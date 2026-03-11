@@ -243,11 +243,8 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
-		// Agent track: resolve schema defaults for CLI args (options from request are ignored).
-		if len(resolved.OptionsSchema) > 0 {
-			defaultArgs, _, _ := config.ResolveOptions(resolved.OptionsSchema, nil)
-			extraArgs = defaultArgs
-		}
+		// Agent track: command comes from the agent config as-is.
+		// Do NOT inject OptionsSchema defaults — agents encode their own CLI flags.
 
 	case "provider":
 		s.createProviderSession(w, r, store, body, name, idemKey, bodyHash)
@@ -291,8 +288,8 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Persist option metadata and project_id on the bead.
-	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
+	// Persist kind, option metadata, and project_id on the bead.
+	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, optMeta)
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
@@ -303,6 +300,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := sessionToResponse(info, s.state.Config())
+	resp.Kind = "agent"
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, resp)
 	writeJSON(w, http.StatusCreated, resp)
@@ -320,11 +318,11 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	)
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		if strings.Contains(err.Error(), "not found in PATH") {
+		if errors.Is(err, config.ErrProviderNotInPATH) {
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
 			return
 		}
-		if strings.Contains(err.Error(), "unknown provider") {
+		if errors.Is(err, config.ErrProviderNotFound) {
 			writeError(w, http.StatusNotFound, "provider_not_found", "provider '"+providerName+"' not found")
 			return
 		}
@@ -335,12 +333,17 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	// Resolve options against the provider's schema.
 	var extraArgs []string
 	var optMeta map[string]string
+	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusBadRequest, "unknown_option", "provider '"+providerName+"' does not accept options")
+		return
+	}
 	if len(resolved.OptionsSchema) > 0 {
 		var optErr error
 		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options)
 		if optErr != nil {
 			s.idem.unreserve(idemKey)
-			if strings.Contains(optErr.Error(), "unknown option") {
+			if errors.Is(optErr, config.ErrUnknownOption) {
 				writeError(w, http.StatusBadRequest, "unknown_option", optErr.Error())
 				return
 			}
@@ -388,8 +391,8 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	// Persist option metadata and project_id on the bead.
-	s.persistSessionMeta(store, info.ID, body.ProjectID, optMeta)
+	// Persist kind, option metadata, and project_id on the bead.
+	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
 
 	// Deliver initial message if provided.
 	if msg := strings.TrimSpace(body.Message); msg != "" {
@@ -400,16 +403,20 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 	}
 
 	resp := sessionToResponse(info, s.state.Config())
+	resp.Kind = "provider"
 	s.enrichSessionResponse(&resp, info, s.state.Config(), s.state.SessionProvider(), false)
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, resp)
 	writeJSON(w, http.StatusCreated, resp)
 }
 
-// persistSessionMeta writes option metadata and project_id to the session bead.
-func (s *Server) persistSessionMeta(store beads.Store, sessionID, projectID string, optMeta map[string]string) {
+// persistSessionMeta writes kind, option metadata, and project_id to the session bead.
+func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectID string, optMeta map[string]string) {
 	batch := make(map[string]string)
 	for k, v := range optMeta {
 		batch[k] = v
+	}
+	if kind != "" {
+		batch["mc_session_kind"] = kind
 	}
 	if projectID != "" {
 		batch["mc_project_id"] = projectID

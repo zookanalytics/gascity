@@ -15,7 +15,7 @@ func ResolveOptions(schema []ProviderOption, options map[string]string) (extraAr
 	for key, value := range options {
 		opt := findOption(schema, key)
 		if opt == nil {
-			return nil, nil, fmt.Errorf("unknown option: %s", key)
+			return nil, nil, fmt.Errorf("%w: %s", ErrUnknownOption, key)
 		}
 		if findChoice(opt.Choices, value) == nil {
 			return nil, nil, fmt.Errorf("invalid value for %s: %s", key, value)

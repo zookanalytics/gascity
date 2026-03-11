@@ -18,6 +18,7 @@ import (
 // sessionResponse is the JSON representation of a chat session.
 type sessionResponse struct {
 	ID          string `json:"id"`
+	Kind        string `json:"kind,omitempty"`
 	Template    string `json:"template"`
 	State       string `json:"state"`
 	Reason      string `json:"reason,omitempty"`
@@ -83,6 +84,10 @@ func sessionResponseWithReason(info session.Info, b *beads.Bead, cfg *config.Cit
 	r := sessionToResponse(info, cfg)
 	if b == nil || info.Closed {
 		return r
+	}
+	// Populate kind from persisted metadata.
+	if k := b.Metadata["mc_session_kind"]; k != "" {
+		r.Kind = k
 	}
 	// Surface bead-persisted sleep/hold/quarantine reason.
 	if sr := b.Metadata["sleep_reason"]; sr != "" {

@@ -6,12 +6,45 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
+
+// lookPathCache caches exec.LookPath results with a short TTL to avoid
+// repeated filesystem scans on every GET /v0/agents request.
+var lookPathCache struct {
+	mu      sync.Mutex
+	entries map[string]lookPathEntry
+}
+
+type lookPathEntry struct {
+	found   bool
+	expires time.Time
+}
+
+const lookPathCacheTTL = 30 * time.Second
+
+func cachedLookPath(binary string) bool {
+	lookPathCache.mu.Lock()
+	defer lookPathCache.mu.Unlock()
+
+	if lookPathCache.entries == nil {
+		lookPathCache.entries = make(map[string]lookPathEntry)
+	}
+
+	if e, ok := lookPathCache.entries[binary]; ok && time.Now().Before(e.expires) {
+		return e.found
+	}
+
+	_, err := exec.LookPath(binary)
+	found := err == nil
+	lookPathCache.entries[binary] = lookPathEntry{found: found, expires: time.Now().Add(lookPathCacheTTL)}
+	return found
+}
 
 type agentResponse struct {
 	Name        string       `json:"name"`
@@ -99,7 +132,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 				available = false
 				unavailableReason = "agent is suspended"
 			} else if provider != "" {
-				if _, lookErr := exec.LookPath(providerPathCheck(provider, cfg)); lookErr != nil {
+				if !cachedLookPath(providerPathCheck(provider, cfg)) {
 					available = false
 					unavailableReason = "provider '" + provider + "' not found in PATH"
 				}
@@ -208,7 +241,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		available = false
 		unavailableReason = "agent is suspended"
 	} else if provider != "" {
-		if _, lookErr := exec.LookPath(providerPathCheck(provider, cfg)); lookErr != nil {
+		if !cachedLookPath(providerPathCheck(provider, cfg)) {
 			available = false
 			unavailableReason = "provider '" + provider + "' not found in PATH"
 		}
@@ -360,6 +393,7 @@ func expandAgent(a config.Agent, cityName, sessTmpl string, sp sessionLister) []
 			pool:          poolName,
 			suspended:     a.Suspended,
 			provider:      a.Provider,
+			description:   a.Description,
 		})
 	}
 	return result
@@ -401,6 +435,7 @@ func discoverUnlimitedPool(a config.Agent, poolName, cityName, sessTmpl string, 
 			pool:          poolName,
 			suspended:     a.Suspended,
 			provider:      a.Provider,
+			description:   a.Description,
 		})
 	}
 	return result
