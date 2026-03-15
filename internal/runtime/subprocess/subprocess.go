@@ -151,10 +151,11 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	done := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
-		close(done)
-		// Clean up socket when process exits.
+		// Clean up socket before signaling done so ListRunning
+		// never sees a stale socket after Stop returns.
 		lis.Close()                 //nolint:errcheck
 		os.Remove(p.sockPath(name)) //nolint:errcheck
+		close(done)
 	}()
 
 	p.procs[name] = &sessionConn{cmd: cmd, done: done, listener: lis}
