@@ -739,7 +739,7 @@ func TestDiscoverSessionBeads_IncludesBeadCreatedSessions(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "helper", StartCommand: "echo"},
+			{Name: "helper", StartCommand: "echo", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	sp := runtime.NewFake()
@@ -1054,7 +1054,7 @@ func TestDiscoverSessionBeads_RigQualifiedTemplate(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "myrig", StartCommand: "echo"},
+			{Name: "worker", Dir: "myrig", StartCommand: "echo", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	sp := runtime.NewFake()
@@ -1105,7 +1105,7 @@ func TestDiscoverSessionBeads_ForkGetsOwnSessionNameInEnv(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "overseer", StartCommand: "echo"},
+			{Name: "overseer", StartCommand: "echo", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	sp := runtime.NewFake()
@@ -1860,11 +1860,9 @@ prompt_template = "prompts/mayor.md"
 
 [[agent]]
 name = "worker"
-
-[agent.pool]
-min = 0
-max = 5
-check = "echo 3"
+min_active_sessions = 0
+max_active_sessions = 5
+scale_check = "echo 3"
 `)
 	if err := os.WriteFile(src, tomlContent, 0o644); err != nil {
 		t.Fatal(err)
@@ -2380,8 +2378,8 @@ func TestDoStop_UsesDependencyAwareOrdering(t *testing.T) {
 	}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", DependsOn: []string{"api"}},
-			{Name: "api", DependsOn: []string{"db"}},
+			{Name: "worker", MaxActiveSessions: intPtr(1), DependsOn: []string{"api"}},
+			{Name: "api", MaxActiveSessions: intPtr(1), DependsOn: []string{"db"}},
 			{Name: "db"},
 		},
 	}
@@ -3052,7 +3050,7 @@ func TestDoAgentSuspend(t *testing.T) {
 	cfg := config.City{
 		Workspace: config.Workspace{Name: "bright-lights"},
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "builder"},
 		},
 	}
@@ -3112,8 +3110,8 @@ func TestDoAgentResume(t *testing.T) {
 	cfg := config.City{
 		Workspace: config.Workspace{Name: "bright-lights"},
 		Agents: []config.Agent{
-			{Name: "mayor"},
-			{Name: "builder", Suspended: true},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "builder", Suspended: true, MaxActiveSessions: intPtr(1)},
 		},
 	}
 	data, err := cfg.Marshal()

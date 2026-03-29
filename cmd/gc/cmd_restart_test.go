@@ -37,8 +37,8 @@ func TestDoRigRestart(t *testing.T) {
 
 	rec := events.NewFake()
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "frontend"},
-		{Name: "worker", Dir: "frontend"},
+		{Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -75,7 +75,7 @@ func TestDoRigRestartNoneRunning(t *testing.T) {
 	sp := runtime.NewFake() // no sessions started
 	rec := events.NewFake()
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "frontend"},
+		{Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -152,7 +152,7 @@ func TestDoRigRestart_UsesLogicalAgentSubjectForCustomSessionNames(t *testing.T)
 	}
 
 	rec := events.NewFake()
-	agents := []config.Agent{{Name: "worker", Dir: "frontend"}}
+	agents := []config.Agent{{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)}}
 
 	var stdout, stderr bytes.Buffer
 	code := doRigRestart(sp, rec, store, nil, agents, "frontend", "city", "{{.Agent}}", &stdout, &stderr)
@@ -347,14 +347,14 @@ func TestDoRigRestart_UsesFullCityGraphForStopOrdering(t *testing.T) {
 
 	fullCfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "api", Dir: "frontend", DependsOn: []string{"backend/db"}},
-			{Name: "cache", Dir: "frontend"},
-			{Name: "db", Dir: "backend", DependsOn: []string{"frontend/cache"}},
+			{Name: "api", Dir: "frontend", MaxActiveSessions: intPtr(1), DependsOn: []string{"backend/db"}},
+			{Name: "cache", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+			{Name: "db", Dir: "backend", MaxActiveSessions: intPtr(1), DependsOn: []string{"frontend/cache"}},
 		},
 	}
 	rigAgents := []config.Agent{
-		{Name: "api", Dir: "frontend", DependsOn: []string{"backend/db"}},
-		{Name: "cache", Dir: "frontend"},
+		{Name: "api", Dir: "frontend", MaxActiveSessions: intPtr(1), DependsOn: []string{"backend/db"}},
+		{Name: "cache", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	rec := events.NewFake()
@@ -397,7 +397,7 @@ func TestDoRigRestartStopError(t *testing.T) {
 
 	rec := events.NewFake()
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "frontend"},
+		{Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer

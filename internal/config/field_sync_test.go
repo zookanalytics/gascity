@@ -37,6 +37,11 @@ func TestAgentFieldSync(t *testing.T) {
 		"PoolName":               "internal field set during pool expansion, not user-configurable",
 		"Implicit":               "runtime-only, set during InjectImplicitAgents, not user-configurable",
 		"SleepAfterIdleSource":   "runtime-only provenance, derived from the layer that set SleepAfterIdle",
+		"DrainTimeout":           "scaling field, patched via PoolOverride.DrainTimeout",
+		"OnBoot":                 "scaling field, patched via PoolOverride.OnBoot",
+		"OnDeath":                "scaling field, patched via PoolOverride.OnDeath",
+		"Namepool":               "agent-specific file path, not a patch concern",
+		"NamepoolNames":          "runtime-only, loaded from Namepool file at config load time",
 	}
 
 	// Fields on AgentOverride/AgentPatch that don't map 1:1 to Agent fields.
@@ -50,6 +55,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"SessionLiveAppend":       true, // append modifier, no Agent field
 		"InstallAgentHooksAppend": true, // append modifier, no Agent field
 		"InjectFragmentsAppend":   true, // append modifier, no Agent field
+		"Pool":                    true, // legacy PoolOverride, maps to flat Agent fields via applyPoolOverride
 	}
 
 	agentFields := structFields(reflect.TypeOf(Agent{}))

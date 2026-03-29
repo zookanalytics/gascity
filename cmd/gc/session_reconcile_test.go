@@ -195,7 +195,7 @@ func TestWakeReasons_PoolWithinDesired(t *testing.T) {
 	}
 }
 
-func TestWakeReasons_PoolExceedsDesired(t *testing.T) {
+func TestWakeReasons_DemandExistsSessionWakes(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -208,14 +208,20 @@ func TestWakeReasons_PoolExceedsDesired(t *testing.T) {
 	session := makeBead("b1", map[string]string{
 		"template":     "worker",
 		"session_name": "test-worker-4",
-		"pool_slot":    "4",
 	})
 
+	// With demand > 0, all sessions for the template are eligible to wake.
 	poolDesired := map[string]int{"worker": 3}
-
 	reasons := wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
-	if len(reasons) != 0 {
-		t.Errorf("pool slot exceeding desired should not wake, got %v", reasons)
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should wake when demand exists, got %v", reasons)
+	}
+
+	// With demand = 0, no sessions wake.
+	poolDesired = map[string]int{"worker": 0}
+	reasons = wakeReasons(session, cfg, nil, poolDesired, nil, nil, clk)
+	if containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should not wake when demand is 0, got %v", reasons)
 	}
 }
 
@@ -421,35 +427,21 @@ func TestWakeReasons_WorkSetPoolSlotGated(t *testing.T) {
 	poolDesired := map[string]int{"pooled": 2}
 	workSet := map[string]bool{"pooled": true}
 
-	// Slot 1 (within desired) — should get WakeConfig.
+	// With demand > 0, any session for this template gets WakeConfig.
 	s1 := makeBead("b1", map[string]string{
 		"template":     "pooled",
 		"session_name": "test-pooled-1",
-		"pool_slot":    "1",
 	})
 	reasons := wakeReasons(s1, cfg, nil, poolDesired, workSet, nil, clk)
-	hasWork := false
-	for _, r := range reasons {
-		if r == WakeConfig {
-			hasWork = true
-		}
-	}
-	if !hasWork {
-		t.Errorf("pool slot 1 (within desired=2) should get WakeConfig, got %v", reasons)
+	if !containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should get WakeConfig when demand exists, got %v", reasons)
 	}
 
-	// Slot 3 (exceeds desired) — should NOT get WakeConfig.
-	s3 := makeBead("b3", map[string]string{
-		"template":     "pooled",
-		"session_name": "test-pooled-3",
-		"pool_slot":    "3",
-	})
-	reasons = wakeReasons(s3, cfg, nil, poolDesired, workSet, nil, clk)
-	for _, r := range reasons {
-		if r == WakeConfig {
-			t.Errorf("pool slot 3 (exceeds desired=2) should NOT get WakeConfig, got %v", reasons)
-			break
-		}
+	// With demand = 0, no sessions get WakeConfig.
+	poolDesiredZero := map[string]int{"pooled": 0}
+	reasons = wakeReasons(s1, cfg, nil, poolDesiredZero, workSet, nil, clk)
+	if containsWakeReason(reasons, WakeConfig) {
+		t.Errorf("session should NOT get WakeConfig when demand is 0, got %v", reasons)
 	}
 }
 
@@ -535,7 +527,7 @@ func TestComputeWorkSet_RunsWorkQuery(t *testing.T) {
 	}
 
 	runner := func(command, _ string) (string, error) {
-		if strings.Contains(command, "GC_SESSION_NAME='worker'") || strings.Contains(command, "GC_SESSION_NAME=worker") {
+		if strings.Contains(command, "gc.routed_to=worker") {
 			return `[{"id":"BL-42"}]`, nil
 		}
 		return "", nil // empty = no work for idle's custom query
@@ -1137,7 +1129,7 @@ func TestFindAgentByTemplate(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "worker"},
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		},
 	}
 

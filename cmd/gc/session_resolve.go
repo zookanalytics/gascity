@@ -97,6 +97,17 @@ func resolveSessionIDMaterializingNamed(cityPath string, cfg *config.City, store
 	return resolveSessionIDWithOptions(cityPath, cfg, store, identifier, namedSessionResolveOptions{materialize: true})
 }
 
+func allowImplicitTemplateMaterialization(cfg *config.City, identifier string) bool {
+	if cfg == nil {
+		return true
+	}
+	agentCfg, ok := resolveSessionTemplate(cfg, identifier, currentRigContext(cfg))
+	if !ok {
+		return true
+	}
+	return !isMultiSessionCfgAgent(&agentCfg)
+}
+
 func parseTemplateTarget(identifier string) (templateTarget, bool) {
 	identifier = strings.TrimSpace(identifier)
 	if !strings.HasPrefix(identifier, templateTargetPrefix) {
@@ -151,6 +162,9 @@ func resolveSessionIDWithOptions(
 		}
 	}
 	if !opts.materialize {
+		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	}
+	if !allowImplicitTemplateMaterialization(cfg, identifier) {
 		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
 	sessionID, err := ensureSessionIDForTemplate(cityPath, cfg, store, identifier, nil)

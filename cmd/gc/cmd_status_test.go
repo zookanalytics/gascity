@@ -24,8 +24,8 @@ func TestDoRigStatus(t *testing.T) {
 	dops := newFakeDrainOps()
 	rig := config.Rig{Name: "frontend", Path: "/home/user/projects/frontend"}
 	agents := []config.Agent{
-		{Name: "polecat", Dir: "frontend"},
-		{Name: "worker", Dir: "frontend"},
+		{Name: "polecat", Dir: "frontend", MaxActiveSessions: intPtr(1)},
+		{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer

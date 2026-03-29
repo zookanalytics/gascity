@@ -52,7 +52,7 @@ func TestCityStatusWithAgents(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker"},
 		},
 	}
@@ -82,8 +82,8 @@ func TestCityStatusSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	cfg := &config.City{
-		Workspace: config.Workspace{Name: "city", Suspended: true},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Workspace: config.Workspace{Name: "city", Suspended: true, MaxActiveSessions: intPtr(1)},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -152,7 +152,7 @@ func TestCityStatusRigs(t *testing.T) {
 	dops := newFakeDrainOps()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		Rigs: []config.Rig{
 			{Name: "hello-world", Path: "/home/user/hello-world"},
 			{Name: "frontend", Path: "/home/user/frontend", Suspended: true},
@@ -225,7 +225,7 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 		Rigs: []config.Rig{
@@ -298,7 +298,7 @@ func TestCityStatusAgentSuspendedByRig(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig"},
+			{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)},
 		},
 		Rigs: []config.Rig{
 			{Name: "myrig", Path: "/tmp/myrig", Suspended: true},

@@ -13,8 +13,8 @@ func TestCanAttributeSessionUsesResolvedWorkDir(t *testing.T) {
 		Workspace: config.Workspace{Name: "gastown", Provider: "claude"},
 		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
 		Agents: []config.Agent{
-			{Name: "refinery", Dir: "demo", WorkDir: ".gc/worktrees/{{.Rig}}/refinery"},
-			{Name: "witness", Dir: "demo", WorkDir: ".gc/agents/{{.Rig}}/witness"},
+			{Name: "refinery", Dir: "demo", WorkDir: ".gc/worktrees/{{.Rig}}/refinery", MaxActiveSessions: intPtr(1)},
+			{Name: "witness", Dir: "demo", WorkDir: ".gc/agents/{{.Rig}}/witness", MaxActiveSessions: intPtr(1)},
 		},
 	}
 
@@ -30,7 +30,7 @@ func TestCanAttributeSessionRejectsSharedRigRootWhenClaudePoolExists(t *testing.
 		Workspace: config.Workspace{Provider: "claude"},
 		Rigs:      []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "refinery", Dir: "demo"},
+			{Name: "refinery", Dir: "demo", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
 		},
 	}
@@ -46,7 +46,7 @@ func TestCanAttributeSessionRejectsSharedPoolTemplateEvenWhenItMentionsAgentIden
 		Workspace: config.Workspace{Provider: "claude"},
 		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
 		Agents: []config.Agent{
-			{Name: "refinery", Dir: "demo", WorkDir: ".gc/shared"},
+			{Name: "refinery", Dir: "demo", WorkDir: ".gc/shared", MaxActiveSessions: intPtr(1)},
 			{
 				Name:              "polecat",
 				Dir:               "demo",
@@ -67,7 +67,7 @@ func TestCanAttributeSessionRejectsSharedSingleSlotPoolTemplate(t *testing.T) {
 		Workspace: config.Workspace{Provider: "claude"},
 		Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}},
 		Agents: []config.Agent{
-			{Name: "observer", Dir: "demo", WorkDir: ".gc/shared/polecat"},
+			{Name: "observer", Dir: "demo", WorkDir: ".gc/shared/polecat", MaxActiveSessions: intPtr(1)},
 			{
 				Name:              "polecat",
 				Dir:               "demo",

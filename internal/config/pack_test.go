@@ -74,9 +74,8 @@ schema = 1
 
 [[agent]]
 name = "polecat"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3
 `)
 
 	cfg := &City{
@@ -200,9 +199,8 @@ schema = 1
 
 [[agent]]
 name = "polecat"
-[agent.pool]
-min = 0
-max = 3
+min_active_sessions = 0
+max_active_sessions = 3
 `)
 
 	maxOverride := 10

@@ -206,7 +206,7 @@ func TestResolveSessionIDWithConfig_ResolvesExistingSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -266,7 +266,7 @@ func TestResolveSessionIDAllowClosedWithConfig_DoesNotResolveClosedReservedAlias
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -293,7 +293,7 @@ func TestResolveSessionIDWithConfig_LiveAliasWinsOverReservedNamedTarget(t *test
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},
@@ -362,7 +362,7 @@ func TestResolveSessionIDAllowClosedWithConfig_ReservedNamedTargetIgnoresClosedH
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
-		Agents:    []config.Agent{{Name: "mayor"}},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 		NamedSessions: []config.NamedSession{{
 			Template: "mayor",
 		}},

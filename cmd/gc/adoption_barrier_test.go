@@ -41,7 +41,7 @@ func TestAdoptionBarrier_AdoptsRunning(t *testing.T) {
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor", "test-city-worker"}}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker"},
 		},
 	}
@@ -104,7 +104,7 @@ func TestAdoptionBarrier_SkipsExistingBead(t *testing.T) {
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor", "test-city-worker"}}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker"},
 		},
 	}
@@ -142,7 +142,7 @@ func TestAdoptionBarrier_ClosedBeadDoesNotBlock(t *testing.T) {
 	}
 
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor"}}
-	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
 	result, passed := runAdoptionBarrier(store, sp, cfg, "test-city", clock.Real{}, &stderr, false)
@@ -157,7 +157,7 @@ func TestAdoptionBarrier_ClosedBeadDoesNotBlock(t *testing.T) {
 func TestAdoptionBarrier_Rerunnable(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor"}}
-	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}}}
 	var stderr bytes.Buffer
 
 	// First run: adopts.
@@ -184,7 +184,7 @@ func TestAdoptionBarrier_DryRun(t *testing.T) {
 	sp := &fakeAdoptionProvider{running: []string{"test-city-mayor", "test-city-worker"}}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker"},
 		},
 	}
@@ -292,7 +292,7 @@ func TestAdoptionBarrier_SingletonWithNumericSuffix(t *testing.T) {
 	sp := &fakeAdoptionProvider{running: []string{"db-node-1"}}
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "db-node-1"}, // no Pool config
+			{Name: "db-node-1", MaxActiveSessions: intPtr(1)}, // singleton agent
 		},
 	}
 	var stderr bytes.Buffer

@@ -53,7 +53,7 @@ func newFakeState(t *testing.T) *fakeState {
 		cfg: &config.City{
 			Workspace: config.Workspace{Name: "test-city"},
 			Agents: []config.Agent{
-				{Name: "worker", Dir: "myrig", Provider: "test-agent"},
+				{Name: "worker", Dir: "myrig", Provider: "test-agent", MaxActiveSessions: intPtr(1)},
 			},
 			NamedSessions: []config.NamedSession{
 				{Template: "worker", Dir: "myrig"},

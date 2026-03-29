@@ -557,7 +557,7 @@ func TestDrainAckNoArgsErrorMessage(t *testing.T) {
 func TestResolveAgentIdentity(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 3"},
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
@@ -626,7 +626,7 @@ func TestResolveAgentIdentity(t *testing.T) {
 func TestResolveAgentIdentityQualified(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "frontend"},
 			{Name: "polecat", Dir: "backend"},
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
@@ -691,7 +691,7 @@ func TestResolveAgentIdentityQualified(t *testing.T) {
 func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "myrig"},
 			{Name: "builder", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
 			{Name: "coder", Dir: "backend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
@@ -756,7 +756,7 @@ func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 func TestFindAgentByNameExact(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "frontend"},
 		},
 	}
@@ -830,7 +830,7 @@ func TestFindAgentByNameUnlimitedPool(t *testing.T) {
 func TestFindAgentByNameNoMatch(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	_, ok := findAgentByName(cfg, "nobody")

@@ -455,6 +455,11 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		DependsOn:              []string{"other-agent"},
 		WakeMode:               "fresh",
 		Implicit:               true,
+		DrainTimeout:           "10m",
+		OnBoot:                 "echo boot",
+		OnDeath:                "echo death",
+		Namepool:               "names.txt",
+		NamepoolNames:          []string{"alpha", "bravo"},
 	}
 
 	// Verify every Agent field is set (non-zero) in the test data.
@@ -546,7 +551,7 @@ func TestRunPoolOnBoot(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "mayor"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
 		},
@@ -617,7 +622,7 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
-			{Name: "mayor"}, // not a pool
+			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
 			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}, // max=1, skipped
 		},

@@ -128,6 +128,9 @@ func sessionWithinDesiredConfig(session beads.Bead, cfg *config.City, poolDesire
 	if isNamedSessionBead(session) {
 		return agent, namedSessionMode(session) == "always"
 	}
+	if session.Metadata["manual_session"] == "true" && isMultiSessionCfgAgent(agent) {
+		return agent, false
+	}
 	// Both pool and non-pool agents are config-eligible when demand exists.
 	return agent, poolDesired[template] > 0
 }

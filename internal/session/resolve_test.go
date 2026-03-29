@@ -238,7 +238,7 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedHistoricalAlias(t *testing.T)
 	}
 }
 
-func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t *testing.T) {
+func TestResolveSessionIDAllowClosed_LiveTemplateBeatsClosedSessionName(t *testing.T) {
 	store := beads.NewMemStore()
 	closed, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -248,7 +248,7 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t 
 		},
 	})
 	_ = store.Close(closed.ID)
-	_, _ = store.Create(beads.Bead{
+	open, _ := store.Create(beads.Bead{
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
 		Metadata: map[string]string{
@@ -260,8 +260,9 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveExactIdentifierMatch(t 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if id != closed.ID {
-		t.Fatalf("got %q, want closed exact-name session %q", id, closed.ID)
+	// Open template match wins over closed session_name match.
+	if id != open.ID {
+		t.Fatalf("got %q, want open template session %q", id, open.ID)
 	}
 }
 
