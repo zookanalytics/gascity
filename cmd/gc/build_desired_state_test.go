@@ -148,10 +148,11 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
-				Name:         "helper",
-				Suspended:    true,
-				DependsOn:    []string{"db"},
-				StartCommand: "echo",
+				Name:              "helper",
+				Suspended:         true,
+				MaxActiveSessions: intPtr(1),
+				DependsOn:         []string{"db"},
+				StartCommand:      "echo",
 			},
 		},
 	}

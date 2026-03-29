@@ -45,7 +45,7 @@ stdout 'City stopped.'
 exec gc start $WORK/pool-city
 stdout 'City started.'
 
-# 8. Ephemeral singleton (max=1) uses bare name.
+# 8. Ephemeral singleton (max=1) starts successfully.
 exec gc start $WORK/singleton-city
 stdout 'Woke session .refinery.'
 stdout 'City started.'

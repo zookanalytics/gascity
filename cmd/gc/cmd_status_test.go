@@ -106,7 +106,7 @@ func TestDoRigStatusSuspendedAgent(t *testing.T) {
 	dops := newFakeDrainOps()
 	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
 	agents := []config.Agent{
-		{Name: "worker", Dir: "frontend", Suspended: true},
+		{Name: "worker", Dir: "frontend", Suspended: true, MaxActiveSessions: intPtr(1)},
 	}
 
 	var stdout, stderr bytes.Buffer

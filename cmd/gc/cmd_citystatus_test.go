@@ -53,7 +53,7 @@ func TestCityStatusWithAgents(t *testing.T) {
 		Workspace: config.Workspace{Name: "city"},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "worker"},
+			{Name: "worker", MaxActiveSessions: intPtr(1)},
 		},
 	}
 

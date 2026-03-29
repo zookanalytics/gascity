@@ -35,7 +35,7 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "reviewer"},
+			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -109,8 +109,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	control := steps["expansion-review.review-scope-check"]
-	if control.Assignee != "" {
-		t.Fatalf("review scope-check assignee = %q, want empty for control pool", control.Assignee)
+	if control.Assignee != config.WorkflowControlAgentName {
+		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.WorkflowControlAgentName)
 	}
 	if control.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
 		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
@@ -495,7 +495,7 @@ func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "reviewer"},
+			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -574,7 +574,7 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "reviewer"},
+			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
