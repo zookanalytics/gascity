@@ -275,6 +275,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /v0/order/{name}/enable", s.handleOrderEnable)
 	s.mux.HandleFunc("POST /v0/order/{name}/disable", s.handleOrderDisable)
 
+	// Workflows
+	s.mux.HandleFunc("DELETE /v0/workflow/{workflow_id}", s.handleWorkflowDelete)
+
 	// Sessions (chat sessions) — id accepts bead ID, alias, or runtime session_name
 	s.mux.HandleFunc("POST /v0/sessions", s.handleSessionCreate)
 	s.mux.HandleFunc("GET /v0/sessions", s.handleSessionList)
