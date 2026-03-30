@@ -1278,7 +1278,7 @@ func TestConfiguredSessionNames_DoesNotIncludePoolForks(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)},
 		},
 	}
 

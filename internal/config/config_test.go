@@ -1082,7 +1082,7 @@ scale_check = "echo 3"
 		t.Fatalf("len(Agents) = %d, want 1", len(cfg.Agents))
 	}
 	a := cfg.Agents[0]
-	if a.MinActiveSessions == nil || *a.MinActiveSessions != 0 {
+	if a.MinActiveSessions == 0 || a.MinActiveSessions != 0 {
 		t.Errorf("MinActiveSessions = %v, want 0", a.MinActiveSessions)
 	}
 	if a.MaxActiveSessions == nil || *a.MaxActiveSessions != 5 {
@@ -1118,7 +1118,7 @@ func TestPoolRoundTrip(t *testing.T) {
 		Workspace: Workspace{Name: "test"},
 		Agents: []Agent{{
 			Name:              "worker",
-			MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3",
+			MinActiveSessions: 1, MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3",
 		}},
 	}
 	data, err := c.Marshal()
@@ -1133,7 +1133,7 @@ func TestPoolRoundTrip(t *testing.T) {
 		t.Fatalf("len(Agents) = %d, want 1", len(got.Agents))
 	}
 	a := got.Agents[0]
-	if a.MinActiveSessions == nil || *a.MinActiveSessions != 1 {
+	if a.MinActiveSessions == 0 || a.MinActiveSessions != 1 {
 		t.Errorf("MinActiveSessions = %v, want 1", a.MinActiveSessions)
 	}
 	if a.MaxActiveSessions == nil || *a.MaxActiveSessions != 5 {
@@ -1172,7 +1172,7 @@ func TestEffectiveWorkQueryWithDir(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolDefault(t *testing.T) {
-	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
+	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: 1, MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
 	want := "bd ready --metadata-field gc.routed_to=hello-world/polecat --unassigned --json --limit=1 2>/dev/null"
 	if got != want {
@@ -1199,7 +1199,7 @@ func TestEffectiveSlingQueryFixedAgentWithDir(t *testing.T) {
 }
 
 func TestEffectiveSlingQueryPoolDefault(t *testing.T) {
-	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
+	a := Agent{Name: "polecat", Dir: "hello-world", MinActiveSessions: 1, MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveSlingQuery()
 	want := "bd update {} --set-metadata gc.routed_to=hello-world/polecat"
 	if got != want {
@@ -1222,7 +1222,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3),
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveWorkQuery()
@@ -1233,7 +1233,7 @@ func TestEffectiveWorkQueryPoolNameOverride(t *testing.T) {
 }
 
 func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
-	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)}
+	a := Agent{Name: "dog", Dir: "hello-world", MinActiveSessions: 1, MaxActiveSessions: ptrInt(3)}
 	got := a.EffectiveWorkQuery()
 	want := "bd ready --metadata-field gc.routed_to=hello-world/dog --unassigned --json --limit=1 2>/dev/null"
 	if got != want {
@@ -1245,7 +1245,7 @@ func TestEffectiveSlingQueryPoolNameOverride(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3),
 		PoolName: "hello-world/dog",
 	}
 	got := a.EffectiveSlingQuery()
@@ -1259,7 +1259,7 @@ func TestDefaultPoolCheckUsesPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-1",
 		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3),
 		PoolName: "hello-world/dog",
 	}
 	check := a.EffectiveScaleCheck()
@@ -1272,7 +1272,7 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
 		Dir:               "hello-world",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3),
 	}
 	check := a.EffectiveScaleCheck()
 	if !strings.Contains(check, "bd ready") {
@@ -1288,7 +1288,7 @@ func TestValidateAgentsCustomQueries(t *testing.T) {
 	agents := []Agent{{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
 		WorkQuery:  "custom-query",
 		SlingQuery: "custom-sling {}",
 	}}
@@ -1300,7 +1300,7 @@ func TestValidateAgentsCustomQueries(t *testing.T) {
 	agents = []Agent{{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
 	}}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("neither set: unexpected error: %v", err)
@@ -1310,7 +1310,7 @@ func TestValidateAgentsCustomQueries(t *testing.T) {
 	agents = []Agent{{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
 		SlingQuery: "custom-sling {}",
 	}}
 	if err := ValidateAgents(agents); err != nil {
@@ -1321,7 +1321,7 @@ func TestValidateAgentsCustomQueries(t *testing.T) {
 	agents = []Agent{{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1",
 		WorkQuery: "custom-query",
 	}}
 	if err := ValidateAgents(agents); err != nil {
@@ -1353,7 +1353,7 @@ func TestEffectiveScalingNil(t *testing.T) {
 func TestEffectiveScalingExplicit(t *testing.T) {
 	a := Agent{
 		Name:              "worker",
-		MinActiveSessions: ptrInt(2), MaxActiveSessions: ptrInt(10), ScaleCheck: "echo 5",
+		MinActiveSessions: 2, MaxActiveSessions: ptrInt(10), ScaleCheck: "echo 5",
 	}
 	if a.EffectiveMinActiveSessions() != 2 {
 		t.Errorf("EffectiveMinActiveSessions = %d, want 2", a.EffectiveMinActiveSessions())
@@ -1370,7 +1370,7 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	// Check empty → default uses qualified name.
 	a := Agent{
 		Name:              "refinery",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(1),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(1),
 	}
 	check := a.EffectiveScaleCheck()
 	// Default check uses bd ready (blocker-aware) + in_progress count via gc.routed_to.
@@ -1387,7 +1387,7 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	a := Agent{
 		Name:              "polecat",
 		Dir:               "myproject",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5),
 	}
 	check := a.EffectiveScaleCheck()
 	if !strings.Contains(check, "gc.routed_to=myproject/polecat") {
@@ -1399,7 +1399,7 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 }
 
 func TestIsMultiSession(t *testing.T) {
-	a := Agent{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}
+	a := Agent{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: ptrInt(5)}
 	max := a.EffectiveMaxActiveSessions()
 	if max == nil || *max == 1 {
 		t.Error("agent with max=5 should be multi-session")
@@ -1476,7 +1476,7 @@ func TestValidateAgentsDupName(t *testing.T) {
 func TestValidatePoolMinGtMax(t *testing.T) {
 	agents := []Agent{{
 		Name:              "worker",
-		MinActiveSessions: ptrInt(10), MaxActiveSessions: ptrInt(5),
+		MinActiveSessions: 10, MaxActiveSessions: ptrInt(5),
 	}}
 	err := ValidateAgents(agents)
 	if err == nil {
@@ -1491,7 +1491,7 @@ func TestValidatePoolMaxZero(t *testing.T) {
 	// Max=0 is valid (disabled agent).
 	agents := []Agent{{
 		Name:              "worker",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(0),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(0),
 	}}
 	err := ValidateAgents(agents)
 	if err != nil {
@@ -1503,7 +1503,7 @@ func TestValidatePoolMaxUnlimited(t *testing.T) {
 	// max=-1 is valid (unlimited pool).
 	agents := []Agent{{
 		Name:              "polecat",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(-1),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(-1),
 	}}
 	err := ValidateAgents(agents)
 	if err != nil {
@@ -1515,7 +1515,7 @@ func TestValidatePoolMaxBelowNegOne(t *testing.T) {
 	// max=-2 is invalid.
 	agents := []Agent{{
 		Name:              "polecat",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(-2),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(-2),
 	}}
 	err := ValidateAgents(agents)
 	if err == nil {
@@ -1530,7 +1530,7 @@ func TestValidatePoolMinGtMaxUnlimited(t *testing.T) {
 	// min > 0 with max=-1 should be valid (unlimited allows any min).
 	agents := []Agent{{
 		Name:              "polecat",
-		MinActiveSessions: ptrInt(5), MaxActiveSessions: ptrInt(-1),
+		MinActiveSessions: 5, MaxActiveSessions: ptrInt(-1),
 	}}
 	err := ValidateAgents(agents)
 	if err != nil {
@@ -1582,7 +1582,7 @@ func TestMaxActiveSessionsMultiInstance(t *testing.T) {
 func TestValidateAgentsValid(t *testing.T) {
 	agents := []Agent{
 		{Name: "mayor"},
-		{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(10), ScaleCheck: "echo 3"},
+		{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: ptrInt(10), ScaleCheck: "echo 3"},
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error: %v", err)
@@ -1590,7 +1590,7 @@ func TestValidateAgentsValid(t *testing.T) {
 }
 
 func TestValidateAgentsMissingName(t *testing.T) {
-	agents := []Agent{{MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)}}
+	agents := []Agent{{MinActiveSessions: 0, MaxActiveSessions: ptrInt(5)}}
 	err := ValidateAgents(agents)
 	if err == nil {
 		t.Fatal("expected error for missing name")
@@ -1639,7 +1639,7 @@ func TestValidateAgentsValidNames(t *testing.T) {
 func TestValidateAgentsPoolMaxZeroIsValid(t *testing.T) {
 	// pool.Max == 0 is valid — used to intentionally disable an agent.
 	agents := []Agent{
-		{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(0)},
+		{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: ptrInt(0)},
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error: %v", err)
@@ -1649,7 +1649,7 @@ func TestValidateAgentsPoolMaxZeroIsValid(t *testing.T) {
 func TestValidateAgentsPoolCheckEmptyIsValid(t *testing.T) {
 	// Empty check is valid — EffectivePool() provides a default check command.
 	agents := []Agent{
-		{Name: "worker", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5)},
+		{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: ptrInt(5)},
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("ValidateAgents: unexpected error for empty check: %v", err)
@@ -2016,7 +2016,7 @@ func TestDrainTimeoutRoundTrip(t *testing.T) {
 		Workspace: Workspace{Name: "test"},
 		Agents: []Agent{{
 			Name:              "worker",
-			MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3", DrainTimeout: "3m",
+			MinActiveSessions: 0, MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3", DrainTimeout: "3m",
 		}},
 	}
 	data, err := c.Marshal()
@@ -2037,7 +2037,7 @@ func TestDrainTimeoutOmittedWhenEmpty(t *testing.T) {
 		Workspace: Workspace{Name: "test"},
 		Agents: []Agent{{
 			Name:              "worker",
-			MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3",
+			MinActiveSessions: 0, MaxActiveSessions: ptrInt(5), ScaleCheck: "echo 3",
 		}},
 	}
 	data, err := c.Marshal()
@@ -2761,7 +2761,7 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			agent: Agent{
 				Name:              "polecat",
 				Dir:               "hello-world",
-				MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3),
+				MinActiveSessions: 0, MaxActiveSessions: ptrInt(3),
 			},
 		},
 		{
@@ -2769,7 +2769,7 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 			agent: Agent{
 				Name:              "worker",
 				Dir:               "rigs/deep-project",
-				MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(5),
+				MinActiveSessions: 1, MaxActiveSessions: ptrInt(5),
 			},
 		},
 	}
@@ -3190,7 +3190,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
 		Dir:               "myrig",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5),
 	}
 	cmd := a.EffectiveOnDeath()
 	if !strings.Contains(cmd, "--assignee=myrig/dog") {
@@ -3207,7 +3207,7 @@ func TestEffectiveOnDeathDefault(t *testing.T) {
 func TestEffectiveOnDeathCustom(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5), OnDeath: "custom-death-cmd",
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5), OnDeath: "custom-death-cmd",
 	}
 	cmd := a.EffectiveOnDeath()
 	if cmd != "custom-death-cmd" {
@@ -3230,7 +3230,7 @@ func TestEffectiveOnBootDefault(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
 		Dir:               "myrig",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5),
 	}
 	cmd := a.EffectiveOnBoot()
 	if !strings.Contains(cmd, "gc.routed_to=myrig/dog") {
@@ -3249,7 +3249,7 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 	a := Agent{
 		Name:              "dog-3",
 		Dir:               "myrig",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5),
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5),
 		PoolName: "myrig/dog",
 	}
 	cmd := a.EffectiveOnBoot()
@@ -3261,7 +3261,7 @@ func TestEffectiveOnBootDefaultPoolName(t *testing.T) {
 func TestEffectiveOnBootCustom(t *testing.T) {
 	a := Agent{
 		Name:              "dog",
-		MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(5), OnBoot: "custom-boot-cmd",
+		MinActiveSessions: 0, MaxActiveSessions: ptrInt(5), OnBoot: "custom-boot-cmd",
 	}
 	cmd := a.EffectiveOnBoot()
 	if cmd != "custom-boot-cmd" {
@@ -3521,7 +3521,7 @@ func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 		}
 		// Implicit agents no longer set MinActiveSessions/MaxActiveSessions;
 		// they are nil (unlimited, on-demand).
-		if a.MinActiveSessions != nil {
+		if a.MinActiveSessions != 0 {
 			t.Errorf("agent[%d].MinActiveSessions = %v, want nil", i, a.MinActiveSessions)
 		}
 		if a.MaxActiveSessions != nil {
@@ -3565,7 +3565,7 @@ func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 			"codex":  {},
 		},
 		Agents: []Agent{
-			{Name: "claude", Provider: "claude", MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3)},
+			{Name: "claude", Provider: "claude", MinActiveSessions: 1, MaxActiveSessions: ptrInt(3)},
 		},
 	}
 	InjectImplicitAgents(cfg)
@@ -3677,7 +3677,7 @@ func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	// Verify all rig-scoped agents have correct pool config.
 	for _, a := range cfg.Agents {
 		if a.Dir != "" && a.Implicit && a.Name != WorkflowControlAgentName {
-			if a.MinActiveSessions != nil || a.MaxActiveSessions != nil {
+			if a.MinActiveSessions != 0 || a.MaxActiveSessions != nil {
 				t.Errorf("rig agent %s/%s: unexpected scaling min=%v max=%v, want nil/nil", a.Dir, a.Name, a.MinActiveSessions, a.MaxActiveSessions)
 			}
 		}

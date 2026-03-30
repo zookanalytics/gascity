@@ -13,7 +13,7 @@ import (
 func TestHandleConfigGet(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Workspace.Provider = "claude"
-	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.Agents[0].MinActiveSessions = 0
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"custom": {DisplayName: "Custom", Command: "custom-cli"},
@@ -95,7 +95,7 @@ func TestHandleConfigGet_WithPatches(t *testing.T) {
 
 func TestHandleConfigExplain(t *testing.T) {
 	fs := newFakeState(t)
-	fs.cfg.Agents[0].MinActiveSessions = intPtr(0)
+	fs.cfg.Agents[0].MinActiveSessions = 0
 	fs.cfg.Agents[0].MaxActiveSessions = intPtr(3)
 	fs.cfg.Providers = map[string]config.ProviderSpec{
 		"claude": {DisplayName: "My Claude", Command: "my-claude"},

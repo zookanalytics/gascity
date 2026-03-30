@@ -38,7 +38,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotMaterializeMissingMultiSessio
 func TestSessionWithinDesiredConfig_ManualPoolSessionIsNotConfigEligible(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "pooled", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 

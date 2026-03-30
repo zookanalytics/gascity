@@ -34,8 +34,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
+			{Name: "mayor"},
+			{Name: "reviewer"},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -109,8 +109,8 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	}
 
 	control := steps["expansion-review.review-scope-check"]
-	if control.Assignee != config.WorkflowControlAgentName {
-		t.Fatalf("review scope-check assignee = %q, want %q", control.Assignee, config.WorkflowControlAgentName)
+	if control.Assignee != "" {
+		t.Fatalf("review scope-check assignee = %q, want empty for control pool", control.Assignee)
 	}
 	if control.Metadata["gc.routed_to"] != config.WorkflowControlAgentName {
 		t.Fatalf("review scope-check gc.routed_to = %q, want %q", control.Metadata["gc.routed_to"], config.WorkflowControlAgentName)
@@ -118,14 +118,9 @@ func TestDecorateDynamicFragmentRecipeSupportsExplicitPerStepAgents(t *testing.T
 	if control.Metadata[graphExecutionRouteMetaKey] != "reviewer" {
 		t.Fatalf("review scope-check execution route = %q, want reviewer", control.Metadata[graphExecutionRouteMetaKey])
 	}
-	foundControlLabel := false
-	for _, label := range control.Labels {
-		if label == config.WorkflowControlPoolLabel {
-			foundControlLabel = true
-		}
-	}
-	if !foundControlLabel {
-		t.Fatalf("review scope-check labels = %#v, want %q", control.Labels, config.WorkflowControlPoolLabel)
+	routedTo := control.Metadata["gc.routed_to"]
+	if routedTo != config.WorkflowControlAgentName {
+		t.Fatalf("review scope-check gc.routed_to = %q, want %q", routedTo, config.WorkflowControlAgentName)
 	}
 
 	submit := steps["expansion-review.submit"]
@@ -177,7 +172,7 @@ func TestDecorateDynamicFragmentRecipePreservesPoolFallbackAndScopeMetadata(t *t
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "reviewer", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+			{Name: "reviewer", Dir: "frontend", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -268,8 +263,8 @@ func TestDecorateDynamicFragmentRecipeUsesSourceRouteRigContextForBareTargets(t 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "reviewer", Dir: "frontend", MaxActiveSessions: intPtr(1)},
-			{Name: "reviewer", Dir: "backend", MaxActiveSessions: intPtr(1)},
+			{Name: "reviewer", Dir: "frontend"},
+			{Name: "reviewer", Dir: "backend"},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -331,7 +326,7 @@ func TestRunWorkflowServeProcessesReadyControlBeadsThenExits(t *testing.T) {
 		workflowServeControl = prevControl
 	})
 
-	wantQuery := `bd ready --label=` + config.WorkflowControlPoolLabel + ` --json --limit=1 2>/dev/null`
+	wantQuery := `bd ready --metadata-field gc.routed_to=` + config.WorkflowControlAgentName + ` --unassigned --json --limit=1 2>/dev/null`
 	var gotQueries []string
 	var gotDirs []string
 	var controlled []string
@@ -414,88 +409,12 @@ func TestRunWorkflowServeReturnsQueryError(t *testing.T) {
 	}
 }
 
-func TestRunWorkflowServeFollowUsesSweepFallback(t *testing.T) {
-	eventsDir := t.TempDir()
-	ep := newTestProvider(t, eventsDir)
-
-	prevList := workflowServeList
-	prevControl := workflowServeControl
-	prevProvider := workflowServeOpenEventsProvider
-	prevSweep := workflowServeWakeSweepInterval
-	workflowServeWakeSweepInterval = time.Millisecond
-	t.Cleanup(func() {
-		workflowServeList = prevList
-		workflowServeControl = prevControl
-		workflowServeOpenEventsProvider = prevProvider
-		workflowServeWakeSweepInterval = prevSweep
-	})
-
-	workflowServeOpenEventsProvider = func(io.Writer) (events.Provider, error) {
-		return ep, nil
-	}
-
-	var processed []string
-	calls := 0
-	workflowServeList = func(_, _ string) ([]hookBead, error) {
-		calls++
-		switch calls {
-		case 1:
-			return nil, nil
-		case 2:
-			return []hookBead{{ID: "gc-ready", Metadata: map[string]string{"gc.kind": "scope-check"}}}, nil
-		default:
-			return nil, nil
-		}
-	}
-	workflowServeControl = func(beadID string, _ io.Writer, _ io.Writer) error {
-		processed = append(processed, beadID)
-		return os.ErrDeadlineExceeded
-	}
-
-	wfcAgent := config.Agent{Name: "workflow-control", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1)}
-	err := runWorkflowServeFollow(
-		wfcAgent,
-		t.TempDir(),
-		io.Discard,
-	)
-	if err == nil || !strings.Contains(err.Error(), os.ErrDeadlineExceeded.Error()) {
-		t.Fatalf("runWorkflowServeFollow error = %v, want wrapped %v", err, os.ErrDeadlineExceeded)
-	}
-	if !slices.Equal(processed, []string{"gc-ready"}) {
-		t.Fatalf("processed beads = %#v, want sweep fallback to process gc-ready", processed)
-	}
-}
-
-func TestWorkflowEventRelevantAcceptsBeadLifecycleEvents(t *testing.T) {
-	for _, evt := range []events.Event{
-		{Type: events.BeadCreated},
-		{Type: events.BeadClosed},
-		{Type: events.BeadUpdated},
-	} {
-		if !workflowEventRelevant(evt) {
-			t.Fatalf("workflowEventRelevant(%q) = false, want true", evt.Type)
-		}
-	}
-}
-
-func TestWorkflowEventRelevantRejectsNonBeadEvents(t *testing.T) {
-	for _, evt := range []events.Event{
-		{Type: events.SessionUpdated},
-		{Type: events.ControllerStarted},
-		{Type: events.CitySuspended},
-	} {
-		if workflowEventRelevant(evt) {
-			t.Fatalf("workflowEventRelevant(%q) = true, want false", evt.Type)
-		}
-	}
-}
-
 func TestDecorateDynamicFragmentRecipeSynthesizesInheritedScopeChecks(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
+			{Name: "reviewer"},
 		},
 	}
 	config.InjectImplicitAgents(cfg)
@@ -573,8 +492,8 @@ func TestResolveGraphStepBindingWorkflowFinalizeUsesFallback(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "reviewer", MaxActiveSessions: intPtr(1)},
+			{Name: "mayor"},
+			{Name: "reviewer"},
 		},
 	}
 	config.InjectImplicitAgents(cfg)

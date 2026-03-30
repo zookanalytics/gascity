@@ -84,7 +84,7 @@ func TestDoRigStatusWithDraining(t *testing.T) {
 
 	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
 	agents := []config.Agent{
-		{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1"},
+		{Name: "worker", Dir: "frontend", MinActiveSessions: 1, MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1"},
 	}
 
 	var stdout, stderr bytes.Buffer

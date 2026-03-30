@@ -43,7 +43,7 @@ func TestAgentListPoolExpansion(t *testing.T) {
 		{
 			Name:              "polecat",
 			Dir:               "myrig",
-			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 3",
+			MinActiveSessions: 1, MaxActiveSessions: intPtr(3), ScaleCheck: "echo 3",
 		},
 	}
 	srv := New(state)
@@ -86,7 +86,7 @@ func TestAgentListUnlimitedPoolDiscovery(t *testing.T) {
 		{
 			Name:              "polecat",
 			Dir:               "myrig",
-			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
+			MinActiveSessions: 0, MaxActiveSessions: intPtr(-1),
 		},
 	}
 	// Start 2 running sessions matching the pool pattern.
@@ -131,7 +131,7 @@ func TestFindAgentUnlimitedPoolMember(t *testing.T) {
 			{
 				Name:              "polecat",
 				Dir:               "myrig",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(-1),
 			},
 		},
 	}
@@ -278,7 +278,7 @@ func TestFindAgentPoolMaxZero(t *testing.T) {
 			{
 				Name:              "polecat",
 				Dir:               "myrig",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0), ScaleCheck: "echo 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(0), ScaleCheck: "echo 0",
 			},
 		},
 	}

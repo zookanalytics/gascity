@@ -13,6 +13,7 @@ import (
 )
 
 func boolPtr(v bool) *bool { return &v }
+func intPtr(n int) *int   { return &n }
 
 type routedSleepProvider struct {
 	runtime.Provider
@@ -141,7 +142,7 @@ func TestWakeReasonsNonInteractiveImmediateUsesHardWakeReasons(t *testing.T) {
 func TestWakeReasons_DependencyOnlyFloorDoesNotGetWakeConfig(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "db", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), Attach: boolPtr(false)},
+			{Name: "db", MinActiveSessions: 0, MaxActiveSessions: intPtr(3), Attach: boolPtr(false)},
 			{Name: "api", Attach: boolPtr(false), DependsOn: []string{"db"}},
 		},
 	}

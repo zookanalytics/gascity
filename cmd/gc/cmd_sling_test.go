@@ -235,7 +235,7 @@ func TestDoSlingEnvPassthrough(t *testing.T) {
 		a := config.Agent{
 			Name:              "polecat",
 			Dir:               "hello-world",
-			MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+			MinActiveSessions: 1, MaxActiveSessions: intPtr(3),
 		}
 
 		deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -261,7 +261,7 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "hello-world",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -378,7 +378,7 @@ func TestDoSlingPoolMaxZeroWarns(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0),
+		MinActiveSessions: 0, MaxActiveSessions: intPtr(0),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -400,7 +400,7 @@ func TestDoSlingPoolMaxZeroForce(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "rig",
-		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(0),
+		MinActiveSessions: 0, MaxActiveSessions: intPtr(0),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -547,7 +547,7 @@ func TestDoSlingNudgePoolMember(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "hw",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -577,7 +577,7 @@ func TestDoSlingNudgePoolNoMembers(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "hw",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(3),
 	}
 
 	deps, _, stderr := testDeps(cfg, sp, runner.run)
@@ -622,7 +622,7 @@ func TestTargetType(t *testing.T) {
 		t.Errorf("targetType(fixed) = %q, want %q", got, "agent")
 	}
 
-	pool := config.Agent{Name: "polecat", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+	pool := config.Agent{Name: "polecat", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)}
 	if got := targetType(&pool); got != "pool" {
 		t.Errorf("targetType(pool) = %q, want %q", got, "pool")
 	}
@@ -1367,14 +1367,9 @@ title = "Do work"
 			if bead.Metadata[graphExecutionRouteMetaKey] != "mayor" {
 				t.Fatalf("workflow-finalize execution route = %q, want mayor", bead.Metadata[graphExecutionRouteMetaKey])
 			}
-			foundControlLabel := false
-			for _, label := range bead.Labels {
-				if label == config.WorkflowControlPoolLabel {
-					foundControlLabel = true
-				}
-			}
-			if !foundControlLabel {
-				t.Fatalf("workflow-finalize labels = %#v, want %q", bead.Labels, config.WorkflowControlPoolLabel)
+			routedTo := bead.Metadata["gc.routed_to"]
+			if routedTo != config.WorkflowControlAgentName {
+				t.Fatalf("workflow-finalize gc.routed_to = %q, want %q", routedTo, config.WorkflowControlAgentName)
 			}
 			assigned++
 		default:
@@ -2080,7 +2075,7 @@ func TestDryRunPool(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "hw",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(3),
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
@@ -2380,7 +2375,7 @@ func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 
 func TestCheckBeadStateIdempotentPool(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:hw/polecat"}}}
-	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
@@ -2396,7 +2391,7 @@ func TestCheckBeadStateIdempotentPoolMultiLabels(t *testing.T) {
 		ID:     "BL-42",
 		Labels: []string{"priority:high", "pool:hw/polecat", "sprint:3"},
 	}}
-	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
@@ -2438,7 +2433,7 @@ func TestCheckBeadStateDifferentAssignee(t *testing.T) {
 
 func TestCheckBeadStateDifferentPoolLabel(t *testing.T) {
 	q := &fakeQuerier{bead: beads.Bead{ID: "BL-42", Labels: []string{"pool:other/pool"}}}
-	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)}
+	a := config.Agent{Name: "polecat", Dir: "hw", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if result.Idempotent {
@@ -3465,7 +3460,7 @@ func TestBuildSlingFormulaVarsInjectsIssueAndBaseBranch(t *testing.T) {
 	a := config.Agent{
 		Name:              "polecat",
 		Dir:               "hw",
-		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5),
+		MinActiveSessions: 0, MaxActiveSessions: intPtr(5),
 	}
 
 	deps, _, _ := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)

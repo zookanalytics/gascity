@@ -227,7 +227,7 @@ max_active_sessions = 3
 	if *cfg.Agents[0].MaxActiveSessions != 10 {
 		t.Errorf("MaxActiveSessions = %d, want 10", *cfg.Agents[0].MaxActiveSessions)
 	}
-	if cfg.Agents[0].MinActiveSessions == nil || *cfg.Agents[0].MinActiveSessions != 0 {
+	if cfg.Agents[0].MinActiveSessions == 0 || cfg.Agents[0].MinActiveSessions != 0 {
 		t.Errorf("MinActiveSessions = %v, want 0 (preserved from pack)", cfg.Agents[0].MinActiveSessions)
 	}
 }

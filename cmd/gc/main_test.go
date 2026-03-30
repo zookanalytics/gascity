@@ -843,7 +843,7 @@ func TestDiscoverSessionBeads_SkipsPoolAgentWithZeroDesired(t *testing.T) {
 			{
 				Name:              "polecat",
 				StartCommand:      "echo",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(-1),
 			},
 		},
 	}
@@ -886,7 +886,7 @@ func TestDiscoverSessionBeads_IncludesPoolAgentWithDesired(t *testing.T) {
 			{
 				Name:              "polecat",
 				StartCommand:      "echo",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1),
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(-1),
 			},
 		},
 	}

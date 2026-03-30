@@ -47,7 +47,7 @@ func TestResolveWorkDirPathUsesPoolInstanceBase(t *testing.T) {
 		Name:              "polecat",
 		Dir:               "demo",
 		WorkDir:           ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
-		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 0, MaxActiveSessions: intPtr(3),
 	}, []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}})
 	want := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecats", "polecat-2")
 	if got != want {

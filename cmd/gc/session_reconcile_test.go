@@ -177,7 +177,7 @@ func TestWakeReasons_PoolWithinDesired(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 		},
 	}
 
@@ -201,7 +201,7 @@ func TestWakeReasons_DemandExistsSessionWakes(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 		},
 	}
 
@@ -265,7 +265,7 @@ func TestWakeReasons_DrainedSleepPoolSessionDoesNotGetWakeConfig(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 		},
 	}
 
@@ -312,7 +312,7 @@ func TestWakeReasons_DemandWakesSession(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: intPtr(5)},
 		},
 	}
 
@@ -420,7 +420,7 @@ func TestWakeReasons_WorkSetPoolSlotGated(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+			{Name: "pooled", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -451,7 +451,7 @@ func TestWakeReasons_DependencyOnlyPoolSlotDoesNotWakeOnWork(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "pooled", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -475,7 +475,7 @@ func TestWakeReasons_ManualPoolSessionDoesNotGetWakeConfigAtZeroScale(t *testing
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "pooled", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "pooled", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -498,7 +498,7 @@ func TestWakeReasons_UsesLegacyAgentLabelTemplate(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3)},
+			{Name: "worker", Dir: "frontend", MinActiveSessions: 1, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -551,7 +551,7 @@ func TestComputeWorkSet_ResolvesRigDir(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -576,7 +576,7 @@ func TestComputeWorkSet_UsesConfiguredRigRoot(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "myrig", Path: rigDir}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "polecat", Dir: "myrig", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -910,7 +910,7 @@ func TestSessionIsQuarantined(t *testing.T) {
 func TestCapWakeConfigByDemand(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+			{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: intPtr(10)},
 		},
 	}
 	poolDesired := map[string]int{"worker": 2}
@@ -942,7 +942,7 @@ func TestCapWakeConfigByDemand(t *testing.T) {
 func TestCapWakeConfigByDemand_ActiveCountsAgainstBudget(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(10)},
+			{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: intPtr(10)},
 		},
 	}
 	poolDesired := map[string]int{"worker": 3}
@@ -983,7 +983,7 @@ func TestCapWakeConfigByDemand_ActiveCountsAgainstBudget(t *testing.T) {
 func TestIsPoolExcess(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 			{Name: "singleton"},
 		},
 	}

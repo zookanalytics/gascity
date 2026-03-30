@@ -18,7 +18,7 @@ func TestBuildDesiredState_SingletonTemplateDoesNotRealizeDependencyPoolFloorWit
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:      "api",
@@ -45,11 +45,11 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForZeroScaledDependentPo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 				DependsOn: []string{"db"},
 			},
 		},
@@ -69,7 +69,7 @@ func TestBuildDesiredState_DoesNotRealizeDependencyFloorForSuspendedDependent(t 
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:      "api",
@@ -93,11 +93,11 @@ func TestBuildDesiredState_SingletonTemplatesDoNotRealizeTransitiveDependencyPoo
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 				DependsOn: []string{"db"},
 			},
 			{
@@ -145,7 +145,7 @@ func TestBuildDesiredState_DiscoveredSessionRootGetsDependencyPoolFloor(t *testi
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "helper",
@@ -192,13 +192,13 @@ func TestBuildDesiredState_ManualZeroScaledPoolSessionStaysDesiredAndKeepsDepend
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
 				DependsOn:         []string{"db"},
 				StartCommand:      "echo",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 		},
 	}
@@ -238,12 +238,12 @@ func TestBuildDesiredState_ZeroScaledPoolSessionKeepsDependencyFloorWhileDrainin
 		Agents: []config.Agent{
 			{
 				Name:              "db",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
 				DependsOn:         []string{"db"},
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 		},
 	}
@@ -293,14 +293,14 @@ func TestBuildDesiredState_ManualPoolSessionInSuspendedRigStaysStopped(t *testin
 			{
 				Name:              "db",
 				Dir:               "payments",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 			{
 				Name:              "api",
 				Dir:               "payments",
 				DependsOn:         []string{"payments/db"},
 				StartCommand:      "echo",
-				MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
+				MinActiveSessions: 0, MaxActiveSessions: intPtr(3), ScaleCheck: "printf 0",
 			},
 		},
 	}

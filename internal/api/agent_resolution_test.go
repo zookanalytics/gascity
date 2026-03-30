@@ -34,7 +34,7 @@ func TestResolveSessionTemplateAgentAcceptsConfiguredTemplates(t *testing.T) {
 func TestResolveSessionTemplateAgentRejectsDerivedPoolMembers(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "worker", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 

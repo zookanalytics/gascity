@@ -105,7 +105,7 @@ func TestDoRigRestartWithPool(t *testing.T) {
 
 	rec := events.NewFake()
 	agents := []config.Agent{
-		{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
+		{Name: "worker", Dir: "frontend", MinActiveSessions: 1, MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -191,7 +191,7 @@ func TestDoRigRestart_UsesPoolSessionBeadsForCustomSessionNames(t *testing.T) {
 	agents := []config.Agent{{
 		Name:              "worker",
 		Dir:               "frontend",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1",
 	}}
 
 	var stdout, stderr bytes.Buffer
@@ -234,7 +234,7 @@ func TestDoRigRestart_UsesUnlimitedPoolSessionBeadsForCustomSessionNames(t *test
 	agents := []config.Agent{{
 		Name:              "worker",
 		Dir:               "frontend",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(-1), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(-1), ScaleCheck: "echo 1",
 	}}
 
 	var stdout, stderr bytes.Buffer
@@ -276,7 +276,7 @@ func TestDoRigRestart_UsesLegacyPoolAgentLabelForCustomSessionNames(t *testing.T
 	agents := []config.Agent{{
 		Name:              "worker",
 		Dir:               "frontend",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(2), ScaleCheck: "echo 1",
 	}}
 
 	var stdout, stderr bytes.Buffer
@@ -318,7 +318,7 @@ func TestDoRigRestart_UsesLegacyUnlimitedPoolAgentLabelForCustomSessionNames(t *
 	agents := []config.Agent{{
 		Name:              "worker",
 		Dir:               "frontend",
-		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(-1), ScaleCheck: "echo 1",
+		MinActiveSessions: 1, MaxActiveSessions: intPtr(-1), ScaleCheck: "echo 1",
 	}}
 
 	var stdout, stderr bytes.Buffer

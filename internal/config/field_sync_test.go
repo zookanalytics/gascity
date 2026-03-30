@@ -248,7 +248,7 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		t.Error("EnvRemove did not remove REMOVE_ME from Env")
 	}
 	// Verify scaling was applied (via PoolOverride).
-	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
+	if agent.MinActiveSessions == 0 || agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
 	}
 	// Verify append modifiers extended the lists (not replaced).
@@ -369,7 +369,7 @@ func TestApplyAgentOverrideCoversAllFields(t *testing.T) {
 	if _, exists := agent.Env["REMOVE_ME"]; exists {
 		t.Error("EnvRemove did not remove REMOVE_ME from Env")
 	}
-	if agent.MinActiveSessions == nil || *agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
+	if agent.MinActiveSessions == 0 || agent.MinActiveSessions != 2 || agent.MaxActiveSessions == nil || *agent.MaxActiveSessions != 10 {
 		t.Errorf("Scaling not applied correctly: min=%v max=%v", agent.MinActiveSessions, agent.MaxActiveSessions)
 	}
 }

@@ -380,7 +380,7 @@ func TestAllDependenciesAlive_UsesLegacyAgentLabelTemplate(t *testing.T) {
 	cfg := &config.City{
 		Workspace: config.Workspace{SessionTemplate: "{{.Agent}}"},
 		Agents: []config.Agent{
-			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+			{Name: "worker", Dir: "frontend", DependsOn: []string{"frontend/db"}, MinActiveSessions: 1, MaxActiveSessions: intPtr(2)},
 			{Name: "db", Dir: "frontend"},
 		},
 	}
@@ -607,7 +607,7 @@ func TestReconcileSessionBeads_PoolDependencyBlocksWake(t *testing.T) {
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db", MinActiveSessions: intPtr(2), MaxActiveSessions: intPtr(2)},
+			{Name: "db", MinActiveSessions: 2, MaxActiveSessions: intPtr(2)},
 		},
 	}
 	// Worker depends on pool "db". No db instances in desired → worker blocked.
@@ -626,7 +626,7 @@ func TestReconcileSessionBeads_PoolDependencyUnblocksWake(t *testing.T) {
 	env.cfg = &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", DependsOn: []string{"db"}},
-			{Name: "db", MinActiveSessions: intPtr(2), MaxActiveSessions: intPtr(2)},
+			{Name: "db", MinActiveSessions: 2, MaxActiveSessions: intPtr(2)},
 		},
 	}
 	env.addDesired("worker", "worker", false)
@@ -1258,7 +1258,7 @@ func TestReconcileSessionBeads_PoolScaleDownOrphansExcess(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 		},
 	}
 	// worker-1 is in the desired set; worker-2 is NOT (scale-down).
@@ -1474,7 +1474,7 @@ func TestResolveAgentTemplate_DirectMatch(t *testing.T) {
 func TestResolveAgentTemplate_PoolInstance(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "worker", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(5)},
+			{Name: "worker", MinActiveSessions: 1, MaxActiveSessions: intPtr(5)},
 		},
 	}
 	if got := resolveAgentTemplate("worker-3", cfg); got != "worker" {
@@ -1627,7 +1627,7 @@ func TestPoolDesiredLimitsWakeWork(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
 		Agents: []config.Agent{
-			{Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)},
+			{Name: "claude", MinActiveSessions: 0, MaxActiveSessions: intPtr(5)},
 		},
 	}
 	// 3 sessions exist and are running, but demand (poolDesired) is only 1.

@@ -37,7 +37,7 @@ func TestApplyPatches_AgentSuspend(t *testing.T) {
 func TestApplyPatches_AgentPool(t *testing.T) {
 	cfg := &City{
 		Agents: []Agent{
-			{Name: "polecat", Dir: "hw", MinActiveSessions: ptrInt(0), MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1"},
+			{Name: "polecat", Dir: "hw", MinActiveSessions: 0, MaxActiveSessions: ptrInt(3), ScaleCheck: "echo 1"},
 		},
 	}
 	err := ApplyPatches(cfg, Patches{
@@ -52,7 +52,7 @@ func TestApplyPatches_AgentPool(t *testing.T) {
 		t.Errorf("MaxActiveSessions = %v, want 10", cfg.Agents[0].MaxActiveSessions)
 	}
 	// Unchanged fields preserved.
-	if cfg.Agents[0].MinActiveSessions == nil || *cfg.Agents[0].MinActiveSessions != 0 {
+	if cfg.Agents[0].MinActiveSessions == 0 || cfg.Agents[0].MinActiveSessions != 0 {
 		t.Errorf("MinActiveSessions = %v, want 0", cfg.Agents[0].MinActiveSessions)
 	}
 	if cfg.Agents[0].ScaleCheck != "echo 1" {
@@ -77,7 +77,7 @@ func TestApplyPatches_AgentPoolCreate(t *testing.T) {
 	if cfg.Agents[0].MaxActiveSessions == nil {
 		t.Fatal("MaxActiveSessions should be set")
 	}
-	if *cfg.Agents[0].MinActiveSessions != 1 || *cfg.Agents[0].MaxActiveSessions != 5 {
+	if cfg.Agents[0].MinActiveSessions != 1 || *cfg.Agents[0].MaxActiveSessions != 5 {
 		t.Errorf("sessions = {Min:%v, Max:%v}, want {1, 5}",
 			cfg.Agents[0].MinActiveSessions, cfg.Agents[0].MaxActiveSessions)
 	}

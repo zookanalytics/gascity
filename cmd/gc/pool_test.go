@@ -432,7 +432,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		EmitsPermissionWarning: &trueVal,
 		Env:                    map[string]string{"K": "V"},
 		MaxActiveSessions:      intPtr(5),
-		MinActiveSessions:      intPtr(1),
+		MinActiveSessions: 1,
 		ScaleCheck:             "echo 3",
 		WorkQuery:              "bd ready",
 		SlingQuery:             "bd update {}",
@@ -501,8 +501,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	src.ProcessNames[0] = "MUTATED"
 	src.InjectFragments[0] = "MUTATED"
 	src.InstallAgentHooks[0] = "MUTATED"
-	newMin := 999
-	src.MinActiveSessions = &newMin
+	src.MinActiveSessions = 999
 
 	if dst.PreStart[0] == "MUTATED" {
 		t.Error("PreStart is not a deep copy")
@@ -525,7 +524,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 	if dst.InstallAgentHooks[0] == "MUTATED" {
 		t.Error("InstallAgentHooks is not a deep copy")
 	}
-	if dst.MinActiveSessions != nil && *dst.MinActiveSessions == 999 {
+	if dst.MinActiveSessions == 999 {
 		t.Error("MinActiveSessions is not a deep copy")
 	}
 }
@@ -534,7 +533,7 @@ func TestDeepCopyAgentSetsPoolName(t *testing.T) {
 	src := &config.Agent{
 		Name:              "dog",
 		Dir:               "hello-world",
-		MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		MinActiveSessions: 0, MaxActiveSessions: intPtr(3),
 	}
 	dst := deepCopyAgent(src, "dog-1", "hello-world")
 	if dst.PoolName != "hello-world/dog" {
@@ -552,8 +551,8 @@ func TestRunPoolOnBoot(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "dog", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
+			{Name: "cat", MinActiveSessions: 0, MaxActiveSessions: intPtr(2)},
 		},
 	}
 
@@ -578,7 +577,7 @@ func TestRunPoolOnBootError(t *testing.T) {
 
 	cfg := &config.City{
 		Agents: []config.Agent{
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "dog", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -603,7 +602,7 @@ func TestRunPoolOnBootUsesRigRootForRigScopedPools(t *testing.T) {
 	cfg := &config.City{
 		Rigs: []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
 		},
 	}
 
@@ -623,8 +622,8 @@ func TestComputePoolDeathHandlers(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)}, // not a pool
-			{Name: "dog", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
-			{Name: "cat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)}, // max=1, skipped
+			{Name: "dog", MinActiveSessions: 0, MaxActiveSessions: intPtr(3)},
+			{Name: "cat", MinActiveSessions: 0, MaxActiveSessions: intPtr(1)}, // max=1, skipped
 		},
 	}
 
@@ -657,7 +656,7 @@ func TestComputePoolDeathHandlersUsesRigRootForRigScopedPools(t *testing.T) {
 		Workspace: config.Workspace{Name: "test"},
 		Rigs:      []config.Rig{{Name: "demo", Path: rigRoot}},
 		Agents: []config.Agent{
-			{Name: "polecat", Dir: "demo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "polecat", Dir: "demo", MinActiveSessions: 0, MaxActiveSessions: intPtr(2)},
 		},
 	}
 
