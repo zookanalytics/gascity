@@ -68,7 +68,7 @@ func TestFormulaCommands(t *testing.T) {
 		}
 	})
 
-	t.Run("List_TutorialCity_ListsAvailableFormulas", func(t *testing.T) {
+	t.Run("List_TutorialCity", func(t *testing.T) {
 		tc := helpers.NewCity(t, testEnv)
 		tc.Init("claude")
 
