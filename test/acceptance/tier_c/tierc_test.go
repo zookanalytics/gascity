@@ -13,6 +13,7 @@
 package tierc_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -161,7 +162,7 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 		t.Skip("Tier C: skipping in short mode")
 	}
 
-	rigDir := setupThrowawayRepo(t)
+	rigDir, bareRepo := setupThrowawayRepoWithOrigin(t)
 	rigName := filepath.Base(rigDir)
 
 	c := helpers.NewCity(t, testEnvC)
@@ -170,13 +171,9 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	// Add the rig via gc rig add (initializes beads, hooks, routes).
 	c.RigAdd(rigDir, "packs/gastown")
 
-	// Limit pool to 1 polecat.
-	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 1\nmax = 1\n")
-
-	c.StartWithSupervisor()
-
-	// Wait for supervisor + dolt + agents to initialize.
-	time.Sleep(15 * time.Second)
+	// Keep polecat on-demand so we can assert the queued outer bead before any
+	// session claims it.
+	c.AppendToConfig("\n[[rigs.overrides]]\nagent = \"polecat\"\n[rigs.overrides.pool]\nmin = 0\nmax = 1\n")
 
 	// Sling work to the polecat pool.
 	out, err := c.GC("sling", rigName+"/polecat", "Create a file called feature.txt containing 'new feature'")
@@ -185,30 +182,76 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	}
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
 
-	// Poll for outcome: a feature branch should eventually appear.
-	deadline := 5 * time.Minute
-	found := pollForCondition(t, deadline, 10*time.Second, func() bool {
-		branches := gitCmd(t, rigDir, "branch", "--list", "--no-color")
-		for _, line := range strings.Split(branches, "\n") {
-			branch := strings.TrimSpace(strings.TrimPrefix(line, "*"))
-			if branch != "" && branch != "main" && branch != "master" {
-				return true
+	ready := bdListJSON(
+		t,
+		testEnvC,
+		rigDir,
+		"ready",
+		"--metadata-field", "gc.routed_to="+rigName+"/polecat",
+		"--unassigned",
+		"--json",
+		"--limit=10",
+	)
+	require.Len(t, ready, 1, "expected exactly one queued outer bead before startup")
+	require.NotContains(t, ready[0].ID, ".", "queued pool work should be the outer bead, not an internal step")
+	outerBeadID := ready[0].ID
+
+	c.StartWithSupervisor()
+
+	sessionDeadline := 2 * time.Minute
+	sessionFound := pollForCondition(t, sessionDeadline, 5*time.Second, func() bool {
+		sessions := sessionListJSON(t, c)
+		for _, s := range sessions {
+			if !strings.Contains(s.ID, "polecat") {
+				continue
 			}
+			if s.ID == rigName+"--polecat" {
+				return false
+			}
+			return strings.HasPrefix(s.ID, "polecat-")
 		}
 		return false
 	})
-
-	if !found {
-		gitLog := gitCmd(t, rigDir, "log", "--all", "--oneline", "-10")
-		branches := gitCmd(t, rigDir, "branch", "-a")
+	if !sessionFound {
+		sessionOut, _ := c.GC("session", "list", "--json")
 		status, _ := c.GC("status")
-		t.Fatalf("no feature branch created within %s\nbranches:\n%s\ngit log:\n%s\nstatus:\n%s",
-			deadline, branches, gitLog, status)
+		t.Fatalf("polecat session did not wake with a pool session name within %s\nsessions:\n%s\nstatus:\n%s",
+			sessionDeadline, sessionOut, status)
 	}
 
-	t.Logf("Feature branch created")
-	mainLog := gitCmd(t, rigDir, "log", "--oneline", "-5", "main")
-	t.Logf("Main branch commits:\n%s", mainLog)
+	deadline := 8 * time.Minute
+	merged := pollForCondition(t, deadline, 10*time.Second, func() bool {
+		if _, err := gitCmdErr(rigDir, "fetch", "origin", "main"); err != nil {
+			return false
+		}
+		content, err := gitCmdErr(rigDir, "show", "origin/main:feature.txt")
+		if err != nil {
+			return false
+		}
+		return strings.TrimSpace(content) == "new feature"
+	})
+
+	if !merged {
+		sessionOut, _ := c.GC("session", "list", "--json")
+		status, _ := c.GC("status")
+		gitLog := gitCmd(t, rigDir, "log", "--all", "--oneline", "-10")
+		branches := gitCmd(t, rigDir, "branch", "-a")
+		beads := bdCmd(t, testEnvC, rigDir, "list", "--json", "--limit", "20")
+		t.Fatalf("feature.txt was not merged to origin/main within %s\nbranches:\n%s\ngit log:\n%s\nsessions:\n%s\nstatus:\n%s\nbeads:\n%s",
+			deadline, branches, gitLog, sessionOut, status, beads)
+	}
+
+	closed := bdShowJSON(t, testEnvC, rigDir, outerBeadID)
+	require.Equal(t, "closed", closed.Status)
+
+	verifyDir := filepath.Join(t.TempDir(), "verify")
+	gitMust(t, "", "clone", bareRepo, verifyDir)
+	data, err := os.ReadFile(filepath.Join(verifyDir, "feature.txt"))
+	require.NoError(t, err, "expected feature.txt on a fresh clone from origin")
+	require.Equal(t, "new feature", strings.TrimSpace(string(data)))
+
+	mainLog := gitCmd(t, verifyDir, "log", "--oneline", "-5", "main")
+	t.Logf("Verified merge on origin/main:\n%s", mainLog)
 }
 
 // TestGastown_PolecatLifecycle verifies the full polecat lifecycle:
@@ -337,15 +380,112 @@ func setupThrowawayRepo(t *testing.T) string {
 	return dir
 }
 
+func setupThrowawayRepoWithOrigin(t *testing.T) (string, string) {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), "origin.git")
+	gitMust(t, "", "init", "--bare", bare)
+
+	work := filepath.Join(t.TempDir(), "repo")
+	gitMust(t, "", "clone", bare, work)
+	gitMust(t, work, "config", "user.email", "test@test.com")
+	gitMust(t, work, "config", "user.name", "Test")
+
+	readme := filepath.Join(work, "README.md")
+	if err := os.WriteFile(readme, []byte("# Test Repo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitMust(t, work, "add", ".")
+	gitMust(t, work, "commit", "-m", "initial commit")
+	gitMust(t, work, "push", "origin", "main")
+
+	return work, bare
+}
+
+type tierCSessionInfo struct {
+	ID       string `json:"id"`
+	Template string `json:"template"`
+	State    string `json:"state"`
+	Alias    string `json:"alias"`
+}
+
+type tierCBead struct {
+	ID       string            `json:"id"`
+	Status   string            `json:"status"`
+	Assignee string            `json:"assignee"`
+	Metadata map[string]string `json:"metadata"`
+}
+
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
+	out, err := gitCmdErr(dir, args...)
+	if err != nil {
+		return out
+	}
+	return strings.TrimSpace(out)
+}
+
+func gitMust(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := gitCmdErr(dir, args...)
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(out)
+}
+
+func gitCmdErr(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func bdCmd(t *testing.T, env *helpers.Env, dir string, args ...string) string {
+	t.Helper()
+	bdPath := helpers.RequireBD(t)
+	cmd := exec.Command(bdPath, args...)
 	cmd.Dir = dir
+	cmd.Env = env.List()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out)
+		t.Fatalf("bd %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
-	return strings.TrimSpace(string(out))
+	return string(out)
+}
+
+func bdListJSON(t *testing.T, env *helpers.Env, dir string, args ...string) []tierCBead {
+	t.Helper()
+	out := bdCmd(t, env, dir, args...)
+	var beads []tierCBead
+	if err := json.Unmarshal([]byte(out), &beads); err != nil {
+		t.Fatalf("parsing bd JSON list: %v\n%s", err, out)
+	}
+	return beads
+}
+
+func bdShowJSON(t *testing.T, env *helpers.Env, dir, id string) tierCBead {
+	t.Helper()
+	out := bdCmd(t, env, dir, "show", id, "--json")
+	var bead tierCBead
+	if err := json.Unmarshal([]byte(out), &bead); err != nil {
+		t.Fatalf("parsing bd show JSON: %v\n%s", err, out)
+	}
+	return bead
+}
+
+func sessionListJSON(t *testing.T, c *helpers.City) []tierCSessionInfo {
+	t.Helper()
+	out, err := c.GC("session", "list", "--json")
+	if err != nil {
+		t.Fatalf("gc session list --json: %v\n%s", err, out)
+	}
+	var sessions []tierCSessionInfo
+	if err := json.Unmarshal([]byte(out), &sessions); err != nil {
+		t.Fatalf("parsing session list JSON: %v\n%s", err, out)
+	}
+	return sessions
 }
 
 func pollForCondition(t *testing.T, timeout, interval time.Duration, check func() bool) bool {
