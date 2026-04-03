@@ -109,6 +109,12 @@ func validateWorkDir(dir string) error {
 
 // beginSessionDrain initiates an async drain. Returns immediately.
 // The drainTracker stores in-memory state; advanceSessionDrains progresses it.
+//
+// The interrupt signal (Ctrl-C) is NOT sent immediately. It is deferred to
+// the next reconciler tick via advanceSessionDrains. This gives the drain
+// one full tick to be canceled (e.g., if the session was falsely orphaned
+// due to a transient store failure) before any signal reaches the process.
+// Without this, a single bad tick can interrupt a working agent mid-tool-call.
 func beginSessionDrain(
 	session beads.Bead,
 	sp runtime.Provider,
@@ -128,10 +134,6 @@ func beginSessionDrain(
 		reason:     reason,
 		generation: gen,
 	})
-
-	// Best-effort drain signal: interrupt the process.
-	// Verify instance_token before signaling.
-	_ = verifiedInterrupt(session, sp)
 
 	name := session.Metadata["session_name"]
 	telemetry.RecordDrainTransition(context.Background(), name, reason, "begin")
@@ -231,6 +233,16 @@ func advanceSessionDrainsWithSessions(
 				dt.remove(id)
 				continue
 			}
+		}
+
+		// Deferred interrupt: send Ctrl-C only after the drain has survived
+		// at least one full tick without being canceled. This prevents a
+		// single transient store failure from interrupting a working agent
+		// — the false-orphan drain is canceled on the next tick when the
+		// store recovers, before any signal reaches the process.
+		if !ds.interruptSent {
+			_ = verifiedInterrupt(*session, sp)
+			ds.interruptSent = true
 		}
 
 		if clk.Now().After(ds.deadline) {

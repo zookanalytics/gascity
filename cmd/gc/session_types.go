@@ -49,10 +49,11 @@ type ExecSpec struct {
 // drainState tracks an in-progress async drain. Ephemeral (in-memory only).
 // Lost on controller crash — safe because NDI reconverges.
 type drainState struct {
-	startedAt  time.Time
-	deadline   time.Time
-	reason     string // "idle", "pool-excess", "config-drift", "user"
-	generation int    // generation at drain start — fence for Stop
+	startedAt     time.Time
+	deadline      time.Time
+	reason        string // "idle", "pool-excess", "config-drift", "user"
+	generation    int    // generation at drain start — fence for Stop
+	interruptSent bool   // true after Ctrl-C has been delivered
 }
 
 // idleProbeState tracks an async WaitForIdle probe for interactive idle sleep.
