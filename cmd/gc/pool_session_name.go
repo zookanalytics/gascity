@@ -54,51 +54,6 @@ func GCSweepSessionBeads(store beads.Store, sessionBeads []beads.Bead, allWorkBe
 	return closed
 }
 
-// ClearOrphanedWorkAssignees finds open/in_progress work beads assigned to
-// sessions that no longer exist and clears their assignee. This prevents
-// work from getting stuck when a session drains before continuation-group
-// beads become ready. Returns the IDs of beads whose assignees were cleared.
-func ClearOrphanedWorkAssignees(store beads.Store, allBeads []beads.Bead, workBeads []beads.Bead) []string {
-	// Build set of all known session identifiers (bead ID, session name, alias)
-	// from open session beads.
-	knownSession := make(map[string]bool)
-	for _, b := range allBeads {
-		if b.Type != "session" || b.Status == "closed" {
-			continue
-		}
-		knownSession[b.ID] = true
-		if sn := strings.TrimSpace(b.Metadata["session_name"]); sn != "" {
-			knownSession[sn] = true
-		}
-		if ni := strings.TrimSpace(b.Metadata["configured_named_identity"]); ni != "" {
-			knownSession[ni] = true
-		}
-	}
-
-	var cleared []string
-	for _, wb := range workBeads {
-		if wb.Status == "closed" || wb.Type == "session" {
-			continue
-		}
-		assignee := strings.TrimSpace(wb.Assignee)
-		if assignee == "" {
-			continue
-		}
-		// Skip if the assignee matches any known live session.
-		if knownSession[assignee] {
-			continue
-		}
-		// Assignee points to a dead session — clear it so the bead
-		// becomes visible to EffectiveWorkQuery tier 3 (unassigned).
-		empty := ""
-		if err := store.Update(wb.ID, beads.UpdateOpts{Assignee: &empty}); err != nil {
-			continue
-		}
-		cleared = append(cleared, wb.ID)
-	}
-	return cleared
-}
-
 // sessionHasAssignedWork checks whether any work bead is assigned to this
 // session bead via any of its identifiers: bead ID, session name, or
 // named identity (alias).

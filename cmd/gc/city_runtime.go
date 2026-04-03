@@ -694,17 +694,7 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	swept := len(GCSweepSessionBeads(store, candidates, allBeads))
-
-	// Clear assignees on work beads pointing to dead sessions.
-	// This prevents continuation-group pre-assigned beads from getting
-	// stuck when the assigning session drains before they become ready.
-	// allBeads contains both session and work beads; ClearOrphanedWorkAssignees
-	// uses session beads to build the known-session set and checks all beads
-	// for orphaned assignments.
-	ClearOrphanedWorkAssignees(store, allBeads, allBeads)
-
-	return swept
+	return len(GCSweepSessionBeads(store, candidates, allBeads))
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
