@@ -56,7 +56,7 @@ my-city/
 
 There are three categories of files in a city:
 
-| Category | Contents | Version? |
+| Category | Contents | Sharable? |
 |---|---|---|
 | **Definitions** | `city.toml`*, `packs/`, `prompts/`, `formulas/`, `scripts/` — the blueprint for what the city is and how it behaves | Yes |
 | **Local bindings** | `city.toml`* —  configuration that wires the city up to the specific machine and directory it's registered in (e.g., paths to project directories, network ports) | No |
@@ -64,7 +64,7 @@ There are three categories of files in a city:
 
 *`city.toml` currently contains both definitions and local bindings. See [#159](https://github.com/gastownhall/gascity/issues/159) for the plan to separate them cleanly via `city.local.toml`.
 
-If you're versioning your city (and you should), you'll want to keep local bindings and managed state out of source control:
+If you're sharing and versioning your city (and you should), you'll want to keep local bindings and managed state out of source control:
 
 ```gitignore
 .gc/
