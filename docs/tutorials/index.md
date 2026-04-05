@@ -3,17 +3,14 @@ title: Tutorials
 description: Hands-on guides for learning Gas City's core concepts.
 ---
 
-## Tutorials
+> **_chris: there's no intro or framing for the tutorials. the first one just starts with the first concepts "A city is...". We should figure out the correct context to set for people approaching the tutorials as their entry point for GC._**
 
-| Tutorial | Description | Status |
-|----------|-------------|--------|
-| [Cities, Rigs, and Packs](cities.md) | Creating and managing a workspace | Reviewable |
-| [Agents](agents.md) | Configuring agent templates | Reviewable |
-| [Sessions](sessions.md) | Running and interacting with agents | Reviewable |
-| [Formulas](formulas.md) | Declarative workflow templates | Reviewable |
-| [Beads](beads.md) | The universal work primitive | In Progress |
+## Tutorials (ready for review)
 
-## Also in this directory
-
-- [Tutorial 01 - Beads](01-beads.md) — Original walkthrough (boneyard — will be archived)
-- [Issues](issues.md) — Issue tracking for tutorial content
+| Tutorial                                | Description                         |
+| --------------------------------------- | ----------------------------------- |
+| [Cities, Rigs, and Packs](01-cities.md) | Creating and managing a workspace   |
+| [Agents](02-agents.md)                  | Configuring agent templates         |
+| [Sessions](03-sessions.md)              | Running and interacting with agents |
+| [Formulas](04-formulas.md)              | Declarative workflow templates      |
+| [Beads](05-beads.md)                    | The universal work primitive        |
