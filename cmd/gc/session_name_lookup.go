@@ -32,7 +32,6 @@ func createPoolSessionBead(
 		"agent_name":           template,
 		"pending_create_claim": "true",
 		"state":                "creating",
-		"pending_create_claim": "true",
 		"generation":           "1",
 		"continuation_epoch":   "1",
 		"instance_token":       sessionpkg.NewInstanceToken(),

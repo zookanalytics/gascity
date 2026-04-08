@@ -278,7 +278,7 @@ func TestValidateNamedSessions_UsesResolvedWorkspaceName(t *testing.T) {
 	}
 }
 
-func TestValidateNamedSessions_RejectsMultiSessionTemplate(t *testing.T) {
+func TestValidateNamedSessions_AllowsReusableTemplate(t *testing.T) {
 	cfg := &City{
 		Workspace: Workspace{Name: "test-city"},
 		Agents: []Agent{{
@@ -291,9 +291,7 @@ func TestValidateNamedSessions_RejectsMultiSessionTemplate(t *testing.T) {
 		}},
 	}
 
-	if err := ValidateNamedSessions(cfg); err == nil {
-		t.Fatal("ValidateNamedSessions() = nil, want singleton error")
-	} else if !strings.Contains(err.Error(), "max_active_sessions = 1") {
-		t.Fatalf("ValidateNamedSessions() error = %v, want singleton error", err)
+	if err := ValidateNamedSessions(cfg); err != nil {
+		t.Fatalf("ValidateNamedSessions() error = %v, want nil", err)
 	}
 }

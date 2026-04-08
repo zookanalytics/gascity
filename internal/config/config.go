@@ -1786,12 +1786,6 @@ func ValidateNamedSessions(cfg *City) error {
 		if agent == nil {
 			return fmt.Errorf("named_session %q: referenced template not found after pack expansion", s.QualifiedName())
 		}
-		if strings.TrimSpace(agent.Namepool) != "" || len(agent.NamepoolNames) > 0 {
-			return fmt.Errorf("named_session %q: template %q uses namepool and cannot be a canonical singleton", s.QualifiedName(), agent.QualifiedName())
-		}
-		if max := agent.ResolvedMaxActiveSessions(cfg); max == nil || *max != 1 {
-			return fmt.Errorf("named_session %q: template %q must resolve to max_active_sessions = 1", s.QualifiedName(), agent.QualifiedName())
-		}
 		identity := s.QualifiedName()
 		sessionName := NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
 		if other, ok := reservedAliases[sessionName]; ok && other != identity {
@@ -1926,10 +1920,9 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 // DefaultCity returns a City with the given name and a single default
 // agent named "mayor". This is the config written by "gc init".
 func DefaultCity(name string) City {
-	one := 1
 	return City{
 		Workspace:     Workspace{Name: name},
-		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md", MaxActiveSessions: &one}},
+		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
 }
@@ -1955,11 +1948,10 @@ func WizardCity(name, provider, startCommand string) City {
 		ws.Provider = provider
 		ws.InstallAgentHooks = defaultInstallAgentHooksForProvider(provider)
 	}
-	one := 1
 	return City{
 		Workspace: ws,
 		Agents: []Agent{
-			{Name: "mayor", PromptTemplate: "prompts/mayor.md", MaxActiveSessions: &one},
+			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
 		},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
