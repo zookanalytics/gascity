@@ -30,6 +30,7 @@ func createPoolSessionBead(
 	meta := map[string]string{
 		"template":             template,
 		"agent_name":           template,
+		"pending_create_claim": "true",
 		"state":                "creating",
 		"pending_create_claim": "true",
 		"generation":           "1",
