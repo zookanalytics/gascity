@@ -48,8 +48,11 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 }
 
 // ComputePoolDesiredStates computes the desired state for all pool agents.
-// assignedWorkBeads contains work beads that have an assignee matching a
-// session — the cross-reference of in-progress/ready work with live sessions.
+// assignedWorkBeads contains actionable assigned work beads only: in-progress
+// work and open work that was already proven ready upstream. Routed but
+// unassigned pool queue work must not be passed here; new-session demand comes
+// from scale_check, while this function only preserves sessions that already
+// own actionable work.
 // Each bead's gc.routed_to determines which agent template it belongs to.
 // scaleCheckCounts maps agent template → desired count from scale_check.
 // Pass nil for either when unavailable.
@@ -105,14 +108,17 @@ func computePoolDesiredStates(
 		}
 		template := agent.QualifiedName()
 
-		// Resume tier: assigned work beads whose assignee resolves to a
-		// non-closed session bead. These sessions must stay alive.
+		// Resume tier: actionable assigned work beads whose assignee resolves
+		// to a non-closed session bead. These sessions must stay alive.
 		for _, wb := range assignedWorkBeads {
 			routedTo := wb.Metadata["gc.routed_to"]
 			if routedTo != template {
 				continue
 			}
 			assignee := strings.TrimSpace(wb.Assignee)
+			if assignee == "" {
+				continue
+			}
 			sessionBeadID := assigneeToSessionBeadID[assignee]
 			if sessionBeadID == "" {
 				continue

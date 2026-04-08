@@ -54,7 +54,8 @@ type CityRuntime struct {
 	poolDeathHandlers map[string]poolDeathInfo
 	suspendedNames    map[string]bool
 
-	standaloneCityStore beads.Store // non-nil when API disabled; for chat auto-suspend
+	standaloneCityStore beads.Store            // non-nil when API disabled; for chat auto-suspend
+	standaloneRigStores map[string]beads.Store // standalone-mode rig stores for cross-store work visibility
 
 	// Bead-driven reconciler state (Phase 2f).
 	sessionDrains *drainTracker // in-memory drain tracker; nil when bead reconciler disabled
@@ -222,6 +223,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			fmt.Fprintf(cr.stderr, "%s: city bead store: %v (auto-suspend disabled)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 		} else {
 			cr.standaloneCityStore = store
+			cr.refreshStandaloneRigStores()
 		}
 	}
 
@@ -606,6 +608,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		} else {
 			cr.standaloneCityStore = s
+			cr.refreshStandaloneRigStores()
 		}
 	}
 
@@ -641,24 +644,11 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 	if sessionBeads == nil {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
-	// Best-effort full bead list for sweep/pool demand. Non-blocking:
-	// if the CachingStore hasn't fully primed yet, List() returns what
-	// it has (or blocks briefly). On the first tick after startup, this
-	// may return empty while the async prime is still running — sweep
-	// and pool demand computation gracefully handle nil/empty lists.
-	var allBeads []beads.Bead
-	if cs, ok := store.(*beads.CachingStore); ok && cs.IsLive() {
-		allBeads, _ = store.ListOpen()
-	} else {
-		// Don't block startup waiting for full prime — skip sweep on this tick.
-		allBeads = nil
-	}
 	// poolDesired determines how many sessions should be AWAKE. Uses the
 	// same scale_check counts that buildDesiredState already computed (no
 	// duplicate shell-outs). Resume tier from cross-referenced assigned
 	// work beads + new tier from scale_check + min fill.
-	poolDesired := PoolDesiredCounts(ComputePoolDesiredStatesTraced(
-		cr.cfg, nil, sessionBeads.Open(), result.ScaleCheckCounts, trace))
+	poolDesired := computePoolDesiredCountsForTick(cr.cfg, sessionBeads, result, trace)
 	for tmpl, count := range poolDesired {
 		if count > 0 {
 			fmt.Fprintf(cr.stderr, "poolDesired: %s = %d\n", tmpl, count) //nolint:errcheck
@@ -669,7 +659,15 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 			fmt.Fprintf(cr.stderr, "scaleCheck: %s = %d\n", tmpl, count) //nolint:errcheck
 		}
 	}
-	if allBeads != nil && sweepUndesiredPoolSessionBeads(store, sessionBeads, desiredState, allBeads, cr.cfg, cr.sp) > 0 {
+	if sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		desiredState,
+		result.AssignedWorkBeads,
+		result.StoreQueryPartial,
+		cr.cfg,
+		cr.sp,
+	) > 0 {
 		sessionBeads = cr.loadSessionBeadSnapshot()
 	}
 	open := sessionBeads.Open()
@@ -803,11 +801,12 @@ func sweepUndesiredPoolSessionBeads(
 	store beads.Store,
 	sessionBeads *sessionBeadSnapshot,
 	desiredState map[string]TemplateParams,
-	allBeads []beads.Bead,
+	assignedWorkBeads []beads.Bead,
+	storeQueryPartial bool,
 	cfg *config.City,
 	sp runtime.Provider,
 ) int {
-	if store == nil || sessionBeads == nil || cfg == nil {
+	if store == nil || sessionBeads == nil || cfg == nil || storeQueryPartial {
 		return 0
 	}
 	var candidates []beads.Bead
@@ -816,6 +815,9 @@ func sweepUndesiredPoolSessionBeads(
 			continue
 		}
 		if _, desired := desiredState[bead.Metadata["session_name"]]; desired {
+			continue
+		}
+		if normalizeBeadState(bead.Metadata["state"]) == "creating" {
 			continue
 		}
 		if bead.Metadata["manual_session"] == boolMetadata(true) || isNamedSessionBead(bead) {
@@ -831,7 +833,7 @@ func sweepUndesiredPoolSessionBeads(
 		}
 		candidates = append(candidates, bead)
 	}
-	return len(GCSweepSessionBeads(store, candidates, allBeads))
+	return len(GCSweepSessionBeads(store, candidates, assignedWorkBeads))
 }
 
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
@@ -952,11 +954,42 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 	var rigStores map[string]beads.Store
 	if cr.cs != nil {
 		rigStores = cr.cs.BeadStores()
+	} else {
+		rigStores = cr.standaloneRigStores
 	}
 	if cr.buildFnWithSessionBeads != nil {
 		return cr.buildFnWithSessionBeads(cr.cfg, cr.sp, store, rigStores, sessionBeads, trace)
 	}
 	return cr.buildFn(cr.cfg, cr.sp, store)
+}
+
+func (cr *CityRuntime) refreshStandaloneRigStores() {
+	if cr.cs != nil || cr.cfg == nil {
+		return
+	}
+	cs := &controllerState{
+		cfg:      cr.cfg,
+		cityPath: cr.cityPath,
+	}
+	cr.standaloneRigStores = cs.buildStores(cr.cfg)
+}
+
+func computePoolDesiredCountsForTick(
+	cfg *config.City,
+	sessionBeads *sessionBeadSnapshot,
+	result DesiredStateResult,
+	trace *sessionReconcilerTraceCycle,
+) map[string]int {
+	if cfg == nil || sessionBeads == nil {
+		return nil
+	}
+	return PoolDesiredCounts(ComputePoolDesiredStatesTraced(
+		cfg,
+		result.AssignedWorkBeads,
+		sessionBeads.Open(),
+		result.ScaleCheckCounts,
+		trace,
+	))
 }
 
 func (cr *CityRuntime) beginTraceCycle(trigger, detail string, sessionBeads *sessionBeadSnapshot) *sessionReconcilerTraceCycle {

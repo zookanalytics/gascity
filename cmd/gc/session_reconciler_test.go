@@ -756,6 +756,36 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 }
 
+func TestReconcileSessionBeads_PreservedPendingCreateNamedSessionStartsOutsideDesiredState(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: intPtr(2)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                      "stopped",
+		"pending_create_claim":       "true",
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1", woken)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not start", sessionName)
+	}
+	got, _ := env.store.Get(session.ID)
+	if got.Metadata["pending_create_claim"] != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
+	}
+}
+
 func TestReconcileSessionBeads_PreservedRunningNamedSessionStillIdleDrains(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
@@ -942,6 +972,9 @@ func TestReconcileSessionBeads_OnDemandNamedSessionRecoversAfterClosedCanonicalB
 	}
 	if got := sessions[0].Metadata[namedSessionIdentityMetadata]; got != "refinery" {
 		t.Fatalf("configured_named_identity = %q, want refinery", got)
+	}
+	if got := sessions[0].Metadata["pending_create_claim"]; got != "true" {
+		t.Fatalf("pending_create_claim = %q, want true", got)
 	}
 
 	woken := reconcileSessionBeads(
@@ -1878,7 +1911,7 @@ func TestResolveSessionCommand(t *testing.T) {
 	}
 
 	t.Run("first start uses --session-id", func(t *testing.T) {
-		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, true)
+		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, true, false)
 		want := "claude --dangerously-skip-permissions --session-id abc-123"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -1886,7 +1919,7 @@ func TestResolveSessionCommand(t *testing.T) {
 	})
 
 	t.Run("resume uses --resume", func(t *testing.T) {
-		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, false)
+		got := resolveSessionCommand("claude --dangerously-skip-permissions", "abc-123", claude, false, false)
 		want := "claude --dangerously-skip-permissions --resume abc-123"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)
@@ -1895,7 +1928,7 @@ func TestResolveSessionCommand(t *testing.T) {
 
 	t.Run("first start without SessionIDFlag falls back to resume", func(t *testing.T) {
 		noSessionID := &config.ResolvedProvider{ResumeFlag: "--resume"}
-		got := resolveSessionCommand("agent run", "key-1", noSessionID, true)
+		got := resolveSessionCommand("agent run", "key-1", noSessionID, true, false)
 		want := "agent run --resume key-1"
 		if got != want {
 			t.Errorf("got %q, want %q", got, want)

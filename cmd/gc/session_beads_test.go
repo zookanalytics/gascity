@@ -1037,6 +1037,9 @@ func TestSyncSessionBeads_StoppedAgent(t *testing.T) {
 	if all[0].Metadata["state"] != "stopped" {
 		t.Errorf("state = %q, want %q", all[0].Metadata["state"], "stopped")
 	}
+	if all[0].Metadata["pending_create_claim"] != "true" {
+		t.Errorf("pending_create_claim = %q, want true", all[0].Metadata["pending_create_claim"])
+	}
 }
 
 func TestSyncSessionBeads_ClosedBeadCreatesNew(t *testing.T) {

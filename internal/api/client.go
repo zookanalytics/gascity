@@ -59,6 +59,8 @@ type Client struct {
 	httpClient  *http.Client
 }
 
+const sessionMessageTimeout = 95 * time.Second
+
 // NewClient creates a new API client targeting the given base URL
 // (e.g., "http://127.0.0.1:8080").
 func NewClient(baseURL string) *Client {
@@ -162,6 +164,14 @@ func (c *Client) KillSession(id string) error {
 	return c.doMutation("POST", "/v0/session/"+url.PathEscape(id)+"/kill", nil)
 }
 
+// SendSessionMessage delivers a message to a session via
+// POST /v0/session/{id}/messages. The server resumes suspended sessions when
+// possible before nudging the message into the runtime.
+func (c *Client) SendSessionMessage(id, message string) error {
+	body := map[string]string{"message": message}
+	return c.doMutationWithTimeout("POST", "/v0/session/"+url.PathEscape(id)+"/messages", body, sessionMessageTimeout)
+}
+
 // escapeName escapes each segment of a potentially qualified name (e.g.,
 // "myrig/worker") for use in URL paths. Slashes are preserved as path
 // separators; other URL metacharacters (#, ?, etc.) are percent-encoded.
@@ -175,6 +185,10 @@ func escapeName(name string) string {
 
 // doMutation sends a mutation request and checks for errors.
 func (c *Client) doMutation(method, path string, body any) error {
+	return c.doMutationWithTimeout(method, path, body, 0)
+}
+
+func (c *Client) doMutationWithTimeout(method, path string, body any, timeout time.Duration) error {
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -193,7 +207,13 @@ func (c *Client) doMutation(method, path string, body any) error {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.httpClient.Do(req)
+	client := c.httpClient
+	if timeout > 0 {
+		clone := *c.httpClient
+		clone.Timeout = timeout
+		client = &clone
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return &connError{err: fmt.Errorf("request failed: %w", err)}
 	}

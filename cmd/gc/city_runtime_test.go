@@ -47,6 +47,7 @@ func TestSweepUndesiredPoolSessionBeads_KeepsRunningSessionsOpen(t *testing.T) {
 		sessionBeads,
 		nil,
 		nil,
+		false,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		sp,
 	)
@@ -89,6 +90,7 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 		sessionBeads,
 		nil,
 		nil,
+		false,
 		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
 		runtime.NewFake(),
 	)
@@ -101,6 +103,199 @@ func TestSweepUndesiredPoolSessionBeads_ClosesStoppedSessions(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("stopped pool bead status = %q, want closed", got.Status)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_KeepsRigAssignedSessionOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/claude"},
+		Metadata: map[string]string{
+			"session_name":         "claude-mc-52hl0x",
+			"template":             "gascity/claude",
+			"agent_name":           "gascity/claude",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "active",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+	assignedWorkBeads := []beads.Bead{{
+		ID:       "ga-m7pmd",
+		Assignee: "claude-mc-52hl0x",
+		Status:   "in_progress",
+		Metadata: map[string]string{"gc.routed_to": "gascity/claude"},
+	}}
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		assignedWorkBeads,
+		false,
+		&config.City{Agents: []config.Agent{{Dir: "gascity", Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(4)}}},
+		runtime.NewFake(),
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("assigned rig worker was closed: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_SkipsPartialAssignedWorkSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":         "worker-bd-123",
+			"template":             "worker",
+			"agent_name":           "worker",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "drained",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		true,
+		&config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}},
+		runtime.NewFake(),
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("partial snapshot should not close bead: %+v", got)
+	}
+}
+
+func TestSweepUndesiredPoolSessionBeads_KeepsCreatingSessionsOpen(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:gascity/claude"},
+		Metadata: map[string]string{
+			"session_name":         "claude-mc-wlgsoq",
+			"template":             "gascity/claude",
+			"agent_name":           "gascity/claude",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"state":                "creating",
+			"continuation_epoch":   "1",
+			"generation":           "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{bead})
+
+	closed := sweepUndesiredPoolSessionBeads(
+		store,
+		sessionBeads,
+		nil,
+		nil,
+		false,
+		&config.City{Agents: []config.Agent{{Dir: "gascity", Name: "claude", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(4)}}},
+		runtime.NewFake(),
+	)
+	if closed != 0 {
+		t.Fatalf("closed = %d, want 0", closed)
+	}
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("creating session should not be swept: %+v", got)
+	}
+}
+
+func TestComputePoolDesiredCountsForTick_UsesAssignedWorkBeads(t *testing.T) {
+	sessionBeads := newSessionBeadSnapshot([]beads.Bead{{
+		ID:     "mc-sctve",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "hello-world/polecat",
+			"session_name": "polecat-mc-sctve",
+			"state":        "asleep",
+			"pool_managed": "true",
+		},
+	}})
+	result := DesiredStateResult{
+		AssignedWorkBeads: []beads.Bead{{
+			ID:       "hw-8lb",
+			Assignee: "mc-sctve",
+			Status:   "in_progress",
+			Metadata: map[string]string{"gc.routed_to": "hello-world/polecat"},
+		}},
+		ScaleCheckCounts: map[string]int{"hello-world/polecat": 0},
+	}
+
+	counts := computePoolDesiredCountsForTick(&config.City{
+		Agents: []config.Agent{{Dir: "hello-world", Name: "polecat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5)}},
+	}, sessionBeads, result, nil)
+
+	if got := counts["hello-world/polecat"]; got != 1 {
+		t.Fatalf("poolDesired[hello-world/polecat] = %d, want 1", got)
+	}
+}
+
+func TestCityRuntimeBuildDesiredState_StandalonePassesRigStores(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	var gotStore beads.Store
+	cr := newCityRuntime(CityRuntimeParams{
+		CityPath: "/tmp/test-city",
+		CityName: "test-city",
+		Cfg:      &config.City{},
+		SP:       runtime.NewFake(),
+		BuildFnWithSessionBeads: func(_ *config.City, _ runtime.Provider, _ beads.Store, rigStores map[string]beads.Store, _ *sessionBeadSnapshot, _ *sessionReconcilerTraceCycle) DesiredStateResult {
+			gotStore = rigStores["gascity"]
+			return DesiredStateResult{}
+		},
+		Dops:   newDrainOps(runtime.NewFake()),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cr.standaloneCityStore = beads.NewMemStore()
+	cr.standaloneRigStores = map[string]beads.Store{"gascity": rigStore}
+
+	cr.buildDesiredState(nil, nil)
+
+	if gotStore != rigStore {
+		t.Fatal("standalone buildDesiredState did not pass rig store through")
 	}
 }
 

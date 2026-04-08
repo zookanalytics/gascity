@@ -3,11 +3,14 @@
 package workerinference_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,12 +25,13 @@ var (
 )
 
 type providerSetup struct {
-	Profile     workerpkg.Profile
-	Provider    string
-	BinaryPath  string
-	AuthSource  string
-	SearchPaths []string
-	SetupError  string
+	Profile      workerpkg.Profile
+	Provider     string
+	BinaryPath   string
+	ProcessNames []string
+	AuthSource   string
+	SearchPaths  []string
+	SetupError   string
 }
 
 func TestMain(m *testing.M) {
@@ -72,7 +76,7 @@ func TestMain(m *testing.M) {
 		Without("GC_BEADS").
 		Without("GC_DOLT").
 		With("DOLT_ROOT_PATH", gcHome)
-	liveSetup = prepareProviderSetup(gcHome, liveEnv)
+	liveSetup = prepareProviderSetup(gcHome, tmpDir, liveEnv)
 
 	code := m.Run()
 	if liveEnv != nil {
@@ -81,7 +85,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
+func prepareProviderSetup(gcHome, workRoot string, env *helpers.Env) providerSetup {
 	setup := providerSetup{
 		Profile: resolveProfile(os.Getenv("PROFILE")),
 	}
@@ -99,12 +103,13 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 		setup.SetupError = "bd not found in PATH"
 		return setup
 	}
-	binaryPath, err := exec.LookPath(setup.Provider)
+	binaryPath, err := resolveProviderBinary(workRoot, env, setup.Provider)
 	if err != nil {
 		setup.SetupError = fmt.Sprintf("%s CLI not found in PATH", setup.Provider)
 		return setup
 	}
 	setup.BinaryPath = binaryPath
+	setup.ProcessNames = providerProcessNames(setup.Provider, setup.BinaryPath)
 	authSource, err := stageProviderAuth(gcHome, env, setup.Profile)
 	if err != nil {
 		setup.SetupError = err.Error()
@@ -112,6 +117,255 @@ func prepareProviderSetup(gcHome string, env *helpers.Env) providerSetup {
 	}
 	setup.AuthSource = authSource
 	return setup
+}
+
+func resolveProviderBinary(workRoot string, env *helpers.Env, provider string) (string, error) {
+	switch {
+	case strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "BIN"))) != "":
+		return installProviderBinaryOverride(workRoot, env, provider, strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "BIN"))))
+	case strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "SHELL_COMMAND"))) != "":
+		return installProviderShellOverride(workRoot, env, provider, strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "SHELL_COMMAND"))))
+	default:
+		return lookPathInEnvPath(env.Get("PATH"), provider)
+	}
+}
+
+func workerInferenceProviderEnv(provider, suffix string) string {
+	return "GC_WORKER_INFERENCE_" + strings.ToUpper(strings.TrimSpace(provider)) + "_" + strings.TrimSpace(suffix)
+}
+
+func installProviderBinaryOverride(workRoot string, env *helpers.Env, provider, target string) (string, error) {
+	resolved := strings.TrimSpace(target)
+	if resolved == "" {
+		return "", fmt.Errorf("%s override binary is empty", provider)
+	}
+	if !filepath.IsAbs(resolved) {
+		path, err := lookPathInEnvPath(env.Get("PATH"), resolved)
+		if err != nil {
+			return "", fmt.Errorf("%s override binary %q not found in PATH: %w", provider, target, err)
+		}
+		resolved = path
+	}
+	script := fmt.Sprintf("#!/usr/bin/env bash\nset -euo pipefail\n%s\nexec %s \"$@\"\n", providerOverrideHomeExport(provider), strconv.Quote(resolved))
+	return installProviderShim(workRoot, env, provider, script)
+}
+
+func installProviderShellOverride(workRoot string, env *helpers.Env, provider, command string) (string, error) {
+	shellPath := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_SHELL"))
+	if shellPath == "" {
+		shellPath = strings.TrimSpace(os.Getenv("SHELL"))
+	}
+	if shellPath == "" {
+		shellPath = "zsh"
+	}
+	resolvedShell, err := exec.LookPath(shellPath)
+	if err != nil {
+		return "", fmt.Errorf("shell override for %s requires %q in PATH: %w", provider, shellPath, err)
+	}
+	launch := strings.TrimSpace(command)
+	if launch == "" {
+		return "", fmt.Errorf("%s shell command override is empty", provider)
+	}
+	if !strings.Contains(launch, "$") {
+		launch += ` "$@"`
+	}
+	rcPath := shellOverrideRCPath(resolvedShell)
+	preamble := shellOverridePreamble(resolvedShell, rcPath)
+	shimPath := providerShimPath(workRoot, provider)
+	script := fmt.Sprintf(
+		"#!/usr/bin/env bash\nset -euo pipefail\nexport GC_WORKER_INFERENCE_CURRENT_SHIM=%s\ncase \":${GC_WORKER_INFERENCE_SHIM_CHAIN:-}:\" in\n  *:\"${GC_WORKER_INFERENCE_CURRENT_SHIM}\":*)\n    printf 'worker-inference shim recursion detected for %s at %%s\\n' \"$GC_WORKER_INFERENCE_CURRENT_SHIM\" >&2\n    exit 97\n    ;;\nesac\nif [ -n \"${GC_WORKER_INFERENCE_SHIM_CHAIN:-}\" ]; then\n  export GC_WORKER_INFERENCE_SHIM_CHAIN=\"${GC_WORKER_INFERENCE_SHIM_CHAIN}:${GC_WORKER_INFERENCE_CURRENT_SHIM}\"\nelse\n  export GC_WORKER_INFERENCE_SHIM_CHAIN=\"${GC_WORKER_INFERENCE_CURRENT_SHIM}\"\nfi\nexport PATH=%s\n%s\nexport GC_WORKER_INFERENCE_LAUNCH=%s\nexec %s -lc %s gc-worker \"$@\"\n",
+		strconv.Quote(shimPath),
+		provider,
+		strconv.Quote(env.Get("PATH")),
+		providerOverrideHomeExport(provider),
+		strconv.Quote(launch),
+		strconv.Quote(resolvedShell),
+		strconv.Quote(preamble),
+	)
+	return installProviderShim(workRoot, env, provider, script)
+}
+
+func shellOverrideRCPath(shellPath string) string {
+	if rcPath := strings.TrimSpace(os.Getenv("GC_WORKER_INFERENCE_SHELL_RC")); rcPath != "" {
+		return rcPath
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	switch filepath.Base(shellPath) {
+	case "bash":
+		return filepath.Join(homeDir, ".bashrc")
+	case "zsh":
+		return filepath.Join(homeDir, ".zshrc")
+	default:
+		return ""
+	}
+}
+
+func shellOverridePreamble(shellPath, rcPath string) string {
+	commands := make([]string, 0, 4)
+	switch filepath.Base(shellPath) {
+	case "bash":
+		commands = append(commands, "shopt -s expand_aliases >/dev/null 2>&1 || true")
+	case "zsh":
+		commands = append(commands, "setopt aliases >/dev/null 2>&1 || true")
+	}
+	if strings.TrimSpace(rcPath) != "" {
+		commands = append(commands, fmt.Sprintf("[ -f %s ] && . %s >/dev/null 2>&1 || true", strconv.Quote(rcPath), strconv.Quote(rcPath)))
+	}
+	commands = append(commands, `eval "$GC_WORKER_INFERENCE_LAUNCH"`)
+	return strings.Join(commands, "; ")
+}
+
+func providerOverrideHomeExport(provider string) string {
+	override := strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "HOME")))
+	if override == "" {
+		return ""
+	}
+	return "export HOME=" + strconv.Quote(override)
+}
+
+func providerOverrideProcessNames(provider string) []string {
+	raw := strings.TrimSpace(os.Getenv(workerInferenceProviderEnv(provider, "PROCESS_NAMES")))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	names := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+func providerProcessNames(provider, binaryPath string) []string {
+	names := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	add := func(raw string) {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; ok {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	for _, name := range providerOverrideProcessNames(provider) {
+		add(name)
+	}
+	add(provider)
+	for _, name := range inferredWrapperProcessNames(binaryPath) {
+		add(name)
+	}
+	if len(names) == 0 {
+		return nil
+	}
+	return names
+}
+
+func inferredWrapperProcessNames(binaryPath string) []string {
+	resolved := strings.TrimSpace(binaryPath)
+	if resolved == "" {
+		return nil
+	}
+	if target, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = target
+	}
+	file, err := os.Open(resolved)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	line, err := bufio.NewReader(file).ReadString('\n')
+	if err != nil && err != io.EOF {
+		return nil
+	}
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "#!") {
+		return nil
+	}
+	fields := strings.Fields(strings.TrimPrefix(line, "#!"))
+	names := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	for _, field := range fields {
+		token := strings.ToLower(strings.TrimSpace(filepath.Base(field)))
+		if token == "" || strings.HasPrefix(token, "-") || token == "env" {
+			continue
+		}
+		switch token {
+		case "node", "bun", "bash", "sh", "zsh":
+			if _, ok := seen[token]; ok {
+				continue
+			}
+			seen[token] = struct{}{}
+			names = append(names, token)
+		}
+	}
+	return names
+}
+
+func installProviderShim(workRoot string, env *helpers.Env, provider, script string) (string, error) {
+	shimDir := filepath.Dir(providerShimPath(workRoot, provider))
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		return "", err
+	}
+	shimPath := providerShimPath(workRoot, provider)
+	if err := os.WriteFile(shimPath, []byte(script), 0o755); err != nil {
+		return "", err
+	}
+	currentPath := env.Get("PATH")
+	if currentPath == "" {
+		env.With("PATH", shimDir)
+	} else {
+		env.With("PATH", shimDir+string(os.PathListSeparator)+currentPath)
+	}
+	return shimPath, nil
+}
+
+func providerShimPath(workRoot, provider string) string {
+	return filepath.Join(workRoot, "provider-bin", provider)
+}
+
+func lookPathInEnvPath(pathEnv, file string) (string, error) {
+	file = strings.TrimSpace(file)
+	if file == "" {
+		return "", exec.ErrNotFound
+	}
+	if strings.Contains(file, string(os.PathSeparator)) {
+		if isExecutableFile(file) {
+			return file, nil
+		}
+		return "", exec.ErrNotFound
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if strings.TrimSpace(dir) == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, file)
+		if isExecutableFile(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	return info.Mode()&0o111 != 0
 }
 
 func resolveProfile(raw string) workerpkg.Profile {
@@ -218,6 +472,12 @@ func stageClaudeAuth(gcHome string, env *helpers.Env) (string, error) {
 	if apiKey := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); apiKey != "" {
 		env.With("ANTHROPIC_API_KEY", apiKey)
 		return "env:ANTHROPIC_API_KEY", nil
+	}
+	if sourceDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); sourceDir != "" {
+		if err := stageClaudeOAuthSource(sourceDir, "", gcHome); err == nil {
+			env.With("CLAUDE_CONFIG_DIR", filepath.Join(gcHome, ".claude"))
+			return "env:CLAUDE_CONFIG_DIR", nil
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -403,7 +663,10 @@ func stagedSecretSource(provider string, fromFile bool) string {
 }
 
 func stageClaudeOAuth(realHome, gcHome string) error {
-	srcClaudeDir := filepath.Join(realHome, ".claude")
+	return stageClaudeOAuthSource(filepath.Join(realHome, ".claude"), filepath.Join(realHome, ".claude.json"), gcHome)
+}
+
+func stageClaudeOAuthSource(srcClaudeDir, rootConfigPath, gcHome string) error {
 	dstClaudeDir := filepath.Join(gcHome, ".claude")
 	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
 		return err
@@ -414,13 +677,18 @@ func stageClaudeOAuth(realHome, gcHome string) error {
 		}
 	}
 	if err := mergeClaudeLocalConfig(
-		filepath.Join(realHome, ".claude.json"),
+		rootConfigPath,
 		filepath.Join(srcClaudeDir, ".claude.json"),
 		filepath.Join(dstClaudeDir, ".claude.json"),
 	); err != nil {
 		return err
 	}
-	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(gcHome, ".claude.json"), 0o600); err != nil {
+	if err := copyPreferredFile(
+		rootConfigPath,
+		filepath.Join(srcClaudeDir, ".claude.json"),
+		filepath.Join(gcHome, ".claude.json"),
+		0o600,
+	); err != nil {
 		return err
 	}
 	return validateClaudeCredentials(filepath.Join(dstClaudeDir, ".credentials.json"), time.Now())
@@ -438,6 +706,21 @@ func copyFileIfExists(src, dst string, perm os.FileMode) error {
 		return err
 	}
 	return os.WriteFile(dst, data, perm)
+}
+
+func copyPreferredFile(primarySrc, fallbackSrc, dst string, perm os.FileMode) error {
+	for _, src := range []string{primarySrc, fallbackSrc} {
+		if strings.TrimSpace(src) == "" {
+			continue
+		}
+		if err := copyFileIfExists(src, dst, perm); err != nil {
+			return err
+		}
+		if _, err := os.Stat(dst); err == nil {
+			return nil
+		}
+	}
+	return nil
 }
 
 func mergeClaudeLocalConfig(rootSrc, nestedSrc, dst string) error {
@@ -503,17 +786,17 @@ func parseUnixMillis(value any) (time.Time, bool, error) {
 	case nil:
 		return time.Time{}, false, nil
 	case float64:
-		return time.UnixMilli(int64(typed)), true, nil
+		return parseUnixEpoch(int64(typed)), true, nil
 	case int64:
-		return time.UnixMilli(typed), true, nil
+		return parseUnixEpoch(typed), true, nil
 	case int:
-		return time.UnixMilli(int64(typed)), true, nil
+		return parseUnixEpoch(int64(typed)), true, nil
 	case json.Number:
 		millis, err := typed.Int64()
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		return time.UnixMilli(millis), true, nil
+		return parseUnixEpoch(millis), true, nil
 	case string:
 		if strings.TrimSpace(typed) == "" {
 			return time.Time{}, false, nil
@@ -522,10 +805,18 @@ func parseUnixMillis(value any) (time.Time, bool, error) {
 		if err != nil {
 			return time.Time{}, false, err
 		}
-		return time.UnixMilli(millis), true, nil
+		return parseUnixEpoch(millis), true, nil
 	default:
 		return time.Time{}, false, fmt.Errorf("unsupported type %T", value)
 	}
+}
+
+func parseUnixEpoch(value int64) time.Time {
+	const secondThreshold = int64(1_000_000_000_000)
+	if value > -secondThreshold && value < secondThreshold {
+		return time.Unix(value, 0)
+	}
+	return time.UnixMilli(value)
 }
 
 func readJSONMapIfExists(path string) (map[string]any, error) {

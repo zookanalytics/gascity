@@ -25,6 +25,9 @@ func TestDefaultCity(t *testing.T) {
 	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
 		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
 	}
+	if c.Agents[0].MaxActiveSessions == nil || *c.Agents[0].MaxActiveSessions != 1 {
+		t.Errorf("Agents[0].MaxActiveSessions = %v, want 1", c.Agents[0].MaxActiveSessions)
+	}
 }
 
 func TestMarshalRoundTrip(t *testing.T) {
@@ -78,7 +81,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\nmax_active_sessions = 1\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -616,6 +619,9 @@ func TestWizardCity(t *testing.T) {
 	if c.Agents[0].PromptTemplate != "prompts/mayor.md" {
 		t.Errorf("Agents[0].PromptTemplate = %q, want %q", c.Agents[0].PromptTemplate, "prompts/mayor.md")
 	}
+	if c.Agents[0].MaxActiveSessions == nil || *c.Agents[0].MaxActiveSessions != 1 {
+		t.Errorf("Agents[0].MaxActiveSessions = %v, want 1", c.Agents[0].MaxActiveSessions)
+	}
 }
 
 func TestWizardCityMarshal(t *testing.T) {
@@ -630,6 +636,9 @@ func TestWizardCityMarshal(t *testing.T) {
 	}
 	if !strings.Contains(s, `name = "mayor"`) {
 		t.Errorf("Marshal output missing mayor agent:\n%s", s)
+	}
+	if !strings.Contains(s, `max_active_sessions = 1`) {
+		t.Errorf("Marshal output missing singleton mayor cap:\n%s", s)
 	}
 	// Round-trip parse.
 	got, err := Parse(data)
@@ -1316,6 +1325,9 @@ func TestDefaultPoolCheckUsesBdReady(t *testing.T) {
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck() = %q, want --status=in_progress for active work", check)
 	}
+	if !strings.Contains(check, "--no-assignee") {
+		t.Errorf("EffectiveScaleCheck() = %q, want --no-assignee for active routed work", check)
+	}
 }
 
 func TestValidateAgentsCustomQueries(t *testing.T) {
@@ -1415,6 +1427,9 @@ func TestEffectiveScaleCheckDefaults(t *testing.T) {
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
 	}
+	if !strings.Contains(check, "--no-assignee") {
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active routed work", check)
+	}
 }
 
 func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
@@ -1430,6 +1445,9 @@ func TestEffectiveScaleCheckDefaultsQualified(t *testing.T) {
 	}
 	if !strings.Contains(check, "--status=in_progress") {
 		t.Errorf("EffectiveScaleCheck = %q, want --status=in_progress for active work", check)
+	}
+	if !strings.Contains(check, "--no-assignee") {
+		t.Errorf("EffectiveScaleCheck = %q, want --no-assignee for active routed work", check)
 	}
 }
 
