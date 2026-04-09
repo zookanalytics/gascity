@@ -202,13 +202,15 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 	return nil
 }
 
-// ExpandCityPacks loads all city-level packs from workspace.includes.
-// City pack agents are stamped with dir="" (city-scoped) and prepended
-// to the agent list. Returns the resolved formula dirs (one per pack
-// that has formulas). cityRoot is the city directory.
+// ExpandCityPacks loads all city-level packs from workspace.includes (V1)
+// and city-level [imports.X] (V2). City pack agents are stamped with
+// dir="" (city-scoped) and prepended to the agent list. Returns the
+// resolved formula dirs (one per pack that has formulas). cityRoot is
+// the city directory.
 func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRequirement, error) {
 	topos := cfg.Workspace.Includes
-	if len(topos) == 0 {
+	hasImports := len(cfg.Imports) > 0
+	if len(topos) == 0 && !hasImports {
 		return nil, nil, nil
 	}
 
@@ -282,6 +284,99 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 			for name, spec := range providers {
 				if _, exists := cfg.Providers[name]; !exists {
 					cfg.Providers[name] = spec
+				}
+			}
+		}
+	}
+
+	// Process city-level [imports.X] entries (V2). These produce agents
+	// with qualified names (bindingName.agentName). Processed after V1
+	// includes so imports can coexist during migration.
+	if hasImports {
+		importNames := make([]string, 0, len(cfg.Imports))
+		for name := range cfg.Imports {
+			importNames = append(importNames, name)
+		}
+		sort.Strings(importNames)
+
+		for _, bindingName := range importNames {
+			imp := cfg.Imports[bindingName]
+
+			impDir, err := resolvePackRef(imp.Source, cityRoot, cityRoot)
+			if err != nil {
+				if errors.Is(err, iofs.ErrNotExist) {
+					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
+					continue
+				}
+				return nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+			}
+
+			impPath := filepath.Join(impDir, packFile)
+			agents, namedSessions, providers, services, topoDirs, reqs, globals, err := loadPack(
+				fs, impPath, impDir, cityRoot, "", nil)
+			if err != nil {
+				if errors.Is(err, iofs.ErrNotExist) {
+					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
+					continue
+				}
+				return nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+			}
+
+			// Stamp binding name on all agents from this import.
+			for i := range agents {
+				if agents[i].BindingName == "" {
+					agents[i].BindingName = bindingName
+				} else if imp.Export {
+					// Re-export flattens the binding.
+					agents[i].BindingName = bindingName
+				}
+			}
+
+			// Read imported pack name for provenance.
+			impData, _ := fs.ReadFile(impPath)
+			var impMeta struct {
+				Pack struct {
+					Name string `toml:"name"`
+				} `toml:"pack"`
+			}
+			if impData != nil {
+				toml.Decode(string(impData), &impMeta)
+			}
+			for i := range agents {
+				if agents[i].PackName == "" {
+					agents[i].PackName = impMeta.Pack.Name
+				}
+			}
+
+			allRequires = append(allRequires, reqs...)
+			allGlobals = append(allGlobals, globals...)
+			cfg.Services = append(cfg.Services, services...)
+			allPackDirs = appendUnique(allPackDirs, topoDirs...)
+
+			// Filter by scope for city expansion.
+			agents = filterAgentsByScope(agents, true)
+			namedSessions = filterNamedSessionsByScope(namedSessions, true)
+
+			allAgents = append(allAgents, agents...)
+			allNamedSessions = append(allNamedSessions, namedSessions...)
+
+			// Derive formula dirs.
+			for _, td := range topoDirs {
+				fd := filepath.Join(td, "formulas")
+				if _, sErr := fs.Stat(fd); sErr == nil {
+					formulaDirs = append(formulaDirs, fd)
+				}
+			}
+
+			// Merge providers (additive, first wins).
+			if len(providers) > 0 {
+				if cfg.Providers == nil {
+					cfg.Providers = make(map[string]ProviderSpec)
+				}
+				for name, spec := range providers {
+					if _, exists := cfg.Providers[name]; !exists {
+						cfg.Providers[name] = spec
+					}
 				}
 			}
 		}

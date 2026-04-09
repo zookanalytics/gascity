@@ -452,6 +452,187 @@ transitive = false
 	}
 }
 
+func TestImport_CityLevelImports(t *testing.T) {
+	// A city declares [imports.X] directly in city.toml.
+	// The loader should resolve them and produce agents with binding names.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	gasDir := filepath.Join(dir, "gastown")
+	maintDir := filepath.Join(dir, "maint")
+
+	for _, d := range []string{cityDir, gasDir, maintDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.gastown]
+source = "../gastown"
+
+[imports.maint]
+source = "../maint"
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "polecat"
+scope = "city"
+`)
+	writeTestFile(t, maintDir, "pack.toml", `
+[pack]
+name = "maintenance"
+schema = 1
+
+[[agent]]
+name = "dog"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	// City's own agent has no binding.
+	if !found["mayor"] {
+		t.Errorf("missing mayor; got: %v", found)
+	}
+	// Import agents have binding names.
+	if !found["gastown.polecat"] {
+		t.Errorf("missing gastown.polecat; got: %v", found)
+	}
+	if !found["maint.dog"] {
+		t.Errorf("missing maint.dog; got: %v", found)
+	}
+}
+
+func TestImport_CityLevelImportsWithRig(t *testing.T) {
+	// City-level imports should produce city-scoped agents only.
+	// Rig-scoped agents from imports should not appear at city level.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	gasDir := filepath.Join(dir, "gastown")
+
+	for _, d := range []string{cityDir, gasDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.gs]
+source = "../gastown"
+`)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	// City-scoped import agent should appear.
+	if !found["gs.mayor"] {
+		t.Errorf("missing gs.mayor; got: %v", found)
+	}
+	// Rig-scoped import agent should NOT appear at city level.
+	if found["gs.polecat"] {
+		t.Error("gs.polecat should not appear at city level (scope=rig)")
+	}
+}
+
+func TestImport_CityImportsCoexistWithIncludes(t *testing.T) {
+	// V1 includes and V2 imports should work together in the same city.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	includeDir := filepath.Join(dir, "city", "old-pack")
+	importDir := filepath.Join(dir, "new-pack")
+
+	for _, d := range []string{cityDir, includeDir, importDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+includes = ["old-pack"]
+
+[imports.newpk]
+source = "../new-pack"
+`)
+	writeTestFile(t, includeDir, "pack.toml", `
+[pack]
+name = "old-pack"
+schema = 1
+
+[[agent]]
+name = "old-agent"
+scope = "city"
+`)
+	writeTestFile(t, importDir, "pack.toml", `
+[pack]
+name = "new-pack"
+schema = 1
+
+[[agent]]
+name = "new-agent"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	explicit := explicitAgents(cfg.Agents)
+	found := map[string]bool{}
+	for _, a := range explicit {
+		found[a.QualifiedName()] = true
+	}
+
+	// V1 include agent: no binding name.
+	if !found["old-agent"] {
+		t.Errorf("missing old-agent from V1 include; got: %v", found)
+	}
+	// V2 import agent: has binding name.
+	if !found["newpk.new-agent"] {
+		t.Errorf("missing newpk.new-agent from V2 import; got: %v", found)
+	}
+}
+
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
 		name        string

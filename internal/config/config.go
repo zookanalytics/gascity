@@ -71,8 +71,12 @@ type City struct {
 	Workspace Workspace `toml:"workspace"`
 	// Providers defines named provider presets for agent startup.
 	Providers map[string]ProviderSpec `toml:"providers,omitempty"`
-	// Packs defines named remote pack sources fetched via git.
+	// Packs defines named remote pack sources fetched via git (V1 mechanism).
 	Packs map[string]PackSource `toml:"packs,omitempty"`
+	// Imports defines named pack imports (V2 mechanism). Each key is a
+	// binding name; the value specifies the source and optional version,
+	// export, and transitive controls. Processed during ExpandCityPacks.
+	Imports map[string]Import `toml:"imports,omitempty"`
 	// Agents lists all configured agents in this city.
 	Agents []Agent `toml:"agent"`
 	// NamedSessions lists canonical alias-backed sessions built from
