@@ -20,7 +20,7 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt lint fmt-check fmt vet test test-mac-smoke test-mac-full test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-regression test-tutorial test-integration test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev
 
 ## build: compile gc binary with version metadata
 build:
@@ -102,6 +102,20 @@ vet:
 ## test: run unit tests (skip integration tests tagged with //go:build integration)
 test:
 	go test ./...
+
+## test-mac-smoke: run the fast macOS regression suite (labeled PRs, manual smoke)
+test-mac-smoke:
+	go test ./...
+
+## test-mac-full: run the broader macOS regression suite (nightly/manual full)
+test-mac-full:
+	$(MAKE) test-mac-smoke
+	$(MAKE) test-acceptance
+	$(MAKE) test-integration
+	# Auth-backed inference lanes for the mac runner. Enable once the host
+	# is provisioned with provider credentials, not just the provider CLIs.
+	# $(MAKE) test-tutorial
+	# $(MAKE) test-acceptance-c
 
 ## test-acceptance: run acceptance tests (Tier A — fast, <5 min, every PR)
 test-acceptance:

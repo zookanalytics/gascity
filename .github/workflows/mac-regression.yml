@@ -52,7 +52,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run macOS smoke suite
-        run: make test
+        run: make test-mac-smoke
 
   mac-full:
     name: Mac full
@@ -71,4 +71,4 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Run macOS full suite
-        run: make test
+        run: make test-mac-full
