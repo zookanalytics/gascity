@@ -662,7 +662,7 @@ func TestExpandCityPacks_SkipsMissingRemoteSubpath(t *testing.T) {
 		},
 	}
 
-	dirs, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, cityRoot)
+	dirs, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, cityRoot)
 	if err != nil {
 		t.Fatalf("ExpandCityPacks should skip missing remote subpath, got error: %v", err)
 	}

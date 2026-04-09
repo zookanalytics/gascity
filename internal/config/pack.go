@@ -306,11 +306,11 @@ func ExpandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 // dir="" (city-scoped) and prepended to the agent list. Returns the
 // resolved formula dirs (one per pack that has formulas). cityRoot is
 // the city directory.
-func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRequirement, error) {
+func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRequirement, []string, error) {
 	topos := cfg.Workspace.Includes
 	hasImports := len(cfg.Imports) > 0
 	if len(topos) == 0 && !hasImports {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	var allAgents []Agent
@@ -329,7 +329,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 				log.Printf("city pack %q: not found, skipping: %v", ref, err)
 				continue
 			}
-			return nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
+			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
 		topoPath := filepath.Join(topoDir, packFile)
 
@@ -351,7 +351,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 				log.Printf("city pack %q: not found, skipping: %v", ref, err)
 				continue
 			}
-			return nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
+			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
 		allRequires = append(allRequires, reqs...)
 		allGlobals = append(allGlobals, globals...)
@@ -407,7 +407,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
 					continue
 				}
-				return nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
 
 			impPath := filepath.Join(impDir, packFile)
@@ -418,7 +418,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 					log.Printf("city import %q: not found, skipping: %v", bindingName, err)
 					continue
 				}
-				return nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
+				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
 
 			// Stamp binding name on all agents from this import.
@@ -505,7 +505,7 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 
 	// Check for duplicate agent names across city packs.
 	if err := checkPackAgentCollisions(allAgents, ""); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	// City pack agents go at the front (before user-defined agents).
@@ -514,10 +514,38 @@ func ExpandCityPacks(cfg *City, fs fsys.FS, cityRoot string) ([]string, []PackRe
 	cfg.Agents = resolveFallbackAgents(append(allAgents, cfg.Agents...))
 	cfg.NamedSessions = append(allNamedSessions, cfg.NamedSessions...)
 
+	// Detect shadow conflicts: city-local agents masking imported agents.
+	// A city agent (BindingName == "") with the same bare Name as an
+	// imported agent (BindingName != "") shadows it. Warn unless the
+	// import has shadow = "silent".
+	var shadowWarnings []string
+	if hasImports {
+		// Build set of imported agent bare names → binding name.
+		importedNames := make(map[string]string) // bare name → binding
+		for _, a := range cfg.Agents {
+			if a.BindingName != "" && a.Dir == "" {
+				importedNames[a.Name] = a.BindingName
+			}
+		}
+		// Check city-local agents against imported names.
+		for _, a := range cfg.Agents {
+			if a.BindingName == "" && a.Dir == "" && !a.Implicit {
+				if binding, ok := importedNames[a.Name]; ok {
+					// Check if this import has shadow = "silent".
+					if imp, impOk := cfg.Imports[binding]; impOk && imp.Shadow == "silent" {
+						continue
+					}
+					shadowWarnings = append(shadowWarnings,
+						fmt.Sprintf("city agent %q shadows agent of the same name from import %q (set shadow = \"silent\" on [imports.%s] to suppress)", a.Name, binding, binding))
+				}
+			}
+		}
+	}
+
 	// Store city-level pack globals.
 	cfg.PackGlobals = append(cfg.PackGlobals, allGlobals...)
 
-	return formulaDirs, allRequires, nil
+	return formulaDirs, allRequires, shadowWarnings, nil
 }
 
 // ComputeFormulaLayers builds the FormulaLayers from the resolved formula

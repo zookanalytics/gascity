@@ -128,10 +128,11 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 	resolveNamedPacks(root, cityRoot)
 
 	// Expand city packs before patches (so patches can target city-topo agents).
-	cityTopoFormulas, cityReqs, ctErr := ExpandCityPacks(root, fs, cityRoot)
+	cityTopoFormulas, cityReqs, shadowWarnings, ctErr := ExpandCityPacks(root, fs, cityRoot)
 	if ctErr != nil {
 		return nil, nil, ctErr
 	}
+	prov.Warnings = append(prov.Warnings, shadowWarnings...)
 	// Track city pack agents in provenance.
 	for _, ref := range root.Workspace.Includes {
 		topoDir, _ := resolvePackRef(ref, cityRoot, cityRoot)

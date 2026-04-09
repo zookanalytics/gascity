@@ -753,6 +753,101 @@ scope = "rig"
 	}
 }
 
+func TestImport_ShadowWarningEmitted(t *testing.T) {
+	// When a city-local agent has the same bare name as an imported agent,
+	// a shadow warning should be emitted.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	gasDir := filepath.Join(dir, "gastown")
+
+	for _, d := range []string{cityDir, gasDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.gastown]
+source = "../gastown"
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	// Should have a shadow warning.
+	found := false
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "shadows") && strings.Contains(w, "mayor") && strings.Contains(w, "gastown") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected shadow warning for mayor; warnings = %v", prov.Warnings)
+	}
+}
+
+func TestImport_ShadowWarningSuppressed(t *testing.T) {
+	// When shadow = "silent" is set on the import, no warning should be emitted.
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	gasDir := filepath.Join(dir, "gastown")
+
+	for _, d := range []string{cityDir, gasDir} {
+		os.MkdirAll(d, 0o755)
+	}
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.gastown]
+source = "../gastown"
+shadow = "silent"
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+`)
+
+	_, prov, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	// Should NOT have a shadow warning.
+	for _, w := range prov.Warnings {
+		if strings.Contains(w, "shadows") && strings.Contains(w, "mayor") {
+			t.Errorf("shadow warning should be suppressed with shadow=silent; got: %s", w)
+		}
+	}
+}
+
 func TestQualifiedName_WithBindingName(t *testing.T) {
 	tests := []struct {
 		name        string
