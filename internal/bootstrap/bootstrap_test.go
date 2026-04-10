@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -165,6 +166,90 @@ func TestEnsureBootstrapEmbedsImportPackRuntimeFiles(t *testing.T) {
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		t.Fatalf("doctor/check-python.sh should be executable, mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestEnsureBootstrapAllowsConcurrentCallers(t *testing.T) {
+	assetsRoot := t.TempDir()
+	writeBootstrapPackAsset(t, assetsRoot, "packs/import", `
+[pack]
+name = "import"
+version = "0.2.0"
+schema = 1
+`)
+	commandsDir := filepath.Join(assetsRoot, "packs", "import", "commands")
+	if err := os.MkdirAll(commandsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(commandsDir, "add.py"), []byte("print('hi')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFS := bootstrapAssets
+	bootstrapAssets = os.DirFS(assetsRoot)
+	t.Cleanup(func() { bootstrapAssets = oldFS })
+
+	old := BootstrapPacks
+	BootstrapPacks = []BootstrapEntry{{
+		Name:     "import",
+		Source:   "github.com/gastownhall/gc-import",
+		Version:  "0.2.0",
+		AssetDir: "packs/import",
+	}}
+	t.Cleanup(func() { BootstrapPacks = old })
+
+	gcHome := t.TempDir()
+	const callers = 8
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- EnsureBootstrap(gcHome)
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("EnsureBootstrap under concurrency: %v", err)
+		}
+	}
+
+	entries, err := readImplicitFile(filepath.Join(gcHome, "implicit-import.toml"))
+	if err != nil {
+		t.Fatalf("readImplicitFile: %v", err)
+	}
+	entry, ok := entries["import"]
+	if !ok {
+		t.Fatalf("missing import entry after concurrent bootstrap: %v", entries)
+	}
+
+	cacheDir := filepath.Join(gcHome, "cache", "repos", CacheDir(entry.Source, entry.Commit))
+	for _, rel := range []string{"pack.toml", "commands/add.py"} {
+		if _, err := os.Stat(filepath.Join(cacheDir, filepath.FromSlash(rel))); err != nil {
+			t.Fatalf("bootstrap cache missing %s after concurrent bootstrap: %v", rel, err)
+		}
+	}
+	stageGlobs, err := filepath.Glob(cacheDir + ".tmp-*")
+	if err != nil {
+		t.Fatalf("Glob(stage tmp): %v", err)
+	}
+	if len(stageGlobs) != 0 {
+		t.Fatalf("bootstrap temp dirs should be cleaned up, found %v", stageGlobs)
+	}
+	fileGlobs, err := filepath.Glob(filepath.Join(gcHome, "implicit-import.toml.tmp-*"))
+	if err != nil {
+		t.Fatalf("Glob(implicit tmp): %v", err)
+	}
+	if len(fileGlobs) != 0 {
+		t.Fatalf("implicit-import temp files should be cleaned up, found %v", fileGlobs)
 	}
 }
 

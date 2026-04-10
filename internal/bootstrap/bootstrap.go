@@ -141,7 +141,10 @@ func bootstrapPackRevision(entry BootstrapEntry) (string, error) {
 }
 
 func materializeBootstrapPack(cacheDir string, entry BootstrapEntry) error {
-	stageDir := cacheDir + ".tmp"
+	stageDir, err := os.MkdirTemp(filepath.Dir(cacheDir), filepath.Base(cacheDir)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("creating bootstrap stage dir: %w", err)
+	}
 	_ = os.RemoveAll(stageDir)
 	if err := copyEmbeddedTree(entry.AssetDir, stageDir); err != nil {
 		_ = os.RemoveAll(stageDir)
@@ -284,9 +287,18 @@ func writeImplicitFile(path string, imports map[string]implicitImport) error {
 		}
 	}
 
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(b.String()), 0o644); err != nil {
+	tmpFile, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
+		return fmt.Errorf("creating implicit-import temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
+	if _, err := tmpFile.WriteString(b.String()); err != nil {
+		tmpFile.Close() //nolint:errcheck // best effort
 		return fmt.Errorf("writing implicit-import.toml: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return fmt.Errorf("closing implicit-import.toml temp file: %w", err)
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
 		return fmt.Errorf("replacing implicit-import.toml: %w", err)
