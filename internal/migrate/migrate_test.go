@@ -3,8 +3,11 @@ package migrate
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func TestMigrateCityCommonCase(t *testing.T) {
@@ -284,6 +287,144 @@ provider = "claude"
 	if strings.Contains(packToml, "[[agent]]") {
 		t.Fatalf("pack.toml still contains [[agent]] after migration:\n%s", packToml)
 	}
+}
+
+func TestMigrateValidatesAssetsBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/missing.md"
+`)
+
+	beforeCity := readFile(t, filepath.Join(cityDir, "city.toml"))
+
+	_, err := Apply(cityDir, Options{})
+	if err == nil {
+		t.Fatal("expected Apply to fail for missing prompt_template")
+	}
+	if !strings.Contains(err.Error(), "prompt_template") {
+		t.Fatalf("expected prompt_template error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(cityDir, "pack.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("pack.toml should not be written on validation failure, err=%v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(cityDir, "agents")); !os.IsNotExist(statErr) {
+		t.Fatalf("agents dir should not be created on validation failure, err=%v", statErr)
+	}
+	if got := readFile(t, filepath.Join(cityDir, "city.toml")); got != beforeCity {
+		t.Fatalf("city.toml changed after validation failure:\n%s", got)
+	}
+}
+
+func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
+	t.Parallel()
+
+	trueVal := true
+	intVal := 42
+	formula := "mol-work"
+	src := config.Agent{
+		Name:                   "worker",
+		Description:            "test agent description",
+		Dir:                    "demo",
+		WorkDir:                ".gc/agents/worker",
+		Scope:                  "city",
+		Suspended:              true,
+		PreStart:               []string{"pre-cmd"},
+		PromptTemplate:         "prompts/worker.md",
+		Nudge:                  "nudge text",
+		Session:                "acp",
+		Provider:               "claude",
+		StartCommand:           "claude --dangerously",
+		Args:                   []string{"--arg1"},
+		PromptMode:             "flag",
+		PromptFlag:             "--prompt",
+		ReadyDelayMs:           &intVal,
+		ReadyPromptPrefix:      "ready>",
+		ProcessNames:           []string{"claude"},
+		EmitsPermissionWarning: &trueVal,
+		Env:                    map[string]string{"K": "V"},
+		OptionDefaults:         map[string]string{"effort": "max"},
+		MaxActiveSessions:      intPtr(5),
+		MinActiveSessions:      intPtr(1),
+		ScaleCheck:             "echo 3",
+		DrainTimeout:           "10m",
+		OnBoot:                 "echo boot",
+		OnDeath:                "echo death",
+		Namepool:               "names.txt",
+		WorkQuery:              "bd ready",
+		SlingQuery:             "bd update {}",
+		IdleTimeout:            "15m",
+		SleepAfterIdle:         "30s",
+		InstallAgentHooks:      []string{"claude"},
+		HooksInstalled:         &trueVal,
+		SessionSetup:           []string{"setup-cmd"},
+		SessionSetupScript:     "scripts/setup.sh",
+		SessionLive:            []string{"live-cmd"},
+		OverlayDir:             "overlays/test",
+		DefaultSlingFormula:    &formula,
+		InjectFragments:        []string{"frag1"},
+		Attach:                 &trueVal,
+		Fallback:               true,
+		DependsOn:              []string{"other-agent"},
+		ResumeCommand:          "claude --resume {{.SessionKey}} --dangerously",
+		WakeMode:               "fresh",
+	}
+
+	omitted := map[string]bool{
+		"Name":                 true,
+		"PromptTemplate":       true,
+		"Namepool":             true,
+		"NamepoolNames":        true,
+		"OverlayDir":           true,
+		"SourceDir":            true,
+		"Implicit":             true,
+		"Fallback":             true,
+		"SleepAfterIdleSource": true,
+		"PoolName":             true,
+		"BindingName":          true,
+		"PackName":             true,
+	}
+
+	cfgFields := make(map[string]bool)
+	cfgType := reflect.TypeOf(agentFile{})
+	for i := 0; i < cfgType.NumField(); i++ {
+		cfgFields[cfgType.Field(i).Name] = true
+	}
+
+	sv := reflect.ValueOf(src)
+	st := sv.Type()
+	for i := 0; i < st.NumField(); i++ {
+		fname := st.Field(i).Name
+		if omitted[fname] {
+			continue
+		}
+		if sv.Field(i).IsZero() {
+			t.Fatalf("Agent field %q is zero in test data — add it to the migration field-sync test", fname)
+		}
+		if !cfgFields[fname] {
+			t.Fatalf("persisted Agent field %q is missing from agentFile — update migration output or explicitly omit it", fname)
+		}
+	}
+
+	cfg := agentConfigFromAgent(src)
+	cv := reflect.ValueOf(cfg)
+	for i := 0; i < cfgType.NumField(); i++ {
+		fname := cfgType.Field(i).Name
+		if cv.Field(i).IsZero() {
+			t.Fatalf("agentConfigFromAgent did not populate field %q", fname)
+		}
+	}
+}
+
+func intPtr(v int) *int {
+	return &v
 }
 
 func writeFile(t *testing.T, root, rel, contents string) {

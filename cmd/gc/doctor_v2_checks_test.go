@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/migrate"
 )
 
 func TestV2DeprecationChecksWarnOnLegacyPatterns(t *testing.T) {
@@ -89,6 +90,46 @@ source = "./assets/imports/gastown"
 	out := buf.String()
 	if strings.Contains(out, "⚠") {
 		t.Fatalf("expected migrated layout to avoid V2 warnings, got:\n%s", out)
+	}
+}
+
+func TestV2DeprecationChecksGoQuietAfterMigration(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+includes = ["../packs/gastown"]
+default_rig_includes = ["../packs/default rig"]
+
+[[agent]]
+name = "mayor"
+prompt_template = "prompts/mayor.md"
+`)
+	writeDoctorFile(t, cityDir, "prompts/mayor.md", "Hello {{.Agent}}\n")
+
+	if _, err := migrate.Apply(cityDir, migrate.Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+
+	out := buf.String()
+	for _, line := range []string{
+		"✓ v2-agent-format",
+		"✓ v2-import-format",
+		"✓ v2-default-rig-import-format",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("doctor output missing %q after migration:\n%s", line, out)
+		}
+	}
+	if strings.Contains(out, "⚠ v2-agent-format") || strings.Contains(out, "⚠ v2-import-format") || strings.Contains(out, "⚠ v2-default-rig-import-format") {
+		t.Fatalf("expected migration-specific warnings to clear, got:\n%s", out)
 	}
 }
 

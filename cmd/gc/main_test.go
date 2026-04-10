@@ -134,7 +134,15 @@ func TestMain(m *testing.M) {
 }
 
 func TestTutorial01(t *testing.T) {
-	testscript.Run(t, testscript.Params{
+	testscript.Run(t, newTestscriptParams(t))
+}
+
+func TestImportMigrateScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "migrate-v2.txtar")))
+}
+
+func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
+	params := testscript.Params{
 		Dir:         "testdata",
 		WorkdirRoot: shortSocketTempDir(t, "gc-testscript-"),
 		Setup: func(env *testscript.Env) error {
@@ -150,7 +158,12 @@ func TestTutorial01(t *testing.T) {
 			env.Setenv("XDG_RUNTIME_DIR", runtimeDir)
 			return nil
 		},
-	})
+	}
+	if len(files) > 0 {
+		params.Dir = ""
+		params.Files = append([]string(nil), files...)
+	}
+	return params
 }
 
 // --- gc version ---

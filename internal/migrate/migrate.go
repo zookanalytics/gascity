@@ -135,6 +135,9 @@ func Apply(cityPath string, opts Options) (*Report, error) {
 	}
 
 	usage := buildUsageCounts(cityPath, selectedAgents)
+	if err := validateAgentAssets(cityPath, selectedAgents); err != nil {
+		return nil, err
+	}
 	for _, entry := range selectedAgents {
 		if err := migrateAgentAssets(cityPath, entry, usage, report, opts); err != nil {
 			return nil, fmt.Errorf("migrate agent %q: %w", entry.Agent.Name, err)
@@ -275,6 +278,35 @@ func buildUsageCounts(cityPath string, agents []agentEntry) usageCounts {
 		}
 	}
 	return out
+}
+
+func validateAgentAssets(cityPath string, agents []agentEntry) error {
+	for _, entry := range agents {
+		agent := entry.Agent
+		if agent.PromptTemplate != "" {
+			src := resolvePath(cityPath, agent.PromptTemplate)
+			if _, err := os.ReadFile(src); err != nil {
+				return fmt.Errorf("migrate agent %q: prompt_template %q: %w", agent.Name, agent.PromptTemplate, err)
+			}
+		}
+		if agent.OverlayDir != "" {
+			src := resolvePath(cityPath, agent.OverlayDir)
+			info, err := os.Stat(src)
+			if err != nil {
+				return fmt.Errorf("migrate agent %q: overlay_dir %q: %w", agent.Name, agent.OverlayDir, err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("migrate agent %q: overlay_dir %q: %q is not a directory", agent.Name, agent.OverlayDir, src)
+			}
+		}
+		if agent.Namepool != "" {
+			src := resolvePath(cityPath, agent.Namepool)
+			if _, err := os.ReadFile(src); err != nil {
+				return fmt.Errorf("migrate agent %q: namepool %q: %w", agent.Name, agent.Namepool, err)
+			}
+		}
+	}
+	return nil
 }
 
 func migrateAgentAssets(cityPath string, entry agentEntry, usage usageCounts, report *Report, opts Options) error {
