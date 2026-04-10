@@ -19,6 +19,9 @@ type Provenance struct {
 	Root string
 	// Sources lists all source files in load order (root first).
 	Sources []string
+	// Imports maps import binding names to the source that added them.
+	// Implicit imports use the sentinel value "(implicit)".
+	Imports map[string]string
 	// Agents maps agent QualifiedName → source file path.
 	Agents map[string]string
 	// Rigs maps rig name → source file path.
@@ -200,6 +203,28 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 	// Resolve named pack references to cache paths before any expansion.
 	resolveNamedPacks(root, cityRoot)
+
+	implicitImports, implicitPath, implicitErr := ReadImplicitImports()
+	if implicitErr != nil {
+		return nil, nil, implicitErr
+	}
+	if len(implicitImports) > 0 {
+		if root.Imports == nil {
+			root.Imports = make(map[string]Import)
+		}
+		addedImplicit := false
+		for name, imp := range implicitImports {
+			if _, exists := root.Imports[name]; exists {
+				continue
+			}
+			root.Imports[name] = resolveImplicitImport(imp)
+			prov.Imports[name] = "(implicit)"
+			addedImplicit = true
+		}
+		if addedImplicit && implicitPath != "" {
+			prov.Sources = append(prov.Sources, implicitPath)
+		}
+	}
 
 	// Expand city packs before patches (so patches can target city-topo agents).
 	cityTopoFormulas, cityReqs, shadowWarnings, ctErr := ExpandCityPacks(root, fs, cityRoot)
@@ -735,6 +760,7 @@ func newProvenance(rootPath string) *Provenance {
 	return &Provenance{
 		Root:      rootPath,
 		Sources:   []string{rootPath},
+		Imports:   make(map[string]string),
 		Agents:    make(map[string]string),
 		Rigs:      make(map[string]string),
 		Workspace: make(map[string]string),
