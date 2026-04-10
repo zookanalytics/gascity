@@ -246,6 +246,60 @@ func TestNamedOnDemand_AgentSuspended_WithWork(t *testing.T) {
 	assertAsleep(t, result, "hello-world--refinery")
 }
 
+func TestConfiguredSingleton_ActiveSessionStaysDesired(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/drifter",
+			FixedSingleton: true,
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:          "mc-1",
+			SessionName: "hello-world--drifter",
+			Template:    "hello-world/drifter",
+			State:       "active",
+		}},
+		RunningSessions: map[string]bool{"hello-world--drifter": true},
+		Now:             now,
+	})
+	assertAwake(t, result, "hello-world--drifter")
+	assertReason(t, result, "hello-world--drifter", "configured-singleton")
+}
+
+func TestConfiguredSingleton_AsleepSessionRequeues(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/drifter",
+			FixedSingleton: true,
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:          "mc-1",
+			SessionName: "hello-world--drifter",
+			Template:    "hello-world/drifter",
+			State:       "asleep",
+		}},
+		Now: now,
+	})
+	assertAwake(t, result, "hello-world--drifter")
+	assertReason(t, result, "hello-world--drifter", "configured-singleton")
+}
+
+func TestConfiguredSingleton_NamedSessionTemplateNotAlwaysDesired(t *testing.T) {
+	result := ComputeAwakeSet(AwakeInput{
+		Agents: []AwakeAgent{{
+			QualifiedName:  "hello-world/refinery",
+			FixedSingleton: true,
+		}},
+		NamedSessions: []AwakeNamedSession{{
+			Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand",
+		}},
+		SessionBeads: []AwakeSessionBead{{
+			ID: "mc-1", SessionName: "hello-world--refinery", Template: "hello-world/refinery", State: "asleep", NamedIdentity: "hello-world/refinery",
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
 // ---------------------------------------------------------------------------
 // Agent template (scaled)
 // ---------------------------------------------------------------------------

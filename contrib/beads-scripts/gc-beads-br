@@ -8,11 +8,13 @@
 # Dependencies: br (beads_rust), jq, bash
 #
 # Label conventions:
-#   parent:<id>  — tracks parent-child relationships
-#   needs:<id>   — tracks step dependencies
+#   meta:<keyhex>:<valuehex>  — metadata entries encoded as hex
+#   gcref:<valuehex>          — bead Ref encoded as hex
+#   gcneed:<valuehex>         — bead Need encoded as hex
 #
-# Metadata is reconstructed from meta:<k>=<v> labels on read.
-# br does not yet support native --metadata; metadata is still written as labels.
+# br does not yet support native metadata/ref/needs fields that match the
+# Gas City exec beads contract, so those values are carried in labels and
+# decoded by the exec store on read.
 #
 # Operations that Gas City composes in Go (exit 2):
 #   mol-cook  — composed from Create calls by exec.Store
@@ -29,57 +31,74 @@ if [ -n "${BR_DIR:-}" ]; then
   cd "$BR_DIR"
 fi
 
-# br_to_gc converts a single br JSON object to Gas City wire format.
-# br uses "issue_type" where Gas City uses "type".
-br_to_gc() {
-  jq '{
-    id: .id,
-    title: .title,
-    status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
-    type: (.issue_type // .type // "task"),
-    created_at: .created_at,
-    assignee: (.assignee // ""),
-    parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
-    ),
-    ref: (.ref // ""),
-    needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
-    description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ((
-      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
-      + (.metadata // {})
-    ) | map_values(tostring))
-  }'
-}
-
-# br_list_to_gc converts a br JSON array to Gas City wire format.
-br_list_to_gc() {
-  jq '[.[] | {
-    id: .id,
-    title: .title,
-    status: (if .status == "blocked" or .status == "review" or .status == "testing" then "open" else .status end),
-    type: (.issue_type // .type // "task"),
-    created_at: .created_at,
-    assignee: (.assignee // ""),
-    parent_id: (
-      [.labels // [] | .[] | select(startswith("parent:")) | ltrimstr("parent:")] | first // ""
-    ),
-    ref: (.ref // ""),
-    needs: [.labels // [] | .[] | select(startswith("needs:")) | ltrimstr("needs:")],
-    description: (.description // ""),
-    labels: [.labels // [] | .[] | select((startswith("parent:") or startswith("meta:") or startswith("needs:")) | not)],
-    metadata: ((
-      ([.labels // [] | .[] | select(startswith("meta:")) | ltrimstr("meta:") | split("=") | {(.[0]): (.[1:] | join("="))}] | add // {})
-      + (.metadata // {})
-    ) | map_values(tostring))
-  }]'
-}
-
 # join_labels joins an array of labels with commas for br --labels flag.
 join_labels() {
   local IFS=","
   echo "$*"
+}
+
+# hex_encode returns a label-safe hex encoding. "_" is the sentinel for empty.
+hex_encode() {
+  if [ -z "${1:-}" ]; then
+    printf '_'
+    return
+  fi
+  printf '%s' "$1" | od -An -tx1 -v | tr -d ' \n'
+}
+
+# issues_to_gc normalizes br JSON output to the exec store wire format.
+issues_to_gc() {
+  jq '
+    def normalize_status:
+      if . == "blocked" or . == "review" or . == "testing" then "open" else . end;
+    def issue_to_gc:
+      {
+        id: .id,
+        title: (.title // ""),
+        status: ((.status // "open") | normalize_status),
+        type: (.issue_type // .type // "task"),
+        priority: (.priority // null),
+        created_at: .created_at,
+        assignee: (.assignee // ""),
+        from: (.from // .owner // ""),
+        owner: (.owner // ""),
+        parent_id: (.parent_id // .parent // ""),
+        parent: (.parent // ""),
+        ref: (.ref // ""),
+        needs: (.needs // []),
+        description: (.description // ""),
+        labels: (.labels // []),
+        metadata: (.metadata // {}),
+        dependencies: (.dependencies // [])
+      };
+    (
+      if type == "array" then .
+      elif (type == "object" and has("issues")) then .issues
+      else [.]
+      end
+    ) | map(issue_to_gc)
+  '
+}
+
+issue_to_gc_one() {
+  issues_to_gc | jq '.[0]'
+}
+
+collect_issue_ids() {
+  jq -r '
+    if type == "array" then .[]?.id
+    elif (type == "object" and has("issues")) then .issues[]?.id
+    else .id // empty
+    end
+  '
+}
+
+show_ids_as_gc() {
+  if [ "$#" -eq 0 ]; then
+    echo '[]'
+    return
+  fi
+  br show --json "$@" | issues_to_gc
 }
 
 case "$op" in
@@ -90,6 +109,8 @@ case "$op" in
     parent_id=$(echo "$input" | jq -r '.parent_id // ""')
     ref=$(echo "$input" | jq -r '.ref // ""')
     description=$(echo "$input" | jq -r '.description // ""')
+    assignee=$(echo "$input" | jq -r '.assignee // ""')
+    from=$(echo "$input" | jq -r '.from // ""')
 
     # Collect all labels into an array.
     all_labels=()
@@ -98,34 +119,35 @@ case "$op" in
       [ -n "$label" ] && all_labels+=("$label")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
-    # Parent tracking via label.
-    [ -n "$parent_id" ] && all_labels+=("parent:$parent_id")
-
-    # Needs tracking via labels.
+    # Ref / needs / metadata use label-safe internal encodings.
+    [ -n "$ref" ] && all_labels+=("gcref:$(hex_encode "$ref")")
     while IFS= read -r need; do
-      [ -n "$need" ] && all_labels+=("needs:$need")
+      [ -n "$need" ] && all_labels+=("gcneed:$(hex_encode "$need")")
     done < <(echo "$input" | jq -r '.needs // [] | .[]')
 
-    # Convert metadata entries to meta:<key>=<value> labels.
-    # br does not support native --metadata; metadata is stored as labels.
-    while IFS= read -r meta_label; do
-      [ -n "$meta_label" ] && all_labels+=("$meta_label")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
+    while IFS=$'\t' read -r key value; do
+      [ -n "$key" ] && all_labels+=("meta:$(hex_encode "$key"):$(hex_encode "$value")")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value | tostring)] | @tsv')
 
     # Build create command.
-    cmd_args=(br create --json --type="$bead_type")
+    cmd_args=(br create --json --type "$bead_type")
     [ -n "$description" ] && cmd_args+=(--description "$description")
+    [ -n "$assignee" ] && cmd_args+=(--assignee "$assignee")
+    [ -n "$from" ] && cmd_args+=(--owner "$from")
+    [ -n "$parent_id" ] && cmd_args+=(--parent "$parent_id")
     if [ ${#all_labels[@]} -gt 0 ]; then
       cmd_args+=(--labels "$(join_labels "${all_labels[@]}")")
     fi
     cmd_args+=("$title")
 
-    "${cmd_args[@]}" | br_to_gc
+    created=$("${cmd_args[@]}")
+    id=$(printf '%s' "$created" | jq -r '.id')
+    br show --json "$id" | issue_to_gc_one
     ;;
 
   get)
     # br show returns an array; extract the first element.
-    br show --json "$1" | jq '.[0]' | br_to_gc
+    br show --json "$1" | issue_to_gc_one
     ;;
 
   update)
@@ -133,60 +155,104 @@ case "$op" in
     input=$(cat)
     cmd_args=(br update --json "$id")
 
-    description=$(echo "$input" | jq -r '.description // empty')
-    [ -n "$description" ] && cmd_args+=(--description "$description")
+    if echo "$input" | jq -e 'has("title")' >/dev/null; then
+      title=$(echo "$input" | jq -r '.title')
+      cmd_args+=(--title "$title")
+    fi
+    if echo "$input" | jq -e 'has("status")' >/dev/null; then
+      status=$(echo "$input" | jq -r '.status')
+      cmd_args+=(--status "$status")
+    fi
+    if echo "$input" | jq -e 'has("priority")' >/dev/null; then
+      priority=$(echo "$input" | jq -r '.priority')
+      cmd_args+=(--priority "$priority")
+    fi
+    if echo "$input" | jq -e 'has("description")' >/dev/null; then
+      description=$(echo "$input" | jq -r '.description')
+      cmd_args+=(--description "$description")
+    fi
+    if echo "$input" | jq -e 'has("assignee")' >/dev/null; then
+      assignee=$(echo "$input" | jq -r '.assignee')
+      cmd_args+=(--assignee "$assignee")
+    fi
+    if echo "$input" | jq -e 'has("parent_id")' >/dev/null; then
+      parent_id=$(echo "$input" | jq -r '.parent_id')
+      cmd_args+=(--parent "$parent_id")
+    fi
 
     # Append labels via --add-label (one per flag).
     while IFS= read -r label; do
       [ -n "$label" ] && cmd_args+=(--add-label "$label")
     done < <(echo "$input" | jq -r '.labels // [] | .[]')
 
-    # Handle parent_id change.
-    parent_id=$(echo "$input" | jq -r '.parent_id // empty')
-    [ -n "$parent_id" ] && cmd_args+=(--add-label "parent:$parent_id")
+    while IFS= read -r label; do
+      [ -n "$label" ] && cmd_args+=(--remove-label "$label")
+    done < <(echo "$input" | jq -r '.remove_labels // [] | .[]')
 
-    # Convert metadata entries to meta:<key>=<value> labels.
-    # br does not support native --metadata; metadata is stored as labels.
-    while IFS= read -r meta_label; do
-      [ -n "$meta_label" ] && cmd_args+=(--add-label "$meta_label")
-    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | "meta:\(.key)=\(.value)"')
+    while IFS=$'\t' read -r key value; do
+      [ -n "$key" ] && cmd_args+=(--add-label "meta:$(hex_encode "$key"):$(hex_encode "$value")")
+    done < <(echo "$input" | jq -r '.metadata // {} | to_entries[] | [.key, (.value | tostring)] | @tsv')
 
     "${cmd_args[@]}" > /dev/null
     ;;
 
   close)
-    br close --json "$1" > /dev/null
+    id="$1"
+    current=$(br show --json "$id")
+    current_status=$(printf '%s' "$current" | jq -r '.[0].status // ""')
+    if [ "$current_status" = "closed" ]; then
+      exit 0
+    fi
+    if ! close_out=$(br close --json "$id" 2>&1); then
+      current=$(br show --json "$id" 2>/dev/null || true)
+      if printf '%s' "$current" | jq -e '.[0].status == "closed"' >/dev/null 2>&1; then
+        exit 0
+      fi
+      printf '%s\n' "$close_out" >&2
+      exit 1
+    fi
     ;;
 
   list)
-    br list --json --all | br_list_to_gc
+    list_args=(br list --json --all)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --status=*)
+          list_args+=(--status "${1#--status=}")
+          ;;
+      esac
+      shift
+    done
+    mapfile -t ids < <("${list_args[@]}" | collect_issue_ids)
+    show_ids_as_gc "${ids[@]}"
     ;;
 
   ready)
-    br ready --json | br_list_to_gc
+    mapfile -t ids < <(br ready --json | collect_issue_ids)
+    show_ids_as_gc "${ids[@]}"
     ;;
 
   children)
     parent_id="$1"
-    # Sort by created_at to match the "in creation order" contract.
-    br list --json --all --label "parent:$parent_id" | br_list_to_gc | jq 'sort_by(.created_at)'
+    mapfile -t ids < <(br list --json --all | collect_issue_ids)
+    if [ ${#ids[@]} -eq 0 ]; then
+      echo '[]'
+      exit 0
+    fi
+    br show --json "${ids[@]}" | jq --arg parent "$parent_id" 'map(select((.parent_id // .parent // "") == $parent))' | issues_to_gc
     ;;
 
   list-by-label)
     label="$1"
-    limit="${2:-0}"
-    if [ "$limit" -gt 0 ] 2>/dev/null; then
-      br list --json --all --label "$label" --limit "$limit" | br_list_to_gc
-    else
-      br list --json --all --label "$label" | br_list_to_gc
-    fi
+    mapfile -t ids < <(br list --json --all --label "$label" | collect_issue_ids)
+    show_ids_as_gc "${ids[@]}"
     ;;
 
   set-metadata)
     id="$1"
     key="$2"
     value=$(cat)
-    br update --json "$id" --add-label "meta:${key}=${value}" > /dev/null
+    br update --json "$id" --add-label "meta:$(hex_encode "$key"):$(hex_encode "$value")" > /dev/null
     ;;
 
   ensure-ready|shutdown)

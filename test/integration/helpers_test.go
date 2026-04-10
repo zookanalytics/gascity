@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	sessionagent "github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -79,10 +81,33 @@ func setupCity(t *testing.T, guard *tmuxtest.Guard, agents []agentConfig) string
 		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
 	})
 
-	// Give sessions a moment to register.
-	time.Sleep(200 * time.Millisecond)
+	timeout := 30 * time.Second
+	if usingSubprocess() {
+		timeout = 10 * time.Second
+	}
+	for _, agent := range agents {
+		waitForManagedSession(t, cityDir, cityName, sessionagent.SessionNameFor(cityName, agent.Name, ""), timeout)
+	}
 
 	return cityDir
+}
+
+func waitForManagedSession(t *testing.T, cityDir, socketName, sessionName string, timeout time.Duration) {
+	t.Helper()
+	if usingSubprocess() {
+		waitForSession(t, cityDir, sessionName, timeout)
+		return
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		cmd := exec.Command("tmux", "-u", "-L", socketName, "has-session", "-t", sessionName)
+		if err := cmd.Run(); err == nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	out, _ := gc(cityDir, "session", "list")
+	t.Fatalf("tmux session %q not found on socket %q within %s\nsession list:\n%s", sessionName, socketName, timeout, out)
 }
 
 // setupCityNoGuard creates a city without requiring a tmuxtest.Guard.
@@ -109,6 +134,7 @@ func writeAgentsToml(t *testing.T, cityDir, cityName string, agents []agentConfi
 	for _, a := range agents {
 		content += fmt.Sprintf("\n[[agent]]\nname = %s\nstart_command = %s\n",
 			quote(a.Name), quote(a.StartCommand))
+		content += "max_active_sessions = 1\n"
 	}
 	tomlPath := filepath.Join(cityDir, "city.toml")
 	if err := os.WriteFile(tomlPath, []byte(content), 0o644); err != nil {

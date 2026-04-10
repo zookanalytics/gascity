@@ -358,6 +358,11 @@ func completeDrain(session *beads.Bead, store beads.Store, ds *drainState, clk c
 		"state":        "asleep",
 		"last_woke_at": "", // Clear to prevent false crash detection.
 	}
+	if ds.reason == "config-drift" {
+		// Config drift is a restart, not a terminal drain. Re-arm the bead so
+		// the next reconciler tick starts a replacement with the updated config.
+		batch["pending_create_claim"] = "true"
+	}
 	if session.Metadata["wake_mode"] == "fresh" {
 		batch["session_key"] = ""
 		batch["started_config_hash"] = ""

@@ -458,6 +458,7 @@ func controllerLoop(
 		poolDeathHandlers:   poolDeathHandlers,
 		suspendedNames:      suspendedNames,
 		pokeCh:              make(chan struct{}, 1),
+		reloadCh:            make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
 		logPrefix:           "gc start",
 		stdout:              stdout,
@@ -537,6 +538,7 @@ func runController(
 
 	convergenceReqCh := make(chan convergenceRequest, 16)
 	pokeCh := make(chan struct{}, 1)
+	reloadCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 
 	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
@@ -591,6 +593,7 @@ func runController(
 		PoolDeathHandlers:       poolDeathHandlers,
 		ConvergenceReqCh:        convergenceReqCh,
 		PokeCh:                  pokeCh,
+		ReloadCh:                reloadCh,
 		ControlDispatcherCh:     controlDispatcherCh,
 		Stdout:                  stdout,
 		Stderr:                  stderr,
@@ -602,6 +605,7 @@ func runController(
 	cs := newControllerState(cfg, sp, eventProv, cityName, cityPath)
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
+	cs.reloadCh = reloadCh
 	cs.services = cr.svc
 	cs.startBeadEventWatcher(ctx)
 	cr.setControllerState(cs)

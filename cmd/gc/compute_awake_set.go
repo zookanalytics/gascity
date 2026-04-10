@@ -35,6 +35,7 @@ type AwakeAgent struct {
 	QualifiedName  string   // e.g. "hello-world/polecat"
 	DependsOn      []string // template names this agent depends on
 	Suspended      bool
+	FixedSingleton bool
 	SleepAfterIdle time.Duration // 0 = disabled
 }
 
@@ -143,6 +144,17 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 					desired[ns.Identity] = "named-on-demand:work-query"
 				}
 			}
+		}
+	}
+
+	// Config-managed fixed singletons stay desired whenever their canonical
+	// bead exists. Unlike pools, they do not rely on scale_check demand.
+	for _, agent := range input.Agents {
+		if agent.Suspended || !agent.FixedSingleton || isNamedSessionTemplate(input.NamedSessions, agent.QualifiedName) {
+			continue
+		}
+		if bead := selectSingletonBead(input.SessionBeads, agent.QualifiedName); bead != nil {
+			desired[bead.SessionName] = "configured-singleton"
 		}
 	}
 
@@ -401,4 +413,20 @@ func collectCreatingBeads(beads []AwakeSessionBead, template string) []AwakeSess
 		}
 	}
 	return result
+}
+
+func selectSingletonBead(beads []AwakeSessionBead, template string) *AwakeSessionBead {
+	if active := collectActiveBeads(beads, template); len(active) > 0 {
+		return &active[0]
+	}
+	if creating := collectCreatingBeads(beads, template); len(creating) > 0 {
+		return &creating[0]
+	}
+	for i := range beads {
+		b := &beads[i]
+		if b.Template == template && !b.ManualSession && !b.Drained && !b.DependencyOnly {
+			return b
+		}
+	}
+	return nil
 }

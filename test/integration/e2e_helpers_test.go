@@ -13,6 +13,7 @@ import (
 	"text/template"
 	"time"
 
+	sessionagent "github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
@@ -60,6 +61,9 @@ type e2eCity struct {
 	Workspace e2eWorkspace
 	Agents    []e2eAgent
 	Providers map[string]e2eProvider
+	// DriftDrainTimeout overrides [daemon].drift_drain_timeout for tests that
+	// need deterministic config-drift restarts within the polling window.
+	DriftDrainTimeout string
 }
 
 // e2eReport holds parsed report data from e2e-report.sh.
@@ -123,6 +127,11 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 	// [beads] — use file store so tests don't need bd init or dolt.
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
 
+	if city.DriftDrainTimeout != "" {
+		b.WriteString("\n[daemon]\n")
+		fmt.Fprintf(&b, "drift_drain_timeout = %s\n", quote(city.DriftDrainTimeout))
+	}
+
 	// [providers.xxx]
 	for name, prov := range city.Providers {
 		fmt.Fprintf(&b, "\n[providers.%s]\n", name)
@@ -151,6 +160,9 @@ func writeE2EToml(t *testing.T, cityDir string, city e2eCity) {
 		}
 		if a.PromptTemplate != "" {
 			fmt.Fprintf(&b, "prompt_template = %s\n", quote(a.PromptTemplate))
+		}
+		if a.Pool == nil {
+			b.WriteString("max_active_sessions = 1\n")
 		}
 		if len(a.Env) > 0 {
 			b.WriteString("\n[agent.env]\n")
@@ -230,6 +242,7 @@ func setupE2ECity(t *testing.T, guard *tmuxtest.Guard, city e2eCity) string {
 	if err != nil {
 		t.Fatalf("gc start failed: %v\noutput: %s", err, out)
 	}
+	waitForConfiguredSessions(t, cityDir, city)
 
 	t.Cleanup(func() {
 		gc("", "stop", cityDir) //nolint:errcheck // best-effort cleanup
@@ -270,6 +283,27 @@ func setupE2ECityNoStart(t *testing.T, city e2eCity) string {
 	})
 
 	return cityDir
+}
+
+func waitForConfiguredSessions(t *testing.T, cityDir string, city e2eCity) {
+	t.Helper()
+	timeout := 30 * time.Second
+	if usingSubprocess() {
+		timeout = 10 * time.Second
+	}
+	for _, agent := range city.Agents {
+		if agent.Suspended {
+			continue
+		}
+		if agent.Pool != nil {
+			if agent.Pool.Min > 0 {
+				waitForSessionCount(t, cityDir, agent.Name, agent.Pool.Min, timeout)
+			}
+			continue
+		}
+		sessionName := sessionagent.SessionNameFor(city.Workspace.Name, agent.Name, city.Workspace.SessionTemplate)
+		waitForManagedSession(t, cityDir, city.Workspace.Name, sessionName, timeout)
+	}
 }
 
 // e2eReportScript returns the start_command for e2e-report.sh.

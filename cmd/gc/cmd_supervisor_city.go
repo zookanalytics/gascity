@@ -113,8 +113,23 @@ func cityUsesManagedReconciler(cityPath string) bool {
 	return supervisorAlive() != 0
 }
 
+func supervisorOwnsCityController(cityPath string, controllerPID int) bool {
+	if controllerPID == 0 {
+		return false
+	}
+	supervisorPID := supervisorAliveHook()
+	if supervisorPID == 0 || controllerPID != supervisorPID {
+		return false
+	}
+	_, registered, err := registeredCityEntry(cityPath)
+	return err == nil && registered
+}
+
 func ensureNoStandaloneController(cityPath string) (int, error) {
 	if pid := controllerAlive(cityPath); pid != 0 {
+		if supervisorOwnsCityController(cityPath, pid) {
+			return 0, nil
+		}
 		return pid, errControllerAlreadyRunning
 	}
 	gcDir := filepath.Join(cityPath, ".gc")

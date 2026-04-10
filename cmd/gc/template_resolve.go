@@ -103,6 +103,8 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	fpExtra = mergeFingerprintEnv(fpExtra, "provider_env.", expandEnvMap(resolved.Env))
+	fpExtra = mergeFingerprintEnv(fpExtra, "agent_env.", expandEnvMap(cfgAgent.Env))
 	// Step 2: Validate session vs provider compatibility.
 	if cfgAgent.Session == "acp" && !resolved.SupportsACP {
 		return TemplateParams{}, fmt.Errorf("agent %q: session = \"acp\" but provider %q does not support ACP (set supports_acp = true on the provider)", qualifiedName, resolved.Name)
@@ -182,7 +184,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		"GC_SESSION_NAME": sessName,
 		"GC_SESSION_ID":   sessionBeadID,
 		"GC_TEMPLATE":     templateNameFor(cfgAgent, qualifiedName),
-		"GC_AGENT":        sessionBeadID,
+		"GC_AGENT":        qualifiedName,
 		"GC_ALIAS":        qualifiedName,
 		"BEADS_ACTOR":     sessName,
 		"GC_DIR":          workDir,
@@ -416,4 +418,17 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		CopyFiles:              tp.Hints.CopyFiles,
 		FingerprintExtra:       tp.FPExtra,
 	}
+}
+
+func mergeFingerprintEnv(base map[string]string, prefix string, env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return base
+	}
+	if base == nil {
+		base = make(map[string]string, len(env))
+	}
+	for key, value := range env {
+		base[prefix+key] = value
+	}
+	return base
 }

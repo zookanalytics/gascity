@@ -843,6 +843,34 @@ func TestCompleteDrain_ResumeModePreservesIdentity(t *testing.T) {
 	}
 }
 
+func TestCompleteDrain_ConfigDriftRearmsPendingCreate(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	store := beads.NewMemStore()
+
+	b, _ := store.Create(beads.Bead{
+		Title: "test",
+		Metadata: map[string]string{
+			"session_name": "test-session",
+			"last_woke_at": now.Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		},
+	})
+
+	ds := &drainState{reason: "config-drift"}
+	completeDrain(&b, store, ds, clk)
+
+	got, _ := store.Get(b.ID)
+	if got.Metadata["state"] != "asleep" {
+		t.Errorf("state = %q, want asleep", got.Metadata["state"])
+	}
+	if got.Metadata["sleep_reason"] != "config-drift" {
+		t.Errorf("sleep_reason = %q, want config-drift", got.Metadata["sleep_reason"])
+	}
+	if got.Metadata["pending_create_claim"] != "true" {
+		t.Errorf("pending_create_claim = %q, want true", got.Metadata["pending_create_claim"])
+	}
+}
+
 func TestAdvanceSessionDrains_CancelsForReadyWait(t *testing.T) {
 	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}

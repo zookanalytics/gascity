@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -110,6 +111,44 @@ func TestResolveTemplateUsesWorkDirForCityScopedAgents(t *testing.T) {
 	}
 	if tp.Env["GT_ROOT"] != cityPath {
 		t.Fatalf("GT_ROOT = %q, want %q", tp.Env["GT_ROOT"], cityPath)
+	}
+}
+
+func TestResolveTemplateFingerprintExtraIncludesConfiguredEnvOnly(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("PATH", "/tmp/test-bin:/usr/bin")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none", Env: map[string]string{"PROVIDER_MODE": "strict"}}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name: "mayor",
+		Env: map[string]string{
+			"CUSTOM_VERSION": "v2",
+		},
+	}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.FPExtra["agent_env.CUSTOM_VERSION"]; got != "v2" {
+		t.Fatalf("agent_env.CUSTOM_VERSION = %q, want v2", got)
+	}
+	if got := tp.FPExtra["provider_env.PROVIDER_MODE"]; got != "strict" {
+		t.Fatalf("provider_env.PROVIDER_MODE = %q, want strict", got)
+	}
+	if _, ok := tp.FPExtra["agent_env.PATH"]; ok {
+		t.Fatal("ambient PATH should not leak into fingerprint extra")
 	}
 }
 
@@ -302,5 +341,43 @@ func TestResolveTemplateUsesRigManagedDoltPortAndPinsHome(t *testing.T) {
 	// Verify it's present and matches the parent process.
 	if got := tp.Env["HOME"]; got == "" {
 		t.Fatalf("HOME should be passed through to agent env")
+	}
+}
+
+func TestResolveTemplateKeepsQualifiedAgentNameWhenBeadExists(t *testing.T) {
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   t.TempDir(),
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+		sessionBeads: newSessionBeadSnapshot([]beads.Bead{{
+			ID: "gc-1",
+			Metadata: map[string]string{
+				"session_name": "worker",
+				"template":     "worker",
+				"state":        "active",
+			},
+		}}),
+	}
+
+	agent := &config.Agent{Name: "worker"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_AGENT"]; got != "worker" {
+		t.Fatalf("GC_AGENT = %q, want worker", got)
+	}
+	if got := tp.Env["GC_ALIAS"]; got != "worker" {
+		t.Fatalf("GC_ALIAS = %q, want worker", got)
+	}
+	if got := tp.Env["GC_SESSION_ID"]; got != "gc-1" {
+		t.Fatalf("GC_SESSION_ID = %q, want gc-1", got)
 	}
 }

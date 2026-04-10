@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,22 +130,145 @@ func (w *beadWire) toBead() beads.Bead {
 		cloned := *w.Priority
 		priority = &cloned
 	}
-	return beads.Bead{
-		ID:          w.ID,
-		Title:       w.Title,
-		Status:      w.Status,
-		Type:        w.Type,
-		Priority:    priority,
-		CreatedAt:   w.CreatedAt,
-		Assignee:    w.Assignee,
-		From:        w.From,
-		ParentID:    w.ParentID,
-		Ref:         w.Ref,
-		Needs:       w.Needs,
-		Description: w.Description,
-		Labels:      w.Labels,
-		Metadata:    coerceMetadata(w.Metadata),
+	labels, metadataFromLabels, refFromLabels, needsFromLabels, parentFromLabels := decodeHiddenLabels(w.Labels)
+	metadata := metadataFromLabels
+	for key, value := range coerceMetadata(w.Metadata) {
+		if metadata == nil {
+			metadata = make(map[string]string)
+		}
+		metadata[key] = value
 	}
+	from := w.From
+	if from == "" {
+		from = w.Owner
+	}
+	parentID := w.ParentID
+	if parentID == "" {
+		parentID = w.Parent
+	}
+	if parentID == "" {
+		parentID = parentFromLabels
+	}
+	ref := w.Ref
+	if ref == "" {
+		ref = refFromLabels
+	}
+	needs := appendUniqueStrings(nil, w.Needs...)
+	needs = appendUniqueStrings(needs, needsFromLabels...)
+	dependencies := make([]beads.Dep, 0, len(w.Dependencies))
+	for _, dep := range w.Dependencies {
+		if dep.ID == "" {
+			continue
+		}
+		dependencies = append(dependencies, beads.Dep{
+			IssueID:     w.ID,
+			DependsOnID: dep.ID,
+			Type:        dep.DependencyType,
+		})
+	}
+	return beads.Bead{
+		ID:           w.ID,
+		Title:        w.Title,
+		Status:       w.Status,
+		Type:         w.Type,
+		Priority:     priority,
+		CreatedAt:    w.CreatedAt,
+		Assignee:     w.Assignee,
+		From:         from,
+		ParentID:     parentID,
+		Ref:          ref,
+		Needs:        needs,
+		Description:  w.Description,
+		Labels:       labels,
+		Metadata:     metadata,
+		Dependencies: dependencies,
+	}
+}
+
+func decodeHiddenLabels(labels []string) (visible []string, metadata map[string]string, ref string, needs []string, parentID string) {
+	visible = make([]string, 0, len(labels))
+	for _, label := range labels {
+		switch {
+		case strings.HasPrefix(label, "meta:"):
+			key, value, ok := decodeMetadataLabel(label)
+			if ok {
+				if metadata == nil {
+					metadata = make(map[string]string)
+				}
+				metadata[key] = value
+				continue
+			}
+		case strings.HasPrefix(label, "gcref:"):
+			decoded, ok := decodeHexLabel(strings.TrimPrefix(label, "gcref:"))
+			if ok {
+				ref = decoded
+				continue
+			}
+		case strings.HasPrefix(label, "gcneed:"):
+			decoded, ok := decodeHexLabel(strings.TrimPrefix(label, "gcneed:"))
+			if ok {
+				needs = appendUniqueStrings(needs, decoded)
+				continue
+			}
+		case strings.HasPrefix(label, "needs:"):
+			needs = appendUniqueStrings(needs, strings.TrimPrefix(label, "needs:"))
+			continue
+		case strings.HasPrefix(label, "parent:"):
+			if parentID == "" {
+				parentID = strings.TrimPrefix(label, "parent:")
+			}
+			continue
+		}
+		visible = append(visible, label)
+	}
+	return visible, metadata, ref, needs, parentID
+}
+
+func decodeMetadataLabel(label string) (key string, value string, ok bool) {
+	rest := strings.TrimPrefix(label, "meta:")
+	keyHex, valueHex, hasHexEncoding := strings.Cut(rest, ":")
+	if hasHexEncoding {
+		decodedKey, keyOK := decodeHexLabel(keyHex)
+		decodedValue, valueOK := decodeHexLabel(valueHex)
+		if keyOK && valueOK && decodedKey != "" {
+			return decodedKey, decodedValue, true
+		}
+	}
+	decodedKey, decodedValue, hasLegacyEncoding := strings.Cut(rest, "=")
+	if hasLegacyEncoding && decodedKey != "" {
+		return decodedKey, decodedValue, true
+	}
+	return "", "", false
+}
+
+func decodeHexLabel(value string) (string, bool) {
+	if value == "_" {
+		return "", true
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		return "", false
+	}
+	return string(decoded), true
+}
+
+func appendUniqueStrings(dst []string, values ...string) []string {
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range dst {
+			if existing == value {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			dst = append(dst, value)
+		}
+	}
+	return dst
 }
 
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores

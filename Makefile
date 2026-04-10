@@ -136,9 +136,11 @@ test-acceptance-all: test-acceptance test-acceptance-b test-acceptance-c
 test-tutorial-regression:
 	go test -tags 'integration acceptance' -timeout 10m -v -run TestTutorialRegression ./test/integration/
 
-## test-integration: run all tests including integration (tmux, etc.)
+INTEGRATION_PKGS := $(shell rg -l '^//go:build integration' --glob '*.go' | sed 's#/[^/]*$$##' | sort -u | sed 's#^\./##; s#^#./#')
+
+## test-integration: run only integration-tagged suites (tmux, e2e, provider conformance)
 test-integration:
-	go test -tags integration -timeout 8m ./...
+	go test -tags integration -timeout 15m $(INTEGRATION_PKGS)
 
 
 ## test-tutorial: run tutorial acceptance tests (requires tmux, dolt, bd, claude authed)

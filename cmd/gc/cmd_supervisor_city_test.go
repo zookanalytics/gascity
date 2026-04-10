@@ -305,6 +305,53 @@ func TestRegisterCityWithSupervisorRejectsStandaloneController(t *testing.T) {
 	}
 }
 
+func TestEnsureNoStandaloneControllerAllowsSupervisorManagedController(t *testing.T) {
+	gcHome := t.TempDir()
+	t.Setenv("GC_HOME", gcHome)
+
+	root := shortSocketTempDir(t, "gc-ctl-")
+	cityPath := filepath.Join(root, "bright-lights")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"bright-lights\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "bright-lights"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldAlive := supervisorAliveHook
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() { supervisorAliveHook = oldAlive })
+
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck // test cleanup
+
+	go func() {
+		conn, acceptErr := lis.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck // test cleanup
+		buf := make([]byte, 32)
+		n, _ := conn.Read(buf)
+		if strings.Contains(string(buf[:n]), "ping") {
+			_, _ = conn.Write([]byte("4242\n"))
+		}
+	}()
+
+	if pid, err := ensureNoStandaloneController(cityPath); err != nil || pid != 0 {
+		t.Fatalf("ensureNoStandaloneController = (%d, %v), want (0, nil)", pid, err)
+	}
+}
+
 func TestUnregisterCityFromSupervisorRestoresRegistrationOnReloadFailure(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)

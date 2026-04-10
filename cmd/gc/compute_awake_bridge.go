@@ -37,9 +37,15 @@ func buildAwakeInputFromReconciler(
 	// Agents
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
+		fixedSingleton := false
+		if _, isNamed := findNamedSessionSpec(cfg, cfg.EffectiveCityName(), a.QualifiedName()); !isNamed {
+			sp := scaleParamsFor(a)
+			fixedSingleton = sp.Max == 1 && !isMultiSessionCfgAgent(a)
+		}
 		agent := AwakeAgent{
 			QualifiedName:  a.QualifiedName(),
 			Suspended:      isAgentEffectivelySuspended(cfg, a),
+			FixedSingleton: fixedSingleton,
 			SleepAfterIdle: parseSleepDuration(a.SleepAfterIdle),
 		}
 		if len(a.DependsOn) > 0 {

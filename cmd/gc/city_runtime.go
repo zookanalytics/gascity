@@ -64,6 +64,7 @@ type CityRuntime struct {
 	convStoreAdapter    *convergenceStoreAdapter // typed reference; avoids type assertions in tick/reconcile
 	convergenceReqCh    chan convergenceRequest  // receives CLI commands from controller.sock
 	pokeCh              chan struct{}            // non-blocking signal to trigger immediate reconciler tick
+	reloadCh            chan struct{}            // non-blocking signal to force config reload on next tick
 	controlDispatcherCh chan struct{}            // non-blocking signal for control-dispatcher-only reconcile
 	onStarted           func()
 	onStatus            func(string)
@@ -97,6 +98,7 @@ type CityRuntimeParams struct {
 
 	ConvergenceReqCh    chan convergenceRequest // may be nil
 	PokeCh              chan struct{}           // may be nil; triggers immediate tick
+	ReloadCh            chan struct{}           // may be nil; triggers immediate reload+tick
 	ControlDispatcherCh chan struct{}           // may be nil; triggers control-dispatcher-only reconcile
 	OnStarted           func()                  // called after initial reconciliation succeeds
 	OnStatus            func(string)            // called when init status changes
@@ -156,6 +158,12 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		pokeCh: func() chan struct{} {
 			if p.PokeCh != nil {
 				return p.PokeCh
+			}
+			return make(chan struct{}, 1)
+		}(),
+		reloadCh: func() chan struct{} {
+			if p.ReloadCh != nil {
+				return p.ReloadCh
 			}
 			return make(chan struct{}, 1)
 		}(),
@@ -325,6 +333,11 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			// session. Trigger an immediate tick so the reconciler sees the new
 			// work via workSet/poolDesired and wakes the target promptly.
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "poke")
+		case <-cr.reloadCh:
+			// Explicit supervisor reload: force city.toml reload even if the
+			// filesystem watcher has not observed the write yet.
+			dirty.Store(true)
+			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, "reload")
 		case <-cr.controlDispatcherCh:
 			cr.controlDispatcherTick(ctx)
 		case req := <-cr.convergenceReqCh:

@@ -189,6 +189,7 @@ func TestE2E_Peek(t *testing.T) {
 // running triggers reconciliation on next gc start.
 func TestE2E_ConfigDrift(t *testing.T) {
 	city := e2eCity{
+		DriftDrainTimeout: "1s",
 		Agents: []e2eAgent{
 			{
 				Name:         "drifter",

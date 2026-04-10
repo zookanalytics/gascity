@@ -554,12 +554,17 @@ func runSupervisor(stdout, stderr io.Writer) int {
 			safeReconcile()
 		case req := <-reconcileCh:
 			safeReconcile()
-			// Also poke all running cities so they immediately reconcile
-			// their agents (e.g. after a child process was killed).
+			// Also force all running cities to reload config and immediately
+			// reconcile. This makes explicit supervisor reloads deterministic
+			// even if a city.toml watcher event is still in flight.
 			snap := registry.Snapshot()
 			for _, v := range snap.all {
 				if v.Started && v.cs != nil {
-					v.cs.Poke()
+					if reloader, ok := v.cs.(interface{ Reload() }); ok {
+						reloader.Reload()
+					} else {
+						v.cs.Poke()
+					}
 				}
 			}
 			if req.done != nil {
@@ -966,6 +971,7 @@ func reconcileCities(
 		watchDirs := config.WatchDirs(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
+		reloadCh := make(chan struct{}, 1)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		mc := &managedCity{name: cityName, cancel: cityCancel, done: done, closer: fr}
@@ -992,6 +998,7 @@ func reconcileCities(
 				PoolDeathHandlers:       poolDeathHandlers,
 				ConvergenceReqCh:        convergenceReqCh,
 				PokeCh:                  pokeCh,
+				ReloadCh:                reloadCh,
 				ControlDispatcherCh:     controlDispatcherCh,
 				OnStarted: func() {
 					cr.UpdateCallback(path, func(m *managedCity) {
@@ -1025,6 +1032,7 @@ func reconcileCities(
 		}
 		cs.ct = cityRuntime.crashTrack()
 		cs.pokeCh = pokeCh
+		cs.reloadCh = reloadCh
 		cs.services = cityRuntime.svc
 		cs.startBeadEventWatcher(cityCtx)
 		cityRuntime.setControllerState(cs)

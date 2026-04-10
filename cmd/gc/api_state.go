@@ -45,6 +45,7 @@ type controllerState struct {
 	startedAt     time.Time
 	ct            crashTracker  // nil if crash tracking disabled
 	pokeCh        chan struct{} // nil when poke is not available; triggers immediate reconciler tick
+	reloadCh      chan struct{} // nil when reload is not available; forces config reload on next tick
 	services      workspacesvc.Registry
 	extmsgSvc     *extmsg.Services
 	adapterReg    *extmsg.AdapterRegistry
@@ -589,6 +590,19 @@ func (cs *controllerState) Poke() {
 	select {
 	case cs.pokeCh <- struct{}{}:
 	default: // poke already pending
+	}
+}
+
+// Reload signals the controller to force a config reload on the next tick.
+// Non-blocking: if a reload is already pending, additional requests are dropped.
+func (cs *controllerState) Reload() {
+	if cs.reloadCh == nil {
+		cs.Poke()
+		return
+	}
+	select {
+	case cs.reloadCh <- struct{}{}:
+	default: // reload already pending
 	}
 }
 

@@ -31,6 +31,41 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
+func requireTestSession(t *testing.T, tm *Tmux, sessionName string) {
+	t.Helper()
+	_ = tm.KillSession(sessionName)
+	var err error
+	for range 5 {
+		err = tm.NewSession(sessionName, "")
+		if err == nil {
+			return
+		}
+		if !errors.Is(err, ErrNoServer) {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("NewSession: %v", err)
+}
+
+func resetTestServer(t *testing.T, tm *Tmux) {
+	t.Helper()
+	if err := tm.KillServer(); err != nil {
+		t.Fatalf("reset test tmux server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = tm.KillServer()
+	})
+}
+
+func ensureBindingServer(t *testing.T, tm *Tmux) {
+	t.Helper()
+	resetTestServer(t, tm)
+	if err := tm.NewSessionWithCommand("binding-test", "", "sleep 3600"); err != nil {
+		t.Fatalf("start binding test session: %v", err)
+	}
+}
+
 func buildEchoBinary(t *testing.T, dir, name string) string {
 	t.Helper()
 
@@ -106,12 +141,7 @@ func TestSessionLifecycle(t *testing.T) {
 	sessionName := "gt-test-session-" + t.Name()
 
 	// Clean up any existing session
-	_ = tm.KillSession(sessionName)
-
-	// Create session
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
+	requireTestSession(t, tm, sessionName)
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Verify exists
@@ -1398,10 +1428,7 @@ func TestFindAgentPane_SinglePane(t *testing.T) {
 	tm := testTmux()
 	sessionName := "gt-test-findagent-single-" + fmt.Sprintf("%d", time.Now().UnixNano()%10000)
 
-	_ = tm.KillSession(sessionName)
-	if err := tm.NewSession(sessionName, ""); err != nil {
-		t.Fatalf("NewSession: %v", err)
-	}
+	requireTestSession(t, tm, sessionName)
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Single pane — should return empty (no disambiguation needed)
@@ -2403,6 +2430,7 @@ func TestGetKeyBinding_NoExistingBinding(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
+	resetTestServer(t, tm)
 	// Query a key that almost certainly has no binding
 	result := tm.getKeyBinding("prefix", "F12")
 	if result != "" {
@@ -2415,6 +2443,7 @@ func TestGetKeyBinding_CapturesDefaultBinding(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
+	resetTestServer(t, tm)
 
 	// Query the default tmux binding for prefix-n (next-window).
 	// This works without a running tmux server because list-keys
@@ -2434,6 +2463,7 @@ func TestGetKeyBinding_CapturesDefaultBindingWithArgs(t *testing.T) {
 		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
+	resetTestServer(t, tm)
 
 	// prefix-s is "choose-tree -Zs" by default — tests multi-word command parsing
 	result := tm.getKeyBinding("prefix", "s")
@@ -2446,10 +2476,8 @@ func TestGetKeyBinding_SkipsGasTownBindings(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
+	ensureBindingServer(t, tm)
 
 	// Set a GT-style if-shell binding (contains both "if-shell" and "gt ")
 	ifShell := fmt.Sprintf("echo '#{session_name}' | grep -Eq '%s'", sessionPrefixPattern())
@@ -2471,10 +2499,8 @@ func TestGetKeyBinding_CapturesUserBinding(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
+	ensureBindingServer(t, tm)
 
 	// Set a user binding that doesn't contain "gt "
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "hello")
@@ -2496,10 +2522,8 @@ func TestIsGTBinding_DetectsGasTownBindings(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
+	ensureBindingServer(t, tm)
 
 	// A plain user binding should NOT be detected as GT
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "hello")
@@ -2525,10 +2549,8 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
+	ensureBindingServer(t, tm)
 
 	// Set a custom user binding on F11
 	_, _ = tm.run("bind-key", "-T", "prefix", "F11", "display-message", "custom-user-cmd")

@@ -360,22 +360,28 @@ func reconcileSessionBeadsTraced(
 					Message: "drain acknowledged by agent",
 				})
 				if stopped && store != nil && session.ID != "" {
-					batch := map[string]string{
-						"state":        "drained",
-						"last_woke_at": "",
-					}
-					if session.Metadata["wake_mode"] == "fresh" {
-						batch["session_key"] = ""
-						batch["started_config_hash"] = ""
-						batch["continuation_reset_pending"] = "true"
-					}
-					_ = store.SetMetadataBatch(session.ID, batch)
-					session.Metadata["state"] = "drained"
-					session.Metadata["last_woke_at"] = ""
-					if session.Metadata["wake_mode"] == "fresh" {
-						session.Metadata["session_key"] = ""
-						session.Metadata["started_config_hash"] = ""
-						session.Metadata["continuation_reset_pending"] = "true"
+					if ds := dt.get(session.ID); ds != nil {
+						completeDrain(session, store, ds, clk)
+						dt.clearIdleProbe(session.ID)
+						dt.remove(session.ID)
+					} else {
+						batch := map[string]string{
+							"state":        "drained",
+							"last_woke_at": "",
+						}
+						if session.Metadata["wake_mode"] == "fresh" {
+							batch["session_key"] = ""
+							batch["started_config_hash"] = ""
+							batch["continuation_reset_pending"] = "true"
+						}
+						_ = store.SetMetadataBatch(session.ID, batch)
+						session.Metadata["state"] = "drained"
+						session.Metadata["last_woke_at"] = ""
+						if session.Metadata["wake_mode"] == "fresh" {
+							session.Metadata["session_key"] = ""
+							session.Metadata["started_config_hash"] = ""
+							session.Metadata["continuation_reset_pending"] = "true"
+						}
 					}
 				}
 				continue
