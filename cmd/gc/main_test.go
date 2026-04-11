@@ -1360,6 +1360,11 @@ func TestDoInitSuccess(t *testing.T) {
 			t.Errorf("%s/ not created", dir)
 		}
 	}
+	for _, dir := range []string{"packs", "prompts"} {
+		if f.Dirs[filepath.Join("/bright-lights", dir)] {
+			t.Errorf("%s/ should not be created by init", dir)
+		}
+	}
 
 	// Verify prompt templates were written.
 	if _, ok := f.Files[filepath.Join("/bright-lights", "agents", "mayor", "prompt.template.md")]; !ok {
@@ -2233,6 +2238,11 @@ scale_check = "echo 3"
 	}
 	if _, err := os.Stat(filepath.Join(cityPath, "agents", "mayor", "prompt.template.md")); err != nil {
 		t.Errorf("agents/mayor/prompt.template.md missing: %v", err)
+	}
+	for _, dir := range []string{"packs", "prompts"} {
+		if _, err := os.Stat(filepath.Join(cityPath, dir)); !os.IsNotExist(err) {
+			t.Errorf("%s/ should not be created by init: %v", dir, err)
+		}
 	}
 }
 
