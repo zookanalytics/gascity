@@ -105,23 +105,13 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 			return
 		}
 		if req.Type != "request" {
-			if err := sc.writeJSON(socketErrorEnvelope{
-				Type:    "error",
-				ID:      req.ID,
-				Code:    "invalid",
-				Message: "message type must be request",
-			}); err != nil {
+			if err := sc.writeJSON(newSocketError(req.ID, "invalid", "message type must be request")); err != nil {
 				return
 			}
 			continue
 		}
 		if req.ID == "" || req.Action == "" {
-			if err := sc.writeJSON(socketErrorEnvelope{
-				Type:    "error",
-				ID:      req.ID,
-				Code:    "invalid",
-				Message: "request id and action are required",
-			}); err != nil {
+			if err := sc.writeJSON(newSocketError(req.ID, "invalid", "request id and action are required")); err != nil {
 				return
 			}
 			continue
@@ -177,41 +167,21 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (socketActionRe
 		return socketActionResult{Result: s.healthResponse()}, nil
 	case "city.patch":
 		if s.readOnly {
-			return socketActionResult{}, &socketErrorEnvelope{
-				Type:    "error",
-				ID:      req.ID,
-				Code:    "read_only",
-				Message: "mutations disabled: server bound to non-localhost address",
-			}
+			return socketActionResult{}, newSocketError(req.ID, "read_only", "mutations disabled: server bound to non-localhost address")
 		}
 		var body cityPatchRequest
 		if err := decodeSocketPayload(req.Payload, &body); err != nil {
-			return socketActionResult{}, &socketErrorEnvelope{
-				Type:    "error",
-				ID:      req.ID,
-				Code:    "invalid",
-				Message: err.Error(),
-			}
+			return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
 		}
 		if body.Suspended == nil {
-			return socketActionResult{}, &socketErrorEnvelope{
-				Type:    "error",
-				ID:      req.ID,
-				Code:    "invalid",
-				Message: "no fields to update",
-			}
+			return socketActionResult{}, newSocketError(req.ID, "invalid", "no fields to update")
 		}
 		if err := s.patchCitySuspended(*body.Suspended); err != nil {
 			return socketActionResult{}, socketErrorFor(req.ID, err)
 		}
 		return socketActionResult{Result: map[string]string{"status": "ok"}}, nil
 	default:
-		return socketActionResult{}, &socketErrorEnvelope{
-			Type:    "error",
-			ID:      req.ID,
-			Code:    "not_found",
-			Message: "unknown action: " + req.Action,
-		}
+		return socketActionResult{}, unknownSocketAction(req.ID, req.Action)
 	}
 }
 
@@ -222,12 +192,7 @@ func (sm *SupervisorMux) handleSocketRequest(req *socketRequestEnvelope) (socket
 	case "cities.list":
 		return socketActionResult{Result: sm.citiesList()}, nil
 	default:
-		return socketActionResult{}, &socketErrorEnvelope{
-			Type:    "error",
-			ID:      req.ID,
-			Code:    "not_found",
-			Message: "unknown action: " + req.Action,
-		}
+		return socketActionResult{}, unknownSocketAction(req.ID, req.Action)
 	}
 }
 
@@ -241,21 +206,24 @@ func decodeSocketPayload(payload json.RawMessage, v any) error {
 func socketErrorFor(id string, err error) *socketErrorEnvelope {
 	var herr httpError
 	if errors.As(err, &herr) {
-		return &socketErrorEnvelope{
-			Type:    "error",
-			ID:      id,
-			Code:    herr.code,
-			Message: herr.message,
-		}
+		return newSocketError(id, herr.code, herr.message)
 	}
 	code := "internal"
 	if errors.Is(err, websocket.ErrCloseSent) {
 		code = "connection_closed"
 	}
+	return newSocketError(id, code, err.Error())
+}
+
+func newSocketError(id, code, message string) *socketErrorEnvelope {
 	return &socketErrorEnvelope{
 		Type:    "error",
 		ID:      id,
 		Code:    code,
-		Message: err.Error(),
+		Message: message,
 	}
+}
+
+func unknownSocketAction(id, action string) *socketErrorEnvelope {
+	return newSocketError(id, "not_found", "unknown action: "+action)
 }

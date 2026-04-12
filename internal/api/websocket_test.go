@@ -199,6 +199,102 @@ func TestSupervisorWebSocketHelloAndCitiesList(t *testing.T) {
 	}
 }
 
+func TestServerWebSocketUnknownActionReturnsCorrelatedError(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "req-unknown",
+		Action: "totally.unknown",
+	})
+
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("error type = %q, want error", resp.Type)
+	}
+	if resp.ID != "req-unknown" {
+		t.Fatalf("error id = %q, want req-unknown", resp.ID)
+	}
+	if resp.Code != "not_found" {
+		t.Fatalf("error code = %q, want not_found", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "unknown action") {
+		t.Fatalf("error message = %q, want unknown action", resp.Message)
+	}
+}
+
+func TestServerWebSocketRejectsMalformedRequestEnvelope(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, map[string]any{
+		"type":   "request",
+		"id":     "req-bad",
+		"action": "",
+	})
+
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("error type = %q, want error", resp.Type)
+	}
+	if resp.ID != "req-bad" {
+		t.Fatalf("error id = %q, want req-bad", resp.ID)
+	}
+	if resp.Code != "invalid" {
+		t.Fatalf("error code = %q, want invalid", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "required") {
+		t.Fatalf("error message = %q, want request id and action are required", resp.Message)
+	}
+}
+
+func TestServerWebSocketRejectsNonRequestMessageType(t *testing.T) {
+	state := newFakeState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, map[string]any{
+		"type":   "event",
+		"id":     "req-wrong-type",
+		"action": "health.get",
+	})
+
+	var resp wsErrorEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "error" {
+		t.Fatalf("error type = %q, want error", resp.Type)
+	}
+	if resp.ID != "req-wrong-type" {
+		t.Fatalf("error id = %q, want req-wrong-type", resp.ID)
+	}
+	if resp.Code != "invalid" {
+		t.Fatalf("error code = %q, want invalid", resp.Code)
+	}
+	if !strings.Contains(resp.Message, "message type must be request") {
+		t.Fatalf("error message = %q, want message type must be request", resp.Message)
+	}
+}
+
 func drainWSHello(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 	var hello wsHelloEnvelope
