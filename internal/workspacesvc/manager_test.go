@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,9 +69,11 @@ func (t *testInstance) Close() error {
 	return t.closeErr
 }
 
+var uniqueContractCounter atomic.Uint64
+
 func uniqueContract(t *testing.T) string {
 	t.Helper()
-	return fmt.Sprintf("test.%s.%d", strings.ReplaceAll(t.Name(), "/", "."), time.Now().UnixNano())
+	return fmt.Sprintf("test.%s.%d", strings.ReplaceAll(t.Name(), "/", "."), uniqueContractCounter.Add(1))
 }
 
 func registerWorkflowContractForTest(t *testing.T, contract string, factory WorkflowFactory) {

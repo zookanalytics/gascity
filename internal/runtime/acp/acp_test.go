@@ -566,28 +566,25 @@ func TestListRunning_FindsSessions(t *testing.T) {
 }
 
 func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
-	root, err := os.MkdirTemp("", "gc-acp-sock-")
+	root, err := os.MkdirTemp("/tmp", "ga-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	const name = "control-dispatcher"
-	longDir := ""
-	for i := 1; i <= 32; i++ {
-		candidate := filepath.Join(root, strings.Repeat("deep-path-", i), "acp")
-		p := NewProviderWithDir(candidate, Config{
-			HandshakeTimeout:  5 * time.Second,
-			NudgeBusyTimeout:  2 * time.Second,
-			OutputBufferLines: 100,
-		})
-		if len(p.legacySockPath(name)) > 108 && len(p.sockPath(name)) < 108 {
-			longDir = candidate
-			break
-		}
+	shortFileLen := len((&Provider{}).sockKey(name) + ".sock")
+	legacyFileLen := len(name + ".sock")
+	minDirLen := 108 - legacyFileLen
+	maxDirLen := 106 - shortFileLen
+	if minDirLen > maxDirLen {
+		t.Fatalf("no directory length can satisfy socket path bounds: min=%d max=%d", minDirLen, maxDirLen)
 	}
-	if longDir == "" {
-		t.Fatal("failed to construct path where legacy socket is too long but short socket fits")
+	targetDirLen := minDirLen
+	fillerLen := targetDirLen - len(root) - len("/acp") - 1
+	if fillerLen < 1 {
+		t.Fatalf("temp root %q too long to construct deterministic socket path fixture", root)
 	}
+	longDir := filepath.Join(root, strings.Repeat("d", fillerLen), "acp")
 	if err := os.MkdirAll(longDir, 0o755); err != nil {
 		t.Fatalf("mkdir longDir: %v", err)
 	}
@@ -613,6 +610,9 @@ func TestStartLongSocketPathUsesShortSocketName(t *testing.T) {
 	}
 	if len(p.sockPath(name)) >= len(p.legacySockPath(name)) {
 		t.Fatalf("short socket path = %q, legacy = %q; want shorter path", p.sockPath(name), p.legacySockPath(name))
+	}
+	if len(p.legacySockPath(name)) <= 108 || len(p.sockPath(name)) >= 108 {
+		t.Fatalf("socket length assumptions not met: short=%d legacy=%d", len(p.sockPath(name)), len(p.legacySockPath(name)))
 	}
 }
 

@@ -1,10 +1,11 @@
 package dashboard
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestScopedPath(t *testing.T) {
@@ -41,27 +42,37 @@ func TestScopedPath(t *testing.T) {
 
 func TestDetectSupervisor(t *testing.T) {
 	t.Run("supervisor with cities", func(t *testing.T) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v0/cities" {
+			if r.URL.Path != "/v0/ws" {
 				http.NotFound(w, r)
 				return
 			}
-			resp := struct {
-				Items []struct {
-					Name string `json:"name"`
-				} `json:"items"`
-				Total int `json:"total"`
-			}{
-				Items: []struct {
-					Name string `json:"name"`
-				}{
-					{Name: "bright-lights"},
-					{Name: "test-city"},
-				},
-				Total: 2,
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Fatalf("upgrade: %v", err)
 			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp) //nolint:errcheck
+			defer conn.Close()
+			_ = conn.WriteJSON(map[string]any{"type": "hello"})
+			var req struct {
+				Action string `json:"action"`
+			}
+			if err := conn.ReadJSON(&req); err != nil {
+				t.Fatalf("read request: %v", err)
+			}
+			if req.Action != "cities.list" {
+				t.Fatalf("action = %q, want cities.list", req.Action)
+			}
+			_ = conn.WriteJSON(map[string]any{
+				"type": "response",
+				"id":   "cli-1",
+				"result": map[string]any{
+					"items": []map[string]any{
+						{"name": "bright-lights"},
+						{"name": "test-city"},
+					},
+				},
+			})
 		}))
 		defer srv.Close()
 
@@ -89,29 +100,37 @@ func TestDetectSupervisor(t *testing.T) {
 }
 
 func TestFetchCityTabs(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/cities" {
+		if r.URL.Path != "/v0/ws" {
 			http.NotFound(w, r)
 			return
 		}
-		resp := struct {
-			Items []struct {
-				Name    string `json:"name"`
-				Running bool   `json:"running"`
-			} `json:"items"`
-			Total int `json:"total"`
-		}{
-			Items: []struct {
-				Name    string `json:"name"`
-				Running bool   `json:"running"`
-			}{
-				{Name: "bright-lights", Running: true},
-				{Name: "stopped-city", Running: false},
-			},
-			Total: 2,
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp) //nolint:errcheck
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"type": "hello"})
+		var req struct {
+			Action string `json:"action"`
+		}
+		if err := conn.ReadJSON(&req); err != nil {
+			t.Fatalf("read request: %v", err)
+		}
+		if req.Action != "cities.list" {
+			t.Fatalf("action = %q, want cities.list", req.Action)
+		}
+		_ = conn.WriteJSON(map[string]any{
+			"type": "response",
+			"id":   "cli-1",
+			"result": map[string]any{
+				"items": []map[string]any{
+					{"name": "bright-lights", "running": true},
+					{"name": "stopped-city", "running": false},
+				},
+			},
+		})
 	}))
 	defer srv.Close()
 

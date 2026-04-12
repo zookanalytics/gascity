@@ -1,0 +1,438 @@
+asyncapi: 2.6.0
+id: urn:gascity:supervisor-websocket:v1alpha1
+defaultContentType: application/json
+info:
+  title: Gas City Supervisor WebSocket Protocol
+  version: 1.0.0
+  description: >
+    Shared websocket protocol for the city API server and supervisor mux at
+    GET /v0/ws. The server sends hello/response/error/event envelopes. Clients
+    send request envelopes.
+servers:
+  city:
+    url: localhost
+    protocol: ws
+    description: Per-city websocket endpoint.
+  supervisor:
+    url: localhost
+    protocol: ws
+    description: Supervisor websocket endpoint.
+channels:
+  /v0/ws:
+    description: Bidirectional websocket channel for requests, responses, and subscriptions.
+    publish:
+      operationId: sendRequest
+      message:
+        $ref: '#/components/messages/RequestEnvelopeMessage'
+    subscribe:
+      operationId: receiveServerEnvelope
+      message:
+        oneOf:
+          - $ref: '#/components/messages/HelloEnvelopeMessage'
+          - $ref: '#/components/messages/ResponseEnvelopeMessage'
+          - $ref: '#/components/messages/ErrorEnvelopeMessage'
+          - $ref: '#/components/messages/EventEnvelopeMessage'
+components:
+  messages:
+    HelloEnvelopeMessage:
+      name: HelloEnvelope
+      payload:
+        $ref: '#/components/schemas/HelloEnvelope'
+    RequestEnvelopeMessage:
+      name: RequestEnvelope
+      payload:
+        $ref: '#/components/schemas/RequestEnvelope'
+    ResponseEnvelopeMessage:
+      name: ResponseEnvelope
+      payload:
+        $ref: '#/components/schemas/ResponseEnvelope'
+    ErrorEnvelopeMessage:
+      name: ErrorEnvelope
+      payload:
+        $ref: '#/components/schemas/ErrorEnvelope'
+    EventEnvelopeMessage:
+      name: EventEnvelope
+      payload:
+        $ref: '#/components/schemas/EventEnvelope'
+  schemas:
+    Scope:
+      type: object
+      additionalProperties: false
+      properties:
+        city:
+          type: string
+
+    HelloEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - protocol
+        - server_role
+        - read_only
+        - capabilities
+      properties:
+        type:
+          type: string
+          enum: [hello]
+        protocol:
+          type: string
+          enum: [gc.v1alpha1]
+        server_role:
+          type: string
+          enum: [city, supervisor]
+        read_only:
+          type: boolean
+        capabilities:
+          type: array
+          items:
+            type: string
+
+    RequestEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+        - action
+      properties:
+        type:
+          type: string
+          enum: [request]
+        id:
+          type: string
+        action:
+          type: string
+          enum:
+            - health.get
+            - cities.list
+            - city.get
+            - city.patch
+            - config.get
+            - config.explain
+            - config.validate
+            - status.get
+            - sessions.list
+            - beads.list
+            - beads.ready
+            - bead.get
+            - bead.create
+            - bead.close
+            - bead.update
+            - mail.list
+            - mail.get
+            - mail.read
+            - mail.reply
+            - mail.send
+            - events.list
+            - rigs.list
+            - convoys.list
+            - convoy.get
+            - sling.run
+            - services.list
+            - service.get
+            - service.restart
+            - packs.list
+            - providers.list
+            - provider.get
+            - agent.suspend
+            - agent.resume
+            - rig.suspend
+            - rig.resume
+            - rig.restart
+            - session.kill
+            - session.pending
+            - session.submit
+            - session.transcript
+            - subscription.start
+            - subscription.stop
+        idempotency_key:
+          type: string
+        scope:
+          $ref: '#/components/schemas/Scope'
+        payload:
+          $ref: '#/components/schemas/RequestPayload'
+
+    ResponseEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - id
+      properties:
+        type:
+          type: string
+          enum: [response]
+        id:
+          type: string
+        index:
+          type: integer
+          minimum: 0
+        result:
+          type: object
+          additionalProperties: true
+
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - code
+        - message
+      properties:
+        type:
+          type: string
+          enum: [error]
+        id:
+          type: string
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldError'
+
+    EventEnvelope:
+      type: object
+      additionalProperties: false
+      required:
+        - type
+        - subscription_id
+        - event_type
+      properties:
+        type:
+          type: string
+          enum: [event]
+        subscription_id:
+          type: string
+        event_type:
+          type: string
+        index:
+          type: integer
+          minimum: 0
+        cursor:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+
+    FieldError:
+      type: object
+      additionalProperties: false
+      required:
+        - field
+        - message
+      properties:
+        field:
+          type: string
+        message:
+          type: string
+
+    RequestPayload:
+      oneOf:
+        - $ref: '#/components/schemas/CityPatchRequest'
+        - $ref: '#/components/schemas/SessionsListRequest'
+        - $ref: '#/components/schemas/BeadsListRequest'
+        - $ref: '#/components/schemas/MailListRequest'
+        - $ref: '#/components/schemas/MailGetRequest'
+        - $ref: '#/components/schemas/MailReplyRequest'
+        - $ref: '#/components/schemas/MailSendRequest'
+        - $ref: '#/components/schemas/EventsListRequest'
+        - $ref: '#/components/schemas/NameRequest'
+        - $ref: '#/components/schemas/IdRequest'
+        - $ref: '#/components/schemas/ProvidersListRequest'
+        - $ref: '#/components/schemas/SessionSubmitRequest'
+        - $ref: '#/components/schemas/SessionTranscriptRequest'
+        - $ref: '#/components/schemas/SubscriptionStartRequest'
+        - $ref: '#/components/schemas/SubscriptionStopRequest'
+
+    CityPatchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        suspended:
+          type: boolean
+
+    SessionsListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        state:
+          type: string
+        template:
+          type: string
+        peek:
+          type: boolean
+
+    BeadsListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+        type:
+          type: string
+        label:
+          type: string
+        assignee:
+          type: string
+        rig:
+          type: string
+
+    MailListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        agent:
+          type: string
+        status:
+          type: string
+        rig:
+          type: string
+
+    MailGetRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        rig:
+          type: string
+
+    MailReplyRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - from
+        - subject
+        - body
+      properties:
+        id:
+          type: string
+        rig:
+          type: string
+        from:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+
+    MailSendRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - to
+        - subject
+      properties:
+        rig:
+          type: string
+        from:
+          type: string
+        to:
+          type: string
+        subject:
+          type: string
+        body:
+          type: string
+
+    EventsListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        type:
+          type: string
+        actor:
+          type: string
+        since:
+          type: string
+
+    NameRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+      properties:
+        name:
+          type: string
+
+    IdRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+      properties:
+        id:
+          type: string
+
+    ProvidersListRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        view:
+          type: string
+          enum: [public]
+
+    SessionSubmitRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - message
+      properties:
+        id:
+          type: string
+        message:
+          type: string
+        intent:
+          type: string
+
+    SessionTranscriptRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+      properties:
+        id:
+          type: string
+        tail:
+          type: integer
+          minimum: 0
+        before:
+          type: string
+        format:
+          type: string
+          enum: [raw]
+
+    SubscriptionStartRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - kind
+      properties:
+        kind:
+          type: string
+          enum:
+            - events
+            - session.stream
+        id:
+          type: string
+        cursor:
+          type: string
+        format:
+          type: string
+          enum: [raw]
+
+    SubscriptionStopRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - subscription_id
+      properties:
+        subscription_id:
+          type: string

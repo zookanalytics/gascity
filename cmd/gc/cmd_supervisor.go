@@ -390,6 +390,7 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 	mc.cancel()
 	timeout := managedCityStopTimeout(mc)
 	if timeout > 0 {
+		deadline := time.Now().Add(timeout)
 		select {
 		case <-mc.done:
 			if err := shutdownBeadsProvider(cityPath); err != nil {
@@ -399,21 +400,38 @@ func stopManagedCity(mc *managedCity, cityPath string, stderr io.Writer) {
 				mc.closer.Close() //nolint:errcheck
 			}
 			return
-		case <-time.After(timeout):
+		case <-time.After(time.Until(deadline)):
 			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after cancel; forcing shutdown\n", mc.name, timeout) //nolint:errcheck
 		}
-	}
-	if mc.cr != nil {
+		if mc.cr != nil {
+			func() {
+				defer func() { recover() }() //nolint:errcheck
+				mc.cr.shutdown()
+			}()
+		}
+		if remaining := time.Until(deadline); remaining > 0 {
+			select {
+			case <-mc.done:
+			case <-time.After(remaining):
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+			}
+		} else {
+			select {
+			case <-mc.done:
+			default:
+				fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+			}
+		}
+	} else if mc.cr != nil {
 		func() {
 			defer func() { recover() }() //nolint:errcheck
 			mc.cr.shutdown()
 		}()
 	}
-	if timeout > 0 {
+	if timeout <= 0 {
 		select {
 		case <-mc.done:
-		case <-time.After(timeout):
-			fmt.Fprintf(stderr, "gc supervisor: city '%s' did not exit within %s after forced shutdown\n", mc.name, timeout) //nolint:errcheck
+		default:
 		}
 	}
 	if err := shutdownBeadsProvider(cityPath); err != nil {

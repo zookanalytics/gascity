@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	gcapi "github.com/gastownhall/gascity/internal/api"
 )
 
 type servicesUnavailableError struct{}
@@ -29,6 +31,7 @@ type APIFetcher struct {
 	cityName  string       // for display
 	cityScope string       // supervisor city scope; when set, /v0/x → /v0/city/{scope}/x
 	client    *http.Client // shared client with timeout
+	apiClient *gcapi.Client
 
 	// sessionsOnce caches the session list for a single dashboard render.
 	// Multiple panel fetchers run in parallel and all need session data;
@@ -49,6 +52,7 @@ func NewAPIFetcher(baseURL, cityPath, cityName string) *APIFetcher {
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		cityPath: cityPath,
 		cityName: cityName,
+		apiClient: newFetcherTransportClient(strings.TrimRight(baseURL, "/"), ""),
 		client: &http.Client{
 			Timeout: 15 * time.Second,
 		},
@@ -65,7 +69,18 @@ func (f *APIFetcher) WithScope(cityScope string) *APIFetcher {
 		cityName:  f.cityName,
 		cityScope: cityScope,
 		client:    f.client,
+		apiClient: newFetcherTransportClient(f.baseURL, cityScope),
 	}
+}
+
+func newFetcherTransportClient(baseURL, cityScope string) *gcapi.Client {
+	if baseURL == "" {
+		return nil
+	}
+	if cityScope != "" {
+		return gcapi.NewCityScopedClient(baseURL, cityScope)
+	}
+	return gcapi.NewClient(baseURL)
 }
 
 // Scope returns a scoped dashboard fetcher without exposing the concrete type.
@@ -184,6 +199,15 @@ func (e *apiHTTPError) Error() string {
 
 // get performs a GET request and decodes the JSON response into result.
 func (f *APIFetcher) get(path string, result any) error {
+	if f.apiClient != nil {
+		body, err := f.apiClient.GetJSON(path)
+		if err == nil {
+			if err := json.Unmarshal(body, result); err != nil {
+				return fmt.Errorf("GET %s: decode: %w", path, err)
+			}
+			return nil
+		}
+	}
 	resp, err := f.client.Get(f.baseURL + scopedPath(path, f.cityScope))
 	if err != nil {
 		return fmt.Errorf("GET %s: %w", path, err)

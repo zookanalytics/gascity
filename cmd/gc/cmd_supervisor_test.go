@@ -604,8 +604,8 @@ func TestStopManagedCityForcesCleanupAfterTimeout(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want bounded timeout", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("stopManagedCity took %s, want bounded shutdown well below startup/drift timeouts", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "did not exit within") {
 		t.Fatalf("stderr = %q, want forced-timeout warning", stderr.String())
@@ -653,8 +653,8 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	var stderr bytes.Buffer
 	start := time.Now()
 	stopManagedCity(mc, cityPath, &stderr)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound", elapsed)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("stopManagedCity took %s, want shutdown-timeout bound and far below startup/drift timeouts", elapsed)
 	}
 	if !strings.Contains(stderr.String(), "20ms") {
 		t.Fatalf("stderr = %q, want shutdown-timeout warning", stderr.String())

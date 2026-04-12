@@ -33,3 +33,4 @@ reports/
 .cache/
 .vscode/settings.json
 .env
+node_modules/

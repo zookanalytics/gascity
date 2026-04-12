@@ -38,10 +38,15 @@ func (s *Server) handleRigList(w http.ResponseWriter, r *http.Request) {
 		waitForChange(r.Context(), s.state.EventProvider(), bp)
 	}
 
+	wantGit := r.URL.Query().Get("git") == "true"
+	rigs := s.listRigResponses(wantGit)
+	writeListJSON(w, s.latestIndex(), rigs, len(rigs))
+}
+
+func (s *Server) listRigResponses(wantGit bool) []rigResponse {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
-	wantGit := r.URL.Query().Get("git") == "true"
 
 	rigs := make([]rigResponse, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
@@ -51,66 +56,105 @@ func (s *Server) handleRigList(w http.ResponseWriter, r *http.Request) {
 		}
 		rigs = append(rigs, resp)
 	}
-	writeListJSON(w, s.latestIndex(), rigs, len(rigs))
+	return rigs
 }
 
 func (s *Server) handleRig(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	wantGit := r.URL.Query().Get("git") == "true"
+	resp, ok := s.getRigResponse(name, wantGit)
+	if ok {
+		writeIndexJSON(w, s.latestIndex(), resp)
+		return
+	}
+	writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
+}
+
+func (s *Server) getRigResponse(name string, wantGit bool) (rigResponse, bool) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
-	wantGit := r.URL.Query().Get("git") == "true"
-
 	for _, rig := range cfg.Rigs {
 		if rig.Name == name {
 			resp := buildRigResponse(cfg, rig, sp, s.state.CityName(), s.state.CityPath())
 			if wantGit {
 				resp.Git = fetchGitStatus(rig.Path)
 			}
-			writeIndexJSON(w, s.latestIndex(), resp)
-			return
+			return resp, true
 		}
 	}
-	writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
+	return rigResponse{}, false
 }
 
 func (s *Server) handleRigAction(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	action := r.PathValue("action")
-
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "internal", "mutations not supported")
-		return
-	}
-
-	var err error
-	switch action {
-	case "suspend":
-		err = sm.SuspendRig(name)
-	case "resume":
-		err = sm.ResumeRig(name)
-	case "restart":
-		s.handleRigRestart(w, name)
-		return
-	default:
-		writeError(w, http.StatusNotFound, "not_found", "unknown rig action: "+action)
-		return
-	}
-
+	resp, err := s.applyRigAction(name, action)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "action": action, "rig": name})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handleRigRestart kills all agents in a rig so the reconciler restarts them.
 // Uses sp.Stop() directly — no StateMutator dependency for runtime kills.
 func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
+	resp, err := s.restartRig(name)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	httpStatus := http.StatusOK
+	if status, _ := resp["status"].(string); status == "failed" {
+		httpStatus = http.StatusInternalServerError
+	}
+	writeJSON(w, httpStatus, resp)
+}
+
+func (s *Server) applyRigAction(name, action string) (map[string]any, error) {
+	sm, ok := s.state.(StateMutator)
+	if !ok {
+		return nil, httpError{status: http.StatusNotImplemented, code: "internal", message: "mutations not supported"}
+	}
+	switch action {
+	case "suspend":
+		if err := sm.SuspendRig(name); err != nil {
+			return nil, normalizeRigActionError(err)
+		}
+		return map[string]any{"status": "ok", "action": action, "rig": name}, nil
+	case "resume":
+		if err := sm.ResumeRig(name); err != nil {
+			return nil, normalizeRigActionError(err)
+		}
+		return map[string]any{"status": "ok", "action": action, "rig": name}, nil
+	case "restart":
+		return s.restartRig(name)
+	default:
+		return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "unknown rig action: " + action}
+	}
+}
+
+func normalizeRigActionError(err error) error {
+	if err == nil || herrStatus(err) != 0 {
+		return err
+	}
+	if strings.Contains(err.Error(), "not found") {
+		return httpError{status: http.StatusNotFound, code: "not_found", message: err.Error()}
+	}
+	return err
+}
+
+func (s *Server) restartRig(name string) (map[string]any, error) {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
@@ -124,8 +168,7 @@ func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 		}
 	}
 	if !rigFound {
-		writeError(w, http.StatusNotFound, "not_found", "rig "+name+" not found")
-		return
+		return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "rig " + name + " not found"}
 	}
 
 	// Best-effort kill: the agent set may change between config read and each
@@ -156,18 +199,16 @@ func (s *Server) handleRigRestart(w http.ResponseWriter, name string) {
 		"rig":    name,
 		"killed": killed,
 	}
-	httpStatus := http.StatusOK
 	if len(failed) > 0 {
 		resp["failed"] = failed
 		if len(killed) == 0 {
 			// Total failure — no agents were killed.
 			resp["status"] = "failed"
-			httpStatus = http.StatusInternalServerError
 		} else {
 			resp["status"] = "partial"
 		}
 	}
-	writeJSON(w, httpStatus, resp)
+	return resp, nil
 }
 
 // buildRigResponse creates a rigResponse with agent counts and last activity.

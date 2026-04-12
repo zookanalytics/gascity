@@ -57,10 +57,6 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		waitForChange(r.Context(), s.state.EventProvider(), bp)
 	}
 
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
-	sessTmpl := cfg.Workspace.SessionTemplate
 	wantPeek := r.URL.Query().Get("peek") == "true"
 
 	// Query filters.
@@ -77,102 +73,7 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var agents []agentResponse
-	for _, a := range cfg.Agents {
-		expanded := expandAgent(a, cityName, sessTmpl, sp)
-		for _, ea := range expanded {
-			// Apply filters.
-			if qRig != "" && ea.rig != qRig {
-				continue
-			}
-			if qPool != "" && ea.pool != qPool {
-				continue
-			}
-
-			sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
-			running := sp.IsRunning(sessionName)
-
-			if qRunning == "true" && !running {
-				continue
-			}
-			if qRunning == "false" && running {
-				continue
-			}
-
-			// Merge config + runtime suspended state.
-			suspended := ea.suspended
-			if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
-				suspended = true
-			}
-
-			// Resolve provider and display name.
-			provider, displayName := resolveProviderInfo(ea.provider, cfg)
-
-			// Determine availability by checking if provider binary is in PATH.
-			available := true
-			var unavailableReason string
-			if suspended {
-				available = false
-				unavailableReason = "agent is suspended"
-			} else if provider != "" {
-				if !s.cachedLookPath(providerPathCheck(provider, cfg)) {
-					available = false
-					unavailableReason = "provider '" + provider + "' not found in PATH"
-				}
-			}
-
-			resp := agentResponse{
-				Name:              ea.qualifiedName,
-				Description:       ea.description,
-				Running:           running,
-				Suspended:         suspended,
-				Rig:               ea.rig,
-				Pool:              ea.pool,
-				Provider:          provider,
-				DisplayName:       displayName,
-				Available:         available,
-				UnavailableReason: unavailableReason,
-			}
-
-			var lastActivity *time.Time
-			if running {
-				si := &sessionInfo{Name: sessionName}
-				if t, err := sp.GetLastActivity(sessionName); err == nil && !t.IsZero() {
-					si.LastActivity = &t
-					lastActivity = &t
-				}
-				si.Attached = sp.IsAttached(sessionName)
-				resp.Session = si
-			}
-
-			// Find active bead by querying bead stores.
-			resp.ActiveBead = s.findActiveBead(ea.qualifiedName, ea.rig)
-
-			// Compute state enum.
-			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
-
-			// Peek preview (opt-in).
-			if wantPeek && running {
-				if output, err := sp.Peek(sessionName, 5); err == nil {
-					resp.LastOutput = output
-				}
-			}
-
-			// Model + context usage (best-effort, Claude only).
-			// Skip when session file attribution is ambiguous (pools,
-			// multiple Claude agents in same rig).
-			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
-				s.enrichSessionMeta(&resp, a, ea.qualifiedName, cfg)
-			}
-
-			agents = append(agents, resp)
-		}
-	}
-
-	if agents == nil {
-		agents = []agentResponse{}
-	}
+	agents := s.listAgentResponses(qPool, qRig, qRunning, wantPeek)
 	resp := listResponse{Items: agents, Total: len(agents)}
 	if cacheKey == "" {
 		writeListJSON(w, index, agents, len(agents))
@@ -186,6 +87,35 @@ func (s *Server) handleAgentList(w http.ResponseWriter, r *http.Request) {
 	writeCachedJSON(w, r, index, body)
 }
 
+func (s *Server) listAgentResponses(qPool, qRig, qRunning string, wantPeek bool) []agentResponse {
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	sessTmpl := cfg.Workspace.SessionTemplate
+
+	var agents []agentResponse
+	for _, a := range cfg.Agents {
+		expanded := expandAgent(a, cityName, sessTmpl, sp)
+		for _, ea := range expanded {
+			if qRig != "" && ea.rig != qRig {
+				continue
+			}
+			if qPool != "" && ea.pool != qPool {
+				continue
+			}
+
+			resp, include := s.buildExpandedAgentResponse(a, ea, wantPeek, qRunning)
+			if include {
+				agents = append(agents, resp)
+			}
+		}
+	}
+	if agents == nil {
+		agents = []agentResponse{}
+	}
+	return agents
+}
+
 func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	if name == "" {
@@ -194,8 +124,6 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-	cityName := s.state.CityName()
 
 	// Try exact agent match first, then check for sub-resource suffix.
 	agentCfg, ok := findAgent(cfg, name)
@@ -215,44 +143,64 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionName := agentSessionName(cityName, name, cfg.Workspace.SessionTemplate)
-	running := sp.IsRunning(sessionName)
+	pool := ""
+	if isMultiSessionAgent(agentCfg) {
+		pool = agentCfg.QualifiedName()
+	}
+	resp, _ := s.buildExpandedAgentResponse(agentCfg, expandedAgent{
+		qualifiedName: name,
+		rig:           agentCfg.Dir,
+		pool:          pool,
+		suspended:     agentCfg.Suspended,
+		provider:      agentCfg.Provider,
+		description:   agentCfg.Description,
+	}, false, "")
+	writeIndexJSON(w, s.latestIndex(), resp)
+}
 
-	// Merge config + runtime suspended state.
-	suspended := agentCfg.Suspended
+func (s *Server) buildExpandedAgentResponse(agentCfg config.Agent, ea expandedAgent, wantPeek bool, qRunning string) (agentResponse, bool) {
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+	cityName := s.state.CityName()
+	sessTmpl := cfg.Workspace.SessionTemplate
+
+	sessionName := agentSessionName(cityName, ea.qualifiedName, sessTmpl)
+	running := sp.IsRunning(sessionName)
+	if qRunning == "true" && !running {
+		return agentResponse{}, false
+	}
+	if qRunning == "false" && running {
+		return agentResponse{}, false
+	}
+
+	suspended := ea.suspended
 	if v, err := sp.GetMeta(sessionName, "suspended"); err == nil && v == "true" {
 		suspended = true
 	}
 
-	// Resolve provider and display name.
-	provider, displayName := resolveProviderInfo(agentCfg.Provider, cfg)
+	provider, displayName := resolveProviderInfo(ea.provider, cfg)
 
-	// Determine availability.
 	available := true
 	var unavailableReason string
 	if suspended {
 		available = false
 		unavailableReason = "agent is suspended"
-	} else if provider != "" {
-		if !s.cachedLookPath(providerPathCheck(provider, cfg)) {
-			available = false
-			unavailableReason = "provider '" + provider + "' not found in PATH"
-		}
+	} else if provider != "" && !s.cachedLookPath(providerPathCheck(provider, cfg)) {
+		available = false
+		unavailableReason = "provider '" + provider + "' not found in PATH"
 	}
 
 	resp := agentResponse{
-		Name:              name,
-		Description:       agentCfg.Description,
+		Name:              ea.qualifiedName,
+		Description:       ea.description,
 		Running:           running,
 		Suspended:         suspended,
-		Rig:               agentCfg.Dir,
+		Rig:               ea.rig,
+		Pool:              ea.pool,
 		Provider:          provider,
 		DisplayName:       displayName,
 		Available:         available,
 		UnavailableReason: unavailableReason,
-	}
-	if isMultiSessionAgent(agentCfg) {
-		resp.Pool = agentCfg.QualifiedName()
 	}
 
 	var lastActivity *time.Time
@@ -266,29 +214,25 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		resp.Session = si
 	}
 
-	// Find active bead by querying bead stores.
-	resp.ActiveBead = s.findActiveBead(name, agentCfg.Dir)
-
-	// Compute state enum.
+	resp.ActiveBead = s.findActiveBead(ea.qualifiedName, ea.rig)
 	quarantined := s.state.IsQuarantined(sessionName)
 	resp.State = computeAgentState(suspended, quarantined, running, resp.ActiveBead, lastActivity)
 
-	// Model + context usage (best-effort, Claude only).
-	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
-		s.enrichSessionMeta(&resp, agentCfg, name, cfg)
+	if wantPeek && running {
+		if output, err := sp.Peek(sessionName, 5); err == nil {
+			resp.LastOutput = output
+		}
 	}
 
-	writeIndexJSON(w, s.latestIndex(), resp)
+	if running && provider == "claude" && canAttributeSession(agentCfg, ea.qualifiedName, cfg, s.state.CityPath()) {
+		s.enrichSessionMeta(&resp, agentCfg, ea.qualifiedName, cfg)
+	}
+
+	return resp, true
 }
 
 func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-
-	sm, ok := s.state.(StateMutator)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "internal", "mutations not supported")
-		return
-	}
 
 	// Parse action suffix before validating agent name.
 	// Only config-level mutations (suspend/resume) are supported.
@@ -305,22 +249,12 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate agent exists in config.
-	cfg := s.state.Config()
-	if _, ok := findAgent(cfg, name); !ok {
-		writeError(w, http.StatusNotFound, "not_found", "agent "+name+" not found")
-		return
-	}
-
-	var err error
-	switch action {
-	case "suspend":
-		err = sm.SuspendAgent(name)
-	case "resume":
-		err = sm.ResumeAgent(name)
-	}
-
+	err := s.applyAgentAction(name, action)
 	if err != nil {
+		if strings.Contains(err.Error(), "mutations not supported") {
+			writeError(w, http.StatusNotImplemented, "internal", err.Error())
+			return
+		}
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, "not_found", err.Error())
 			return
@@ -329,6 +263,27 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) applyAgentAction(name, action string) error {
+	sm, ok := s.state.(StateMutator)
+	if !ok {
+		return httpError{status: http.StatusNotImplemented, code: "internal", message: "mutations not supported"}
+	}
+
+	cfg := s.state.Config()
+	if _, ok := findAgent(cfg, name); !ok {
+		return httpError{status: http.StatusNotFound, code: "not_found", message: "agent " + name + " not found"}
+	}
+
+	switch action {
+	case "suspend":
+		return sm.SuspendAgent(name)
+	case "resume":
+		return sm.ResumeAgent(name)
+	default:
+		return httpError{status: http.StatusNotFound, code: "not_found", message: "unknown agent action: " + action}
+	}
 }
 
 // expandedAgent holds a single (possibly pool-expanded) agent identity.

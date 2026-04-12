@@ -1,7 +1,6 @@
 package dashboard
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,7 +14,9 @@ import (
 	"sync"
 	"time"
 
+	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/shellquote"
+	"github.com/gorilla/websocket"
 )
 
 // CommandRequest is the JSON request body for /api/run.
@@ -57,6 +58,10 @@ type APIHandler struct {
 	cityScope string
 	// apiClient is the shared HTTP client for API calls (nil when apiURL is empty).
 	apiClient *http.Client
+	// apiTransportClient routes supported API reads and mutations through the
+	// shared supervisor transport client, which prefers websocket transport and
+	// falls back to HTTP when websocket is unavailable.
+	apiTransportClient *gcapi.Client
 	// defaultRunTimeout is the default timeout for command execution.
 	defaultRunTimeout time.Duration
 	// maxRunTimeout is the maximum allowed timeout for command execution.
@@ -69,6 +74,43 @@ type APIHandler struct {
 	cmdSem chan struct{}
 	// csrfToken is validated on POST requests to prevent cross-site request forgery.
 	csrfToken string
+}
+
+type websocketHelloEnvelope struct {
+	Type string `json:"type"`
+}
+
+type websocketRequestEnvelope struct {
+	Type    string      `json:"type"`
+	ID      string      `json:"id"`
+	Action  string      `json:"action"`
+	Scope   *websocketScope `json:"scope,omitempty"`
+	Payload interface{} `json:"payload,omitempty"`
+}
+
+type websocketScope struct {
+	City string `json:"city,omitempty"`
+}
+
+type websocketResponseEnvelope struct {
+	Type   string          `json:"type"`
+	ID     string          `json:"id"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+type websocketErrorEnvelope struct {
+	Type    string `json:"type"`
+	ID      string `json:"id,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+type websocketEventEnvelope struct {
+	Type      string          `json:"type"`
+	EventType string          `json:"event_type"`
+	Index     uint64          `json:"index,omitempty"`
+	Cursor    string          `json:"cursor,omitempty"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
 const optionsCacheTTL = 30 * time.Second
@@ -87,6 +129,7 @@ func NewAPIHandler(cityPath, cityName, apiURL, cityScope string, defaultRunTimeo
 		cityName:          cityName,
 		apiURL:            strings.TrimRight(apiURL, "/"),
 		cityScope:         cityScope,
+		apiTransportClient: newAPITransportClient(strings.TrimRight(apiURL, "/"), cityScope),
 		defaultRunTimeout: defaultRunTimeout,
 		maxRunTimeout:     maxRunTimeout,
 		cmdSem:            make(chan struct{}, maxConcurrentCommands),
@@ -103,6 +146,16 @@ func NewAPIHandler(cityPath, cityName, apiURL, cityScope string, defaultRunTimeo
 	return h
 }
 
+func newAPITransportClient(apiURL, cityScope string) *gcapi.Client {
+	if apiURL == "" {
+		return nil
+	}
+	if cityScope != "" {
+		return gcapi.NewCityScopedClient(apiURL, cityScope)
+	}
+	return gcapi.NewClient(apiURL)
+}
+
 // withCityScope returns a new APIHandler that routes API calls through
 // /v0/city/{scope}/... for supervisor mode. Shared state (client, cache,
 // semaphore) is referenced by pointer, not copied.
@@ -113,6 +166,7 @@ func (h *APIHandler) withCityScope(scope string) *APIHandler {
 		apiURL:            h.apiURL,
 		cityScope:         scope,
 		apiClient:         h.apiClient,
+		apiTransportClient: newAPITransportClient(h.apiURL, scope),
 		defaultRunTimeout: h.defaultRunTimeout,
 		maxRunTimeout:     h.maxRunTimeout,
 		cmdSem:            h.cmdSem,
@@ -126,6 +180,12 @@ func (h *APIHandler) withCityScope(scope string) *APIHandler {
 
 // apiGet performs a GET against the GC API server and returns the body.
 func (h *APIHandler) apiGet(path string) ([]byte, error) {
+	if h.apiTransportClient != nil {
+		body, err := h.apiTransportClient.GetJSON(path)
+		if err == nil {
+			return body, nil
+		}
+	}
 	resp, err := h.apiClient.Get(h.apiURL + scopedPath(path, h.cityScope))
 	if err != nil {
 		return nil, err
@@ -140,6 +200,12 @@ func (h *APIHandler) apiGet(path string) ([]byte, error) {
 
 // apiPost performs a POST against the GC API server and returns the body.
 func (h *APIHandler) apiPost(path string, payload any) ([]byte, error) {
+	if h.apiTransportClient != nil {
+		body, err := h.apiTransportClient.PostJSON(path, payload)
+		if err == nil {
+			return body, nil
+		}
+	}
 	var reqBody io.Reader
 	if payload != nil {
 		data, err := json.Marshal(payload)
@@ -1668,16 +1734,12 @@ func (h *APIHandler) handleAgentOutput(w http.ResponseWriter, r *http.Request) {
 		upstream += sep + "before=" + url.QueryEscape(v)
 	}
 
-	resp, err := h.apiClient.Get(h.apiURL + scopedPath(upstream, h.cityScope))
+	body, err := h.apiGet(upstream)
 	if err != nil {
 		h.sendError(w, "Failed to fetch session transcript", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck
-	body, _ := io.ReadAll(resp.Body)
-
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
 }
 
@@ -1696,30 +1758,82 @@ func (h *APIHandler) handleAgentOutputStream(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	upstream := h.apiURL + scopedPath("/v0/session/"+sessionID+"/stream", h.cityScope)
-	req, err := http.NewRequestWithContext(r.Context(), "GET", upstream, nil)
-	if err != nil {
-		h.sendError(w, "Failed to create request", http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Accept", "text/event-stream")
-
-	// Use a client without timeout for the long-lived SSE connection
-	// (h.apiClient has a 15s timeout that would kill the stream).
-	sseClient := &http.Client{Timeout: 0}
-	resp, err := sseClient.Do(req)
+	wsURL, err := websocketURL(h.apiURL)
 	if err != nil {
 		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck
+	header := http.Header{}
+	header.Set("Origin", "http://localhost")
+	conn, resp, err := websocket.DefaultDialer.DialContext(r.Context(), wsURL, header)
+	if err != nil {
+		if resp != nil {
+			h.sendError(w, "Failed to connect to agent output stream: "+resp.Status, http.StatusBadGateway)
+			return
+		}
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+	defer conn.Close()
 
-	// On upstream error, proxy the error response as JSON (not SSE).
-	if resp.StatusCode != http.StatusOK {
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		w.WriteHeader(resp.StatusCode)
-		body, _ := io.ReadAll(resp.Body)
-		_, _ = w.Write(body)
+	var hello websocketHelloEnvelope
+	if err := conn.ReadJSON(&hello); err != nil || hello.Type != "hello" {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+
+	start := websocketRequestEnvelope{
+		Type:   "request",
+		ID:     "dashboard-session-stream-1",
+		Action: "subscription.start",
+		Payload: map[string]any{
+			"kind":   "session.stream",
+			"target": sessionID,
+		},
+	}
+	if h.cityScope != "" {
+		start.Scope = &websocketScope{City: h.cityScope}
+	}
+	if format := strings.TrimSpace(r.URL.Query().Get("format")); format != "" {
+		start.Payload = map[string]any{
+			"kind":   "session.stream",
+			"target": sessionID,
+			"format": format,
+		}
+	}
+	if err := conn.WriteJSON(start); err != nil {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+
+	var firstMsg json.RawMessage
+	if err := conn.ReadJSON(&firstMsg); err != nil {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+	var firstType struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(firstMsg, &firstType); err != nil {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+	if firstType.Type == "error" {
+		var apiErr websocketErrorEnvelope
+		if unmarshalErr := json.Unmarshal(firstMsg, &apiErr); unmarshalErr != nil {
+			h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+			return
+		}
+		h.sendError(w, apiErr.Message, http.StatusBadGateway)
+		return
+	}
+	var startResp websocketResponseEnvelope
+	if err := json.Unmarshal(firstMsg, &startResp); err != nil {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
+		return
+	}
+	if startResp.Type != "response" || startResp.ID != start.ID {
+		h.sendError(w, "Failed to connect to agent output stream", http.StatusBadGateway)
 		return
 	}
 
@@ -1735,17 +1849,33 @@ func (h *APIHandler) handleAgentOutputStream(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	// Stream the response body through.
-	buf := make([]byte, 4096)
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
 	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			_, _ = w.Write(buf[:n])
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepalive.C:
+			if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
+		default:
 		}
-		if readErr != nil {
+
+		var event websocketEventEnvelope
+		if err := conn.ReadJSON(&event); err != nil {
 			return
 		}
+		if event.Type != "event" {
+			continue
+		}
+		if event.Index > 0 {
+			fmt.Fprintf(w, "event: %s\nid: %d\ndata: %s\n\n", event.EventType, event.Index, event.Payload) //nolint:errcheck
+		} else {
+			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.EventType, event.Payload) //nolint:errcheck
+		}
+		flusher.Flush()
 	}
 }
 
@@ -1754,6 +1884,25 @@ func (h *APIHandler) handleAgentOutputStream(w http.ResponseWriter, r *http.Requ
 // parseCommandArgs splits a command string into args, respecting quotes.
 func parseCommandArgs(command string) []string {
 	return shellquote.Split(command)
+}
+
+func websocketURL(apiURL string) (string, error) {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return "", err
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("unsupported api url scheme: %s", u.Scheme)
+	}
+	u.Path = strings.TrimRight(u.Path, "/") + "/v0/ws"
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String(), nil
 }
 
 // ---------- SSE handler ----------
@@ -1771,35 +1920,23 @@ func (h *APIHandler) handleSSEProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Connect to API event stream. Resume from after_seq if provided.
-	// The client sends after_seq as a query param (manual EventSource creation
-	// doesn't send Last-Event-ID header), so check both sources. The dashboard
-	// always connects to per-city streams (cityScope set via meta tag or URL
-	// param), so after_seq is always the correct parameter.
-	sseURL := h.apiURL + scopedPath("/v0/events/stream", h.cityScope)
-	afterSeq := r.URL.Query().Get("after_seq")
-	if afterSeq == "" {
-		afterSeq = r.Header.Get("Last-Event-ID")
-	}
-	if afterSeq != "" {
-		sseURL += "?after_seq=" + url.QueryEscape(afterSeq)
-	}
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, sseURL, nil)
-	if err != nil {
-		http.Error(w, "SSE request failed", http.StatusInternalServerError)
-		return
-	}
-	req.Header.Set("Accept", "text/event-stream")
-
-	// Use a client without timeout for the long-lived SSE connection.
-	sseClient := &http.Client{Timeout: 0}
-	resp, err := sseClient.Do(req)
+	wsURL, err := websocketURL(h.apiURL)
 	if err != nil {
 		http.Error(w, "SSE connect failed: "+err.Error(), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
+	header := http.Header{}
+	header.Set("Origin", "http://localhost")
+	conn, resp, err := websocket.DefaultDialer.DialContext(r.Context(), wsURL, header)
+	if err != nil {
+		if resp != nil {
+			http.Error(w, "SSE connect failed: "+resp.Status, http.StatusBadGateway)
+			return
+		}
+		http.Error(w, "SSE connect failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer conn.Close()
 
 	// On upstream error, forward the error response as-is so the browser's
 	// EventSource sees a non-200 status and backs off properly. Without this
@@ -1819,43 +1956,100 @@ func (h *APIHandler) handleSSEProxy(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Send initial connection event.
-	fmt.Fprintf(w, "event: connected\ndata: ok\n\n") //nolint:errcheck // best-effort SSE write
+	var hello websocketHelloEnvelope
+	if err := conn.ReadJSON(&hello); err != nil || hello.Type != "hello" {
+		http.Error(w, "SSE connect failed: invalid websocket hello", http.StatusBadGateway)
+		return
+	}
+
+	afterCursor := r.URL.Query().Get("after_seq")
+	if afterCursor == "" {
+		afterCursor = r.Header.Get("Last-Event-ID")
+	}
+	start := websocketRequestEnvelope{
+		Type:   "request",
+		ID:     "dashboard-events-1",
+		Action: "subscription.start",
+		Payload: map[string]any{
+			"kind": "events",
+		},
+	}
+	if h.cityScope != "" {
+		start.Scope = &websocketScope{City: h.cityScope}
+		if afterCursor != "" {
+			start.Payload = map[string]any{
+				"kind":      "events",
+				"after_seq": afterCursor,
+			}
+		}
+	} else if afterCursor != "" {
+		start.Payload = map[string]any{
+			"kind":         "events",
+			"after_cursor": afterCursor,
+		}
+	}
+	if err := conn.WriteJSON(start); err != nil {
+		http.Error(w, "SSE subscription failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	var startResp websocketResponseEnvelope
+	if err := conn.ReadJSON(&startResp); err != nil || startResp.Type != "response" || startResp.ID != start.ID {
+		http.Error(w, "SSE subscription failed", http.StatusBadGateway)
+		return
+	}
+
+	fmt.Fprintf(w, "event: connected\ndata: ok\n\n") //nolint:errcheck
 	flusher.Flush()
 
-	// Proxy the upstream SSE stream, preserving event types and IDs.
-	// Upstream format: "event: <type>\nid: <seq>\ndata: <json>\n\n"
-	// We forward: "event: gc-event\nid: <seq>\ndata: <json>\n\n"
-	// The browser parses the event type from the JSON data payload and
-	// uses Last-Event-ID for automatic reconnection on disconnect.
-	//
-	// Fields are buffered until the blank-line delimiter, then emitted as a
-	// complete event. This eliminates any dependency on field ordering
-	// (the SSE spec does not mandate id-before-data).
-	scanner := bufio.NewScanner(resp.Body)
-	var currentID, currentData string
-	for scanner.Scan() {
-		line := scanner.Text()
-		switch {
-		case strings.HasPrefix(line, "id:"):
-			currentID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-		case strings.HasPrefix(line, "data:"):
-			currentData = strings.TrimPrefix(line, "data:")
-		case line == "":
-			// Blank line = SSE event delimiter. Emit buffered event.
-			if currentData != "" {
-				if currentID != "" {
-					fmt.Fprintf(w, "event: gc-event\nid: %s\ndata:%s\n\n", currentID, currentData) //nolint:errcheck // best-effort SSE write
+	keepalive := time.NewTicker(15 * time.Second)
+	defer keepalive.Stop()
+	go func() {
+		<-r.Context().Done()
+		_ = conn.Close()
+	}()
+
+	type readResult struct {
+		event websocketEventEnvelope
+		err   error
+	}
+	ch := make(chan readResult, 1)
+	readNext := func() {
+		go func() {
+			var event websocketEventEnvelope
+			err := conn.ReadJSON(&event)
+			select {
+			case ch <- readResult{event: event, err: err}:
+			case <-r.Context().Done():
+			}
+		}()
+	}
+	readNext()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck
+			flusher.Flush()
+		case result := <-ch:
+			if result.err != nil {
+				return
+			}
+			if result.event.Type == "event" {
+				eventID := result.event.Cursor
+				if eventID == "" && result.event.Index > 0 {
+					eventID = fmt.Sprintf("%d", result.event.Index)
+				}
+				if eventID != "" {
+					fmt.Fprintf(w, "event: gc-event\nid: %s\ndata:%s\n\n", eventID, result.event.Payload) //nolint:errcheck
 				} else {
-					fmt.Fprintf(w, "event: gc-event\ndata:%s\n\n", currentData) //nolint:errcheck // best-effort SSE write
+					fmt.Fprintf(w, "event: gc-event\ndata:%s\n\n", result.event.Payload) //nolint:errcheck
 				}
 				flusher.Flush()
 			}
-			currentID, currentData = "", ""
-		case strings.HasPrefix(line, ":"):
-			// Forward keepalive comments to prevent connection timeout.
-			fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck // best-effort SSE write
-			flusher.Flush()
+			readNext()
 		}
 	}
 }

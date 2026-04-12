@@ -7,8 +7,9 @@
     // Selected city: prefer URL query param, fall back to server-rendered meta tag.
     // The meta tag ensures the first load (no ?city= in URL) still scopes API calls
     // to the city the server selected as default.
+    var _selectedCityMeta = document.querySelector('meta[name="selected-city"]');
     var _selectedCity = new URLSearchParams(window.location.search).get('city') ||
-        (document.querySelector('meta[name="selected-city"]') || {}).getAttribute('content') || '';
+        (_selectedCityMeta ? _selectedCityMeta.getAttribute('content') : '') || '';
 
     // ============================================
     // CSRF PROTECTION
@@ -82,7 +83,7 @@
             if (window.pauseRefresh) return;
             var dashboard = document.getElementById('dashboard-main');
             if (dashboard && typeof htmx !== 'undefined') {
-                htmx.trigger(dashboard, 'sse:dashboard-update');
+                htmx.trigger(dashboard, 'dashboard:update');
             }
         }, 500);
     }

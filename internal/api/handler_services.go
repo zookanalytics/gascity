@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -9,24 +10,18 @@ import (
 )
 
 func (s *Server) handleServiceList(w http.ResponseWriter, _ *http.Request) {
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeListJSON(w, s.latestIndex(), []any{}, 0)
-		return
-	}
-	items := reg.List()
+	items := s.listServices()
 	writeListJSON(w, s.latestIndex(), items, len(items))
 }
 
 func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeError(w, http.StatusNotFound, "not_found", "service "+r.PathValue("name")+" not found")
-		return
-	}
-	item, ok := reg.Get(r.PathValue("name"))
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "service "+r.PathValue("name")+" not found")
+	item, err := s.getService(r.PathValue("name"))
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, "not_found", err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	writeIndexJSON(w, s.latestIndex(), item)
@@ -34,12 +29,7 @@ func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	reg := s.state.ServiceRegistry()
-	if reg == nil {
-		writeError(w, http.StatusNotFound, "not_found", "service "+name+" not found")
-		return
-	}
-	if err := reg.Restart(name); err != nil {
+	if err := s.restartService(name); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			writeError(w, http.StatusNotFound, "not_found", err.Error())
 			return
@@ -48,6 +38,34 @@ func (s *Server) handleServiceRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "action": "restart", "service": name})
+}
+
+func (s *Server) listServices() []workspacesvc.Status {
+	reg := s.state.ServiceRegistry()
+	if reg == nil {
+		return []workspacesvc.Status{}
+	}
+	return reg.List()
+}
+
+func (s *Server) getService(name string) (workspacesvc.Status, error) {
+	reg := s.state.ServiceRegistry()
+	if reg == nil {
+		return workspacesvc.Status{}, httpError{status: http.StatusNotFound, code: "not_found", message: fmt.Sprintf("service %q not found", name)}
+	}
+	item, ok := reg.Get(name)
+	if !ok {
+		return workspacesvc.Status{}, httpError{status: http.StatusNotFound, code: "not_found", message: fmt.Sprintf("service %q not found", name)}
+	}
+	return item, nil
+}
+
+func (s *Server) restartService(name string) error {
+	reg := s.state.ServiceRegistry()
+	if reg == nil {
+		return httpError{status: http.StatusNotFound, code: "not_found", message: fmt.Sprintf("service %q not found", name)}
+	}
+	return reg.Restart(name)
 }
 
 func (s *Server) handleServiceProxy(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,3 @@
+
+type AnonymousSchema_3 = "health.get" | "cities.list" | "city.get" | "city.patch" | "config.get" | "config.explain" | "config.validate" | "status.get" | "sessions.list" | "beads.list" | "beads.ready" | "bead.get" | "bead.create" | "bead.close" | "bead.update" | "mail.list" | "mail.get" | "mail.read" | "mail.reply" | "mail.send" | "events.list" | "rigs.list" | "convoys.list" | "convoy.get" | "sling.run" | "services.list" | "service.get" | "service.restart" | "packs.list" | "providers.list" | "provider.get" | "agent.suspend" | "agent.resume" | "rig.suspend" | "rig.resume" | "rig.restart" | "session.kill" | "session.pending" | "session.submit" | "session.transcript" | "subscription.start" | "subscription.stop";
+export { AnonymousSchema_3 };

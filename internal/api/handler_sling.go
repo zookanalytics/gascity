@@ -49,24 +49,34 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp, status, err := s.runSling(r.Context(), body)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeStructuredError(w, herr.status, herr.code, herr.message, herr.details)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
+		return
+	}
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) runSling(ctx context.Context, body slingBody) (*slingResponse, int, error) {
 	cfg := s.state.Config()
 	agentCfg, ok := findAgent(cfg, body.Target)
 	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "target "+body.Target+" not found")
-		return
+		return nil, 0, httpError{status: http.StatusNotFound, code: "not_found", message: "target " + body.Target + " not found"}
 	}
 
 	if body.Bead == "" && body.Formula == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "bead or formula is required")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "bead or formula is required"}
 	}
 	if body.Bead != "" && body.Formula != "" {
-		writeError(w, http.StatusBadRequest, "invalid", "bead and formula are mutually exclusive")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "bead and formula are mutually exclusive"}
 	}
 	if body.Bead != "" && body.AttachedBeadID != "" {
-		writeError(w, http.StatusBadRequest, "invalid", "bead and attached_bead_id are mutually exclusive")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "bead and attached_bead_id are mutually exclusive"}
 	}
 
 	body.ScopeKind = strings.TrimSpace(body.ScopeKind)
@@ -82,28 +92,23 @@ func (s *Server) handleSling(w http.ResponseWriter, r *http.Request) {
 		agentCfg.EffectiveDefaultSlingFormula() != "" &&
 		(len(body.Vars) > 0 || body.Title != "" || body.ScopeKind != "" || body.ScopeRef != "")
 	if body.Formula == "" && body.AttachedBeadID != "" {
-		writeError(w, http.StatusBadRequest, "invalid", "formula is required when attached_bead_id is provided")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "formula is required when attached_bead_id is provided"}
 	}
 	if body.Formula == "" && workflowLaunchOptions && !defaultFormulaLaunch {
-		writeError(w, http.StatusBadRequest, "invalid", "formula or target default formula is required when vars, title, or scope are provided")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "formula or target default formula is required when vars, title, or scope are provided"}
 	}
 	if (body.ScopeKind == "") != (body.ScopeRef == "") {
-		writeError(w, http.StatusBadRequest, "invalid", "scope_kind and scope_ref must be provided together")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "scope_kind and scope_ref must be provided together"}
 	}
 	if body.ScopeKind != "" && body.ScopeKind != "city" && body.ScopeKind != "rig" {
-		writeError(w, http.StatusBadRequest, "invalid", "scope_kind must be 'city' or 'rig'")
-		return
+		return nil, 0, httpError{status: http.StatusBadRequest, code: "invalid", message: "scope_kind must be 'city' or 'rig'"}
 	}
 
-	resp, status, code, message := s.execSling(r.Context(), body, agentCfg.EffectiveDefaultSlingFormula())
+	resp, status, code, message := s.execSling(ctx, body, agentCfg.EffectiveDefaultSlingFormula())
 	if code != "" {
-		writeError(w, status, code, message)
-		return
+		return nil, 0, httpError{status: status, code: code, message: message}
 	}
-	writeJSON(w, status, resp)
+	return resp, status, nil
 }
 
 // execSling builds gc sling CLI args from the request body and shells out.

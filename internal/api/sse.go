@@ -11,27 +11,44 @@ const sseKeepalive = 15 * time.Second
 
 // writeSSE writes a single SSE event to w and flushes.
 func writeSSE(w http.ResponseWriter, eventType string, id uint64, data []byte) {
-	fmt.Fprintf(w, "event: %s\nid: %d\ndata: %s\n\n", eventType, id, data) //nolint:errcheck
-	// Use ResponseController to flush through wrapped writers (e.g., logging middleware).
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		// Flushing not supported; best-effort.
-		_ = err
-	}
+	_ = writeSSEEvent(w, eventType, id, data)
 }
 
 func writeSSEWithStringID(w http.ResponseWriter, eventType, id string, data []byte) {
-	fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", eventType, id, data) //nolint:errcheck
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
-	}
+	_ = writeSSEStringIDEvent(w, eventType, id, data)
 }
 
 // writeSSEComment writes a keepalive comment line and flushes.
 func writeSSEComment(w http.ResponseWriter) {
-	fmt.Fprintf(w, ": keepalive\n\n") //nolint:errcheck
-	if err := http.NewResponseController(w).Flush(); err != nil {
-		_ = err
+	_ = writeSSECommentLine(w)
+}
+
+func writeSSEEvent(w http.ResponseWriter, eventType string, id uint64, data []byte) error {
+	if _, err := fmt.Fprintf(w, "event: %s\nid: %d\ndata: %s\n\n", eventType, id, data); err != nil {
+		return err
 	}
+	return flushSSEWriter(w)
+}
+
+func writeSSEStringIDEvent(w http.ResponseWriter, eventType, id string, data []byte) error {
+	if _, err := fmt.Fprintf(w, "event: %s\nid: %s\ndata: %s\n\n", eventType, id, data); err != nil {
+		return err
+	}
+	return flushSSEWriter(w)
+}
+
+func writeSSECommentLine(w http.ResponseWriter) error {
+	if _, err := fmt.Fprintf(w, ": keepalive\n\n"); err != nil {
+		return err
+	}
+	return flushSSEWriter(w)
+}
+
+func flushSSEWriter(w http.ResponseWriter) error {
+	if err := http.NewResponseController(w).Flush(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // parseAfterSeq reads the reconnect position from Last-Event-ID or ?after_seq.

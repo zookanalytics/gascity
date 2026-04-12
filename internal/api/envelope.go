@@ -41,6 +41,10 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, Error{Code: code, Message: msg})
 }
 
+func writeStructuredError(w http.ResponseWriter, status int, code, msg string, details []FieldError) {
+	writeJSON(w, status, Error{Code: code, Message: msg, Details: details})
+}
+
 // writeListJSON writes a list response with X-GC-Index header.
 func writeListJSON(w http.ResponseWriter, index uint64, items any, total int) {
 	w.Header().Set("X-GC-Index", strconv.FormatUint(index, 10))

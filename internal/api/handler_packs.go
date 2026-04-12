@@ -13,6 +13,10 @@ type packResponse struct {
 }
 
 func (s *Server) handlePackList(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"packs": s.listPacks()})
+}
+
+func (s *Server) listPacks() []packResponse {
 	cfg := s.state.Config()
 	names := make([]string, 0, len(cfg.Packs))
 	for name := range cfg.Packs {
@@ -29,5 +33,5 @@ func (s *Server) handlePackList(w http.ResponseWriter, _ *http.Request) {
 			Path:   src.Path,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"packs": packs})
+	return packs
 }

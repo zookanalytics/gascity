@@ -89,16 +89,20 @@ func providerPublicFromMerged(name string, spec config.ProviderSpec, builtin, ci
 }
 
 func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
+	items := s.listProviders(r.URL.Query().Get("view") == "public")
+	writeListJSON(w, s.latestIndex(), items, len(items))
+}
+
+func (s *Server) listProviders(isPublic bool) []any {
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 	builtinOrder := config.BuiltinProviderOrder()
-	isPublic := r.URL.Query().Get("view") == "public"
 
 	// Collect all providers: city-level overrides + builtins.
 	seen := make(map[string]bool)
 
 	if isPublic {
-		var providers []providerPublicResponse
+		var providers []any
 		// City-level providers first (sorted alphabetically).
 		// Merge with builtins to inherit OptionsSchema, OptionDefaults, etc.
 		var cityNames []string
@@ -126,11 +130,10 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 			}
 			providers = append(providers, providerPublicFromMerged(name, builtins[name], true, false))
 		}
-		writeListJSON(w, s.latestIndex(), providers, len(providers))
-		return
+			return providers
 	}
 
-	var providers []providerResponse
+	var providers []any
 	// City-level providers first (sorted alphabetically).
 	var cityNames []string
 	for name := range cfg.Providers {
@@ -152,26 +155,33 @@ func (s *Server) handleProviderList(w http.ResponseWriter, r *http.Request) {
 		providers = append(providers, providerFromSpec(name, builtins[name], true, false))
 	}
 
-	writeListJSON(w, s.latestIndex(), providers, len(providers))
+	return providers
 }
 
 func (s *Server) handleProviderGet(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	provider, err := s.getProvider(name)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	writeIndexJSON(w, s.latestIndex(), provider)
+}
+
+func (s *Server) getProvider(name string) (providerResponse, error) {
 	cfg := s.state.Config()
 	builtins := config.BuiltinProviders()
 
 	// Check city-level first.
 	if spec, ok := cfg.Providers[name]; ok {
 		_, isBuiltin := builtins[name]
-		writeIndexJSON(w, s.latestIndex(), providerFromSpec(name, spec, isBuiltin, true))
-		return
+		return providerFromSpec(name, spec, isBuiltin, true), nil
 	}
 
 	// Check builtins.
 	if spec, ok := builtins[name]; ok {
-		writeIndexJSON(w, s.latestIndex(), providerFromSpec(name, spec, true, false))
-		return
+		return providerFromSpec(name, spec, true, false), nil
 	}
 
-	writeError(w, http.StatusNotFound, "not_found", "provider "+name+" not found")
+	return providerResponse{}, httpError{status: http.StatusNotFound, code: "not_found", message: "provider " + name + " not found"}
 }

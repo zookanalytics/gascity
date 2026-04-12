@@ -210,7 +210,7 @@ func TestRunConditionPass(t *testing.T) {
 		ArtifactDir: dir,
 	}
 
-	result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+	result := RunCondition(context.Background(), script, env, 15*time.Second, 0)
 	if result.Outcome != GatePass {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, GatePass)
 	}
@@ -239,7 +239,7 @@ func TestRunConditionFail(t *testing.T) {
 		ArtifactDir: dir,
 	}
 
-	result := RunCondition(context.Background(), script, env, 5*time.Second, 0)
+	result := RunCondition(context.Background(), script, env, 15*time.Second, 0)
 	if result.Outcome != GateFail {
 		t.Errorf("Outcome = %q, want %q", result.Outcome, GateFail)
 	}

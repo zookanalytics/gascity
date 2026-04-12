@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -74,6 +73,12 @@ type sessionRawTranscriptResponse struct {
 	Format     string                     `json:"format"`
 	Messages   []json.RawMessage          `json:"messages"`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
+}
+
+type sessionTranscriptQuery struct {
+	Tail   int
+	Before string
+	Raw    bool
 }
 
 func (s *Server) sessionLogPaths() []string {
@@ -594,145 +599,25 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 }
 
 func (s *Server) handleSessionTranscript(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
-	mgr := s.sessionManager(store)
-	info, err := mgr.Get(id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	wantRaw := r.URL.Query().Get("format") == "raw"
-
-	if path != "" {
-		tail := 0
-		if v := r.URL.Query().Get("tail"); v != "" {
-			if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
-				tail = n
-			}
+	tail := 0
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, convErr := strconv.Atoi(v); convErr == nil && n >= 0 {
+			tail = n
 		}
-		before := r.URL.Query().Get("before")
-
-		if wantRaw {
-			// Raw format uses ReadFileRaw (no display-type filtering) so
-			// all entry types are returned — consistent with the raw
-			// stream and snapshot paths.
-			var rawSess *sessionlog.Session
-			if before != "" {
-				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, tail, before)
-			} else {
-				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, tail)
-			}
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-				return
-			}
-			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
-			for _, entry := range rawSess.Messages {
-				if len(entry.Raw) > 0 {
-					msgs = append(msgs, entry.Raw)
-				}
-			}
-			writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
-				ID:         info.ID,
-				Template:   info.Template,
-				Format:     "raw",
-				Messages:   msgs,
-				Pagination: rawSess.Pagination,
-			})
-			return
-		}
-
-		var sess *sessionlog.Session
-		if before != "" {
-			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, tail, before)
-		} else {
-			sess, err = sessionlog.ReadProviderFile(info.Provider, path, tail)
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "reading session log: "+err.Error())
-			return
-		}
-
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			turn := entryToTurn(entry)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-		}
-		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-			ID:         info.ID,
-			Template:   info.Template,
-			Format:     "conversation",
-			Turns:      turns,
-			Pagination: sess.Pagination,
-		})
-		return
 	}
-
-	if wantRaw {
-		writeJSON(w, http.StatusOK, sessionRawTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "raw",
-			Messages: []json.RawMessage{},
-		})
-		return
-	}
-
-	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
-		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
-		if peekErr != nil {
-			writeError(w, http.StatusInternalServerError, "internal", peekErr.Error())
-			return
-		}
-		turns := []outputTurn{}
-		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
-		}
-		writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "text",
-			Turns:    turns,
-		})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, sessionTranscriptResponse{
-		ID:       info.ID,
-		Template: info.Template,
-		Format:   "conversation",
-		Turns:    []outputTurn{},
+	resp, err := s.getSessionTranscript(r.PathValue("id"), sessionTranscriptQuery{
+		Tail:   tail,
+		Before: r.URL.Query().Get("before"),
+		Raw:    r.URL.Query().Get("format") == "raw",
 	})
+	if err != nil {
+		writeSocketCompatibleSessionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSessionSubmit(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
 	var body sessionSubmitRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
@@ -760,26 +645,11 @@ func (s *Server) handleSessionSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
+	resp, err := s.submitSessionTarget(r.Context(), r.PathValue("id"), body.Message, body.Intent)
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		writeResolveError(w, err)
+		writeSocketCompatibleSessionError(w, err)
 		return
-	}
-
-	outcome, err := s.submitMessageToSession(r.Context(), store, id, body.Message, body.Intent)
-	if err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
-	}
-
-	resp := map[string]any{
-		"status": "accepted",
-		"id":     id,
-		"queued": outcome.Queued,
-		"intent": string(body.Intent),
 	}
 	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
 	writeJSON(w, http.StatusAccepted, resp)
@@ -830,24 +700,79 @@ func (s *Server) handleSessionMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.killSessionTarget(r.PathValue("id"))
+	if err != nil {
+		writeSocketCompatibleSessionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) submitSessionTarget(ctx context.Context, target, message string, intent session.SubmitIntent) (map[string]any, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
-		writeResolveError(w, err)
-		return
+		return nil, err
 	}
+	outcome, err := s.submitMessageToSession(ctx, store, id, message, intent)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"status": "accepted",
+		"id":     id,
+		"queued": outcome.Queued,
+		"intent": string(intent),
+	}, nil
+}
 
+func (s *Server) killSessionTarget(target string) (map[string]string, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	id, err := s.resolveSessionIDWithConfig(store, target)
+	if err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store)
 	if err := mgr.Kill(id); err != nil {
-		writeSessionManagerError(w, err)
-		return
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "id": id})
+	return map[string]string{"status": "ok", "id": id}, nil
+}
+
+func writeSocketCompatibleSessionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, session.ErrAmbiguous), errors.Is(err, errConfiguredNamedSessionConflict):
+		writeError(w, http.StatusConflict, "ambiguous", err.Error())
+	case errors.Is(err, session.ErrSessionNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case herrStatus(err) != 0:
+		herr := asHTTPError(err)
+		writeError(w, herr.status, herr.code, herr.message)
+	default:
+		writeSessionManagerError(w, err)
+	}
+}
+
+func asHTTPError(err error) httpError {
+	var herr httpError
+	if errors.As(err, &herr) {
+		return herr
+	}
+	return httpError{}
+}
+
+func herrStatus(err error) int {
+	var herr httpError
+	if errors.As(err, &herr) {
+		return herr.status
+	}
+	return 0
 }
 
 func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
@@ -872,53 +797,148 @@ func (s *Server) handleSessionStop(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionPending(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
+	resp, err := s.getSessionPending(r.PathValue("id"))
+	if err != nil {
+		writeSocketCompatibleSessionError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
+func (s *Server) getSessionPending(target string) (sessionPendingResponse, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return sessionPendingResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
-		writeResolveError(w, err)
-		return
+		return sessionPendingResponse{}, err
 	}
 
 	mgr := s.sessionManager(store)
 	pending, supported, err := mgr.Pending(id)
 	if err != nil {
-		writeSessionManagerError(w, err)
-		return
+		return sessionPendingResponse{}, err
 	}
-	writeJSON(w, http.StatusOK, sessionPendingResponse{
-		Supported: supported,
-		Pending:   pending,
-	})
+	return sessionPendingResponse{Supported: supported, Pending: pending}, nil
+}
+
+func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuery) (any, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, target)
+	if err != nil {
+		return nil, err
+	}
+
+	mgr := s.sessionManager(store)
+	info, err := mgr.Get(id)
+	if err != nil {
+		return nil, err
+	}
+
+	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
+	if err != nil {
+		return nil, err
+	}
+
+	if path != "" {
+		if query.Raw {
+			var rawSess *sessionlog.Session
+			if query.Before != "" {
+				rawSess, err = sessionlog.ReadProviderFileRawOlder(info.Provider, path, query.Tail, query.Before)
+			} else {
+				rawSess, err = sessionlog.ReadProviderFileRaw(info.Provider, path, query.Tail)
+			}
+			if err != nil {
+				return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
+			}
+			msgs := make([]json.RawMessage, 0, len(rawSess.Messages))
+			for _, entry := range rawSess.Messages {
+				if len(entry.Raw) > 0 {
+					msgs = append(msgs, entry.Raw)
+				}
+			}
+			return sessionRawTranscriptResponse{
+				ID:         info.ID,
+				Template:   info.Template,
+				Format:     "raw",
+				Messages:   msgs,
+				Pagination: rawSess.Pagination,
+			}, nil
+		}
+
+		var sess *sessionlog.Session
+		if query.Before != "" {
+			sess, err = sessionlog.ReadProviderFileOlder(info.Provider, path, query.Tail, query.Before)
+		} else {
+			sess, err = sessionlog.ReadProviderFile(info.Provider, path, query.Tail)
+		}
+		if err != nil {
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
+		}
+
+		turns := make([]outputTurn, 0, len(sess.Messages))
+		for _, entry := range sess.Messages {
+			turn := entryToTurn(entry)
+			if turn.Text == "" {
+				continue
+			}
+			turns = append(turns, turn)
+		}
+		return sessionTranscriptResponse{
+			ID:         info.ID,
+			Template:   info.Template,
+			Format:     "conversation",
+			Turns:      turns,
+			Pagination: sess.Pagination,
+		}, nil
+	}
+
+	if query.Raw {
+		return sessionRawTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "raw",
+			Messages: []json.RawMessage{},
+		}, nil
+	}
+
+	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
+		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
+		if peekErr != nil {
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: peekErr.Error()}
+		}
+		turns := []outputTurn{}
+		if output != "" {
+			turns = append(turns, outputTurn{Role: "output", Text: output})
+		}
+		return sessionTranscriptResponse{
+			ID:       info.ID,
+			Template: info.Template,
+			Format:   "text",
+			Turns:    turns,
+		}, nil
+	}
+
+	return sessionTranscriptResponse{
+		ID:       info.ID,
+		Template: info.Template,
+		Format:   "conversation",
+		Turns:    []outputTurn{},
+	}, nil
 }
 
 func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-
-	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
-	if err != nil {
-		writeResolveError(w, err)
-		return
-	}
-
 	var body sessionRespondRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	if body.Action == "" {
-		writeError(w, http.StatusBadRequest, "invalid", "action is required")
-		return
-	}
-
 	idemKey := scopedIdemKey(r, r.Header.Get("Idempotency-Key"))
 	var bodyHash string
 	if idemKey != "" {
@@ -927,7 +947,37 @@ func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	resp, err := s.respondSessionTarget(r.PathValue("id"), body)
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+			return
+		}
+		if errors.Is(err, session.ErrAmbiguous) || errors.Is(err, errConfiguredNamedSessionConflict) || errors.Is(err, session.ErrSessionNotFound) {
+			writeResolveError(w, err)
+			return
+		}
+		writeSessionManagerError(w, err)
+		return
+	}
+	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
+	writeJSON(w, http.StatusAccepted, resp)
+}
 
+func (s *Server) respondSessionTarget(identifier string, body sessionRespondRequest) (map[string]string, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	if body.Action == "" {
+		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: "action is required"}
+	}
+	id, err := s.resolveSessionIDWithConfig(store, identifier)
+	if err != nil {
+		return nil, err
+	}
 	mgr := s.sessionManager(store)
 	if err := mgr.Respond(id, runtime.InteractionResponse{
 		RequestID: body.RequestID,
@@ -935,14 +985,9 @@ func (s *Server) handleSessionRespond(w http.ResponseWriter, r *http.Request) {
 		Text:      body.Text,
 		Metadata:  body.Metadata,
 	}); err != nil {
-		s.idem.unreserve(idemKey)
-		writeSessionManagerError(w, err)
-		return
+		return nil, err
 	}
-
-	resp := map[string]string{"status": "accepted", "id": id}
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusAccepted, resp)
-	writeJSON(w, http.StatusAccepted, resp)
+	return map[string]string{"status": "accepted", "id": id}, nil
 }
 
 func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
@@ -1030,438 +1075,28 @@ func (s *Server) handleSessionStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) emitClosedSessionSnapshot(w http.ResponseWriter, info session.Info, logPath string) {
-	if logPath == "" {
-		return
-	}
-	sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
-	if err != nil {
-		return
-	}
-
-	turns := make([]outputTurn, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		turn := entryToTurn(entry)
-		if turn.Text == "" {
-			continue
-		}
-		turns = append(turns, turn)
-	}
-	if len(turns) == 0 {
-		return
-	}
-
-	data, err := json.Marshal(sessionTranscriptResponse{
-		ID:       info.ID,
-		Template: info.Template,
-		Format:   "conversation",
-		Turns:    turns,
-	})
-	if err != nil {
-		return
-	}
-	writeSSE(w, "turn", 1, data)
-	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	s.emitClosedSessionSnapshotWithEmitter(newSSESessionStreamEmitter(w), info, logPath)
 }
 
 func (s *Server) emitClosedSessionSnapshotRaw(w http.ResponseWriter, info session.Info, logPath string) {
-	if logPath == "" {
-		return
-	}
-	sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 0)
-	if err != nil {
-		return
-	}
-
-	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-	for _, entry := range sess.Messages {
-		if len(entry.Raw) == 0 {
-			continue
-		}
-		rawMessages = append(rawMessages, entry.Raw)
-	}
-	if len(rawMessages) == 0 {
-		return
-	}
-
-	data, err := json.Marshal(sessionRawTranscriptResponse{
-		ID:       info.ID,
-		Template: info.Template,
-		Format:   "raw",
-		Messages: rawMessages,
-	})
-	if err != nil {
-		return
-	}
-	writeSSE(w, "message", 1, data)
-	// Closed session is definitionally idle.
-	actData, _ := json.Marshal(map[string]string{"activity": "idle"})
-	writeSSE(w, "activity", 2, actData)
+	s.emitClosedSessionSnapshotRawWithEmitter(newSSESessionStreamEmitter(w), info, logPath)
 }
 
 func (s *Server) streamSessionTranscriptLogRaw(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	var lastSentUUID string
-	var seq uint64
-	var lastActivity string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() { lastSize = 0; lastActivity = "" }
-
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil {
-			return
-		}
-		if stat.Size() == lastSize {
-			return
-		}
-
-		// Use tail=1 (last compaction segment) to limit parsing scope,
-		// consistent with the non-raw streaming path.
-		sess, err := sessionlog.ReadProviderFileRaw(info.Provider, logPath, 1)
-		if err != nil {
-			return
-		}
-		lastSize = stat.Size()
-
-		// Compute activity early (used after message emission).
-		activity := sessionlog.InferActivityFromEntries(sess.Messages)
-
-		rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			if len(entry.Raw) == 0 {
-				continue
-			}
-			rawMessages = append(rawMessages, entry.Raw)
-			uuids = append(uuids, entry.UUID)
-		}
-
-		// Emit messages if there are new ones.
-		if len(rawMessages) > 0 {
-			var toSend []json.RawMessage
-
-			if lastSentUUID == "" {
-				// First emission: send everything.
-				toSend = rawMessages
-			} else {
-				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
-						toSend = rawMessages[i+1:]
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Cursor lost (DAG rewrite, compaction). Instead of
-					// re-syncing from the beginning (which causes duplicate/
-					// out-of-order messages on the client), emit only messages
-					// we haven't previously sent.
-					log.Printf("session stream raw: cursor %s lost, emitting only new messages", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, rawMessages[i])
-						}
-					}
-				}
-			}
-
-			if len(toSend) > 0 {
-				seq++
-				data, err := json.Marshal(sessionRawTranscriptResponse{
-					ID:       info.ID,
-					Template: info.Template,
-					Format:   "raw",
-					Messages: toSend,
-				})
-				if err == nil {
-					writeSSE(w, "message", seq, data)
-				}
-			}
-
-			// Track all current UUIDs so cursor-lost can filter correctly.
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
-			}
-		}
-
-		// Emit activity after content so clients receive data before state change.
-		if activity != "" && activity != lastActivity {
-			lastActivity = activity
-			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
-		}
-	}
-
-	// Stall detection: when the log hasn't grown for 5s, check the tmux
-	// pane for a tool approval prompt. If found, emit a "pending" SSE event
-	// so the UI can show the approval panel.
-	var lastPendingID string
-	onStall := func() {
-		sp := s.state.SessionProvider()
-		ip, ok := sp.(runtime.InteractionProvider)
-		if !ok {
-			return
-		}
-		pending, err := ip.Pending(info.SessionName)
-		if err != nil || pending == nil {
-			if lastPendingID != "" {
-				// Approval cleared — emit activity update.
-				lastPendingID = ""
-				seq++
-				actData, _ := json.Marshal(map[string]string{"activity": "in-turn"})
-				writeSSE(w, "activity", seq, actData)
-			}
-			return
-		}
-		if pending.RequestID == lastPendingID {
-			return // already emitted this approval
-		}
-		lastPendingID = pending.RequestID
-		seq++
-		pendingData, _ := json.Marshal(pending)
-		writeSSE(w, "pending", seq, pendingData)
-	}
-
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) }, RunOpts{
-		OnStall:      onStall,
-		StallTimeout: 5 * time.Second,
-	})
+	s.streamSessionTranscriptLogRawWithEmitter(ctx, newSSESessionStreamEmitter(w), info, logPath)
 }
 
 func (s *Server) streamSessionTranscriptLog(ctx context.Context, w http.ResponseWriter, info session.Info, logPath string) {
-	lw := newLogFileWatcher(logPath)
-	defer lw.Close()
-
-	var lastSize int64
-	var lastSentUUID string
-	var seq uint64
-	var lastActivity string
-	sentUUIDs := make(map[string]struct{})
-	lw.onReset = func() { lastSize = 0; lastActivity = "" }
-
-	readAndEmit := func() {
-		stat, err := os.Stat(logPath)
-		if err != nil {
-			return
-		}
-		if stat.Size() == lastSize {
-			return
-		}
-
-		sess, err := sessionlog.ReadProviderFile(info.Provider, logPath, 0)
-		if err != nil {
-			return
-		}
-		lastSize = stat.Size()
-
-		// Compute activity early (used after turn emission).
-		activity := sessionlog.InferActivityFromEntries(sess.Messages)
-
-		turns := make([]outputTurn, 0, len(sess.Messages))
-		uuids := make([]string, 0, len(sess.Messages))
-		for _, entry := range sess.Messages {
-			turn := entryToTurn(entry)
-			if turn.Text == "" {
-				continue
-			}
-			turns = append(turns, turn)
-			uuids = append(uuids, entry.UUID)
-		}
-
-		// Emit turns if there are new ones.
-		if len(turns) > 0 {
-			var toSend []outputTurn
-
-			if lastSentUUID == "" {
-				// First emission: send everything.
-				toSend = turns
-			} else {
-				found := false
-				for i, uuid := range uuids {
-					if uuid == lastSentUUID {
-						toSend = turns[i+1:]
-						found = true
-						break
-					}
-				}
-				if !found {
-					// Cursor lost (DAG rewrite, compaction). Instead of
-					// re-syncing from the beginning (which causes duplicate/
-					// out-of-order messages on the client), emit only turns
-					// we haven't previously sent.
-					log.Printf("session stream: cursor %s lost, emitting only new turns", lastSentUUID)
-					for i, uuid := range uuids {
-						if _, seen := sentUUIDs[uuid]; !seen {
-							toSend = append(toSend, turns[i])
-						}
-					}
-				}
-			}
-
-			if len(toSend) > 0 {
-				seq++
-				data, err := json.Marshal(sessionTranscriptResponse{
-					ID:       info.ID,
-					Template: info.Template,
-					Format:   "conversation",
-					Turns:    toSend,
-				})
-				if err == nil {
-					writeSSE(w, "turn", seq, data)
-				}
-			}
-
-			// Track all current UUIDs so cursor-lost can filter correctly.
-			lastSentUUID = uuids[len(uuids)-1]
-			for _, uuid := range uuids {
-				sentUUIDs[uuid] = struct{}{}
-			}
-		}
-
-		// Emit activity after content so clients receive data before state change.
-		if activity != "" && activity != lastActivity {
-			lastActivity = activity
-			seq++
-			actData, _ := json.Marshal(map[string]string{"activity": activity})
-			writeSSE(w, "activity", seq, actData)
-		}
-	}
-
-	lw.Run(ctx, readAndEmit, func() { writeSSEComment(w) })
+	s.streamSessionTranscriptLogWithEmitter(ctx, newSSESessionStreamEmitter(w), info, logPath)
 }
 
 // streamSessionPeekRaw polls tmux pane content and wraps it as format=raw
 // messages so MC's JSONL rendering pipeline can display terminal output
 // (e.g. OAuth prompts, startup screens) when no transcript log exists yet.
 func (s *Server) streamSessionPeekRaw(ctx context.Context, w http.ResponseWriter, info session.Info) {
-	sp := s.state.SessionProvider()
-	poll := time.NewTicker(outputStreamPollInterval)
-	defer poll.Stop()
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	var lastOutput string
-	var seq uint64
-
-	var lastPeekPendingID string
-
-	emitPeek := func() {
-		if !sp.IsRunning(info.SessionName) {
-			return
-		}
-		output, err := sp.Peek(info.SessionName, 100)
-		if err != nil || output == lastOutput {
-			return
-		}
-		lastOutput = output
-		seq++
-
-		if output == "" {
-			return
-		}
-
-		// Wrap as a fake assistant message in raw JSONL format so MC's
-		// translate_transcript_response handles it like a normal transcript.
-		fakeMsg, _ := json.Marshal(map[string]interface{}{
-			"role": "assistant",
-			"content": []map[string]string{
-				{"type": "text", "text": output},
-			},
-		})
-		data, err := json.Marshal(sessionRawTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "raw",
-			Messages: []json.RawMessage{fakeMsg},
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "message", seq, data)
-
-		// Check for approval prompts in the pane output we already have.
-		if ip, ok := sp.(runtime.InteractionProvider); ok {
-			pending, pErr := ip.Pending(info.SessionName)
-			if pErr == nil && pending != nil && pending.RequestID != lastPeekPendingID {
-				lastPeekPendingID = pending.RequestID
-				seq++
-				pendingData, _ := json.Marshal(pending)
-				writeSSE(w, "pending", seq, pendingData)
-			} else if pending == nil && lastPeekPendingID != "" {
-				lastPeekPendingID = ""
-			}
-		}
-	}
-
-	emitPeek()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-poll.C:
-			emitPeek()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
+	s.streamSessionPeekRawWithEmitter(ctx, newSSESessionStreamEmitter(w), info)
 }
 
 func (s *Server) streamSessionPeek(ctx context.Context, w http.ResponseWriter, info session.Info) {
-	sp := s.state.SessionProvider()
-	poll := time.NewTicker(outputStreamPollInterval)
-	defer poll.Stop()
-	keepalive := time.NewTicker(sseKeepalive)
-	defer keepalive.Stop()
-
-	var lastOutput string
-	var seq uint64
-
-	emitPeek := func() {
-		if !sp.IsRunning(info.SessionName) {
-			return
-		}
-		output, err := sp.Peek(info.SessionName, 100)
-		if err != nil || output == lastOutput {
-			return
-		}
-		lastOutput = output
-		seq++
-
-		turns := []outputTurn{}
-		if output != "" {
-			turns = append(turns, outputTurn{Role: "output", Text: output})
-		}
-		data, err := json.Marshal(sessionTranscriptResponse{
-			ID:       info.ID,
-			Template: info.Template,
-			Format:   "text",
-			Turns:    turns,
-		})
-		if err != nil {
-			return
-		}
-		writeSSE(w, "turn", seq, data)
-	}
-
-	emitPeek()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-poll.C:
-			emitPeek()
-		case <-keepalive.C:
-			writeSSEComment(w)
-		}
-	}
+	s.streamSessionPeekWithEmitter(ctx, newSSESessionStreamEmitter(w), info)
 }

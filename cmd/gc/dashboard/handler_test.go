@@ -105,3 +105,43 @@ func TestConvoyHandlerServiceErrorRendersFetchFailedState(t *testing.T) {
 		t.Fatalf("response missing fetch-failed count badge:\n%s", body)
 	}
 }
+
+func TestConvoyHandlerUsesCustomDashboardUpdateEvent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v0/status":
+			_, _ = w.Write([]byte(`{"name":"test-city","path":"/tmp/city","agent_count":0,"rig_count":0,"running":0}`))
+		default:
+			_, _ = w.Write([]byte(`{"items":[],"total":0}`))
+		}
+	}))
+	defer srv.Close()
+
+	handler, err := NewConvoyHandler(
+		NewAPIFetcher(srv.URL, "/tmp/city", "test-city"),
+		false,
+		"",
+		"",
+		250*time.Millisecond,
+		"csrf-token",
+	)
+	if err != nil {
+		t.Fatalf("NewConvoyHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `hx-trigger="dashboard:update, every 30s [!window.pauseRefresh && !window.sseConnected]"`) {
+		t.Fatalf("response missing dashboard:update trigger:\n%s", body)
+	}
+	if strings.Contains(body, `hx-trigger="sse:dashboard-update`) {
+		t.Fatalf("response should not use sse-prefixed custom trigger:\n%s", body)
+	}
+}

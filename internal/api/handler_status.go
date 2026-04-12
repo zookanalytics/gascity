@@ -58,14 +58,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resp := s.statusSnapshot()
+	body, err := s.storeResponse(cacheKey, index, resp)
+	if err != nil {
+		writeIndexJSON(w, index, resp)
+		return
+	}
+	writeCachedJSON(w, r, index, body)
+}
+
+func (s *Server) statusSnapshot() statusResponse {
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 	cityName := s.state.CityName()
 	sessTmpl := cfg.Workspace.SessionTemplate
 
-	// Count agents by state. The top-level Running field preserves backward
-	// compatibility (raw process count), while Agents.* uses the mutually
-	// exclusive state priority chain from computeAgentState.
 	var ac agentCounts
 	var rawRunning int
 	for _, a := range cfg.Agents {
@@ -91,7 +98,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count rigs by state.
 	rc := rigCounts{Total: len(cfg.Rigs)}
 	for _, rig := range cfg.Rigs {
 		if rigSuspended(cfg, rig, sp, cityName, s.state.CityPath()) {
@@ -99,8 +105,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count work items (best-effort). Deduplicate stores that may be
-	// shared across rigs (e.g., when using the "file" bead provider).
 	var wc workCounts
 	stores := s.state.BeadStores()
 	seenStores := make(map[string]bool)
@@ -116,8 +120,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		for _, b := range list {
-			// Only count work beads (tasks, molecules). Skip mail,
-			// convoys, convergence, and other non-work bead types.
 			switch b.Type {
 			case "message", "convoy", "convergence":
 				continue
@@ -133,7 +135,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Count mail (best-effort). Deduplicate shared providers.
 	var mc mailCounts
 	seenProvs := make(map[string]bool)
 	for _, mp := range s.state.MailProviders() {
@@ -149,8 +150,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
-
-	resp := statusResponse{
+	return statusResponse{
 		Name:       cityName,
 		Path:       s.state.CityPath(),
 		Version:    s.state.Version(),
@@ -164,12 +164,6 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Work:       wc,
 		Mail:       mc,
 	}
-	body, err := s.storeResponse(cacheKey, index, resp)
-	if err != nil {
-		writeIndexJSON(w, index, resp)
-		return
-	}
-	writeCachedJSON(w, r, index, body)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

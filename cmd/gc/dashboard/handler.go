@@ -6,15 +6,15 @@ import (
 	"crypto/rand"
 	"embed"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"html/template"
 	"io/fs"
 	"log"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
+
+	gcapi "github.com/gastownhall/gascity/internal/api"
 )
 
 //go:embed static
@@ -465,28 +465,13 @@ func computeSummary(workers []WorkerRow, assigned []AssignedRow, issues []IssueR
 
 // fetchCityTabs fetches the city list from the supervisor API for the city selector.
 func fetchCityTabs(apiURL string) []CityTab {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/v0/cities")
-	if err != nil || resp.StatusCode != http.StatusOK {
-		if resp != nil {
-			resp.Body.Close() //nolint:errcheck
-		}
+	client := gcapi.NewClient(apiURL)
+	items, err := client.ListCities()
+	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	var list struct {
-		Items []struct {
-			Name    string `json:"name"`
-			Running bool   `json:"running"`
-		} `json:"items"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&list) != nil {
-		return nil
-	}
-
-	tabs := make([]CityTab, 0, len(list.Items))
-	for _, c := range list.Items {
+	tabs := make([]CityTab, 0, len(items))
+	for _, c := range items {
 		tabs = append(tabs, CityTab{Name: c.Name, Running: c.Running})
 	}
 	return tabs

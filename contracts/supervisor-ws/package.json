@@ -1,0 +1,14 @@
+{
+  "name": "supervisor-ws-contract",
+  "private": true,
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@asyncapi/modelina-cli": "5.10.1"
+  },
+  "scripts": {
+    "generate": "npm run generate:typescript && npm run generate:golang && npm run generate:rust",
+    "generate:typescript": "modelina generate typescript asyncapi.yaml -o generated/typescript --tsModelType interface --tsEnumType union --tsExportType named --tsModuleSystem ESM --tsIncludeComments",
+    "generate:golang": "modelina generate golang asyncapi.yaml -o generated/golang --packageName wscontract --goIncludeComments --goIncludeTags",
+    "generate:rust": "modelina generate rust asyncapi.yaml -o generated/rust"
+  }
+}

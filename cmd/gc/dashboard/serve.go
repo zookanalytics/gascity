@@ -2,13 +2,14 @@ package dashboard
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	gcapi "github.com/gastownhall/gascity/internal/api"
 )
 
 // Serve starts the dashboard HTTP server. It creates an APIFetcher, builds
@@ -81,22 +82,10 @@ func ValidateAPI(apiURL string) error {
 // detectSupervisor probes the API server for supervisor mode by checking
 // whether /v0/cities responds successfully.
 func detectSupervisor(apiURL string) bool {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(strings.TrimRight(apiURL, "/") + "/v0/cities")
+	client := gcapi.NewClient(apiURL)
+	cities, err := client.ListCities()
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode != http.StatusOK {
-		return false
-	}
-
-	// Any valid JSON response from /v0/cities means supervisor mode. We
-	// don't require items to be non-empty since the supervisor may have
-	// zero cities registered at startup.
-	var list struct {
-		Items json.RawMessage `json:"items"`
-	}
-	return json.NewDecoder(resp.Body).Decode(&list) == nil && list.Items != nil
+	return cities != nil
 }

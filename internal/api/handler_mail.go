@@ -12,6 +12,20 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 )
 
+type mailSendRequest struct {
+	Rig     string `json:"rig"`
+	From    string `json:"from"`
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
+type mailReplyRequest struct {
+	From    string `json:"from"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 	bp := parseBlockingParams(r)
 	if bp.isBlocking() {
@@ -22,41 +36,49 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 	agent := q.Get("agent")
 	status := q.Get("status")
 	rig := q.Get("rig")
+	msgs, err := s.listMailMessages(agent, status, rig)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
+		return
+	}
+	pp := parsePagination(r, 50)
+	if !pp.IsPaging {
+		total := len(msgs)
+		if pp.Limit < len(msgs) {
+			msgs = msgs[:pp.Limit]
+		}
+		writeListJSON(w, s.latestIndex(), msgs, total)
+		return
+	}
+	page, total, nextCursor := paginate(msgs, pp)
+	if page == nil {
+		page = []mail.Message{}
+	}
+	writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+}
 
+func (s *Server) listMailMessages(agent, status, rig string) ([]mail.Message, error) {
 	switch status {
 	case "", "unread":
-		pp := parsePagination(r, 50)
-
-		// Aggregate across all rigs when rig is omitted (matching count semantics).
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				writeListJSON(w, s.latestIndex(), []any{}, 0)
-				return
+				return []mail.Message{}, nil
 			}
 			msgs, err := mp.Inbox(agent)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
+				return nil, err
 			}
 			if msgs == nil {
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				writeListJSON(w, s.latestIndex(), msgs, total)
-				return
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-			return
+			return msgs, nil
 		}
 
 		providers := s.state.MailProviders()
@@ -64,59 +86,29 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 		for _, name := range sortedProviderNames(providers) {
 			msgs, err := providers[name].Inbox(agent)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-				return
+				return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "mail provider " + name + ": " + err.Error()}
 			}
 			allMsgs = append(allMsgs, tagRig(msgs, name)...)
 		}
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			writeListJSON(w, s.latestIndex(), allMsgs, total)
-			break
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+		return allMsgs, nil
 	case "all":
-		pp := parsePagination(r, 50)
-
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				writeListJSON(w, s.latestIndex(), []any{}, 0)
-				return
+				return []mail.Message{}, nil
 			}
 			msgs, err := mp.All(agent)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", err.Error())
-				return
+				return nil, err
 			}
 			if msgs == nil {
 				msgs = []mail.Message{}
 			}
 			msgs = tagRig(msgs, rig)
-			if !pp.IsPaging {
-				total := len(msgs)
-				if pp.Limit < len(msgs) {
-					msgs = msgs[:pp.Limit]
-				}
-				writeListJSON(w, s.latestIndex(), msgs, total)
-				return
-			}
-			page, total, nextCursor := paginate(msgs, pp)
-			if page == nil {
-				page = []mail.Message{}
-			}
-			writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
-			return
+			return msgs, nil
 		}
 
 		providers := s.state.MailProviders()
@@ -124,97 +116,60 @@ func (s *Server) handleMailList(w http.ResponseWriter, r *http.Request) {
 		for _, name := range sortedProviderNames(providers) {
 			msgs, err := providers[name].All(agent)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-				return
+				return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "mail provider " + name + ": " + err.Error()}
 			}
 			allMsgs = append(allMsgs, tagRig(msgs, name)...)
 		}
 		if allMsgs == nil {
 			allMsgs = []mail.Message{}
 		}
-		if !pp.IsPaging {
-			total := len(allMsgs)
-			if pp.Limit < len(allMsgs) {
-				allMsgs = allMsgs[:pp.Limit]
-			}
-			writeListJSON(w, s.latestIndex(), allMsgs, total)
-			break
-		}
-		page, total, nextCursor := paginate(allMsgs, pp)
-		if page == nil {
-			page = []mail.Message{}
-		}
-		writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+		return allMsgs, nil
 	default:
-		writeError(w, http.StatusBadRequest, "invalid", "unsupported status filter: "+status+"; supported: unread, all")
+		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: "unsupported status filter: " + status + "; supported: unread, all"}
 	}
+	return []mail.Message{}, nil
 }
 
 func (s *Server) handleMailGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	msg, err := s.getMailMessage(id, rig)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-
-	msg, err := mp.Get(id)
-	if err != nil {
-		if errors.Is(err, mail.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
 		} else {
 			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		}
 		return
 	}
-	msg.Rig = resolvedRig
 	writeIndexJSON(w, s.latestIndex(), msg)
 }
 
-func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Rig     string `json:"rig"`
-		From    string `json:"from"`
-		To      string `json:"to"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
+func (s *Server) getMailMessage(id, rig string) (mail.Message, error) {
+	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	if err != nil {
+		return mail.Message{}, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
 	}
+	if mp == nil {
+		return mail.Message{}, httpError{status: http.StatusNotFound, code: "not_found", message: "message " + id + " not found"}
+	}
+
+	msg, err := mp.Get(id)
+	if err != nil {
+		if errors.Is(err, mail.ErrNotFound) {
+			return mail.Message{}, httpError{status: http.StatusNotFound, code: "not_found", message: err.Error()}
+		}
+		return mail.Message{}, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	msg.Rig = resolvedRig
+	return msg, nil
+}
+
+func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
+	var body mailSendRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
-		return
-	}
-
-	var errs []FieldError
-	if body.To == "" {
-		errs = append(errs, FieldError{Field: "to", Message: "required"})
-	}
-	if body.Subject == "" {
-		errs = append(errs, FieldError{Field: "subject", Message: "required"})
-	}
-	if len(errs) > 0 {
-		writeJSON(w, http.StatusBadRequest, Error{
-			Code:    "invalid",
-			Message: "invalid mail request",
-			Details: errs,
-		})
-		return
-	}
-
-	// Resolve recipient against configured agents.
-	resolved, resolveErr := mail.ResolveRecipient(body.To, agentEntries(s.state.Config()))
-	if resolveErr != nil {
-		writeError(w, http.StatusBadRequest, "invalid", resolveErr.Error())
-		return
-	}
-
-	mp := s.findMailProvider(body.Rig)
-	if mp == nil {
-		writeError(w, http.StatusBadRequest, "invalid", "no mail provider available")
 		return
 	}
 
@@ -228,109 +183,190 @@ func (s *Server) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	msg, err := mp.Send(body.From, resolved, body.Subject, body.Body)
+	msg, err := s.sendMail(body)
 	if err != nil {
 		s.idem.unreserve(idemKey)
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeStructuredError(w, herr.status, herr.code, herr.message, herr.details)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
 		return
 	}
-	msg.Rig = body.Rig
-	s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, msg)
-	s.recordMailEvent(events.MailSent, body.From, msg.ID, body.Rig, &msg)
+	if idemKey != "" {
+		s.idem.storeResponse(idemKey, bodyHash, http.StatusCreated, msg)
+	}
 	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (s *Server) sendMail(body mailSendRequest) (mail.Message, error) {
+	var errs []FieldError
+	if body.To == "" {
+		errs = append(errs, FieldError{Field: "to", Message: "required"})
+	}
+	if body.Subject == "" {
+		errs = append(errs, FieldError{Field: "subject", Message: "required"})
+	}
+	if len(errs) > 0 {
+		return mail.Message{}, httpError{
+			status:  http.StatusBadRequest,
+			code:    "invalid",
+			message: "invalid mail request",
+			details: errs,
+		}
+	}
+
+	// Resolve recipient against configured agents.
+	resolved, resolveErr := mail.ResolveRecipient(body.To, agentEntries(s.state.Config()))
+	if resolveErr != nil {
+		return mail.Message{}, httpError{status: http.StatusBadRequest, code: "invalid", message: resolveErr.Error()}
+	}
+
+	mp := s.findMailProvider(body.Rig)
+	if mp == nil {
+		return mail.Message{}, httpError{status: http.StatusBadRequest, code: "invalid", message: "no mail provider available"}
+	}
+
+	msg, err := mp.Send(body.From, resolved, body.Subject, body.Body)
+	if err != nil {
+		return mail.Message{}, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	msg.Rig = body.Rig
+	s.recordMailEvent(events.MailSent, body.From, msg.ID, body.Rig, &msg)
+	return msg, nil
 }
 
 func (s *Server) handleMailRead(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	resp, err := s.markMailRead(id, rig)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
 		return
 	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.MarkRead(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailMarkedRead, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "read"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleMailMarkUnread(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	resp, err := s.markMailUnread(id, rig)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
 		return
 	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.MarkUnread(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailMarkedUnread, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "unread"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleMailArchive(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	resp, err := s.archiveMail(id, rig)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
 		return
 	}
-	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
-	}
-	if err := mp.Archive(id); err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "archived"})
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleMailReply(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
-	var body struct {
-		From    string `json:"from"`
-		Subject string `json:"subject"`
-		Body    string `json:"body"`
-	}
+	var body mailReplyRequest
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-
-	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
-	if mpErr != nil {
-		writeError(w, http.StatusInternalServerError, "internal", mpErr.Error())
+	msg, err := s.replyMail(id, rig, body)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
 		return
 	}
+	writeJSON(w, http.StatusCreated, msg)
+}
+
+func (s *Server) markMailRead(id, rig string) (map[string]string, error) {
+	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	if err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
 	if mp == nil {
-		writeError(w, http.StatusNotFound, "not_found", "message "+id+" not found")
-		return
+		return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "message " + id + " not found"}
+	}
+	if err := mp.MarkRead(id); err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	s.recordMailEvent(events.MailMarkedRead, "api", id, resolvedRig, nil)
+	return map[string]string{"status": "read"}, nil
+}
+
+func (s *Server) markMailUnread(id, rig string) (map[string]string, error) {
+	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	if err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	if mp == nil {
+		return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "message " + id + " not found"}
+	}
+	if err := mp.MarkUnread(id); err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	s.recordMailEvent(events.MailMarkedUnread, "api", id, resolvedRig, nil)
+	return map[string]string{"status": "unread"}, nil
+}
+
+func (s *Server) archiveMail(id, rig string) (map[string]string, error) {
+	mp, resolvedRig, err := s.findMailProviderForMessage(id, rig)
+	if err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	if mp == nil {
+		return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "message " + id + " not found"}
+	}
+	if err := mp.Archive(id); err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
+	}
+	s.recordMailEvent(events.MailArchived, "api", id, resolvedRig, nil)
+	return map[string]string{"status": "archived"}, nil
+}
+
+func (s *Server) replyMail(id, rig string, body mailReplyRequest) (mail.Message, error) {
+	mp, resolvedRig, mpErr := s.findMailProviderForMessage(id, rig)
+	if mpErr != nil {
+		return mail.Message{}, httpError{status: http.StatusInternalServerError, code: "internal", message: mpErr.Error()}
+	}
+	if mp == nil {
+		return mail.Message{}, httpError{status: http.StatusNotFound, code: "not_found", message: "message " + id + " not found"}
 	}
 
 	msg, err := mp.Reply(id, body.From, body.Subject, body.Body)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
+		return mail.Message{}, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
 	}
 	msg.Rig = resolvedRig
 	s.recordMailEvent(events.MailReplied, body.From, msg.ID, resolvedRig, &msg)
-	writeJSON(w, http.StatusCreated, msg)
+	return msg, nil
 }
 
 func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
@@ -360,77 +396,90 @@ func (s *Server) handleMailDelete(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMailThread(w http.ResponseWriter, r *http.Request) {
 	threadID := r.PathValue("id")
 	rig := r.URL.Query().Get("rig")
+	msgs, err := s.listMailThread(threadID, rig)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
+		return
+	}
+	writeListJSON(w, s.latestIndex(), msgs, len(msgs))
+}
 
-	// When rig is specified, query only that provider.
+func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
+	agentName := r.URL.Query().Get("agent")
+	rig := r.URL.Query().Get("rig")
+	counts, err := s.mailCount(agentName, rig)
+	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, counts)
+}
+
+func (s *Server) listMailThread(threadID, rig string) ([]mail.Message, error) {
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
 		if mp == nil {
-			writeError(w, http.StatusNotFound, "not_found", "rig "+rig+" not found")
-			return
+			return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "rig " + rig + " not found"}
 		}
 		msgs, err := mp.Thread(threadID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
 		}
 		if msgs == nil {
 			msgs = []mail.Message{}
 		}
-		msgs = tagRig(msgs, rig)
-		writeListJSON(w, s.latestIndex(), msgs, len(msgs))
-		return
+		return tagRig(msgs, rig), nil
 	}
 
-	// Aggregate thread messages across all providers.
 	providers := s.state.MailProviders()
 	var allMsgs []mail.Message
 	for _, name := range sortedProviderNames(providers) {
 		msgs, err := providers[name].Thread(threadID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-			return
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "mail provider " + name + ": " + err.Error()}
 		}
 		allMsgs = append(allMsgs, tagRig(msgs, name)...)
 	}
 	if allMsgs == nil {
 		allMsgs = []mail.Message{}
 	}
-	writeListJSON(w, s.latestIndex(), allMsgs, len(allMsgs))
+	return allMsgs, nil
 }
 
-func (s *Server) handleMailCount(w http.ResponseWriter, r *http.Request) {
-	agentName := r.URL.Query().Get("agent")
-	rig := r.URL.Query().Get("rig")
-
-	// If rig specified, count only that rig.
+func (s *Server) mailCount(agentName, rig string) (map[string]int, error) {
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
 		if mp == nil {
-			writeJSON(w, http.StatusOK, map[string]int{"total": 0, "unread": 0})
-			return
+			return map[string]int{"total": 0, "unread": 0}, nil
 		}
 		total, unread, err := mp.Count(agentName)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: err.Error()}
 		}
-		writeJSON(w, http.StatusOK, map[string]int{"total": total, "unread": unread})
-		return
+		return map[string]int{"total": total, "unread": unread}, nil
 	}
 
-	// Aggregate across all rigs (deduplicated by provider identity).
 	providers := s.state.MailProviders()
 	var totalAll, unreadAll int
 	for _, name := range sortedProviderNames(providers) {
 		total, unread, err := providers[name].Count(agentName)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", "mail provider "+name+": "+err.Error())
-			return
+			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "mail provider " + name + ": " + err.Error()}
 		}
 		totalAll += total
 		unreadAll += unread
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"total": totalAll, "unread": unreadAll})
+	return map[string]int{"total": totalAll, "unread": unreadAll}, nil
 }
 
 // findMailProvider returns the mail provider for a rig, or the first available

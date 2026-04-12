@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,39 +189,19 @@ func writeResolveError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.CityBeadStore()
-	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	mgr := s.sessionManager(store)
-	cfg := s.state.Config()
-	sp := s.state.SessionProvider()
-
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
 	templateFilter := q.Get("template")
 	wantPeek := q.Get("peek") == "true"
-
-	sessions, err := mgr.List(stateFilter, templateFilter)
+	items, err := s.listSessionResponses(stateFilter, templateFilter, wantPeek)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	if all, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
-		for i := range all {
-			beadIndex[all[i].ID] = &all[i]
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+		} else {
+			writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		}
-	}
-
-	items := make([]sessionResponse, len(sessions))
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
+		return
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
@@ -238,31 +219,180 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, listResponse{Items: page, Total: total, NextCursor: nextCursor})
 }
 
-func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listSessionResponses(stateFilter, templateFilter string, wantPeek bool) ([]sessionResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
+	sessions, err := mgr.List(stateFilter, templateFilter)
 	if err != nil {
-		writeResolveError(w, err)
-		return
+		return nil, err
 	}
-	info, err := mgr.Get(id)
+
+	beadIndex := make(map[string]*beads.Bead)
+	if all, err := store.List(beads.ListQuery{Label: session.LabelSession}); err == nil {
+		for i := range all {
+			beadIndex[all[i].ID] = &all[i]
+		}
+	}
+
+	items := make([]sessionResponse, len(sessions))
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	for i, sess := range sessions {
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, hasDeferredQueue)
+		s.enrichSessionResponse(&items[i], sess, cfg, sp, wantPeek)
+	}
+	return items, nil
+}
+
+func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
+	resp, err := s.getSessionResponse(r.PathValue("id"), r.URL.Query().Get("peek") == "true")
 	if err != nil {
+		if herrStatus(err) != 0 {
+			herr := asHTTPError(err)
+			writeError(w, herr.status, herr.code, herr.message)
+			return
+		}
+		if errors.Is(err, session.ErrAmbiguous) || errors.Is(err, errConfiguredNamedSessionConflict) || errors.Is(err, session.ErrSessionNotFound) {
+			writeResolveError(w, err)
+			return
+		}
 		writeSessionManagerError(w, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) getSessionResponse(identifier string, wantPeek bool) (sessionResponse, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return sessionResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	mgr := s.sessionManager(store)
+	cfg := s.state.Config()
+	sp := s.state.SessionProvider()
+
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, identifier)
+	if err != nil {
+		return sessionResponse{}, err
+	}
+	info, err := mgr.Get(id)
+	if err != nil {
+		return sessionResponse{}, err
+	}
 	b, _ := store.Get(id)
-	wantPeek := r.URL.Query().Get("peek") == "true"
 	resp := sessionResponseWithReason(info, &b, cfg, strings.TrimSpace(s.state.CityPath()) != "")
 	s.enrichSessionResponse(&resp, info, cfg, sp, wantPeek)
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
+}
+
+func (s *Server) suspendSessionTarget(identifier string) error {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	mgr := s.sessionManager(store)
+	id, err := s.resolveSessionIDWithConfig(store, identifier)
+	if err != nil {
+		return err
+	}
+	return mgr.Suspend(id)
+}
+
+func (s *Server) closeSessionTarget(identifier string) error {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	mgr := s.sessionManager(store)
+	id, err := s.resolveSessionIDWithConfig(store, identifier)
+	if err != nil {
+		return err
+	}
+	if b, getErr := store.Get(id); getErr == nil && strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true" && strings.TrimSpace(b.Metadata[apiNamedSessionModeKey]) == "always" {
+		return httpError{status: http.StatusConflict, code: "conflict", message: "configured always-on named sessions cannot be closed while config-managed"}
+	}
+	nudgeIDs, err := session.WaitNudgeIDs(store, id)
+	if err != nil {
+		return err
+	}
+	if err := mgr.Close(id); err != nil {
+		return err
+	}
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
+	}
+	return nil
+}
+
+func (s *Server) wakeSessionTarget(ctx context.Context, identifier string) (map[string]string, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, identifier)
+	if err != nil {
+		return nil, err
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: id + " is not a session"}
+	}
+	session.RepairEmptyType(store, &b)
+	if b.Status == "closed" {
+		return nil, httpError{status: http.StatusConflict, code: "conflict", message: "session " + id + " is closed"}
+	}
+	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
+		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
+	}
+	sessionName := b.Metadata["session_name"]
+	if sessionName != "" {
+		s.state.ClearCrashHistory(sessionName)
+	}
+	return map[string]string{"status": "ok", "id": id}, nil
+}
+
+func (s *Server) renameSessionTarget(identifier, title string) (sessionResponse, error) {
+	store := s.state.CityBeadStore()
+	if store == nil {
+		return sessionResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+	}
+	if title == "" {
+		return sessionResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: "title is required"}
+	}
+	id, err := s.resolveSessionIDWithConfig(store, identifier)
+	if err != nil {
+		return sessionResponse{}, err
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		return sessionResponse{}, err
+	}
+	if !session.IsSessionBeadOrRepairable(b) {
+		return sessionResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: id + " is not a session"}
+	}
+	session.RepairEmptyType(store, &b)
+	mgr := s.sessionManager(store)
+	if err := mgr.Rename(id, title); err != nil {
+		return sessionResponse{}, err
+	}
+	info, err := mgr.Get(id)
+	if err != nil {
+		return sessionResponse{}, err
+	}
+	updated, _ := store.Get(id)
+	return sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != ""), nil
 }
 
 func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {

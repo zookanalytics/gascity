@@ -51,30 +51,15 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 		waitForChange(r.Context(), s.state.EventProvider(), bp)
 	}
 
-	ep := s.state.EventProvider()
-	if ep == nil {
-		writeListJSON(w, 0, []any{}, 0)
+	filter, err := parseEventFilter(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-
-	q := r.URL.Query()
-	filter := events.Filter{
-		Type:  q.Get("type"),
-		Actor: q.Get("actor"),
-	}
-	if v := q.Get("since"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			filter.Since = time.Now().Add(-d)
-		}
-	}
-
-	evts, err := ep.List(filter)
+	evts, err := s.listEvents(filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
-	}
-	if evts == nil {
-		evts = []events.Event{}
 	}
 	pp := parsePagination(r, 100)
 	if !pp.IsPaging {
@@ -89,6 +74,37 @@ func (s *Server) handleEventList(w http.ResponseWriter, r *http.Request) {
 		page = []events.Event{}
 	}
 	writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
+}
+
+func parseEventFilter(r *http.Request) (events.Filter, error) {
+	q := r.URL.Query()
+	filter := events.Filter{
+		Type:  q.Get("type"),
+		Actor: q.Get("actor"),
+	}
+	if v := q.Get("since"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			filter.Since = time.Now().Add(-d)
+		} else {
+			return events.Filter{}, err
+		}
+	}
+	return filter, nil
+}
+
+func (s *Server) listEvents(filter events.Filter) ([]events.Event, error) {
+	ep := s.state.EventProvider()
+	if ep == nil {
+		return []events.Event{}, nil
+	}
+	evts, err := ep.List(filter)
+	if err != nil {
+		return nil, err
+	}
+	if evts == nil {
+		evts = []events.Event{}
+	}
+	return evts, nil
 }
 
 func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {

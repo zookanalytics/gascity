@@ -14,21 +14,7 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pp := parsePagination(r, 50)
-	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
-	var convoys []beads.Bead
-	for _, rigName := range rigNames {
-		store := stores[rigName]
-		list, err := store.List(beads.ListQuery{Type: "convoy"})
-		if err != nil {
-			continue
-		}
-		convoys = append(convoys, list...)
-	}
-
-	if convoys == nil {
-		convoys = []beads.Bead{}
-	}
+	convoys := s.listConvoys()
 	if !pp.IsPaging {
 		total := len(convoys)
 		if pp.Limit < len(convoys) {
@@ -44,16 +30,44 @@ func (s *Server) handleConvoyList(w http.ResponseWriter, r *http.Request) {
 	writePagedJSON(w, s.latestIndex(), page, total, nextCursor)
 }
 
+func (s *Server) listConvoys() []beads.Bead {
+	stores := s.state.BeadStores()
+	rigNames := sortedRigNames(stores)
+	var convoys []beads.Bead
+	for _, rigName := range rigNames {
+		store := stores[rigName]
+		list, err := store.List(beads.ListQuery{Type: "convoy"})
+		if err != nil {
+			continue
+		}
+		convoys = append(convoys, list...)
+	}
+	if convoys == nil {
+		return []beads.Bead{}
+	}
+	return convoys
+}
+
 func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-
-	// Formula-compiled convoy (graph workflow): delegate to the graph
-	// snapshot builder which returns the full DAG with deps and status.
 	if isGraphConvoyID(s, id) {
 		s.handleWorkflowGet(w, r)
 		return
 	}
+	resp, err := s.getConvoySnapshot(id)
+	if err != nil {
+		var herr httpError
+		if errors.As(err, &herr) {
+			writeError(w, herr.status, herr.code, herr.message)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeIndexJSON(w, s.latestIndex(), resp)
+}
 
+func (s *Server) getConvoySnapshot(id string) (map[string]any, error) {
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -62,12 +76,10 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, err
 		}
 		if b.Type != "convoy" {
-			writeError(w, http.StatusNotFound, "not_found", "bead "+id+" is not a convoy")
-			return
+			return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "bead " + id + " is not a convoy"}
 		}
 
 		children, err := store.List(beads.ListQuery{
@@ -76,8 +88,7 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			Sort:          beads.SortCreatedAsc,
 		})
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "internal", err.Error())
-			return
+			return nil, err
 		}
 		if children == nil {
 			children = []beads.Bead{}
@@ -92,14 +103,13 @@ func (s *Server) handleConvoyGet(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		writeIndexJSON(w, s.latestIndex(), map[string]any{
+		return map[string]any{
 			"convoy":   b,
 			"children": children,
 			"progress": map[string]int{"total": total, "closed": closed},
-		})
-		return
+		}, nil
 	}
-	writeError(w, http.StatusNotFound, "not_found", "convoy "+id+" not found")
+	return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "convoy " + id + " not found"}
 }
 
 // isGraphConvoyID checks if the bead is a formula-compiled graph convoy
