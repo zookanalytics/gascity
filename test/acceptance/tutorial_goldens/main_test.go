@@ -3,6 +3,7 @@
 package tutorialgoldens
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	loadTutorialEnvFile()
 	if !hasClaudeAuth() || (!useClaudeForCodex() && !hasCodexAuth()) {
 		if useClaudeForCodex() {
 			fmt.Fprintln(os.Stderr, "tutorial-goldens: skipping package (requires Claude auth)")
@@ -101,9 +103,6 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 	if err := os.WriteFile(filepath.Join(home, ".dolt", "config_global.json"), []byte(doltCfg), 0o644); err != nil {
 		t.Fatalf("writing dolt config: %v", err)
 	}
-	if err := stageClaudeAuth(home); err != nil {
-		t.Fatalf("staging Claude auth: %v", err)
-	}
 	if err := helpers.EnsureClaudeStateFile(home); err != nil {
 		t.Fatalf("seeding Claude state: %v", err)
 	}
@@ -134,6 +133,7 @@ func newTutorialEnv(t *testing.T) *tutorialEnv {
 		"ANTHROPIC_DEFAULT_SONNET_MODEL",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
 		"CLAUDE_CODE_EFFORT_LEVEL",
+		"CLAUDE_CODE_OAUTH_TOKEN",
 		"CLAUDE_CODE_SUBAGENT_MODEL",
 		"OPENAI_API_KEY",
 	} {
@@ -256,6 +256,9 @@ func hasClaudeAuth() bool {
 	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" || strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) != "" {
 		return true
 	}
+	if hasValidClaudeOAuthToken() {
+		return true
+	}
 	cmd := exec.Command("claude", "auth", "status")
 	out, err := cmd.Output()
 	if err != nil {
@@ -274,30 +277,6 @@ func hasCodexAuth() bool {
 		return false
 	}
 	return codexStatusOutputLoggedIn(out)
-}
-
-func stageClaudeAuth(dstHome string) error {
-	realHome := hostHomeDir()
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) == "" && strings.TrimSpace(os.Getenv("ANTHROPIC_AUTH_TOKEN")) == "" {
-		if refreshOut, err := exec.Command("claude", "--print", "ok").CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "tutorial-goldens: Claude preflight refresh failed: %v\n%s\n", err, refreshOut) //nolint:errcheck
-		}
-	}
-
-	srcClaudeDir := filepath.Join(realHome, ".claude")
-	dstClaudeDir := filepath.Join(dstHome, ".claude")
-	if err := os.MkdirAll(dstClaudeDir, 0o755); err != nil {
-		return err
-	}
-	for _, name := range []string{".credentials.json", "credentials.json", "settings.json", ".claude.json"} {
-		if err := copyFileIfExists(filepath.Join(srcClaudeDir, name), filepath.Join(dstClaudeDir, name), 0o600); err != nil {
-			return err
-		}
-	}
-	if err := copyFileIfExists(filepath.Join(realHome, ".claude.json"), filepath.Join(dstHome, ".claude.json"), 0o600); err != nil {
-		return err
-	}
-	return nil
 }
 
 func stageCodexAuth(dstHome string) error {
@@ -339,6 +318,63 @@ func stageProviderBinaries(dstHome string) error {
 		}
 	}
 	return nil
+}
+
+func loadTutorialEnvFile() {
+	path := filepath.Join(helpers.FindModuleRoot(), ".env")
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		value = strings.Trim(value, `"'`)
+		_ = os.Setenv(key, value)
+	}
+}
+
+func hasValidClaudeOAuthToken() bool {
+	token := strings.TrimSpace(os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"))
+	if token == "" {
+		return false
+	}
+	tmpHome, err := os.MkdirTemp("", "claude-oauth-check-*")
+	if err != nil {
+		return false
+	}
+	defer os.RemoveAll(tmpHome)
+
+	cmd := exec.Command("claude", "--print", "ok")
+	cmd.Env = []string{
+		"HOME=" + tmpHome,
+		"PATH=" + os.Getenv("PATH"),
+		"USER=" + os.Getenv("USER"),
+		"LOGNAME=" + os.Getenv("LOGNAME"),
+		"SHELL=" + os.Getenv("SHELL"),
+		"LANG=" + os.Getenv("LANG"),
+		"CLAUDE_CODE_OAUTH_TOKEN=" + token,
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(out)), "ok")
 }
 
 func acceptanceTempRoot() (string, error) {
