@@ -338,6 +338,7 @@ func (r *runningShell) stop() error {
 	r.cancel()
 	if r.cmd.Process != nil {
 		_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGTERM)
+		_ = r.cmd.Process.Signal(syscall.SIGTERM)
 	}
 	select {
 	case err := <-r.done:
@@ -348,9 +349,17 @@ func (r *runningShell) stop() error {
 	case <-time.After(5 * time.Second):
 		if r.cmd.Process != nil {
 			_ = syscall.Kill(-r.cmd.Process.Pid, syscall.SIGKILL)
+			_ = r.cmd.Process.Kill()
 		}
-		<-r.done
-		return nil
+		select {
+		case err := <-r.done:
+			if err == nil || errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		case <-time.After(5 * time.Second):
+			return fmt.Errorf("timed out stopping running shell\n%s", r.output())
+		}
 	}
 }
 
