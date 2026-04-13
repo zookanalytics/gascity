@@ -42,7 +42,7 @@ func registerPackCommands(root *cobra.Command, stdout, stderr io.Writer) {
 		return
 	}
 
-	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, cfg.Workspace.Name, stdout, stderr)
+	addDiscoveredCommandsToRoot(root, cfg.PackCommands, cityPath, cfg.Workspace.Name, stdout, stderr, false)
 }
 
 // coreCommandNames returns the set of built-in command names that packs

@@ -28,7 +28,7 @@ func TestAddDiscoveredCommandsToRoot_BuildsBindingScopedNestedTree(t *testing.T)
 		},
 	}
 
-	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", os.Stdout, os.Stderr)
+	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", os.Stdout, os.Stderr, true)
 
 	gs := findSubcommand(root, "gs")
 	if gs == nil {
@@ -281,7 +281,7 @@ func TestAddDiscoveredCommandsToRoot_CollisionProtection(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", &stdout, &stderr)
+	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", &stdout, &stderr, true)
 
 	if !strings.Contains(stderr.String(), "shadows core command") {
 		t.Fatalf("expected collision warning, got stderr: %q", stderr.String())
@@ -350,7 +350,7 @@ func TestAddDiscoveredCommandsToRoot_DedupsDuplicateLeaf(t *testing.T) {
 		{BindingName: "gs", Command: []string{"status"}, Description: "second"},
 	}
 
-	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", os.Stdout, os.Stderr)
+	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", os.Stdout, os.Stderr, true)
 	gs := findSubcommand(root, "gs")
 	if gs == nil {
 		t.Fatal("missing binding namespace")
@@ -363,5 +363,34 @@ func TestAddDiscoveredCommandsToRoot_DedupsDuplicateLeaf(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("got %d status commands, want 1", count)
+	}
+}
+
+func TestAddDiscoveredCommandsToRoot_CanSuppressCollisionWarnings(t *testing.T) {
+	root := &cobra.Command{Use: "gc"}
+	root.AddCommand(&cobra.Command{Use: "import"})
+
+	entries := []config.DiscoveredCommand{
+		{
+			BindingName: "import",
+			Command:     []string{"list"},
+			Description: "Show imports",
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	addDiscoveredCommandsToRoot(root, entries, "/city", "testcity", &stdout, &stderr, false)
+
+	if stderr.Len() != 0 {
+		t.Fatalf("expected suppressed collision warning, got stderr: %q", stderr.String())
+	}
+	importCount := 0
+	for _, c := range root.Commands() {
+		if c.Name() == "import" {
+			importCount++
+		}
+	}
+	if importCount != 1 {
+		t.Fatalf("got %d import commands, want 1", importCount)
 	}
 }

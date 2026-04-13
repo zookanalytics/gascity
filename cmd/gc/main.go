@@ -452,8 +452,7 @@ func rigFromCwdDir(cityPath, cwd string) string {
 		if !filepath.IsAbs(rigPath) {
 			rigPath = filepath.Join(cityPath, rigPath)
 		}
-		rigPath = normalizePathForCompare(rigPath)
-		if samePath(cwd, rigPath) || strings.HasPrefix(cwd, rigPath+string(filepath.Separator)) {
+		if pathWithinRoot(cwd, rigPath) {
 			return rig.Name
 		}
 	}

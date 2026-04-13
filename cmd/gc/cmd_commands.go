@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer) {
+func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.DiscoveredCommand, cityPath, cityName string, stdout, stderr io.Writer, warnOnCollision bool) {
 	core := coreCommandNames(root)
 	grouped := make(map[string][]config.DiscoveredCommand)
 	for _, entry := range entries {
@@ -34,7 +34,9 @@ func addDiscoveredCommandsToRoot(root *cobra.Command, entries []config.Discovere
 
 	for _, binding := range bindings {
 		if core[binding] {
-			fmt.Fprintf(stderr, "gc: import binding %q: name shadows core command, skipping\n", binding) //nolint:errcheck
+			if warnOnCollision {
+				fmt.Fprintf(stderr, "gc: import binding %q: name shadows core command, skipping\n", binding) //nolint:errcheck
+			}
 			continue
 		}
 		nsCmd := newDiscoveredNamespaceCmd(binding, grouped[binding], cityPath, cityName, stdout, stderr)
