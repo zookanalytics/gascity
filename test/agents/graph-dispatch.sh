@@ -193,28 +193,6 @@ trace "startup pid=$$ assignee=${ASSIGNEE:-}"
 trace_store
 cleanup() {
     local rc=$?
-    local running_status=""
-    local running_assignee=""
-    local running_outcome=""
-    if [ -n "${pending_claim_bead:-}" ]; then
-        if timeout 10 bd update "$pending_claim_bead" --assignee "" --status open >/dev/null 2>&1; then
-            trace "cleanup-released bead=$pending_claim_bead assignee=$ASSIGNEE"
-        else
-            trace "cleanup-release-failed bead=$pending_claim_bead assignee=$ASSIGNEE"
-        fi
-    fi
-    if [ -n "${running_bead:-}" ]; then
-        running_status=$(show_status "$running_bead" 2>/dev/null || true)
-        running_assignee=$(show_assignee "$running_bead" 2>/dev/null || true)
-        running_outcome=$(show_outcome "$running_bead" 2>/dev/null || true)
-        if [ "$running_status" = "in_progress" ] && [ "$running_assignee" = "$BEADS_ACTOR" ] && [ -z "$running_outcome" ]; then
-            if timeout 10 bd update "$running_bead" --assignee "" --status open >/dev/null 2>&1; then
-                trace "cleanup-released-running bead=$running_bead assignee=$ASSIGNEE"
-            else
-                trace "cleanup-release-running-failed bead=$running_bead assignee=$ASSIGNEE"
-            fi
-        fi
-    fi
     trace "exit pid=$rc shell=$$"
     trap - EXIT INT TERM
     pkill -TERM -P $$ >/dev/null 2>&1 || true
@@ -224,8 +202,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 misses=0
-pending_claim_bead=""
-running_bead=""
 
 jq_bead() {
     local filter="$1"
@@ -392,7 +368,6 @@ while true; do
         bead_id=$(printf '%s\n' "$bead_json" | json_payload | jq -r 'if type == "array" then (.[0].id // "") else (.id // "") end' 2>/dev/null || true)
         claimed_here="true"
         owns_bead="true"
-        pending_claim_bead="$bead_id"
         trace "claim bead=$bead_id assignee=$ASSIGNEE"
     fi
 
@@ -424,7 +399,6 @@ while true; do
             if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
-                pending_claim_bead=""
                 trace "released bead=$bead_id ref=$ref"
             fi
         fi
@@ -490,8 +464,6 @@ while true; do
         exit 1
     fi
 
-    pending_claim_bead=""
-    running_bead="$bead_id"
     printf '%s\n' "$ref" >> "$REPORT_FILE"
     trace "run bead=$bead_id ref=$ref kind=$kind source=$source_id work_dir=$work_dir"
     trace_store
@@ -513,7 +485,6 @@ while true; do
                 status_after=$(show_status "$bead_id" 2>/dev/null || true)
                 outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
                 trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
-                running_bead=""
                 continue
             fi
             ;;
@@ -549,7 +520,6 @@ while true; do
         status_after=$(show_status "$bead_id" 2>/dev/null || true)
         outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
-        running_bead=""
         continue
     fi
     if should_fail_transient_always "$ref"; then
@@ -560,7 +530,6 @@ while true; do
         status_after=$(show_status "$bead_id" 2>/dev/null || true)
         outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
         trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
-        running_bead=""
         continue
     fi
 
@@ -592,5 +561,4 @@ while true; do
     status_after=$(show_status "$bead_id" 2>/dev/null || true)
     outcome_after=$(show_outcome "$bead_id" 2>/dev/null || true)
     trace "closed bead=$bead_id status=$status_after outcome=$outcome_after"
-    running_bead=""
 done
