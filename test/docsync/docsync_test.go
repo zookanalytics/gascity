@@ -726,39 +726,24 @@ func TestAsyncAPIActionsMatchGoCode(t *testing.T) {
 	}
 }
 
-// extractAsyncAPIActions parses the action enum from the AsyncAPI YAML.
-// Looks for lines like "            - action.name" under the action enum.
+// extractAsyncAPIActions parses action names from the AsyncAPI YAML.
+// The swaggest-generated spec uses channel names like "actions/agent.create/request:"
+// so we extract the action name from the channel path.
 func extractAsyncAPIActions(data []byte) []string {
+	re := regexp.MustCompile(`^\s+actions/([a-z][a-z0-9_.]+)/(request|response):`)
+	seen := make(map[string]bool)
 	var actions []string
-	inEnum := false
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	for scanner.Scan() {
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-		if strings.Contains(line, "enum:") && inEnum {
-			// Second enum block — stop.
-			break
-		}
-		if strings.HasSuffix(trimmed, "action:") {
-			// Next line should be "type: string", then "enum:"
-			continue
-		}
-		if trimmed == "enum:" {
-			inEnum = true
-			continue
-		}
-		if inEnum {
-			if strings.HasPrefix(trimmed, "- ") {
-				action := strings.TrimPrefix(trimmed, "- ")
-				if strings.Contains(action, ".") {
-					actions = append(actions, action)
-				}
-			} else if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-				// End of enum block.
-				break
+		if m := re.FindStringSubmatch(scanner.Text()); m != nil {
+			action := m[1]
+			if !seen[action] {
+				seen[action] = true
+				actions = append(actions, action)
 			}
 		}
 	}
+	sort.Strings(actions)
 	return actions
 }
 

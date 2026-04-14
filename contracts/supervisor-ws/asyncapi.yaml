@@ -1,2587 +1,1629 @@
-asyncapi: 2.6.0
+asyncapi: 2.4.0
 id: urn:gascity:supervisor-websocket:v1alpha1
-defaultContentType: application/json
 info:
   title: Gas City Supervisor WebSocket Protocol
   version: 1.0.0
-  description: >
-    Shared websocket protocol for the city API server and supervisor mux at
-    GET /v0/ws. The server sends hello/response/error/event envelopes. Clients
-    send request envelopes.
-
-    This spec is auto-generated from the Go type registry. Do not edit manually.
-    Regenerate with: go generate ./internal/api/specgen/...
+  description: WebSocket protocol for the city API server and supervisor mux at GET
+    /v0/ws. Auto-generated from the Go type registry via go generate ./internal/api/specgen/...
 servers:
   city:
     url: localhost
-    protocol: ws
     description: Per-city websocket endpoint.
+    protocol: ws
   supervisor:
     url: localhost
-    protocol: ws
     description: Supervisor websocket endpoint.
+    protocol: ws
+defaultContentType: application/json
 channels:
-  /v0/ws:
-    description: Bidirectional websocket channel for requests, responses, and subscriptions.
+  actions/agent.create/request:
     publish:
-      operationId: sendRequest
       message:
-        $ref: '#/components/messages/RequestEnvelopeMessage'
+        $ref: '#/components/messages/ApiAgentCreateRequest'
+  actions/agent.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/agent.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/agent.get/response:
     subscribe:
-      operationId: receiveServerEnvelope
       message:
-        oneOf:
-          - $ref: '#/components/messages/HelloEnvelopeMessage'
-          - $ref: '#/components/messages/ResponseEnvelopeMessage'
-          - $ref: '#/components/messages/ErrorEnvelopeMessage'
-          - $ref: '#/components/messages/EventEnvelopeMessage'
+        $ref: '#/components/messages/ApiAgentResponse'
+  actions/agent.resume/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/agent.suspend/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/agent.update/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketAgentUpdatePayload'
+  actions/agents.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketAgentsListPayload'
+  actions/agents.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/bead.assign/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketBeadAssignPayload'
+  actions/bead.assign/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/bead.close/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.close/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/bead.create/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiBeadCreateRequest'
+  actions/bead.create/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/bead.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.deps/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/bead.reopen/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.reopen/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/bead.update/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/bead.update/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/beads.graph/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketBeadGraphPayload'
+  actions/beads.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketBeadsListPayload'
+  actions/beads.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/beads.ready/request:
+    description: List ready beads
+  actions/beads.ready/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/cities.list/request:
+    description: List managed cities (supervisor)
+  actions/cities.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/city.get/request:
+    description: Get city details
+  actions/city.patch/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiCityPatchRequest'
+  actions/config.explain/request:
+    description: Explain config resolution
+  actions/config.get/request:
+    description: Get parsed city configuration
+  actions/config.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiConfigResponse'
+  actions/config.validate/request:
+    description: Validate city configuration
+  actions/convoy.add/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketConvoyItemsPayload'
+  actions/convoy.check/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/convoy.close/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/convoy.create/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiConvoyCreateRequest'
+  actions/convoy.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/convoy.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/convoy.remove/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketConvoyItemsPayload'
+  actions/convoys.list/request:
+    description: List convoys
+  actions/convoys.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/event.emit/request:
+    publish:
+      message:
+        $ref: '#/components/messages/EventsEvent'
+  actions/events.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketEventsListPayload'
+  actions/events.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/extmsg.adapters.list/request:
+    description: List messaging adapters
+  actions/extmsg.adapters.register/request:
+    description: Register messaging adapter
+  actions/extmsg.adapters.unregister/request:
+    description: Unregister messaging adapter
+  actions/extmsg.bind/request:
+    description: Bind external messaging channel
+  actions/extmsg.bindings.list/request:
+    description: List external message bindings
+  actions/extmsg.groups.ensure/request:
+    description: Ensure messaging group exists
+  actions/extmsg.groups.lookup/request:
+    description: Look up messaging groups
+  actions/extmsg.inbound/request:
+    description: Process inbound external message
+  actions/extmsg.outbound/request:
+    description: Send outbound external message
+  actions/extmsg.participant.remove/request:
+    description: Remove messaging participant
+  actions/extmsg.participant.upsert/request:
+    description: Add/update messaging participant
+  actions/extmsg.transcript.ack/request:
+    description: Acknowledge transcript messages
+  actions/extmsg.transcript.list/request:
+    description: List external message transcript
+  actions/extmsg.unbind/request:
+    description: Unbind external messaging channel
+  actions/formula.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketFormulaGetPayload'
+  actions/formula.runs/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketFormulaRunsPayload'
+  actions/formulas.feed/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketFormulaFeedPayload'
+  actions/formulas.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketFormulaScopePayload'
+  actions/health.get/request:
+    description: Health check
+  actions/mail.archive/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailGetPayload'
+  actions/mail.archive/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
+  actions/mail.count/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailCountPayload'
+  actions/mail.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailGetPayload'
+  actions/mail.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailGetPayload'
+  actions/mail.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
+  actions/mail.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailListPayload'
+  actions/mail.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/mail.mark_unread/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailGetPayload'
+  actions/mail.mark_unread/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
+  actions/mail.read/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailGetPayload'
+  actions/mail.read/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
+  actions/mail.reply/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailReplyPayload'
+  actions/mail.send/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiMailSendRequest'
+  actions/mail.send/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/MailMessage'
+  actions/mail.thread/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketMailThreadPayload'
+  actions/mail.thread/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/order.disable/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/order.enable/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/order.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/order.history.detail/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketIDPayload'
+  actions/order.history.detail/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/BeadsBead'
+  actions/orders.check/request:
+    description: Check order gate conditions
+  actions/orders.feed/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketOrdersFeedPayload'
+  actions/orders.history/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketOrdersHistoryPayload'
+  actions/orders.list/request:
+    description: List orders
+  actions/packs.list/request:
+    description: List installed packs
+  actions/patches.agent.delete/request:
+    description: Delete agent patch
+  actions/patches.agent.get/request:
+    description: Get agent patch
+  actions/patches.agents.list/request:
+    description: List agent patches
+  actions/patches.agents.set/request:
+    description: Set agent patch
+  actions/patches.provider.delete/request:
+    description: Delete provider patch
+  actions/patches.provider.get/request:
+    description: Get provider patch
+  actions/patches.providers.list/request:
+    description: List provider patches
+  actions/patches.providers.set/request:
+    description: Set provider patch
+  actions/patches.rig.delete/request:
+    description: Delete rig patch
+  actions/patches.rig.get/request:
+    description: Get rig patch
+  actions/patches.rigs.list/request:
+    description: List rig patches
+  actions/patches.rigs.set/request:
+    description: Set rig patch
+  actions/provider.create/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketProviderCreatePayload'
+  actions/provider.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/provider.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/provider.update/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketProviderUpdatePayload'
+  actions/providers.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketProvidersListPayload'
+  actions/providers.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/rig.create/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketRigCreatePayload'
+  actions/rig.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/rig.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/rig.restart/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/rig.resume/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/rig.suspend/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/rig.update/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketRigUpdatePayload'
+  actions/rigs.list/request:
+    description: List rigs
+  actions/rigs.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/service.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/service.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/WorkspacesvcStatus'
+  actions/service.restart/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketNamePayload'
+  actions/services.list/request:
+    description: List workspace services
+  actions/services.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/session.agent.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionAgentGetPayload'
+  actions/session.agents.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.agents.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/session.close/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.create/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSessionCreateRequest'
+  actions/session.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.get/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiSessionResponse'
+  actions/session.kill/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.messages/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionMessagesPayload'
+  actions/session.patch/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionPatchPayload'
+  actions/session.pending/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.rename/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionRenamePayload'
+  actions/session.respond/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionRespondPayload'
+  actions/session.stop/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.submit/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionSubmitPayload'
+  actions/session.suspend/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/session.transcript/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTranscriptPayload'
+  actions/session.wake/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionTargetPayload'
+  actions/sessions.list/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketSessionsListPayload'
+  actions/sessions.list/response:
+    subscribe:
+      message:
+        $ref: '#/components/messages/ApiListResponse'
+  actions/sling.run/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSlingBody'
+  actions/status.get/request:
+    description: City status snapshot
+  actions/subscription.start/request:
+    description: Start an event or session stream subscription
+  actions/subscription.stop/request:
+    description: Stop a subscription
+  actions/workflow.delete/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketWorkflowDeletePayload'
+  actions/workflow.get/request:
+    publish:
+      message:
+        $ref: '#/components/messages/ApiSocketWorkflowGetPayload'
 components:
-  messages:
-    HelloEnvelopeMessage:
-      name: HelloEnvelope
-      payload:
-        $ref: '#/components/schemas/HelloEnvelope'
-    RequestEnvelopeMessage:
-      name: RequestEnvelope
-      payload:
-        $ref: '#/components/schemas/RequestEnvelope'
-    ResponseEnvelopeMessage:
-      name: ResponseEnvelope
-      payload:
-        $ref: '#/components/schemas/ResponseEnvelope'
-    ErrorEnvelopeMessage:
-      name: ErrorEnvelope
-      payload:
-        $ref: '#/components/schemas/ErrorEnvelope'
-    EventEnvelopeMessage:
-      name: EventEnvelope
-      payload:
-        $ref: '#/components/schemas/EventEnvelope'
   schemas:
-    HelloEnvelope:
-      type: object
-      required: [type]
+    ApiAgentCreateRequest:
       properties:
-        type:
+        dir:
           type: string
-          enum: [hello]
-        protocol:
+        name:
           type: string
-        server_role:
+        provider:
           type: string
-          enum: [city, supervisor]
-        read_only:
+        scope:
+          type: string
+      type: object
+    ApiAgentResponse:
+      properties:
+        active_bead:
+          type: string
+        activity:
+          type: string
+        available:
           type: boolean
-        capabilities:
-          type: array
+        context_pct:
+          type:
+          - "null"
+          - integer
+        context_window:
+          type:
+          - "null"
+          - integer
+        description:
+          type: string
+        display_name:
+          type: string
+        last_output:
+          type: string
+        model:
+          type: string
+        name:
+          type: string
+        pool:
+          type: string
+        provider:
+          type: string
+        rig:
+          type: string
+        running:
+          type: boolean
+        session:
+          $ref: '#/components/schemas/ApiSessionInfo'
+        state:
+          type: string
+        suspended:
+          type: boolean
+        unavailable_reason:
+          type: string
+      type: object
+    ApiBeadCreateRequest:
+      properties:
+        assignee:
+          type: string
+        description:
+          type: string
+        labels:
           items:
             type: string
-    RequestEnvelope:
-      type: object
-      required: [type, id, action]
-      properties:
+          type:
+          - array
+          - "null"
+        priority:
+          type:
+          - "null"
+          - integer
+        rig:
+          type: string
+        title:
+          type: string
         type:
           type: string
-          enum: [request]
-        id:
+      type: object
+    ApiCityPatchRequest:
+      properties:
+        suspended:
+          type:
+          - "null"
+          - boolean
+      type: object
+    ApiConfigAgentResponse:
+      properties:
+        dir:
           type: string
-        action:
+        is_pool:
+          type: boolean
+        name:
           type: string
-          enum:
-            - agent.create
-            - agent.delete
-            - agent.get
-            - agent.resume
-            - agent.suspend
-            - agent.update
-            - agents.list
-            - bead.assign
-            - bead.close
-            - bead.create
-            - bead.delete
-            - bead.deps
-            - bead.get
-            - bead.reopen
-            - bead.update
-            - beads.graph
-            - beads.list
-            - beads.ready
-            - cities.list
-            - city.get
-            - city.patch
-            - config.explain
-            - config.get
-            - config.validate
-            - convoy.add
-            - convoy.check
-            - convoy.close
-            - convoy.create
-            - convoy.delete
-            - convoy.get
-            - convoy.remove
-            - convoys.list
-            - event.emit
-            - events.list
-            - extmsg.adapters.list
-            - extmsg.adapters.register
-            - extmsg.adapters.unregister
-            - extmsg.bind
-            - extmsg.bindings.list
-            - extmsg.groups.ensure
-            - extmsg.groups.lookup
-            - extmsg.inbound
-            - extmsg.outbound
-            - extmsg.participant.remove
-            - extmsg.participant.upsert
-            - extmsg.transcript.ack
-            - extmsg.transcript.list
-            - extmsg.unbind
-            - formula.get
-            - formula.runs
-            - formulas.feed
-            - formulas.list
-            - health.get
-            - mail.archive
-            - mail.count
-            - mail.delete
-            - mail.get
-            - mail.list
-            - mail.mark_unread
-            - mail.read
-            - mail.reply
-            - mail.send
-            - mail.thread
-            - order.disable
-            - order.enable
-            - order.get
-            - order.history.detail
-            - orders.check
-            - orders.feed
-            - orders.history
-            - orders.list
-            - packs.list
-            - patches.agent.delete
-            - patches.agent.get
-            - patches.agents.list
-            - patches.agents.set
-            - patches.provider.delete
-            - patches.provider.get
-            - patches.providers.list
-            - patches.providers.set
-            - patches.rig.delete
-            - patches.rig.get
-            - patches.rigs.list
-            - patches.rigs.set
-            - provider.create
-            - provider.delete
-            - provider.get
-            - provider.update
-            - providers.list
-            - rig.create
-            - rig.delete
-            - rig.get
-            - rig.restart
-            - rig.resume
-            - rig.suspend
-            - rig.update
-            - rigs.list
-            - service.get
-            - service.restart
-            - services.list
-            - session.agent.get
-            - session.agents.list
-            - session.close
-            - session.create
-            - session.get
-            - session.kill
-            - session.messages
-            - session.patch
-            - session.pending
-            - session.rename
-            - session.respond
-            - session.stop
-            - session.submit
-            - session.suspend
-            - session.transcript
-            - session.wake
-            - sessions.list
-            - sling.run
-            - status.get
-            - subscription.start
-            - subscription.stop
-            - workflow.delete
-            - workflow.get
-        payload:
-          type: object
-          description: Action-specific request payload. Schema varies by action.
+        provider:
+          type: string
         scope:
-          type: object
-          properties:
-            city:
-              type: string
-        idempotency_key:
           type: string
-          description: Deduplication key for mutation replay.
-        watch:
-          type: object
-          description: Blocking query parameters.
-          properties:
-            index:
-              type: integer
-              description: Block until server index exceeds this value.
-            wait:
-              type: string
-              description: Maximum wait duration (e.g. '30s').
-    ResponseEnvelope:
+        suspended:
+          type: boolean
       type: object
-      required: [type, id]
+    ApiConfigPatchesResponse:
       properties:
-        type:
-          type: string
-          enum: [response]
-        id:
-          type: string
-        index:
+        agent_count:
           type: integer
-          description: Server event index for watch semantics.
-        result:
-          type: object
-          description: Action-specific response payload.
-    ErrorEnvelope:
+        provider_count:
+          type: integer
+        rig_count:
+          type: integer
       type: object
-      required: [type, code, message]
+    ApiConfigResponse:
       properties:
-        type:
+        agents:
+          items:
+            $ref: '#/components/schemas/ApiConfigAgentResponse'
+          type:
+          - array
+          - "null"
+        patches:
+          $ref: '#/components/schemas/ApiConfigPatchesResponse'
+        providers:
+          additionalProperties:
+            $ref: '#/components/schemas/ApiProviderSpecJSON'
+          type: object
+        rigs:
+          items:
+            $ref: '#/components/schemas/ApiConfigRigResponse'
+          type:
+          - array
+          - "null"
+        workspace:
+          $ref: '#/components/schemas/ApiWorkspaceResponse'
+      type: object
+    ApiConfigRigResponse:
+      properties:
+        name:
           type: string
-          enum: [error]
-        id:
+        path:
           type: string
-        code:
+        prefix:
+          type: string
+        suspended:
+          type: boolean
+      type: object
+    ApiConvoyCreateRequest:
+      properties:
+        items:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+        rig:
+          type: string
+        title:
+          type: string
+      type: object
+    ApiListResponse:
+      properties:
+        items: {}
+        next_cursor:
+          type: string
+        total:
+          type: integer
+      type: object
+    ApiMailSendRequest:
+      properties:
+        body:
+          type: string
+        from:
+          type: string
+        rig:
+          type: string
+        subject:
+          type: string
+        to:
+          type: string
+      type: object
+    ApiProviderSpecJSON:
+      properties:
+        args:
+          items:
+            type: string
+          type: array
+        command:
+          type: string
+        display_name:
+          type: string
+        env:
+          additionalProperties:
+            type: string
+          type: object
+        prompt_flag:
+          type: string
+        prompt_mode:
+          type: string
+        ready_delay_ms:
+          type: integer
+      type: object
+    ApiProviderUpdate:
+      type: object
+    ApiSessionCreateRequest:
+      properties:
+        alias:
+          type: string
+        async:
+          type: boolean
+        kind:
           type: string
         message:
           type: string
-        details:
-          type: array
-          items:
-            type: object
-            properties:
-              field:
-                type: string
-              message:
-                type: string
-    EventEnvelope:
+        name:
+          type: string
+        options:
+          additionalProperties:
+            type: string
+          type: object
+        project_id:
+          type: string
+        session_name:
+          type:
+          - "null"
+          - string
+        title:
+          type: string
       type: object
-      required: [type, subscription_id]
+    ApiSessionInfo:
       properties:
-        type:
+        attached:
+          type: boolean
+        last_activity:
+          format: date-time
+          type:
+          - "null"
+          - string
+        name:
           type: string
-          enum: [event]
-        subscription_id:
+      type: object
+    ApiSessionResponse:
+      properties:
+        active_bead:
           type: string
-        event_type:
+        activity:
           type: string
-        index:
-          type: integer
+        alias:
+          type: string
+        attached:
+          type: boolean
+        configured_named_session:
+          type: boolean
+        context_pct:
+          type:
+          - "null"
+          - integer
+        context_window:
+          type:
+          - "null"
+          - integer
+        created_at:
+          type: string
+        display_name:
+          type: string
+        id:
+          type: string
+        kind:
+          type: string
+        last_active:
+          type: string
+        last_output:
+          type: string
+        metadata:
+          additionalProperties:
+            type: string
+          type: object
+        model:
+          type: string
+        options:
+          additionalProperties:
+            type: string
+          type: object
+        pool:
+          type: string
+        provider:
+          type: string
+        reason:
+          type: string
+        rig:
+          type: string
+        running:
+          type: boolean
+        session_name:
+          type: string
+        state:
+          type: string
+        submission_capabilities:
+          $ref: '#/components/schemas/SessionSubmissionCapabilities'
+        template:
+          type: string
+        title:
+          type: string
+      type: object
+    ApiSlingBody:
+      properties:
+        attached_bead_id:
+          type: string
+        bead:
+          type: string
+        formula:
+          type: string
+        rig:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+        target:
+          type: string
+        title:
+          type: string
+        vars:
+          additionalProperties:
+            type: string
+          type:
+          - object
+          - "null"
+      type: object
+    ApiSocketAgentUpdatePayload:
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        scope:
+          type: string
+        suspended:
+          type:
+          - "null"
+          - boolean
+      type: object
+    ApiSocketAgentsListPayload:
+      properties:
+        peek:
+          type: boolean
+        pool:
+          type: string
+        rig:
+          type: string
+        running:
+          type: string
+      type: object
+    ApiSocketBeadAssignPayload:
+      properties:
+        assignee:
+          type: string
+        id:
+          type: string
+      type: object
+    ApiSocketBeadGraphPayload:
+      properties:
+        root_id:
+          type: string
+      type: object
+    ApiSocketBeadsListPayload:
+      properties:
+        assignee:
+          type: string
         cursor:
           type: string
-        payload:
-          type: object
-    # ── Action catalog (x-gc-actions) ──
-    # Auto-generated from Go type registry.
-    x-gc-actions:
+        label:
+          type: string
+        limit:
+          type:
+          - "null"
+          - integer
+        rig:
+          type: string
+        status:
+          type: string
+        type:
+          type: string
       type: object
-      description: Catalog of all WebSocket actions.
+    ApiSocketConvoyItemsPayload:
       properties:
-        agent.create:
-          description: Create an agent
-          x-mutation: true
-          x-request-schema:
-            properties:
-              dir:
-                type: string
-              name:
-                type: string
-              provider:
-                type: string
-              scope:
-                type: string
-            required:
-              - name
-              - provider
-            type: object
-        agent.delete:
-          description: Delete an agent
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        agent.get:
-          description: Get agent details
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-          x-response-schema:
-            properties:
-              active_bead:
-                type: string
-              activity:
-                type: string
-              available:
-                type: boolean
-              context_pct:
-                type: integer
-              context_window:
-                type: integer
-              description:
-                type: string
-              display_name:
-                type: string
-              last_output:
-                type: string
-              model:
-                type: string
-              name:
-                type: string
-              pool:
-                type: string
-              provider:
-                type: string
-              rig:
-                type: string
-              running:
-                type: boolean
-              session:
-                properties:
-                  attached:
-                    type: boolean
-                  last_activity:
-                    properties:
-                    type: object
-                  name:
-                    type: string
-                required:
-                  - attached
-                  - name
-                type: object
-              state:
-                type: string
-              suspended:
-                type: boolean
-              unavailable_reason:
-                type: string
-            required:
-              - available
-              - name
-              - running
-              - state
-              - suspended
-            type: object
-        agent.resume:
-          description: Resume a suspended agent
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        agent.suspend:
-          description: Suspend an agent
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        agent.update:
-          description: Update agent config
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              provider:
-                type: string
-              scope:
-                type: string
-              suspended:
-                type: boolean
-            required:
-              - name
-            type: object
-        agents.list:
-          description: List agents
-          x-request-schema:
-            properties:
-              peek:
-                type: boolean
-              pool:
-                type: string
-              rig:
-                type: string
-              running:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        bead.assign:
-          description: Assign a bead to an agent
-          x-mutation: true
-          x-request-schema:
-            properties:
-              assignee:
-                type: string
-              id:
-                type: string
-            required:
-              - assignee
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        bead.close:
-          description: Close a bead
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        bead.create:
-          description: Create a new bead
-          x-mutation: true
-          x-request-schema:
-            properties:
-              assignee:
-                type: string
-              description:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              priority:
-                type: integer
-              rig:
-                type: string
-              title:
-                type: string
-              type:
-                type: string
-            required:
-              - assignee
-              - description
-              - labels
-              - priority
-              - rig
-              - title
-              - type
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        bead.delete:
-          description: Delete a bead
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        bead.deps:
-          description: Get bead dependencies
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        bead.get:
-          description: Get a bead by ID
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        bead.reopen:
-          description: Reopen a closed bead
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        bead.update:
-          description: Update a bead
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        beads.graph:
-          description: Get bead dependency graph
-          x-request-schema:
-            properties:
-              root_id:
-                type: string
-            required:
-              - root_id
-            type: object
-        beads.list:
-          description: List beads with filters
-          x-request-schema:
-            properties:
-              assignee:
-                type: string
-              cursor:
-                type: string
-              label:
-                type: string
-              limit:
-                type: integer
-              rig:
-                type: string
-              status:
-                type: string
-              type:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        beads.ready:
-          description: List ready beads
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        cities.list:
-          description: List managed cities (supervisor)
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        city.get:
-          description: Get city details
-        city.patch:
-          description: Update city (suspend/resume)
-          x-mutation: true
-          x-request-schema:
-            properties:
-              suspended:
-                type: boolean
-            type: object
-        config.explain:
-          description: Explain config resolution
-        config.get:
-          description: Get parsed city configuration
-          x-response-schema:
-            properties:
-              agents:
-                items:
-                  properties:
-                    dir:
-                      type: string
-                    is_pool:
-                      type: boolean
-                    name:
-                      type: string
-                    provider:
-                      type: string
-                    scope:
-                      type: string
-                    suspended:
-                      type: boolean
-                  required:
-                    - name
-                    - suspended
-                  type: object
-                type: array
-              patches:
-                properties:
-                  agent_count:
-                    type: integer
-                  provider_count:
-                    type: integer
-                  rig_count:
-                    type: integer
-                required:
-                  - agent_count
-                  - provider_count
-                  - rig_count
-                type: object
-              providers:
-                additionalProperties:
-                  properties:
-                    args:
-                      items:
-                        type: string
-                      type: array
-                    command:
-                      type: string
-                    display_name:
-                      type: string
-                    env:
-                      additionalProperties:
-                        type: string
-                      type: object
-                    prompt_flag:
-                      type: string
-                    prompt_mode:
-                      type: string
-                    ready_delay_ms:
-                      type: integer
-                  type: object
-                type: object
-              rigs:
-                items:
-                  properties:
-                    name:
-                      type: string
-                    path:
-                      type: string
-                    prefix:
-                      type: string
-                    suspended:
-                      type: boolean
-                  required:
-                    - name
-                    - path
-                    - suspended
-                  type: object
-                type: array
-              workspace:
-                properties:
-                  name:
-                    type: string
-                  provider:
-                    type: string
-                  session_template:
-                    type: string
-                  suspended:
-                    type: boolean
-                required:
-                  - name
-                  - suspended
-                type: object
-            required:
-              - agents
-              - rigs
-              - workspace
-            type: object
-        config.validate:
-          description: Validate city configuration
-        convoy.add:
-          description: Add items to a convoy
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              items:
-                items:
-                  type: string
-                type: array
-            required:
-              - id
-              - items
-            type: object
-        convoy.check:
-          description: Check convoy status
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        convoy.close:
-          description: Close a convoy
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        convoy.create:
-          description: Create a convoy
-          x-mutation: true
-          x-request-schema:
-            properties:
-              items:
-                items:
-                  type: string
-                type: array
-              rig:
-                type: string
-              title:
-                type: string
-            required:
-              - items
-              - rig
-              - title
-            type: object
-        convoy.delete:
-          description: Delete a convoy
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        convoy.get:
-          description: Get convoy details
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-        convoy.remove:
-          description: Remove items from a convoy
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              items:
-                items:
-                  type: string
-                type: array
-            required:
-              - id
-              - items
-            type: object
-        convoys.list:
-          description: List convoys
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        event.emit:
-          description: Emit a custom event
-          x-mutation: true
-          x-request-schema:
-            properties:
-              actor:
-                type: string
-              message:
-                type: string
-              payload:
-                items:
-                  type: integer
-                type: array
-              seq:
-                type: integer
-              subject:
-                type: string
-              ts:
-                properties:
-                type: object
-              type:
-                type: string
-            required:
-              - actor
-              - seq
-              - ts
-              - type
-            type: object
-        events.list:
-          description: List events with filters
-          x-request-schema:
-            properties:
-              actor:
-                type: string
-              cursor:
-                type: string
-              limit:
-                type: integer
-              since:
-                type: string
-              type:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        extmsg.adapters.list:
-          description: List messaging adapters
-        extmsg.adapters.register:
-          description: Register messaging adapter
-          x-mutation: true
-        extmsg.adapters.unregister:
-          description: Unregister messaging adapter
-          x-mutation: true
-        extmsg.bind:
-          description: Bind external messaging channel
-          x-mutation: true
-        extmsg.bindings.list:
-          description: List external message bindings
-        extmsg.groups.ensure:
-          description: Ensure messaging group exists
-          x-mutation: true
-        extmsg.groups.lookup:
-          description: Look up messaging groups
-        extmsg.inbound:
-          description: Process inbound external message
-          x-mutation: true
-        extmsg.outbound:
-          description: Send outbound external message
-          x-mutation: true
-        extmsg.participant.remove:
-          description: Remove messaging participant
-          x-mutation: true
-        extmsg.participant.upsert:
-          description: Add/update messaging participant
-          x-mutation: true
-        extmsg.transcript.ack:
-          description: Acknowledge transcript messages
-          x-mutation: true
-        extmsg.transcript.list:
-          description: List external message transcript
-        extmsg.unbind:
-          description: Unbind external messaging channel
-          x-mutation: true
-        formula.get:
-          description: Get formula details
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-              target:
-                type: string
-              vars:
-                additionalProperties:
-                  type: string
-                type: object
-            required:
-              - name
-              - scope_kind
-              - scope_ref
-              - target
-            type: object
-        formula.runs:
-          description: Get formula run history
-          x-request-schema:
-            properties:
-              limit:
-                type: integer
-              name:
-                type: string
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - name
-              - scope_kind
-              - scope_ref
-            type: object
-        formulas.feed:
-          description: Formula activity feed
-          x-request-schema:
-            properties:
-              limit:
-                type: integer
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - scope_kind
-              - scope_ref
-            type: object
-        formulas.list:
-          description: List formulas
-          x-request-schema:
-            properties:
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - scope_kind
-              - scope_ref
-            type: object
-        health.get:
-          description: Health check
-        mail.archive:
-          description: Archive a mail message
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              body:
-                type: string
-              cc:
-                items:
-                  type: string
-                type: array
-              created_at:
-                properties:
-                type: object
-              from:
-                type: string
-              id:
-                type: string
-              priority:
-                type: integer
-              read:
-                type: boolean
-              reply_to:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              thread_id:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - created_at
-              - from
-              - id
-              - read
-              - subject
-              - to
-            type: object
-        mail.count:
-          description: Count mail messages
-          x-request-schema:
-            properties:
-              agent:
-                type: string
-              rig:
-                type: string
-            type: object
-        mail.delete:
-          description: Delete a mail message
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-        mail.get:
-          description: Get a mail message
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              body:
-                type: string
-              cc:
-                items:
-                  type: string
-                type: array
-              created_at:
-                properties:
-                type: object
-              from:
-                type: string
-              id:
-                type: string
-              priority:
-                type: integer
-              read:
-                type: boolean
-              reply_to:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              thread_id:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - created_at
-              - from
-              - id
-              - read
-              - subject
-              - to
-            type: object
-        mail.list:
-          description: List mail messages
-          x-request-schema:
-            properties:
-              agent:
-                type: string
-              cursor:
-                type: string
-              limit:
-                type: integer
-              rig:
-                type: string
-              status:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        mail.mark_unread:
-          description: Mark mail as unread
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              body:
-                type: string
-              cc:
-                items:
-                  type: string
-                type: array
-              created_at:
-                properties:
-                type: object
-              from:
-                type: string
-              id:
-                type: string
-              priority:
-                type: integer
-              read:
-                type: boolean
-              reply_to:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              thread_id:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - created_at
-              - from
-              - id
-              - read
-              - subject
-              - to
-            type: object
-        mail.read:
-          description: Mark mail as read
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              body:
-                type: string
-              cc:
-                items:
-                  type: string
-                type: array
-              created_at:
-                properties:
-                type: object
-              from:
-                type: string
-              id:
-                type: string
-              priority:
-                type: integer
-              read:
-                type: boolean
-              reply_to:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              thread_id:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - created_at
-              - from
-              - id
-              - read
-              - subject
-              - to
-            type: object
-        mail.reply:
-          description: Reply to a mail message
-          x-mutation: true
-          x-request-schema:
-            properties:
-              body:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-            required:
-              - body
-              - from
-              - id
-              - subject
-            type: object
-        mail.send:
-          description: Send a new mail message
-          x-mutation: true
-          x-request-schema:
-            properties:
-              body:
-                type: string
-              from:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - from
-              - rig
-              - subject
-              - to
-            type: object
-          x-response-schema:
-            properties:
-              body:
-                type: string
-              cc:
-                items:
-                  type: string
-                type: array
-              created_at:
-                properties:
-                type: object
-              from:
-                type: string
-              id:
-                type: string
-              priority:
-                type: integer
-              read:
-                type: boolean
-              reply_to:
-                type: string
-              rig:
-                type: string
-              subject:
-                type: string
-              thread_id:
-                type: string
-              to:
-                type: string
-            required:
-              - body
-              - created_at
-              - from
-              - id
-              - read
-              - subject
-              - to
-            type: object
-        mail.thread:
-          description: Get a mail thread
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              rig:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        order.disable:
-          description: Disable an order
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        order.enable:
-          description: Enable an order
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        order.get:
-          description: Get order details
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        order.history.detail:
-          description: Get order history detail
-          x-request-schema:
-            properties:
-              id:
-                type: string
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              assignee:
-                type: string
-              created_at:
-                properties:
-                type: object
-              dependencies:
-                items:
-                  properties:
-                    depends_on_id:
-                      type: string
-                    issue_id:
-                      type: string
-                    type:
-                      type: string
-                  required:
-                    - depends_on_id
-                    - issue_id
-                    - type
-                  type: object
-                type: array
-              description:
-                type: string
-              from:
-                type: string
-              id:
-                type: string
-              issue_type:
-                type: string
-              labels:
-                items:
-                  type: string
-                type: array
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              needs:
-                items:
-                  type: string
-                type: array
-              parent:
-                type: string
-              priority:
-                type: integer
-              ref:
-                type: string
-              status:
-                type: string
-              title:
-                type: string
-            required:
-              - created_at
-              - id
-              - issue_type
-              - status
-              - title
-            type: object
-        orders.check:
-          description: Check order gate conditions
-        orders.feed:
-          description: Order activity feed
-          x-request-schema:
-            properties:
-              limit:
-                type: integer
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - scope_kind
-              - scope_ref
-            type: object
-        orders.history:
-          description: Get order history
-          x-request-schema:
-            properties:
-              before:
-                type: string
-              limit:
-                type: integer
-              scoped_name:
-                type: string
-            required:
-              - scoped_name
-            type: object
-        orders.list:
-          description: List orders
-        packs.list:
-          description: List installed packs
-        patches.agent.delete:
-          description: Delete agent patch
-          x-mutation: true
-        patches.agent.get:
-          description: Get agent patch
-        patches.agents.list:
-          description: List agent patches
-        patches.agents.set:
-          description: Set agent patch
-          x-mutation: true
-        patches.provider.delete:
-          description: Delete provider patch
-          x-mutation: true
-        patches.provider.get:
-          description: Get provider patch
-        patches.providers.list:
-          description: List provider patches
-        patches.providers.set:
-          description: Set provider patch
-          x-mutation: true
-        patches.rig.delete:
-          description: Delete rig patch
-          x-mutation: true
-        patches.rig.get:
-          description: Get rig patch
-        patches.rigs.list:
-          description: List rig patches
-        patches.rigs.set:
-          description: Set rig patch
-          x-mutation: true
-        provider.create:
-          description: Create a provider
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              spec:
-                properties:
-                  Args:
-                    items:
-                      type: string
-                    type: array
-                  Command:
-                    type: string
-                  DisplayName:
-                    type: string
-                  EmitsPermissionWarning:
-                    type: boolean
-                  Env:
-                    additionalProperties:
-                      type: string
-                    type: object
-                  InstructionsFile:
-                    type: string
-                  NeedsNudgePoller:
-                    type: boolean
-                  OptionDefaults:
-                    additionalProperties:
-                      type: string
-                    type: object
-                  PathCheck:
-                    type: string
-                  PermissionModes:
-                    additionalProperties:
-                      type: string
-                    type: object
-                  PrintArgs:
-                    items:
-                      type: string
-                    type: array
-                  ProcessNames:
-                    items:
-                      type: string
-                    type: array
-                  PromptFlag:
-                    type: string
-                  PromptMode:
-                    type: string
-                  ReadyDelayMs:
-                    type: integer
-                  ReadyPromptPrefix:
-                    type: string
-                  ResumeCommand:
-                    type: string
-                  ResumeFlag:
-                    type: string
-                  ResumeStyle:
-                    type: string
-                  SessionIDFlag:
-                    type: string
-                  SupportsACP:
-                    type: boolean
-                  SupportsHooks:
-                    type: boolean
-                  TitleModel:
-                    type: string
-                required:
-                  - Args
-                  - Command
-                  - DisplayName
-                  - EmitsPermissionWarning
-                  - Env
-                  - InstructionsFile
-                  - NeedsNudgePoller
-                  - OptionDefaults
-                  - PathCheck
-                  - PermissionModes
-                  - PrintArgs
-                  - ProcessNames
-                  - PromptFlag
-                  - PromptMode
-                  - ReadyDelayMs
-                  - ReadyPromptPrefix
-                  - ResumeCommand
-                  - ResumeFlag
-                  - ResumeStyle
-                  - SessionIDFlag
-                  - SupportsACP
-                  - SupportsHooks
-                  - TitleModel
-                type: object
-            required:
-              - name
-              - spec
-            type: object
-        provider.delete:
-          description: Delete a provider
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        provider.get:
-          description: Get provider details
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        provider.update:
-          description: Update provider config
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              update:
-                properties:
-                  Args:
-                    items:
-                      type: string
-                    type: array
-                  Command:
-                    type: string
-                  DisplayName:
-                    type: string
-                  Env:
-                    additionalProperties:
-                      type: string
-                    type: object
-                  PromptFlag:
-                    type: string
-                  PromptMode:
-                    type: string
-                  ReadyDelayMs:
-                    type: integer
-                required:
-                  - Args
-                  - Command
-                  - DisplayName
-                  - Env
-                  - PromptFlag
-                  - PromptMode
-                  - ReadyDelayMs
-                type: object
-            required:
-              - name
-              - update
-            type: object
-        providers.list:
-          description: List AI providers
-          x-request-schema:
-            properties:
-              view:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        rig.create:
-          description: Create a rig
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              path:
-                type: string
-            required:
-              - name
-            type: object
-        rig.delete:
-          description: Delete a rig
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        rig.get:
-          description: Get rig details
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        rig.restart:
-          description: Restart a rig
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        rig.resume:
-          description: Resume a suspended rig
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        rig.suspend:
-          description: Suspend a rig
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        rig.update:
-          description: Update rig config
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-              path:
-                type: string
-              prefix:
-                type: string
-              suspended:
-                type: boolean
-            required:
-              - name
-            type: object
-        rigs.list:
-          description: List rigs
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        service.get:
-          description: Get service status
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-          x-response-schema:
-            properties:
-              allow_websockets:
-                type: boolean
-              hostname:
-                type: string
-              kind:
-                type: string
-              local_state:
-                type: string
-              mount_path:
-                type: string
-              publication_state:
-                type: string
-              publish_mode:
-                type: string
-              reason:
-                type: string
-              service_name:
-                type: string
-              state:
-                type: string
-              state_root:
-                type: string
-              updated_at:
-                properties:
-                type: object
-              url:
-                type: string
-              visibility:
-                type: string
-              workflow_contract:
-                type: string
-            required:
-              - local_state
-              - mount_path
-              - publication_state
-              - publish_mode
-              - service_name
-              - state_root
-              - updated_at
-            type: object
-        service.restart:
-          description: Restart a service
-          x-mutation: true
-          x-request-schema:
-            properties:
-              name:
-                type: string
-            required:
-              - name
-            type: object
-        services.list:
-          description: List workspace services
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        session.agent.get:
-          description: Get session agent details
-          x-request-schema:
-            properties:
-              agent_id:
-                type: string
-              id:
-                type: string
-            required:
-              - agent_id
-              - id
-            type: object
-        session.agents.list:
-          description: List agents in a session
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        session.close:
-          description: Close a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        session.create:
-          description: Create a new session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              alias:
-                type: string
-              async:
-                type: boolean
-              kind:
-                type: string
-              message:
-                type: string
-              name:
-                type: string
-              options:
-                additionalProperties:
-                  type: string
-                type: object
-              project_id:
-                type: string
-              session_name:
-                type: string
-              title:
-                type: string
-            type: object
-        session.get:
-          description: Get session details
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-          x-response-schema:
-            properties:
-              active_bead:
-                type: string
-              activity:
-                type: string
-              alias:
-                type: string
-              attached:
-                type: boolean
-              configured_named_session:
-                type: boolean
-              context_pct:
-                type: integer
-              context_window:
-                type: integer
-              created_at:
-                type: string
-              display_name:
-                type: string
-              id:
-                type: string
-              kind:
-                type: string
-              last_active:
-                type: string
-              last_output:
-                type: string
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              model:
-                type: string
-              options:
-                additionalProperties:
-                  type: string
-                type: object
-              pool:
-                type: string
-              provider:
-                type: string
-              reason:
-                type: string
-              rig:
-                type: string
-              running:
-                type: boolean
-              session_name:
-                type: string
-              state:
-                type: string
-              submission_capabilities:
-                properties:
-                  supports_follow_up:
-                    type: boolean
-                  supports_interrupt_now:
-                    type: boolean
-                required:
-                  - supports_follow_up
-                  - supports_interrupt_now
-                type: object
-              template:
-                type: string
-              title:
-                type: string
-            required:
-              - attached
-              - created_at
-              - id
-              - provider
-              - running
-              - session_name
-              - state
-              - template
-              - title
-            type: object
-        session.kill:
-          description: Force-kill a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        session.messages:
-          description: Get session messages
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              message:
-                type: string
-            required:
-              - id
-              - message
-            type: object
-        session.patch:
-          description: Update session metadata
-          x-mutation: true
-          x-request-schema:
-            properties:
-              alias:
-                type: string
-              id:
-                type: string
-              title:
-                type: string
-            required:
-              - id
-            type: object
-        session.pending:
-          description: Get pending input requests
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        session.rename:
-          description: Rename a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              title:
-                type: string
-            required:
-              - id
-              - title
-            type: object
-        session.respond:
-          description: Respond to a session prompt
-          x-mutation: true
-          x-request-schema:
-            properties:
-              action:
-                type: string
-              id:
-                type: string
-              metadata:
-                additionalProperties:
-                  type: string
-                type: object
-              request_id:
-                type: string
-              text:
-                type: string
-            required:
-              - action
-              - id
-            type: object
-        session.stop:
-          description: Stop a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        session.submit:
-          description: Submit work to a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              intent:
-                type: string
-              message:
-                type: string
-            required:
-              - id
-              - message
-            type: object
-        session.suspend:
-          description: Suspend a session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        session.transcript:
-          description: Get session transcript
-          x-request-schema:
-            properties:
-              before:
-                type: string
-              format:
-                type: string
-              id:
-                type: string
-              turns:
-                type: integer
-            required:
-              - id
-            type: object
-        session.wake:
-          description: Wake a suspended session
-          x-mutation: true
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              peek:
-                type: boolean
-            required:
-              - id
-            type: object
-        sessions.list:
-          description: List sessions
-          x-request-schema:
-            properties:
-              cursor:
-                type: string
-              limit:
-                type: integer
-              peek:
-                type: boolean
-              state:
-                type: string
-              template:
-                type: string
-            type: object
-          x-response-schema:
-            properties:
-              items:
-              next_cursor:
-                type: string
-              total:
-                type: integer
-            required:
-              - items
-              - total
-            type: object
-        sling.run:
-          description: Run sling dispatch
-          x-mutation: true
-          x-request-schema:
-            properties:
-              attached_bead_id:
-                type: string
-              bead:
-                type: string
-              formula:
-                type: string
-              rig:
-                type: string
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-              target:
-                type: string
-              title:
-                type: string
-              vars:
-                additionalProperties:
-                  type: string
-                type: object
-            required:
-              - attached_bead_id
-              - bead
-              - formula
-              - rig
-              - scope_kind
-              - scope_ref
-              - target
-              - title
-              - vars
-            type: object
-        status.get:
-          description: City status snapshot
-        subscription.start:
-          description: Start an event or session stream subscription
-        subscription.stop:
-          description: Stop a subscription
-        workflow.delete:
-          description: Delete a workflow
-          x-mutation: true
-          x-request-schema:
-            properties:
-              delete:
-                type: boolean
-              id:
-                type: string
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - id
-            type: object
-        workflow.get:
-          description: Get workflow details
-          x-request-schema:
-            properties:
-              id:
-                type: string
-              scope_kind:
-                type: string
-              scope_ref:
-                type: string
-            required:
-              - id
-            type: object
+        id:
+          type: string
+        items:
+          items:
+            type: string
+          type:
+          - array
+          - "null"
+      type: object
+    ApiSocketEventsListPayload:
+      properties:
+        actor:
+          type: string
+        cursor:
+          type: string
+        limit:
+          type:
+          - "null"
+          - integer
+        since:
+          type: string
+        type:
+          type: string
+      type: object
+    ApiSocketFormulaFeedPayload:
+      properties:
+        limit:
+          type: integer
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiSocketFormulaGetPayload:
+      properties:
+        name:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+        target:
+          type: string
+        vars:
+          additionalProperties:
+            type: string
+          type: object
+      type: object
+    ApiSocketFormulaRunsPayload:
+      properties:
+        limit:
+          type: integer
+        name:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiSocketFormulaScopePayload:
+      properties:
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiSocketIDPayload:
+      properties:
+        id:
+          type: string
+      type: object
+    ApiSocketMailCountPayload:
+      properties:
+        agent:
+          type: string
+        rig:
+          type: string
+      type: object
+    ApiSocketMailGetPayload:
+      properties:
+        id:
+          type: string
+        rig:
+          type: string
+      type: object
+    ApiSocketMailListPayload:
+      properties:
+        agent:
+          type: string
+        cursor:
+          type: string
+        limit:
+          type:
+          - "null"
+          - integer
+        rig:
+          type: string
+        status:
+          type: string
+      type: object
+    ApiSocketMailReplyPayload:
+      properties:
+        body:
+          type: string
+        from:
+          type: string
+        id:
+          type: string
+        rig:
+          type: string
+        subject:
+          type: string
+      type: object
+    ApiSocketMailThreadPayload:
+      properties:
+        id:
+          type: string
+        rig:
+          type: string
+      type: object
+    ApiSocketNamePayload:
+      properties:
+        name:
+          type: string
+      type: object
+    ApiSocketOrdersFeedPayload:
+      properties:
+        limit:
+          type: integer
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiSocketOrdersHistoryPayload:
+      properties:
+        before:
+          type: string
+        limit:
+          type: integer
+        scoped_name:
+          type: string
+      type: object
+    ApiSocketProviderCreatePayload:
+      properties:
+        name:
+          type: string
+        spec:
+          $ref: '#/components/schemas/ConfigProviderSpec'
+      type: object
+    ApiSocketProviderUpdatePayload:
+      properties:
+        name:
+          type: string
+        update:
+          $ref: '#/components/schemas/ApiProviderUpdate'
+      type: object
+    ApiSocketProvidersListPayload:
+      properties:
+        view:
+          type: string
+      type: object
+    ApiSocketRigCreatePayload:
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+      type: object
+    ApiSocketRigUpdatePayload:
+      properties:
+        name:
+          type: string
+        path:
+          type: string
+        prefix:
+          type: string
+        suspended:
+          type:
+          - "null"
+          - boolean
+      type: object
+    ApiSocketSessionAgentGetPayload:
+      properties:
+        agent_id:
+          type: string
+        id:
+          type: string
+      type: object
+    ApiSocketSessionMessagesPayload:
+      properties:
+        id:
+          type: string
+        message:
+          type: string
+      type: object
+    ApiSocketSessionPatchPayload:
+      properties:
+        alias:
+          type:
+          - "null"
+          - string
+        id:
+          type: string
+        title:
+          type:
+          - "null"
+          - string
+      type: object
+    ApiSocketSessionRenamePayload:
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+      type: object
+    ApiSocketSessionRespondPayload:
+      properties:
+        action:
+          type: string
+        id:
+          type: string
+        metadata:
+          additionalProperties:
+            type: string
+          type: object
+        request_id:
+          type: string
+        text:
+          type: string
+      type: object
+    ApiSocketSessionSubmitPayload:
+      properties:
+        id:
+          type: string
+        intent:
+          type: string
+        message:
+          type: string
+      type: object
+    ApiSocketSessionTargetPayload:
+      properties:
+        id:
+          type: string
+        peek:
+          type: boolean
+      type: object
+    ApiSocketSessionTranscriptPayload:
+      properties:
+        before:
+          type: string
+        format:
+          type: string
+        id:
+          type: string
+        turns:
+          type: integer
+      type: object
+    ApiSocketSessionsListPayload:
+      properties:
+        cursor:
+          type: string
+        limit:
+          type:
+          - "null"
+          - integer
+        peek:
+          type: boolean
+        state:
+          type: string
+        template:
+          type: string
+      type: object
+    ApiSocketWorkflowDeletePayload:
+      properties:
+        delete:
+          type: boolean
+        id:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiSocketWorkflowGetPayload:
+      properties:
+        id:
+          type: string
+        scope_kind:
+          type: string
+        scope_ref:
+          type: string
+      type: object
+    ApiWorkspaceResponse:
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+        session_template:
+          type: string
+        suspended:
+          type: boolean
+      type: object
+    BeadsBead:
+      properties:
+        assignee:
+          type: string
+        created_at:
+          format: date-time
+          type: string
+        dependencies:
+          items:
+            $ref: '#/components/schemas/BeadsDep'
+          type: array
+        description:
+          type: string
+        from:
+          type: string
+        id:
+          type: string
+        issue_type:
+          type: string
+        labels:
+          items:
+            type: string
+          type: array
+        metadata:
+          additionalProperties:
+            type: string
+          type: object
+        needs:
+          items:
+            type: string
+          type: array
+        parent:
+          type: string
+        priority:
+          type:
+          - "null"
+          - integer
+        ref:
+          type: string
+        status:
+          type: string
+        title:
+          type: string
+      type: object
+    BeadsDep:
+      properties:
+        depends_on_id:
+          type: string
+        issue_id:
+          type: string
+        type:
+          type: string
+      type: object
+    ConfigProviderSpec:
+      type: object
+    EventsEvent:
+      properties:
+        actor:
+          type: string
+        message:
+          type: string
+        payload: {}
+        seq:
+          minimum: 0
+          type: integer
+        subject:
+          type: string
+        ts:
+          format: date-time
+          type: string
+        type:
+          type: string
+      type: object
+    MailMessage:
+      properties:
+        body:
+          type: string
+        cc:
+          items:
+            type: string
+          type: array
+        created_at:
+          format: date-time
+          type: string
+        from:
+          type: string
+        id:
+          type: string
+        priority:
+          type: integer
+        read:
+          type: boolean
+        reply_to:
+          type: string
+        rig:
+          type: string
+        subject:
+          type: string
+        thread_id:
+          type: string
+        to:
+          type: string
+      type: object
+    SessionSubmissionCapabilities:
+      properties:
+        supports_follow_up:
+          type: boolean
+        supports_interrupt_now:
+          type: boolean
+      type: object
+    WorkspacesvcStatus:
+      properties:
+        allow_websockets:
+          type: boolean
+        hostname:
+          type: string
+        kind:
+          type: string
+        local_state:
+          type: string
+        mount_path:
+          type: string
+        publication_state:
+          type: string
+        publish_mode:
+          type: string
+        reason:
+          type: string
+        service_name:
+          type: string
+        state:
+          type: string
+        state_root:
+          type: string
+        updated_at:
+          format: date-time
+          type: string
+        url:
+          type: string
+        visibility:
+          type: string
+        workflow_contract:
+          type: string
+      type: object
+  messages:
+    ApiAgentCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiAgentCreateRequest'
+      summary: Create an agent
+      description: agent.create request payload
+    ApiAgentResponse:
+      payload:
+        $ref: '#/components/schemas/ApiAgentResponse'
+      summary: Get agent details
+      description: agent.get response payload
+    ApiBeadCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiBeadCreateRequest'
+      summary: Create a new bead
+      description: bead.create request payload
+    ApiCityPatchRequest:
+      payload:
+        $ref: '#/components/schemas/ApiCityPatchRequest'
+      summary: Update city (suspend/resume)
+      description: city.patch request payload
+    ApiConfigResponse:
+      payload:
+        $ref: '#/components/schemas/ApiConfigResponse'
+      summary: Get parsed city configuration
+      description: config.get response payload
+    ApiConvoyCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiConvoyCreateRequest'
+      summary: Create a convoy
+      description: convoy.create request payload
+    ApiListResponse:
+      payload:
+        $ref: '#/components/schemas/ApiListResponse'
+      summary: List sessions
+      description: sessions.list response payload
+    ApiMailSendRequest:
+      payload:
+        $ref: '#/components/schemas/ApiMailSendRequest'
+      summary: Send a new mail message
+      description: mail.send request payload
+    ApiSessionCreateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiSessionCreateRequest'
+      summary: Create a new session
+      description: session.create request payload
+    ApiSessionResponse:
+      payload:
+        $ref: '#/components/schemas/ApiSessionResponse'
+      summary: Get session details
+      description: session.get response payload
+    ApiSlingBody:
+      payload:
+        $ref: '#/components/schemas/ApiSlingBody'
+      summary: Run sling dispatch
+      description: sling.run request payload
+    ApiSocketAgentUpdatePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketAgentUpdatePayload'
+      summary: Update agent config
+      description: agent.update request payload
+    ApiSocketAgentsListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketAgentsListPayload'
+      summary: List agents
+      description: agents.list request payload
+    ApiSocketBeadAssignPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketBeadAssignPayload'
+      summary: Assign a bead to an agent
+      description: bead.assign request payload
+    ApiSocketBeadGraphPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketBeadGraphPayload'
+      summary: Get bead dependency graph
+      description: beads.graph request payload
+    ApiSocketBeadsListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketBeadsListPayload'
+      summary: List beads with filters
+      description: beads.list request payload
+    ApiSocketConvoyItemsPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketConvoyItemsPayload'
+      summary: Remove items from a convoy
+      description: convoy.remove request payload
+    ApiSocketEventsListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketEventsListPayload'
+      summary: List events with filters
+      description: events.list request payload
+    ApiSocketFormulaFeedPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketFormulaFeedPayload'
+      summary: Formula activity feed
+      description: formulas.feed request payload
+    ApiSocketFormulaGetPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketFormulaGetPayload'
+      summary: Get formula details
+      description: formula.get request payload
+    ApiSocketFormulaRunsPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketFormulaRunsPayload'
+      summary: Get formula run history
+      description: formula.runs request payload
+    ApiSocketFormulaScopePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketFormulaScopePayload'
+      summary: List formulas
+      description: formulas.list request payload
+    ApiSocketIDPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketIDPayload'
+      summary: Get order history detail
+      description: order.history.detail request payload
+    ApiSocketMailCountPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketMailCountPayload'
+      summary: Count mail messages
+      description: mail.count request payload
+    ApiSocketMailGetPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketMailGetPayload'
+      summary: Mark mail as read
+      description: mail.read request payload
+    ApiSocketMailListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketMailListPayload'
+      summary: List mail messages
+      description: mail.list request payload
+    ApiSocketMailReplyPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketMailReplyPayload'
+      summary: Reply to a mail message
+      description: mail.reply request payload
+    ApiSocketMailThreadPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketMailThreadPayload'
+      summary: Get a mail thread
+      description: mail.thread request payload
+    ApiSocketNamePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketNamePayload'
+      summary: Restart a service
+      description: service.restart request payload
+    ApiSocketOrdersFeedPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketOrdersFeedPayload'
+      summary: Order activity feed
+      description: orders.feed request payload
+    ApiSocketOrdersHistoryPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketOrdersHistoryPayload'
+      summary: Get order history
+      description: orders.history request payload
+    ApiSocketProviderCreatePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketProviderCreatePayload'
+      summary: Create a provider
+      description: provider.create request payload
+    ApiSocketProviderUpdatePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketProviderUpdatePayload'
+      summary: Update provider config
+      description: provider.update request payload
+    ApiSocketProvidersListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketProvidersListPayload'
+      summary: List AI providers
+      description: providers.list request payload
+    ApiSocketRigCreatePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketRigCreatePayload'
+      summary: Create a rig
+      description: rig.create request payload
+    ApiSocketRigUpdatePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketRigUpdatePayload'
+      summary: Update rig config
+      description: rig.update request payload
+    ApiSocketSessionAgentGetPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionAgentGetPayload'
+      summary: Get session agent details
+      description: session.agent.get request payload
+    ApiSocketSessionMessagesPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionMessagesPayload'
+      summary: Get session messages
+      description: session.messages request payload
+    ApiSocketSessionPatchPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionPatchPayload'
+      summary: Update session metadata
+      description: session.patch request payload
+    ApiSocketSessionRenamePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionRenamePayload'
+      summary: Rename a session
+      description: session.rename request payload
+    ApiSocketSessionRespondPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionRespondPayload'
+      summary: Respond to a session prompt
+      description: session.respond request payload
+    ApiSocketSessionSubmitPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionSubmitPayload'
+      summary: Submit work to a session
+      description: session.submit request payload
+    ApiSocketSessionTargetPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionTargetPayload'
+      summary: Wake a suspended session
+      description: session.wake request payload
+    ApiSocketSessionTranscriptPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionTranscriptPayload'
+      summary: Get session transcript
+      description: session.transcript request payload
+    ApiSocketSessionsListPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketSessionsListPayload'
+      summary: List sessions
+      description: sessions.list request payload
+    ApiSocketWorkflowDeletePayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketWorkflowDeletePayload'
+      summary: Delete a workflow
+      description: workflow.delete request payload
+    ApiSocketWorkflowGetPayload:
+      payload:
+        $ref: '#/components/schemas/ApiSocketWorkflowGetPayload'
+      summary: Get workflow details
+      description: workflow.get request payload
+    BeadsBead:
+      payload:
+        $ref: '#/components/schemas/BeadsBead'
+      summary: Get order history detail
+      description: order.history.detail response payload
+    EventsEvent:
+      payload:
+        $ref: '#/components/schemas/EventsEvent'
+      summary: Emit a custom event
+      description: event.emit request payload
+    MailMessage:
+      payload:
+        $ref: '#/components/schemas/MailMessage'
+      summary: Send a new mail message
+      description: mail.send response payload
+    WorkspacesvcStatus:
+      payload:
+        $ref: '#/components/schemas/WorkspacesvcStatus'
+      summary: Get service status
+      description: service.get response payload
