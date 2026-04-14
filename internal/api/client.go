@@ -554,7 +554,10 @@ func (c *Client) wsReadLoop(conn *websocket.Conn) {
 				c.subMu.Unlock()
 				cb(evt)
 			} else {
-				c.eventBuf = append(c.eventBuf, evt)
+				const maxEventBuf = 1000
+				if len(c.eventBuf) < maxEventBuf {
+					c.eventBuf = append(c.eventBuf, evt)
+				}
 				c.subMu.Unlock()
 			}
 		default:

@@ -147,17 +147,7 @@ func (s *Server) startSocketSubscription(ctx context.Context, sess *socketSessio
 }
 
 func (s *Server) stopSocketSubscription(sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
-	var payload socketSubscriptionStopPayload
-	if err := decodeSocketPayload(req.Payload, &payload); err != nil {
-		return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
-	}
-	if payload.SubscriptionID == "" {
-		return socketActionResult{}, newSocketError(req.ID, "invalid", "subscription_id is required")
-	}
-	if !sess.stopSubscription(payload.SubscriptionID) {
-		return socketActionResult{}, newSocketError(req.ID, "not_found", "subscription not found: "+payload.SubscriptionID)
-	}
-	return socketActionResult{Result: map[string]string{"status": "ok", "subscription_id": payload.SubscriptionID}}, nil
+	return stopSocketSubscriptionImpl(sess, req)
 }
 
 func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
@@ -211,6 +201,10 @@ func (sm *SupervisorMux) startSocketSubscription(ctx context.Context, sess *sock
 }
 
 func (sm *SupervisorMux) stopSocketSubscription(sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
+	return stopSocketSubscriptionImpl(sess, req)
+}
+
+func stopSocketSubscriptionImpl(sess *socketSession, req *socketRequestEnvelope) (socketActionResult, *socketErrorEnvelope) {
 	var payload socketSubscriptionStopPayload
 	if err := decodeSocketPayload(req.Payload, &payload); err != nil {
 		return socketActionResult{}, newSocketError(req.ID, "invalid", err.Error())
@@ -404,11 +398,6 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 		Result: map[string]string{"subscription_id": subID, "kind": payload.Kind},
 		AfterWrite: start,
 	}, nil
-}
-
-func encodeSocketJSON(v any) json.RawMessage {
-	data, _ := json.Marshal(v)
-	return data
 }
 
 // watchCityAvailability polls the resolver for city availability. When the

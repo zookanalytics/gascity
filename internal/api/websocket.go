@@ -374,11 +374,16 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 
 	// Send appropriate close frame when the handler exits.
 	// Default to normal closure; detect shutdown via request context.
+	// Protected by closeMu since dispatch goroutines may set these on panic.
+	var closeMu sync.Mutex
 	closeCode := websocket.CloseNormalClosure
 	closeText := ""
 	defer func() {
-		_ = sc.writeClose(closeCode, closeText)
-		log.Printf("api: ws disconnected remote=%s close_code=%d", r.RemoteAddr, closeCode)
+		closeMu.Lock()
+		code, text := closeCode, closeText
+		closeMu.Unlock()
+		_ = sc.writeClose(code, text)
+		log.Printf("api: ws disconnected remote=%s close_code=%d", r.RemoteAddr, code)
 		telemetry.RecordWebSocketConnection(r.Context(), -1)
 	}()
 
@@ -473,8 +478,10 @@ func serveWebSocket(w http.ResponseWriter, r *http.Request, handler socketHandle
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("api: ws dispatch panic for %s: %v", reqCopy.Action, r)
+						closeMu.Lock()
 						closeCode = websocket.CloseInternalServerErr // 1011
 						closeText = "internal server error"
+						closeMu.Unlock()
 						ss.cancel()
 					}
 				}()
@@ -524,21 +531,22 @@ func (sc *socketConn) writeJSON(v any) error {
 // The error envelope preserves the request ID so concurrent clients can
 // correlate the failure.
 func (sc *socketConn) writeResponseChecked(reqID string, resp socketResponseEnvelope) error {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
+	// Marshal outside the lock to avoid holding the mutex during serialization.
 	data, err := json.Marshal(resp)
 	if err != nil {
 		return err
 	}
 	if len(data) > maxWSOutboundSize {
 		log.Printf("api: ws outbound message too large (%d bytes) for req %s, sending error", len(data), reqID)
-		return sc.conn.WriteJSON(socketErrorEnvelope{
+		return sc.writeJSON(socketErrorEnvelope{
 			Type:    "error",
 			ID:      reqID,
 			Code:    "message_too_large",
 			Message: "response exceeds maximum message size",
 		})
 	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	return sc.conn.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -996,9 +1004,6 @@ func (s *Server) handleSocketRequest(req *socketRequestEnvelope) (result socketA
 			if handled {
 				return socketActionResult{Result: cached}, nil
 			}
-			defer func() {
-				// Store result on success for replay.
-			}()
 		}
 		bead, err := s.createBead(payload)
 		if err != nil {

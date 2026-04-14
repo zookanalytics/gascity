@@ -2,7 +2,9 @@ package dashboard
 
 import (
 	"embed"
+	"html"
 	"io/fs"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -31,23 +33,25 @@ func NewDashboardMux(apiURL, initialCityScope string) (http.Handler, error) {
 			return
 		}
 		// Inject API URL and selected city into the static HTML.
-		html := string(indexData)
+		htmlStr := string(indexData)
 		city := r.URL.Query().Get("city")
 		if city == "" {
 			city = initialCityScope
 		}
 		inject := ""
 		if dashAPIURL != "" {
-			inject += `<meta name="api-url" content="` + dashAPIURL + `">`
+			inject += `<meta name="api-url" content="` + html.EscapeString(dashAPIURL) + `">`
 		}
 		if city != "" {
-			inject += `<meta name="selected-city" content="` + city + `">`
+			inject += `<meta name="selected-city" content="` + html.EscapeString(city) + `">`
 		}
 		if inject != "" {
-			html = strings.Replace(html, "</head>", inject+"\n</head>", 1)
+			htmlStr = strings.Replace(htmlStr, "</head>", inject+"\n</head>", 1)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(html)) //nolint:errcheck
+		if _, err := w.Write([]byte(htmlStr)); err != nil {
+			log.Printf("dashboard: response write failed: %v", err)
+		}
 	})
 
 	return mux, nil

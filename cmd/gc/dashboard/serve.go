@@ -66,11 +66,9 @@ func ValidateAPI(apiURL string) error {
 }
 
 // detectSupervisor probes the API server for supervisor mode.
+// A successful cities.list response (even with zero cities) means supervisor.
 func detectSupervisor(apiURL string) bool {
 	client := gcapi.NewClient(apiURL)
-	cities, err := client.ListCities()
-	if err != nil {
-		return false
-	}
-	return cities != nil
+	_, err := client.ListCities()
+	return err == nil
 }
