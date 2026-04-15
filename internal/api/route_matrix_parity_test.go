@@ -712,6 +712,50 @@ func TestRouteMatrixParity_GET_v0_events_stream_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_cities_ViaWS(t *testing.T) {
+	alpha := newFakeState(t)
+	alpha.cityName = "alpha"
+	beta := newFakeState(t)
+	beta.cityName = "beta"
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{
+		"alpha": alpha,
+		"beta":  beta,
+	})
+	ts := httptest.NewServer(sm.Handler())
+	defer ts.Close()
+
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	defer conn.Close()
+	drainWSHello(t, conn)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-cities-list",
+		Action: "cities.list",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-cities-list" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body struct {
+		Items []CityInfo `json:"items"`
+		Total int        `json:"total"`
+	}
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode cities.list: %v", err)
+	}
+	if body.Total != 2 || len(body.Items) != 2 {
+		t.Fatalf("body = %+v, want alpha+beta city list", body)
+	}
+	if body.Items[0].Name != "alpha" || body.Items[1].Name != "beta" {
+		t.Fatalf("city order = %+v, want alpha then beta", body.Items)
+	}
+}
+
 func TestRouteMatrixParity_POST_v0_events_ViaWS(t *testing.T) {
 	state := newFakeState(t)
 	_, _, conn := wsSetup(t, state)
@@ -3035,6 +3079,36 @@ func TestRouteMatrixParity_GET_v0_patches_rigs_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_patches_rig_name_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	suspended := true
+	fs.cfg.Patches.Rigs = []config.RigPatch{{Name: "myrig", Suspended: &suspended}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-patch-get",
+		Action: "patches.rig.get",
+		Payload: map[string]any{
+			"name": "myrig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-patch-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body config.RigPatch
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.rig.get: %v", err)
+	}
+	if body.Name != "myrig" || body.Suspended == nil || !*body.Suspended {
+		t.Fatalf("body = %+v, want suspended myrig patch", body)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_patches_providers_ViaWS(t *testing.T) {
 	fs := newFakeState(t)
 	cmd := "new-cmd"
@@ -3062,6 +3136,36 @@ func TestRouteMatrixParity_GET_v0_patches_providers_ViaWS(t *testing.T) {
 	}
 	if body.Total != 1 || len(body.Items) != 1 || body.Items[0].Name != "claude" {
 		t.Fatalf("body = %+v, want single claude provider patch", body)
+	}
+}
+
+func TestRouteMatrixParity_GET_v0_patches_provider_name_ViaWS(t *testing.T) {
+	fs := newFakeState(t)
+	cmd := "new-cmd"
+	fs.cfg.Patches.Providers = []config.ProviderPatch{{Name: "claude", Command: &cmd}}
+	_, _, conn := wsSetup(t, fs)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-patch-get",
+		Action: "patches.provider.get",
+		Payload: map[string]any{
+			"name": "claude",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-patch-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body config.ProviderPatch
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode patches.provider.get: %v", err)
+	}
+	if body.Name != "claude" || body.Command == nil || *body.Command != "new-cmd" {
+		t.Fatalf("body = %+v, want claude provider patch with command new-cmd", body)
 	}
 }
 

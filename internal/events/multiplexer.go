@@ -226,33 +226,3 @@ func cutColon(s string) (string, string, bool) {
 	}
 	return s, "", false
 }
-
-// keepaliveWatcher wraps a MuxWatcher to satisfy the standard Watcher
-// interface by converting TaggedEvent to Event (with City embedded in the
-// Actor field as "city/actor"). This is a bridge for the existing SSE
-// infrastructure which expects events.Watcher.
-type keepaliveWatcher struct {
-	mux *MuxWatcher
-}
-
-// WrapForSSE wraps a MuxWatcher as a standard events.Watcher for use with
-// streamEventsWithWatcher. The City is prepended to the Actor field.
-func WrapForSSE(mw *MuxWatcher) Watcher {
-	return &keepaliveWatcher{mux: mw}
-}
-
-func (w *keepaliveWatcher) Next() (Event, error) {
-	te, err := w.mux.Next()
-	if err != nil {
-		return Event{}, err
-	}
-	e := te.Event
-	if te.City != "" {
-		e.Actor = te.City + "/" + e.Actor
-	}
-	return e, nil
-}
-
-func (w *keepaliveWatcher) Close() error {
-	return w.mux.Close()
-}

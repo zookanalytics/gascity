@@ -134,7 +134,8 @@ func InferActivity(entryType, subtype string, message json.RawMessage) string {
 
 // InferActivityFromEntries walks entries backwards to find the last
 // activity-defining entry. This mirrors the backwards-walk in
-// extractFromLines but operates on parsed Entry values (for SSE streams).
+// extractFromLines but operates on parsed Entry values used by live session
+// stream emitters.
 func InferActivityFromEntries(entries []*Entry) string {
 	for i := len(entries) - 1; i >= 0; i-- {
 		if entries[i] == nil {

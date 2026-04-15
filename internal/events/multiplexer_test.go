@@ -165,32 +165,6 @@ func TestParseCursorFormatCursor(t *testing.T) {
 	}
 }
 
-func TestWrapForSSE(t *testing.T) {
-	m := NewMultiplexer()
-	f1 := NewFake()
-	m.Add("city-a", f1)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	mw, err := m.Watch(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w := WrapForSSE(mw)
-	defer w.Close() //nolint:errcheck
-
-	f1.Record(Event{Type: SessionWoke, Actor: "mayor"})
-
-	e, err := w.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if e.Actor != "city-a/mayor" {
-		t.Errorf("Actor = %q, want %q", e.Actor, "city-a/mayor")
-	}
-}
-
 func TestMultiplexerSkipsBrokenProvider(t *testing.T) {
 	m := NewMultiplexer()
 

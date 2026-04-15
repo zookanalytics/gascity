@@ -33,8 +33,8 @@ http://127.0.0.1:8372
 ```
 
 In this mode, per-city `[api]` ports are ignored. The dashboard detects
-supervisor mode automatically via `/v0/cities`, enables a city selector, and
-routes requests through `/v0/city/{name}/...`.
+supervisor mode automatically via `cities.list`, enables a city selector, and
+sends city-scoped requests over the shared WebSocket protocol.
 
 ## Starting the dashboard
 
@@ -48,9 +48,9 @@ gc dashboard --api http://127.0.0.1:8372 # Optional override
 When run inside a city, `gc dashboard` auto-discovers the right API server:
 
 - Supervisor-managed city: uses the machine supervisor API and defaults the UI
-  to the current city.
+  to the current city scope.
 - Standalone `gc start --foreground`: uses that city's configured `[api]`
-  listener.
+  listener directly.
 
 The `--api` flag remains available as an override for non-standard setups.
 
@@ -70,4 +70,6 @@ The dashboard provides:
 - **Issues** — backlog with priority, age, labels, assignment
 - **Command palette** (Cmd+K) — execute gc commands from the browser
 
-Real-time updates via SSE (Server-Sent Events) from the API server.
+Real-time updates use WebSocket subscriptions from the browser directly to the
+GC API server. The dashboard server only serves static assets plus bootstrap
+configuration; it does not proxy API or event traffic.
