@@ -18,7 +18,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
-	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -75,7 +74,7 @@ func TestBdStoreConformance(t *testing.T) {
 
 		runBDInit(t, wsDir, prefix, serverPort)
 
-		writeCustomTypesConfig(t, wsDir, doctor.RequiredCustomTypes)
+		configureCustomTypes(t, wsDir, doctor.RequiredCustomTypes)
 
 		return beads.NewBdStore(wsDir, beads.ExecCommandRunner())
 	}
@@ -167,35 +166,20 @@ func runBDInit(t *testing.T, dir, prefix, port string) {
 	}
 }
 
-func writeCustomTypesConfig(t *testing.T, wsDir string, customTypes []string) {
+func configureCustomTypes(t *testing.T, wsDir string, customTypes []string) {
 	t.Helper()
 
-	configPath := filepath.Join(wsDir, ".beads", "config.yaml")
-	data, err := os.ReadFile(configPath)
+	ctx, cancel := context.WithTimeout(context.Background(), bdInitTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "bd", "config", "set", "types.custom", strings.Join(customTypes, ","))
+	cmd.Dir = wsDir
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("bd config set types.custom timed out after %s: %s", bdInitTimeout, out)
+	}
 	if err != nil {
-		t.Fatalf("reading config.yaml: %v", err)
-	}
-
-	cfg := map[string]any{}
-	if len(data) > 0 {
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			t.Fatalf("parsing config.yaml: %v", err)
-		}
-	}
-
-	typesCfg, ok := cfg["types"].(map[string]any)
-	if !ok || typesCfg == nil {
-		typesCfg = map[string]any{}
-	}
-	typesCfg["custom"] = strings.Join(customTypes, ",")
-	cfg["types"] = typesCfg
-
-	out, err := yaml.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("marshaling config.yaml: %v", err)
-	}
-	if err := os.WriteFile(configPath, out, 0o644); err != nil {
-		t.Fatalf("writing config.yaml: %v", err)
+		t.Fatalf("bd config set types.custom: %v: %s", err, out)
 	}
 }
 

@@ -174,10 +174,7 @@ func setupReviewCheckScriptCity(t *testing.T) string {
 			t.Fatalf("writing %s: %v", dst, err)
 		}
 	}
-	out, err := runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-	if err != nil {
-		t.Fatalf("gc init failed: %v\noutput: %s", err, out)
-	}
+	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)

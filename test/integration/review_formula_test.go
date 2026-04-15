@@ -810,21 +810,7 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	}
 	installReviewFormulaFixtures(t, cityDir)
 
-	var (
-		out string
-		err error
-	)
-	for attempt := 1; attempt <= 2; attempt++ {
-		out, err = runGCDoltWithEnv(env, "", "init", "--skip-provider-readiness", "--file", configPath, cityDir)
-		if err == nil {
-			break
-		}
-		if !isTransientManagedDoltInitFailure(out) || attempt == 2 {
-			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
-		}
-		t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
+	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
 	registerCityCommandEnv(cityDir, env)
 	t.Cleanup(func() {
 		unregisterCityCommandEnv(cityDir)
@@ -833,12 +819,6 @@ func setupReviewFormulaCity(t *testing.T, mode string, extraEnv map[string]strin
 	})
 
 	return cityDir
-}
-
-func isTransientManagedDoltInitFailure(out string) bool {
-	msg := strings.ToLower(out)
-	return strings.Contains(msg, "dolt server exited during startup") ||
-		strings.Contains(msg, "did not become query-ready after 30s")
 }
 
 func workflowAgentStartCommand(mode string, extraEnv map[string]string) string {

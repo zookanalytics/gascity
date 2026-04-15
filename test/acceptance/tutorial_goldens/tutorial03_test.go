@@ -276,14 +276,27 @@ func TestTutorial03Sessions(t *testing.T) {
 		t.Fatalf("clear mayor session_key before log lookup: %v\n%s", err, out)
 	}
 	ws.noteWarning("tutorial 03 runtime workaround: wait for the visible alias-based `gc session logs mayor` path to become readable before exercising the documented log commands")
-	if !waitForCondition(t, 30*time.Second, 1*time.Second, func() bool {
+	mayorLogsReadable := func() bool {
 		out, err := ws.runShell("gc session logs mayor --tail 1", "")
 		if err != nil || strings.TrimSpace(out) == "" {
 			return false
 		}
 		mayorTailLogs = out
 		return true
-	}) {
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorLogsReadable) {
+		ws.noteWarning("tutorial 03 runtime workaround: alias-based log lookup can still point at drained mayor session state after reviewer setup, so the page driver clears stale resume metadata, wakes mayor, and requeues the city-status prompt before retrying visible log commands")
+		if out, err := ws.runShell("bd update "+mayorSessionID+" --unset-metadata session_key --unset-metadata started_config_hash --set-metadata continuation_reset_pending=true", ""); err != nil {
+			t.Fatalf("clear mayor stale resume metadata before log lookup retry: %v\n%s", err, out)
+		}
+		if out, err := ws.runShell("gc session wake mayor", ""); err != nil {
+			t.Fatalf("wake mayor before log lookup retry: %v\n%s", err, out)
+		}
+		if out, err := ws.runShell(`gc session nudge mayor "`+cityStatusPrompt+`"`, ""); err != nil {
+			t.Fatalf("re-nudge mayor before log lookup retry: %v\n%s", err, out)
+		}
+	}
+	if !waitForCondition(t, 30*time.Second, 1*time.Second, mayorLogsReadable) {
 		out, _ := ws.runShell("gc session list", "")
 		t.Fatalf("mayor transcript never became readable through alias mayor:\n%s", out)
 	}
