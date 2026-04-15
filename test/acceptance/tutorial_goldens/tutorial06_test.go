@@ -93,14 +93,14 @@ pool = "worker"
 description = "Run the test suite"
 formula = "test-suite"
 gate = "cooldown"
-	interval = "5m"
-	pool = "worker"
+interval = "5m"
+pool = "worker"
 `
 
-	writeFile(t, filepath.Join(myCity, "orders", "review-check.order.toml"), reviewOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "orders", "dep-update.order.toml"), depUpdateOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "orders", "release-notes.order.toml"), releaseNotesOrder, 0o644)
-	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "orders", "test-suite.order.toml"), testSuiteOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "review-check.toml"), reviewOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "dep-update.toml"), depUpdateOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "orders", "release-notes.toml"), releaseNotesOrder, 0o644)
+	writeFile(t, filepath.Join(myCity, "packs", "dev-ops", "orders", "test-suite.toml"), testSuiteOrder, 0o644)
 
 	t.Run("gc order list", func(t *testing.T) {
 		out, err := ws.runShell("gc order list", "")

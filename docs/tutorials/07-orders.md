@@ -24,13 +24,13 @@ a schedule or in response to events.
 ## A simple order
 
 Orders live in an `orders/` directory at the top level of your city, alongside
-`formulas/` and `agents/`. Each order is a flat `*.order.toml` file in that
+`formulas/` and `agents/`. Each order is a flat `*.toml` file in that
 directory.
 
 ```
 orders/
-  review-check.order.toml
-  dep-update.order.toml
+  review-check.toml
+  dep-update.toml
 formulas/
   pancakes.formula.toml
   review.formula.toml
@@ -40,7 +40,7 @@ Here's a minimal order that dispatches the `review` formula from Tutorial 04
 every five minutes:
 
 ```toml
-# orders/review-check.order.toml
+# orders/review-check.toml
 [order]
 description = "Check for PRs that need review"
 formula = "review"
@@ -58,7 +58,7 @@ up.
 The controller evaluates gate conditions on every tick. When five minutes have
 passed since the last run, it instantiates the `review` formula as a wisp and
 routes it to the `worker` pool. The order name comes from the file basename
-(`review-check.order.toml` → `review-check`), not from anything in the TOML.
+(`review-check.toml` → `review-check`), not from anything in the TOML.
 
 Orders are discovered when the city starts and whenever the controller reloads
 config. You don't need to restart anything if the city is already watching the
@@ -96,7 +96,7 @@ Formula:     review
 Gate:        cooldown
 Interval:    5m
 Target:      worker
-Source:      /Users/you/my-city/orders/review-check.order.toml
+Source:      /Users/you/my-city/orders/review-check.toml
 ```
 
 To check which orders are due right now:
@@ -374,7 +374,7 @@ Say you have a pack called `dev-ops` that includes a `test-suite` order:
 ```
 packs/dev-ops/
   orders/
-    test-suite.order.toml   # gate = "cooldown", interval = "5m", pool = "worker"
+    test-suite.toml         # gate = "cooldown", interval = "5m", pool = "worker"
   formulas/
     test-suite.formula.toml
 ```
@@ -443,7 +443,7 @@ highest-priority layer wins. The layers, from lowest to highest priority:
 
 A higher layer completely replaces a lower layer's definition for the same order
 name. So if the `dev-ops` pack defines `test-suite` with a 5-minute cooldown and
-you create your own `orders/test-suite.order.toml` with a 1-minute cooldown,
+you create your own `orders/test-suite.toml` with a 1-minute cooldown,
 yours wins — the pack version is ignored entirely.
 
 ## Putting it together
@@ -456,7 +456,7 @@ Assume you've already created a `worker` agent as in
 files and the formula they dispatch.
 
 ```toml
-# orders/lint-check.order.toml
+# orders/lint-check.toml
 [order]
 description = "Run the linter on changed files"
 gate = "cooldown"
@@ -466,7 +466,7 @@ timeout = "60s"
 ```
 
 ```toml
-# orders/release-notes.order.toml
+# orders/release-notes.toml
 [order]
 description = "Generate release notes from the week's merges"
 formula = "release-notes"

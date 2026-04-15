@@ -212,8 +212,9 @@ into the session's terminal:
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
 2026/04/07 22:07:28 tmux state cache: refreshed 2 sessions in 3.765375ms
-Nudged mayor
 ```
+
+Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
 
 ![mayor nudge screenshot](mayor-nudge.png)
 
@@ -258,8 +259,9 @@ conversation as it happens:
 ```shell
 ~/my-city
 $ gc session nudge mayor "What's the current city status?"
-Nudged mayor
 ```
+
+Again, Gas City confirms the nudge with either `Nudged mayor` or `Queued nudge for mayor`.
 
 Useful for watching what a background agent is doing without attaching and
 potentially interrupting it. Peek shows the terminal; logs show the
