@@ -8,6 +8,7 @@
 package acceptance_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -29,14 +30,18 @@ func TestDashboard_DefaultCommand_WorksOutOfBoxUnderSupervisor(t *testing.T) {
 	dashboardPort := reserveLoopbackPort(t)
 
 	dashboard := startDashboardCommand(t, c, "dashboard", "--port", strconv.Itoa(dashboardPort))
-	page, options := waitForHealthyDashboard(t, dashboard, dashboardPort, startOut)
+	page, bootstrap := waitForHealthyDashboard(t, dashboard, dashboardPort, startOut)
 
 	cityName := filepath.Base(c.Dir)
-	if !strings.Contains(page, fmt.Sprintf(`meta name="selected-city" content="%s"`, cityName)) {
-		t.Fatalf("dashboard did not default to the current city %q\npage:\n%s", cityName, page)
+	if !strings.Contains(page, `<script src="/bootstrap.js"></script>`) {
+		t.Fatalf("dashboard page missing bootstrap script\npage:\n%s", page)
 	}
-	if strings.TrimSpace(options) == "{}" {
-		t.Fatalf("dashboard /api/options stayed empty under supervisor auto-discovery\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
+	cfg := parseBootstrapScript(t, bootstrap)
+	if cfg.InitialCityScope != cityName {
+		t.Fatalf("bootstrap initialCityScope = %q, want %q\nstart output:\n%s\nlogs:\n%s", cfg.InitialCityScope, cityName, startOut, dashboard.logs(t))
+	}
+	if strings.TrimSpace(cfg.APIBaseURL) == "" {
+		t.Fatalf("bootstrap apiBaseURL empty under supervisor auto-discovery\nstart output:\n%s\nlogs:\n%s", startOut, dashboard.logs(t))
 	}
 }
 
@@ -125,6 +130,11 @@ func startCityUnderSupervisor(t *testing.T, c *helpers.City) string {
 	return startOut
 }
 
+type dashboardBootstrap struct {
+	APIBaseURL       string `json:"apiBaseURL"`
+	InitialCityScope string `json:"initialCityScope"`
+}
+
 func waitForHealthyDashboard(t *testing.T, dashboard *backgroundCmd, port int, startOut string) (string, string) {
 	t.Helper()
 
@@ -137,9 +147,9 @@ func waitForHealthyDashboard(t *testing.T, dashboard *backgroundCmd, port int, s
 
 		page, err := httpGetText(dashboardURL + "/")
 		if err == nil {
-			options, optErr := httpGetText(dashboardURL + "/api/options")
-			if optErr == nil && dashboardLooksHealthy(page, options) {
-				return page, options
+			bootstrap, bootstrapErr := httpGetText(dashboardURL + "/bootstrap.js")
+			if bootstrapErr == nil && dashboardLooksHealthy(page, bootstrap) {
+				return page, bootstrap
 			}
 		}
 
@@ -220,7 +230,34 @@ func (b *backgroundCmd) logs(t *testing.T) string {
 }
 
 func dashboardLooksHealthy(page, options string) bool {
-	return strings.Contains(page, "💓 active") && strings.TrimSpace(options) != "{}"
+	cfg, err := parseBootstrapScriptRaw(options)
+	return err == nil &&
+		strings.Contains(page, `<script src="/bootstrap.js"></script>`) &&
+		strings.TrimSpace(cfg.APIBaseURL) != ""
+}
+
+func parseBootstrapScript(t *testing.T, body string) dashboardBootstrap {
+	t.Helper()
+
+	cfg, err := parseBootstrapScriptRaw(body)
+	if err != nil {
+		t.Fatalf("parse bootstrap.js: %v\nbody:\n%s", err, body)
+	}
+	return cfg
+}
+
+func parseBootstrapScriptRaw(body string) (dashboardBootstrap, error) {
+	const prefix = "window.__GC_BOOTSTRAP__ = "
+	trimmed := strings.TrimSpace(body)
+	if !strings.HasPrefix(trimmed, prefix) || !strings.HasSuffix(trimmed, ";") {
+		return dashboardBootstrap{}, fmt.Errorf("unexpected bootstrap script")
+	}
+	raw := strings.TrimSuffix(strings.TrimPrefix(trimmed, prefix), ";")
+	var cfg dashboardBootstrap
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return dashboardBootstrap{}, err
+	}
+	return cfg, nil
 }
 
 func httpGetText(rawURL string) (string, error) {

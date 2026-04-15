@@ -53,9 +53,7 @@ type wsClientResult struct {
 // The client auto-reconnects with exponential backoff on failure.
 type Client struct {
 	baseURL     string
-	scopePrefix string
 	socketScope *socketScope
-	httpClient  *http.Client // retained for health/readiness probes only
 	wsMu        sync.Mutex
 	wsConn      *websocket.Conn
 	wsFailCount int
@@ -96,21 +94,17 @@ type SessionSubmitResponse struct {
 // (e.g., "http://127.0.0.1:8080").
 func NewClient(baseURL string) *Client {
 	return &Client{
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		baseURL:        baseURL,
 		subs:           make(map[string]*clientSubscription),
 		subServerIndex: make(map[string]string),
 		eventBuf:       make(map[string][]SubscriptionEvent),
 	}
 }
 
-// NewCityScopedClient creates a client that routes requests through the
-// supervisor's city-scoped API namespace for the given city name.
+// NewCityScopedClient creates a client that attaches the given city scope to
+// all requests sent through the supervisor WebSocket endpoint.
 func NewCityScopedClient(baseURL, cityName string) *Client {
 	c := NewClient(baseURL)
-	c.scopePrefix = "/v0/city/" + escapeName(cityName)
 	c.socketScope = &socketScope{City: cityName}
 	return c
 }
@@ -218,28 +212,6 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		return SessionSubmitResponse{}, err
 	}
 	return resp, nil
-}
-
-// escapeName escapes each segment of a potentially qualified name (e.g.,
-// "myrig/worker") for use in URL paths. Slashes are preserved as path
-// separators; other URL metacharacters (#, ?, etc.) are percent-encoded.
-func escapeName(name string) string {
-	parts := strings.Split(name, "/")
-	for i, p := range parts {
-		parts[i] = url.PathEscape(p)
-	}
-	return strings.Join(parts, "/")
-}
-
-func unescapeName(name string) string {
-	parts := strings.Split(name, "/")
-	for i, p := range parts {
-		unescaped, err := url.PathUnescape(p)
-		if err == nil {
-			parts[i] = unescaped
-		}
-	}
-	return strings.Join(parts, "/")
 }
 
 func (c *Client) doSocketJSON(action string, scope *socketScope, payload any, out any) (bool, error) {
@@ -660,13 +632,6 @@ func websocketURLForBase(baseURL string) (string, error) {
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String(), nil
-}
-
-func (c *Client) urlForPath(path string) string {
-	if c.scopePrefix != "" && strings.HasPrefix(path, "/v0/") {
-		return c.baseURL + c.scopePrefix + strings.TrimPrefix(path, "/v0")
-	}
-	return c.baseURL + path
 }
 
 func (c *Client) effectiveSocketScope(scope *socketScope) *socketScope {
