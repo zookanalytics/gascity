@@ -556,7 +556,7 @@ func poolQualifiedNameForSlot(a config.Agent, slot int) string {
 }
 
 // isMultiSessionAgent reports whether the agent can have more than one
-// concurrent session. This is the replacement for the removed IsPool() method.
+// concurrent session.
 func isMultiSessionAgent(a config.Agent) bool {
 	maxSess := a.EffectiveMaxActiveSessions()
 	return maxSess == nil || *maxSess != 1
