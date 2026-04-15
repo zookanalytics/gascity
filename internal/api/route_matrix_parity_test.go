@@ -52,6 +52,53 @@ func TestRouteMatrixParity_GET_v0_status_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_GET_v0_city_ViaWS(t *testing.T) {
+	state := newFakeState(t)
+	_, _, conn := wsSetup(t, state)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-city-get",
+		Action: "city.get",
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-city-get" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+
+	var body cityGetResponse
+	if err := json.Unmarshal(resp.Result, &body); err != nil {
+		t.Fatalf("decode city.get: %v", err)
+	}
+	if body.Name != "test-city" || body.AgentCount != 1 || body.RigCount != 1 {
+		t.Fatalf("body = %+v, want test-city with one agent and one rig", body)
+	}
+}
+
+func TestRouteMatrixParity_PATCH_v0_city_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-city-patch",
+		Action: "city.patch",
+		Payload: map[string]any{
+			"suspended": true,
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-city-patch" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if !state.cfg.Workspace.Suspended {
+		t.Fatal("city suspended = false, want true after city.patch")
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_config_ViaWS(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Workspace.Provider = "claude"
@@ -212,6 +259,85 @@ func TestRouteMatrixParity_GET_v0_provider_name_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_POST_v0_providers_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-create",
+		Action: "provider.create",
+		Payload: map[string]any{
+			"name": "myagent",
+			"spec": map[string]any{
+				"command":      "myagent-cli",
+				"display_name": "My Agent",
+			},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-create" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if spec, ok := state.cfg.Providers["myagent"]; !ok || spec.Command != "myagent-cli" {
+		t.Fatalf("providers = %+v, want created myagent provider", state.cfg.Providers)
+	}
+}
+
+func TestRouteMatrixParity_PATCH_v0_provider_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+	state.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {Command: "old-cli", DisplayName: "Old Name"},
+	}
+	cmd := "new-cli"
+	dn := "New Name"
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-update",
+		Action: "provider.update",
+		Payload: map[string]any{
+			"name":   "custom",
+			"update": map[string]any{"command": &cmd, "display_name": &dn},
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-update" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if spec := state.cfg.Providers["custom"]; spec.Command != "new-cli" {
+		t.Fatalf("provider = %+v, want command updated to new-cli", spec)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_provider_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+	state.cfg.Providers = map[string]config.ProviderSpec{
+		"custom": {Command: "custom-cli"},
+	}
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-provider-delete",
+		Action: "provider.delete",
+		Payload: map[string]any{
+			"name": "custom",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-provider-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if _, ok := state.cfg.Providers["custom"]; ok {
+		t.Fatalf("providers = %+v, want custom provider removed", state.cfg.Providers)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_agents_ViaWS(t *testing.T) {
 	state := newFakeState(t)
 	if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
@@ -290,6 +416,103 @@ func TestRouteMatrixParity_GET_v0_agent_name_ViaWS(t *testing.T) {
 	}
 	if body.Session == nil || body.Session.ID != info.ID || body.Session.Name != sessionName {
 		t.Fatalf("session = %+v, want id=%q name=%q", body.Session, info.ID, sessionName)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_agents_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-create",
+		Action: "agent.create",
+		Payload: map[string]any{
+			"name":     "coder",
+			"provider": "claude",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-create" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	found := false
+	for _, a := range state.cfg.Agents {
+		if a.Name == "coder" && a.Provider == "claude" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("created agent coder missing from config")
+	}
+}
+
+func TestRouteMatrixParity_PATCH_v0_agent_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-update",
+		Action: "agent.update",
+		Payload: map[string]any{
+			"name":     "myrig/worker",
+			"provider": "gemini",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-update" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if got := state.cfg.Agents[0].Provider; got != "gemini" {
+		t.Fatalf("provider = %q, want gemini", got)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_agent_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-delete",
+		Action: "agent.delete",
+		Payload: map[string]any{
+			"name": "myrig/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if len(state.cfg.Agents) != 0 {
+		t.Fatalf("agents = %+v, want worker removed", state.cfg.Agents)
+	}
+}
+
+func TestRouteMatrixParity_POST_v0_agent_name_suspend_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-agent-suspend",
+		Action: "agent.suspend",
+		Payload: map[string]any{
+			"name": "myrig/worker",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-agent-suspend" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if !state.suspended["myrig/worker"] {
+		t.Fatal("agent suspend flag missing after agent.suspend")
 	}
 }
 
@@ -1105,6 +1328,81 @@ func TestRouteMatrixParity_POST_v0_rig_name_suspend_ViaWS(t *testing.T) {
 	}
 }
 
+func TestRouteMatrixParity_POST_v0_rigs_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-create",
+		Action: "rig.create",
+		Payload: map[string]any{
+			"name": "new-rig",
+			"path": "/tmp/new-rig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-create" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	found := false
+	for _, rig := range state.cfg.Rigs {
+		if rig.Name == "new-rig" && rig.Path == "/tmp/new-rig" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("rigs = %+v, want created new-rig", state.cfg.Rigs)
+	}
+}
+
+func TestRouteMatrixParity_PATCH_v0_rig_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-update",
+		Action: "rig.update",
+		Payload: map[string]any{
+			"name": "myrig",
+			"path": "/tmp/updated",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-update" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if got := state.cfg.Rigs[0].Path; got != "/tmp/updated" {
+		t.Fatalf("path = %q, want /tmp/updated", got)
+	}
+}
+
+func TestRouteMatrixParity_DELETE_v0_rig_name_ViaWS(t *testing.T) {
+	state, _, conn := openRouteMatrixMutatorSocket(t)
+
+	writeWSJSON(t, conn, wsRequestEnvelope{
+		Type:   "request",
+		ID:     "route-rig-delete",
+		Action: "rig.delete",
+		Payload: map[string]any{
+			"name": "myrig",
+		},
+	})
+
+	var resp wsResponseEnvelope
+	readWSJSON(t, conn, &resp)
+	if resp.Type != "response" || resp.ID != "route-rig-delete" {
+		t.Fatalf("response = %#v, want correlated response", resp)
+	}
+	if len(state.cfg.Rigs) != 0 {
+		t.Fatalf("rigs = %+v, want myrig removed", state.cfg.Rigs)
+	}
+}
+
 func TestRouteMatrixParity_GET_v0_patches_agents_ViaWS(t *testing.T) {
 	fs := newFakeState(t)
 	suspended := true
@@ -1456,6 +1754,19 @@ func resolveAgentSessionID(t *testing.T, conn *websocket.Conn, agentName string)
 		t.Fatalf("agent.get session = %+v, want canonical session id", body.Session)
 	}
 	return body.Session.ID
+}
+
+func openRouteMatrixMutatorSocket(t *testing.T) (*fakeMutatorState, *httptest.Server, *websocket.Conn) {
+	t.Helper()
+
+	state := newFakeMutatorState(t)
+	srv := New(state)
+	ts := httptest.NewServer(srv.handler())
+	t.Cleanup(ts.Close)
+	conn := dialWebSocket(t, ts.URL+"/v0/ws")
+	t.Cleanup(func() { _ = conn.Close() })
+	drainWSHello(t, conn)
+	return state, ts, conn
 }
 
 func routeMatrixListMail(t *testing.T, conn *websocket.Conn, agent, status string) []mail.Message {
