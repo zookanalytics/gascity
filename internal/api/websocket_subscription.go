@@ -395,7 +395,7 @@ func (s *Server) startSessionStreamSubscription(parent context.Context, sess *so
 						ID:       info.ID,
 						Template: info.Template,
 						Format:   "raw",
-						Messages: []json.RawMessage{},
+						Messages: []sessionRawMessage{},
 					})
 					_ = emitter.emit("message", 1, data)
 				}

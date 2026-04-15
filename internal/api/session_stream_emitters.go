@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -131,13 +132,17 @@ func (s *Server) emitClosedSessionSnapshotRawWithEmitter(emitter sessionStreamEm
 		return
 	}
 
-	rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+	rawMessages := make([]sessionRawMessage, 0, len(sess.Messages))
 	uuids := make([]string, 0, len(sess.Messages))
 	for _, entry := range sess.Messages {
 		if len(entry.Raw) == 0 {
 			continue
 		}
-		rawMessages = append(rawMessages, entry.Raw)
+		msg, err := decodeSessionRawMessage(entry.Raw)
+		if err != nil {
+			return
+		}
+		rawMessages = append(rawMessages, msg)
 		uuids = append(uuids, entry.UUID)
 	}
 	if len(rawMessages) == 0 {
@@ -210,18 +215,22 @@ func (s *Server) streamSessionTranscriptLogRawWithEmitter(ctx context.Context, e
 		lastSize = stat.Size()
 		activity := sessionlog.InferActivityFromEntries(sess.Messages)
 
-		rawMessages := make([]json.RawMessage, 0, len(sess.Messages))
+		rawMessages := make([]sessionRawMessage, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
 			if len(entry.Raw) == 0 {
 				continue
 			}
-			rawMessages = append(rawMessages, entry.Raw)
+			msg, err := decodeSessionRawMessage(entry.Raw)
+			if err != nil {
+				return
+			}
+			rawMessages = append(rawMessages, msg)
 			uuids = append(uuids, entry.UUID)
 		}
 
 		if len(rawMessages) > 0 {
-			var toSend []json.RawMessage
+			var toSend []sessionRawMessage
 			emittedCursor := ""
 
 			if lastSentUUID == "" && resumeCursor == "" {
@@ -476,17 +485,15 @@ func (s *Server) streamSessionPeekRawWithEmitter(ctx context.Context, emitter se
 			return
 		}
 
-		fakeMsg, _ := json.Marshal(map[string]interface{}{
-			"role": "assistant",
-			"content": []map[string]string{
-				{"type": "text", "text": output},
-			},
-		})
+		fakeMsg := sessionRawMessage{
+			"role":    json.RawMessage(`"assistant"`),
+			"content": json.RawMessage(`[{"type":"text","text":` + strconv.Quote(output) + `}]`),
+		}
 		data, err := json.Marshal(sessionRawTranscriptResponse{
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []json.RawMessage{fakeMsg},
+			Messages: []sessionRawMessage{fakeMsg},
 		})
 		if err != nil {
 			return

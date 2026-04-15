@@ -280,29 +280,29 @@ func (s *Server) closeSessionTarget(identifier string) error {
 	return nil
 }
 
-func (s *Server) wakeSessionTarget(ctx context.Context, identifier string) (map[string]string, error) {
+func (s *Server) wakeSessionTarget(ctx context.Context, identifier string) (mutationStatusIDResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, identifier)
 	if err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
 	b, err := store.Get(id)
 	if err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
 	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: id + " is not a session"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: id + " is not a session"}
 	}
 	session.RepairEmptyType(store, &b)
 	if b.Status == "closed" {
-		return nil, httpError{status: http.StatusConflict, code: "conflict", message: "session " + id + " is closed"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusConflict, code: "conflict", message: "session " + id + " is closed"}
 	}
 	nudgeIDs, err := session.WakeSession(store, b, time.Now().UTC())
 	if err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
 	if err := withdrawQueuedWaitNudges(store, s.state.CityPath(), nudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
@@ -311,7 +311,7 @@ func (s *Server) wakeSessionTarget(ctx context.Context, identifier string) (map[
 	if sessionName != "" {
 		s.state.ClearCrashHistory(sessionName)
 	}
-	return map[string]string{"status": "ok", "id": id}, nil
+	return mutationStatusIDResponse{Status: "ok", ID: id}, nil
 }
 
 func (s *Server) renameSessionTarget(identifier, title string) (sessionResponse, error) {
@@ -403,24 +403,24 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
 // patchSession applies a partial update (title and/or alias) to a session.
-func (s *Server) patchSession(target string, title, alias *string) (any, error) {
+func (s *Server) patchSession(target string, title, alias *string) (sessionResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+		return sessionResponse{}, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
 	}
 	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
-		return nil, err
+		return sessionResponse{}, err
 	}
 	if title == nil && alias == nil {
-		return nil, httpError{status: 400, code: "invalid", message: "at least one of 'title' or 'alias' is required"}
+		return sessionResponse{}, httpError{status: 400, code: "invalid", message: "at least one of 'title' or 'alias' is required"}
 	}
 	b, err := store.Get(id)
 	if err != nil {
-		return nil, err
+		return sessionResponse{}, err
 	}
 	if !session.IsSessionBeadOrRepairable(b) {
-		return nil, httpError{status: 400, code: "invalid", message: id + " is not a session"}
+		return sessionResponse{}, httpError{status: 400, code: "invalid", message: id + " is not a session"}
 	}
 	session.RepairEmptyType(store, &b)
 	mgr := s.sessionManager(store)
@@ -429,7 +429,7 @@ func (s *Server) patchSession(target string, title, alias *string) (any, error) 
 	}
 	if alias != nil {
 		if strings.TrimSpace(b.Metadata["agent_name"]) != "" {
-			return nil, httpError{status: 403, code: "forbidden", message: "alias is controller-managed for this session"}
+			return sessionResponse{}, httpError{status: 403, code: "forbidden", message: "alias is controller-managed for this session"}
 		}
 		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *alias, func() error {
 			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *alias, id); err != nil {
@@ -437,14 +437,14 @@ func (s *Server) patchSession(target string, title, alias *string) (any, error) 
 			}
 			return updateFn()
 		}); err != nil {
-			return nil, err
+			return sessionResponse{}, err
 		}
 	} else if err := updateFn(); err != nil {
-		return nil, err
+		return sessionResponse{}, err
 	}
 	info, err := mgr.Get(id)
 	if err != nil {
-		return nil, err
+		return sessionResponse{}, err
 	}
 	updated, _ := store.Get(id)
 	return sessionResponseWithReason(info, &updated, s.state.Config(), strings.TrimSpace(s.state.CityPath()) != ""), nil

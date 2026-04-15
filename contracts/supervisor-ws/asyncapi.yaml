@@ -122,14 +122,7 @@ channels:
   actions/bead.assign/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Assign a bead
-        description: bead.assign response payload
+        $ref: '#/components/messages/ApiBeadAssignResponse'
   actions/bead.close/request:
     publish:
       message:
@@ -137,14 +130,7 @@ channels:
   actions/bead.close/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Close a bead
-        description: bead.close response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/bead.create/request:
     publish:
       message:
@@ -160,14 +146,7 @@ channels:
   actions/bead.delete/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Delete a bead
-        description: bead.delete response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/bead.deps/request:
     publish:
       message:
@@ -175,13 +154,7 @@ channels:
   actions/bead.deps/response:
     subscribe:
       message:
-        payload:
-          additionalProperties: {}
-          type:
-          - "null"
-          - object
-        summary: Get bead dependencies
-        description: bead.deps response payload
+        $ref: '#/components/messages/ApiBeadDepsResponse'
   actions/bead.get/request:
     publish:
       message:
@@ -197,30 +170,15 @@ channels:
   actions/bead.reopen/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Reopen a bead
-        description: bead.reopen response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/bead.update/request:
     publish:
       message:
-        summary: Update a bead
-        description: bead.update request payload
+        $ref: '#/components/messages/ApiBeadUpdateRequest'
   actions/bead.update/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Update a bead
-        description: bead.update response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/beads.graph/request:
     publish:
       message:
@@ -299,14 +257,7 @@ channels:
   actions/convoy.add/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Add items to a convoy
-        description: convoy.add response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/convoy.check/request:
     publish:
       message:
@@ -314,8 +265,7 @@ channels:
   actions/convoy.check/response:
     subscribe:
       message:
-        summary: Check convoy completion
-        description: convoy.check response payload
+        $ref: '#/components/messages/ApiConvoyCheckResponse'
   actions/convoy.close/request:
     publish:
       message:
@@ -323,14 +273,7 @@ channels:
   actions/convoy.close/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Close a convoy
-        description: convoy.close response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/convoy.create/request:
     publish:
       message:
@@ -338,8 +281,7 @@ channels:
   actions/convoy.create/response:
     subscribe:
       message:
-        summary: Create a convoy
-        description: convoy.create response payload
+        $ref: '#/components/messages/BeadsBead'
   actions/convoy.delete/request:
     publish:
       message:
@@ -347,14 +289,7 @@ channels:
   actions/convoy.delete/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Delete a convoy
-        description: convoy.delete response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/convoy.get/request:
     publish:
       message:
@@ -362,13 +297,7 @@ channels:
   actions/convoy.get/response:
     subscribe:
       message:
-        payload:
-          additionalProperties: {}
-          type:
-          - "null"
-          - object
-        summary: Get convoy details
-        description: convoy.get response payload
+        $ref: '#/components/messages/ApiConvoySnapshotResponse'
   actions/convoy.remove/request:
     publish:
       message:
@@ -376,14 +305,7 @@ channels:
   actions/convoy.remove/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Remove items from a convoy
-        description: convoy.remove response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/convoys.list/request:
     description: List convoys
   actions/convoys.list/response:
@@ -1107,8 +1029,7 @@ channels:
   actions/session.agent.get/response:
     subscribe:
       message:
-        summary: Get agent details in a session
-        description: session.agent.get response payload
+        $ref: '#/components/messages/ApiSessionAgentDetailResponse'
   actions/session.agents.list/request:
     publish:
       message:
@@ -1116,8 +1037,7 @@ channels:
   actions/session.agents.list/response:
     subscribe:
       message:
-        summary: List agents in a session
-        description: session.agents.list response payload
+        $ref: '#/components/messages/ApiSessionAgentsResponse'
   actions/session.close/request:
     publish:
       message:
@@ -1125,14 +1045,7 @@ channels:
   actions/session.close/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Close a session
-        description: session.close response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/session.create/request:
     publish:
       message:
@@ -1140,8 +1053,7 @@ channels:
   actions/session.create/response:
     subscribe:
       message:
-        summary: Create a session
-        description: session.create response payload
+        $ref: '#/components/messages/ApiSessionResponse'
   actions/session.get/request:
     publish:
       message:
@@ -1157,14 +1069,7 @@ channels:
   actions/session.kill/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Kill a session
-        description: session.kill response payload
+        $ref: '#/components/messages/ApiMutationStatusIDResponse'
   actions/session.messages/request:
     publish:
       message:
@@ -1172,14 +1077,7 @@ channels:
   actions/session.messages/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Send a user message to a session
-        description: session.messages response payload
+        $ref: '#/components/messages/ApiMutationStatusIDResponse'
   actions/session.patch/request:
     publish:
       message:
@@ -1187,8 +1085,7 @@ channels:
   actions/session.patch/response:
     subscribe:
       message:
-        summary: Patch session metadata
-        description: session.patch response payload
+        $ref: '#/components/messages/ApiSessionResponse'
   actions/session.pending/request:
     publish:
       message:
@@ -1212,14 +1109,7 @@ channels:
   actions/session.respond/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Respond to a session prompt
-        description: session.respond response payload
+        $ref: '#/components/messages/ApiMutationStatusIDResponse'
   actions/session.stop/request:
     publish:
       message:
@@ -1227,14 +1117,7 @@ channels:
   actions/session.stop/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Stop a session turn
-        description: session.stop response payload
+        $ref: '#/components/messages/ApiMutationStatusIDResponse'
   actions/session.submit/request:
     publish:
       message:
@@ -1242,13 +1125,7 @@ channels:
   actions/session.submit/response:
     subscribe:
       message:
-        payload:
-          additionalProperties: {}
-          type:
-          - "null"
-          - object
-        summary: Submit a message to a session
-        description: session.submit response payload
+        $ref: '#/components/messages/ApiSessionSubmitResponse'
   actions/session.suspend/request:
     publish:
       message:
@@ -1256,14 +1133,7 @@ channels:
   actions/session.suspend/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Suspend a session
-        description: session.suspend response payload
+        $ref: '#/components/messages/ApiMutationStatusResponse'
   actions/session.transcript/request:
     publish:
       message:
@@ -1271,8 +1141,7 @@ channels:
   actions/session.transcript/response:
     subscribe:
       message:
-        summary: Get session transcript
-        description: session.transcript response payload
+        $ref: '#/components/messages/ApiSessionTranscriptResult'
   actions/session.wake/request:
     publish:
       message:
@@ -1280,14 +1149,7 @@ channels:
   actions/session.wake/response:
     subscribe:
       message:
-        payload:
-          additionalProperties:
-            type: string
-          type:
-          - "null"
-          - object
-        summary: Wake a suspended session
-        description: session.wake response payload
+        $ref: '#/components/messages/ApiMutationStatusIDResponse'
   actions/sessions.list/request:
     publish:
       message:
@@ -1356,6 +1218,13 @@ components:
         scope:
           type: string
       type: object
+    ApiBeadAssignResponse:
+      properties:
+        assignee:
+          type: string
+        status:
+          type: string
+      type: object
     ApiBeadCreateRequest:
       properties:
         assignee:
@@ -1379,6 +1248,15 @@ components:
         type:
           type: string
       type: object
+    ApiBeadDepsResponse:
+      properties:
+        children:
+          items:
+            $ref: '#/components/schemas/BeadsBead'
+          type:
+          - array
+          - "null"
+      type: object
     ApiBeadGraphResponseJSON:
       properties:
         beads:
@@ -1396,12 +1274,64 @@ components:
         root:
           $ref: '#/components/schemas/BeadsBead'
       type: object
+    ApiBeadUpdatePriorityField:
+      type: object
+    ApiBeadUpdateRequest:
+      properties:
+        assignee:
+          type:
+          - "null"
+          - string
+        description:
+          type:
+          - "null"
+          - string
+        id:
+          type: string
+        labels:
+          items:
+            type: string
+          type: array
+        metadata:
+          additionalProperties:
+            type: string
+          type: object
+        priority:
+          $ref: '#/components/schemas/ApiBeadUpdatePriorityField'
+        remove_labels:
+          items:
+            type: string
+          type: array
+        status:
+          type:
+          - "null"
+          - string
+        title:
+          type:
+          - "null"
+          - string
+        type:
+          type:
+          - "null"
+          - string
+      type: object
     ApiCityPatchRequest:
       properties:
         suspended:
           type:
           - "null"
           - boolean
+      type: object
+    ApiConvoyCheckResponse:
+      properties:
+        closed:
+          type: integer
+        complete:
+          type: boolean
+        convoy_id:
+          type: string
+        total:
+          type: integer
       type: object
     ApiConvoyCreateRequest:
       properties:
@@ -1415,6 +1345,26 @@ components:
           type: string
         title:
           type: string
+      type: object
+    ApiConvoyProgressResponse:
+      properties:
+        closed:
+          type: integer
+        total:
+          type: integer
+      type: object
+    ApiConvoySnapshotResponse:
+      properties:
+        children:
+          items:
+            $ref: '#/components/schemas/BeadsBead'
+          type:
+          - array
+          - "null"
+        convoy:
+          $ref: '#/components/schemas/BeadsBead'
+        progress:
+          $ref: '#/components/schemas/ApiConvoyProgressResponse'
       type: object
     ApiErrorEnvelope:
       properties:
@@ -1658,6 +1608,18 @@ components:
         to:
           type: string
       type: object
+    ApiMutationStatusIDResponse:
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+      type: object
+    ApiMutationStatusResponse:
+      properties:
+        status:
+          type: string
+      type: object
     ApiOrderResponse:
       properties:
         capture_output:
@@ -1693,6 +1655,15 @@ components:
         timeout_ms:
           type: integer
         type:
+          type: string
+      type: object
+    ApiOutputTurn:
+      properties:
+        role:
+          type: string
+        text:
+          type: string
+        timestamp:
           type: string
       type: object
     ApiProviderUpdate:
@@ -1741,6 +1712,25 @@ components:
           description: City name for supervisor-scoped requests
           type: string
       type: object
+    ApiSessionAgentDetailResponse:
+      properties:
+        messages:
+          items: {}
+          type:
+          - array
+          - "null"
+        status:
+          type: string
+      type: object
+    ApiSessionAgentsResponse:
+      properties:
+        agents:
+          items:
+            $ref: '#/components/schemas/SessionlogAgentMapping'
+          type:
+          - array
+          - "null"
+      type: object
     ApiSessionCreateRequest:
       properties:
         alias:
@@ -1772,6 +1762,9 @@ components:
           $ref: '#/components/schemas/RuntimePendingInteraction'
         supported:
           type: boolean
+      type: object
+    ApiSessionRawMessage:
+      additionalProperties: {}
       type: object
     ApiSessionResponse:
       properties:
@@ -1835,6 +1828,36 @@ components:
           type: string
         title:
           type: string
+      type: object
+    ApiSessionSubmitResponse:
+      properties:
+        id:
+          type: string
+        intent:
+          type: string
+        queued:
+          type: boolean
+        status:
+          type: string
+      type: object
+    ApiSessionTranscriptResult:
+      properties:
+        format:
+          type: string
+        id:
+          type: string
+        messages:
+          items:
+            $ref: '#/components/schemas/ApiSessionRawMessage'
+          type: array
+        pagination:
+          $ref: '#/components/schemas/SessionlogPaginationInfo'
+        template:
+          type: string
+        turns:
+          items:
+            $ref: '#/components/schemas/ApiOutputTurn'
+          type: array
       type: object
     ApiSlingBody:
       properties:
@@ -2428,32 +2451,77 @@ components:
         supports_interrupt_now:
           type: boolean
       type: object
+    SessionlogAgentMapping:
+      properties:
+        agent_id:
+          type: string
+        parent_tool_use_id:
+          type: string
+      type: object
+    SessionlogPaginationInfo:
+      properties:
+        has_older_messages:
+          type: boolean
+        returned_message_count:
+          type: integer
+        total_compactions:
+          type: integer
+        total_message_count:
+          type: integer
+        truncated_before_message:
+          type: string
+      type: object
   messages:
     ApiAgentCreateRequest:
       payload:
         $ref: '#/components/schemas/ApiAgentCreateRequest'
       summary: Create an agent
       description: agent.create request payload
+    ApiBeadAssignResponse:
+      payload:
+        $ref: '#/components/schemas/ApiBeadAssignResponse'
+      summary: Assign a bead
+      description: bead.assign response payload
     ApiBeadCreateRequest:
       payload:
         $ref: '#/components/schemas/ApiBeadCreateRequest'
       summary: Create a bead
       description: bead.create request payload
+    ApiBeadDepsResponse:
+      payload:
+        $ref: '#/components/schemas/ApiBeadDepsResponse'
+      summary: Get bead dependencies
+      description: bead.deps response payload
     ApiBeadGraphResponseJSON:
       payload:
         $ref: '#/components/schemas/ApiBeadGraphResponseJSON'
       summary: Get bead dependency graph
       description: beads.graph response payload
+    ApiBeadUpdateRequest:
+      payload:
+        $ref: '#/components/schemas/ApiBeadUpdateRequest'
+      summary: Update a bead
+      description: bead.update request payload
     ApiCityPatchRequest:
       payload:
         $ref: '#/components/schemas/ApiCityPatchRequest'
       summary: Update city (suspend/resume)
       description: city.patch request payload
+    ApiConvoyCheckResponse:
+      payload:
+        $ref: '#/components/schemas/ApiConvoyCheckResponse'
+      summary: Check convoy completion
+      description: convoy.check response payload
     ApiConvoyCreateRequest:
       payload:
         $ref: '#/components/schemas/ApiConvoyCreateRequest'
       summary: Create a convoy
       description: convoy.create request payload
+    ApiConvoySnapshotResponse:
+      payload:
+        $ref: '#/components/schemas/ApiConvoySnapshotResponse'
+      summary: Get convoy details
+      description: convoy.get response payload
     ApiErrorEnvelope:
       payload:
         $ref: '#/components/schemas/ApiErrorEnvelope'
@@ -2544,6 +2612,16 @@ components:
         $ref: '#/components/schemas/ApiMailSendRequest'
       summary: Send a mail message
       description: mail.send request payload
+    ApiMutationStatusIDResponse:
+      payload:
+        $ref: '#/components/schemas/ApiMutationStatusIDResponse'
+      summary: Wake a suspended session
+      description: session.wake response payload
+    ApiMutationStatusResponse:
+      payload:
+        $ref: '#/components/schemas/ApiMutationStatusResponse'
+      summary: Suspend a session
+      description: session.suspend response payload
     ApiOrderResponse:
       payload:
         $ref: '#/components/schemas/ApiOrderResponse'
@@ -2559,6 +2637,16 @@ components:
         $ref: '#/components/schemas/ApiResponseEnvelope'
       summary: Server Envelope
       description: Server-to-client message (response, error, event, or hello)
+    ApiSessionAgentDetailResponse:
+      payload:
+        $ref: '#/components/schemas/ApiSessionAgentDetailResponse'
+      summary: Get agent details in a session
+      description: session.agent.get response payload
+    ApiSessionAgentsResponse:
+      payload:
+        $ref: '#/components/schemas/ApiSessionAgentsResponse'
+      summary: List agents in a session
+      description: session.agents.list response payload
     ApiSessionCreateRequest:
       payload:
         $ref: '#/components/schemas/ApiSessionCreateRequest'
@@ -2574,6 +2662,16 @@ components:
         $ref: '#/components/schemas/ApiSessionResponse'
       summary: Rename a session
       description: session.rename response payload
+    ApiSessionSubmitResponse:
+      payload:
+        $ref: '#/components/schemas/ApiSessionSubmitResponse'
+      summary: Submit a message to a session
+      description: session.submit response payload
+    ApiSessionTranscriptResult:
+      payload:
+        $ref: '#/components/schemas/ApiSessionTranscriptResult'
+      summary: Get session transcript
+      description: session.transcript response payload
     ApiSlingBody:
       payload:
         $ref: '#/components/schemas/ApiSlingBody'
@@ -2772,8 +2870,8 @@ components:
     BeadsBead:
       payload:
         $ref: '#/components/schemas/BeadsBead'
-      summary: Get bead details
-      description: bead.get response payload
+      summary: Create a convoy
+      description: convoy.create response payload
     ConfigAgentPatch:
       payload:
         $ref: '#/components/schemas/ConfigAgentPatch'

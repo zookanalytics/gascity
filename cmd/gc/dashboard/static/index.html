@@ -23,6 +23,14 @@
             </div>
         </header>
 
+        <div class="dashboard-error-banner" id="dashboard-error-banner" hidden>
+            <div class="dashboard-error-copy">
+                <strong id="dashboard-error-title">Dashboard degraded</strong>
+                <span id="dashboard-error-message"></span>
+            </div>
+            <button class="dashboard-error-dismiss" id="dashboard-error-dismiss" type="button">Dismiss</button>
+        </div>
+
         <!-- City Tabs (populated by JS in supervisor mode) -->
         <nav class="city-tabs" id="city-tabs-nav" style="display: none;"></nav>
 
@@ -687,6 +695,6 @@
     </div>
 
     <script src="/bootstrap.js"></script>
-    <script src="/static/dashboard.js"></script>
+    <script type="module" src="/static/dashboard.js"></script>
 </body>
 </html>

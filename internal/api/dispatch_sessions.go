@@ -97,7 +97,7 @@ func init() {
 		Description:       "Create a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(ctx context.Context, s *Server, p sessionCreateRequest) (any, error) {
+	}, func(ctx context.Context, s *Server, p sessionCreateRequest) (sessionResponse, error) {
 		result, _, err := s.Sessions.Create(ctx, p, "")
 		return result, err
 	})
@@ -106,49 +106,49 @@ func init() {
 		Description:       "Suspend a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (mutationStatusResponse, error) {
 		if err := s.Sessions.Suspend(payload.ID); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "ok"}, nil
+		return mutationStatusResponse{Status: "ok"}, nil
 	})
 
 	RegisterAction("session.close", ActionDef{
 		Description:       "Close a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (mutationStatusResponse, error) {
 		if err := s.Sessions.Close(payload.ID); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "ok"}, nil
+		return mutationStatusResponse{Status: "ok"}, nil
 	})
 
 	RegisterAction("session.stop", ActionDef{
 		Description:       "Stop a session turn",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (mutationStatusIDResponse, error) {
 		store := s.state.CityBeadStore()
 		if store == nil {
-			return nil, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+			return mutationStatusIDResponse{}, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
 		}
 		id, err := s.resolveSessionIDWithConfig(store, payload.ID)
 		if err != nil {
-			return nil, err
+			return mutationStatusIDResponse{}, err
 		}
 		mgr := s.sessionManager(store)
 		if err := mgr.StopTurn(id); err != nil {
-			return nil, err
+			return mutationStatusIDResponse{}, err
 		}
-		return map[string]string{"status": "ok", "id": id}, nil
+		return mutationStatusIDResponse{Status: "ok", ID: id}, nil
 	})
 
 	RegisterAction("session.wake", ActionDef{
 		Description:       "Wake a suspended session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(ctx context.Context, s *Server, payload socketSessionTargetPayload) (map[string]string, error) {
+	}, func(ctx context.Context, s *Server, payload socketSessionTargetPayload) (mutationStatusIDResponse, error) {
 		return s.Sessions.Wake(ctx, payload.ID)
 	})
 
@@ -164,7 +164,7 @@ func init() {
 		Description:       "Respond to a session prompt",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionRespondPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionRespondPayload) (mutationStatusIDResponse, error) {
 		return s.Sessions.Respond(payload.ID, sessionRespondRequest{
 			RequestID: payload.RequestID,
 			Action:    payload.Action,
@@ -177,7 +177,7 @@ func init() {
 		Description:       "Kill a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (mutationStatusIDResponse, error) {
 		return s.Sessions.Kill(payload.ID)
 	})
 
@@ -192,7 +192,7 @@ func init() {
 		Description:       "Submit a message to a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(ctx context.Context, s *Server, p socketSessionSubmitPayload) (map[string]any, error) {
+	}, func(ctx context.Context, s *Server, p socketSessionSubmitPayload) (SessionSubmitResponse, error) {
 		if p.Intent == "" {
 			p.Intent = session.SubmitIntentDefault
 		}
@@ -202,10 +202,10 @@ func init() {
 	RegisterAction("session.transcript", ActionDef{
 		Description:       "Get session transcript",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTranscriptPayload) (any, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTranscriptPayload) (sessionTranscriptResult, error) {
 		format, err := normalizeSessionTranscriptFormat(payload.Format)
 		if err != nil {
-			return nil, err
+			return sessionTranscriptResult{}, err
 		}
 		return s.Sessions.Transcript(payload.ID, sessionTranscriptQuery{
 			Tail:   payload.Turns,
@@ -218,7 +218,7 @@ func init() {
 		Description:       "Patch session metadata",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionPatchPayload) (any, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionPatchPayload) (sessionResponse, error) {
 		return s.Sessions.Patch(payload.ID, payload.Title, payload.Alias)
 	})
 
@@ -226,35 +226,35 @@ func init() {
 		Description:       "Send a user message to a session",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(ctx context.Context, s *Server, payload socketSessionMessagesPayload) (map[string]string, error) {
+	}, func(ctx context.Context, s *Server, payload socketSessionMessagesPayload) (mutationStatusIDResponse, error) {
 		if strings.TrimSpace(payload.Message) == "" {
-			return nil, httpError{status: 400, code: "invalid", message: "message is required"}
+			return mutationStatusIDResponse{}, httpError{status: 400, code: "invalid", message: "message is required"}
 		}
 		store := s.state.CityBeadStore()
 		if store == nil {
-			return nil, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+			return mutationStatusIDResponse{}, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
 		}
 		id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, payload.ID)
 		if err != nil {
-			return nil, err
+			return mutationStatusIDResponse{}, err
 		}
 		if err := s.sendUserMessageToSession(ctx, store, id, payload.Message); err != nil {
-			return nil, err
+			return mutationStatusIDResponse{}, err
 		}
-		return map[string]string{"status": "accepted", "id": id}, nil
+		return mutationStatusIDResponse{Status: "accepted", ID: id}, nil
 	})
 
 	RegisterAction("session.agents.list", ActionDef{
 		Description:       "List agents in a session",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (any, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionTargetPayload) (sessionAgentsResponse, error) {
 		return s.Sessions.ListAgents(payload.ID)
 	})
 
 	RegisterAction("session.agent.get", ActionDef{
 		Description:       "Get agent details in a session",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketSessionAgentGetPayload) (any, error) {
+	}, func(_ context.Context, s *Server, payload socketSessionAgentGetPayload) (sessionAgentDetailResponse, error) {
 		return s.Sessions.GetAgent(payload.ID, payload.AgentID)
 	})
 }

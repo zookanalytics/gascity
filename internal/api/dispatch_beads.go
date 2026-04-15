@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -89,7 +88,7 @@ func init() {
 	RegisterAction("bead.deps", ActionDef{
 		Description:       "Get bead dependencies",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]any, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (beadDepsResponse, error) {
 		return s.Beads.Deps(payload.ID)
 	})
 
@@ -105,7 +104,7 @@ func init() {
 		Description:       "Close a bead",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (mutationStatusResponse, error) {
 		return s.Beads.Close(payload.ID)
 	})
 
@@ -113,19 +112,15 @@ func init() {
 		Description:       "Update a bead",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload json.RawMessage) (map[string]string, error) {
-		var idHolder socketIDPayload
-		if err := json.Unmarshal(payload, &idHolder); err != nil {
-			return nil, httpError{status: 400, code: "invalid", message: err.Error()}
-		}
-		return s.Beads.Update(idHolder.ID, payload)
+	}, func(_ context.Context, s *Server, payload beadUpdateRequest) (mutationStatusResponse, error) {
+		return s.Beads.Update(payload)
 	})
 
 	RegisterAction("bead.reopen", ActionDef{
 		Description:       "Reopen a bead",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (mutationStatusResponse, error) {
 		return s.Beads.Reopen(payload.ID)
 	})
 
@@ -133,7 +128,7 @@ func init() {
 		Description:       "Assign a bead",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketBeadAssignPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketBeadAssignPayload) (beadAssignResponse, error) {
 		return s.Beads.Assign(payload.ID, payload.Assignee)
 	})
 
@@ -141,10 +136,10 @@ func init() {
 		Description:       "Delete a bead",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (mutationStatusResponse, error) {
 		if err := s.Beads.Delete(payload.ID); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "deleted"}, nil
+		return mutationStatusResponse{Status: "deleted"}, nil
 	})
 }

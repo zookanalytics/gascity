@@ -12,13 +12,13 @@ type BeadService interface {
 	List(query beads.ListQuery, rig string) []beads.Bead
 	ListReady() ([]beads.Bead, error)
 	Get(id string) (beads.Bead, error)
-	Deps(id string) (map[string]any, error)
+	Deps(id string) (beadDepsResponse, error)
 	Graph(rootID string) (beadGraphResponseJSON, error)
 	Create(req beadCreateRequest) (beads.Bead, error)
-	Close(id string) (map[string]string, error)
-	Update(id string, payload []byte) (map[string]string, error)
-	Reopen(id string) (map[string]string, error)
-	Assign(id, assignee string) (map[string]string, error)
+	Close(id string) (mutationStatusResponse, error)
+	Update(body beadUpdateRequest) (mutationStatusResponse, error)
+	Reopen(id string) (mutationStatusResponse, error)
+	Assign(id, assignee string) (beadAssignResponse, error)
 	Delete(id string) error
 }
 
@@ -41,7 +41,7 @@ func (b *beadService) Get(id string) (beads.Bead, error) {
 	return b.s.getBead(id)
 }
 
-func (b *beadService) Deps(id string) (map[string]any, error) {
+func (b *beadService) Deps(id string) (beadDepsResponse, error) {
 	return b.s.getBeadDeps(id)
 }
 
@@ -53,19 +53,19 @@ func (b *beadService) Create(req beadCreateRequest) (beads.Bead, error) {
 	return b.s.createBead(req)
 }
 
-func (b *beadService) Close(id string) (map[string]string, error) {
+func (b *beadService) Close(id string) (mutationStatusResponse, error) {
 	return b.s.closeBead(id)
 }
 
-func (b *beadService) Update(id string, payload []byte) (map[string]string, error) {
-	return b.s.updateBead(id, payload)
+func (b *beadService) Update(body beadUpdateRequest) (mutationStatusResponse, error) {
+	return b.s.updateBead(body)
 }
 
-func (b *beadService) Reopen(id string) (map[string]string, error) {
+func (b *beadService) Reopen(id string) (mutationStatusResponse, error) {
 	return b.s.reopenBead(id)
 }
 
-func (b *beadService) Assign(id, assignee string) (map[string]string, error) {
+func (b *beadService) Assign(id, assignee string) (beadAssignResponse, error) {
 	return b.s.assignBead(id, assignee)
 }
 

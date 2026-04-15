@@ -11,7 +11,7 @@
 //	go run ./cmd/specgen
 //	go generate ./internal/api/specgen/...
 //
-//go:generate go run ../../cmd/specgen
+//go:generate go run ../../../cmd/specgen
 package specgen
 
 import (

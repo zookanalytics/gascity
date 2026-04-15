@@ -1,3 +1,8 @@
+import { createDashboardData } from './dashboard_data.js';
+import { createCommandPalette } from './dashboard_palette.js';
+import { createDashboardSubscriptions } from './dashboard_subscriptions.js';
+import { createDashboardTransport } from './dashboard_transport.js';
+
 (function() {
     'use strict';
 
@@ -6,143 +11,48 @@
     // ================================================================
 
     var _bootstrap = window.__GC_BOOTSTRAP__ || {};
-    var _selectedCity = new URLSearchParams(window.location.search).get('city') ||
-        _bootstrap.initialCityScope || '';
-    var _wsUrl = buildWebSocketURL(_bootstrap.apiBaseURL);
+    var state = {
+        selectedCity: new URLSearchParams(window.location.search).get('city') ||
+            _bootstrap.initialCityScope || '',
+        wsUrl: buildWebSocketURL(_bootstrap.apiBaseURL),
+        ws: null,
+        wsReqId: 0,
+        wsPending: {},
+        wsReconnectDelay: 1000,
+        wsMaxReconnectDelay: 30000,
+        lastEventCursor: '',
+        subscriptionRetry: 0,
+        wsCapabilities: [],
+        citiesList: [],
+        observationTypes: {
+            'agent.message': 1, 'agent.tool_call': 1, 'agent.tool_result': 1,
+            'agent.thinking': 1, 'agent.output': 1, 'agent.idle': 1,
+            'agent.error': 1, 'agent.completed': 1
+        },
+        activityTimer: null,
+        activityThrottle: 2000,
+        fullRefreshTimer: null
+    };
+    var _lastErrorKey = '';
+    var _lastErrorAt = 0;
+    var transport;
+    var data;
+    var palette;
+    var subscriptions;
 
     window.wsConnected = false;
-    Object.defineProperty(window, 'sseConnected', {
-        get: function() { return window.wsConnected; },
-        set: function(v) { window.wsConnected = v; }
-    });
     window.pauseRefresh = false;
 
-    var _ws = null;
-    var _wsReqId = 0;
-    var _wsPending = {};
-    var _wsReconnectDelay = 1000;
-    var _wsMaxReconnectDelay = 30000;
-    var _lastEventCursor = '';
-    var _subscriptionRetry = 0;
-    var _wsCapabilities = [];
-    var _citiesList = [];
-
-    // Category-based refresh: observation events update only the activity
-    // panel (cheap). State-changing events trigger a full dashboard reload
-    // but are debounced to prevent overload.
-    var _observationTypes = {
-        'agent.message': 1, 'agent.tool_call': 1, 'agent.tool_result': 1,
-        'agent.thinking': 1, 'agent.output': 1, 'agent.idle': 1,
-        'agent.error': 1, 'agent.completed': 1
-    };
-
-    var _activityTimer = null;
-    var _activityThrottle = 2000;
-    var _fullRefreshTimer = null;
-
     function wsRequest(action, payload) {
-        return new Promise(function(resolve, reject) {
-            if (!_ws || _ws.readyState !== WebSocket.OPEN) {
-                reject(new Error('WebSocket not connected'));
-                return;
-            }
-            _wsReqId++;
-            var id = 'dash-' + _wsReqId;
-            var msg = {type: 'request', id: id, action: action};
-            if (_selectedCity) {
-                msg.scope = {city: _selectedCity};
-            }
-            if (payload) {
-                msg.payload = payload;
-            }
-            _wsPending[id] = {resolve: resolve, reject: reject};
-            _ws.send(JSON.stringify(msg));
-            setTimeout(function() {
-                if (_wsPending[id]) {
-                    _wsPending[id].reject(new Error('WebSocket request timeout'));
-                    delete _wsPending[id];
-                }
-            }, 30000);
-        });
+        return transport.wsRequest(action, payload);
     }
 
     function connectWebSocket() {
-        if (!_wsUrl) {
-            updateConnectionStatus('error');
-            handleError(new Error('dashboard bootstrap missing apiBaseURL'), 'bootstrap');
-            return;
-        }
-        if (_ws) {
-            _ws.close();
-        }
-
-        _ws = new WebSocket(_wsUrl);
-
-        _ws.onopen = function() {
-            // Hello envelope arrives as the first message.
-        };
-
-        _ws.onmessage = function(e) {
-            var msg;
-            try { msg = JSON.parse(e.data); } catch (err) { return; }
-
-            switch (msg.type) {
-            case 'hello':
-                window.wsConnected = true;
-                _wsReconnectDelay = 1000;
-                _subscriptionRetry = 0;
-                updateConnectionStatus('live');
-                _buildCommandsFromCapabilities(msg.capabilities);
-                _resolveDefaultCity(msg).then(function() {
-                    _subscribeEvents();
-                    loadDashboard();
-                });
-                break;
-            case 'response':
-                if (msg.id && _wsPending[msg.id]) {
-                    _wsPending[msg.id].resolve(msg.result);
-                    delete _wsPending[msg.id];
-                }
-                break;
-            case 'error':
-                if (msg.id && _wsPending[msg.id]) {
-                    _wsPending[msg.id].reject(new Error(msg.message || msg.code || 'API error'));
-                    delete _wsPending[msg.id];
-                }
-                break;
-            case 'event':
-                _handleWSEvent(msg);
-                break;
-            }
-        };
-
-        _ws.onclose = function() {
-            window.wsConnected = false;
-            updateConnectionStatus('reconnecting');
-            setTimeout(function() {
-                _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, _wsMaxReconnectDelay);
-                connectWebSocket();
-            }, _wsReconnectDelay);
-        };
-
-        _ws.onerror = function() {
-            // onclose fires after onerror.
-        };
+        transport.connectWebSocket();
     }
 
     function _resolveDefaultCity(hello) {
-        if (_selectedCity) return Promise.resolve();
-        if (!hello || hello.server_role !== 'supervisor') return Promise.resolve();
-        return wsRequest('cities.list').then(function(data) {
-            var items = (data && data.items) || [];
-            _citiesList = items;
-            if (items.length > 0 && items[0].name) {
-                _selectedCity = items[0].name;
-            }
-            updateCityTabs(items);
-        }).catch(function(err) {
-            handleError(err, 'cities.list.default');
-        });
+        return transport.resolveDefaultCity(hello);
     }
 
     function updateConnectionStatus(state) {
@@ -194,8 +104,41 @@
         }
     }
 
+    function formatErrorMessage(err) {
+        if (!err) return 'unknown error';
+        if (typeof err === 'string') return err;
+        if (err.message) return err.message;
+        return String(err);
+    }
+
+    function showErrorBanner(title, message) {
+        var banner = document.getElementById('dashboard-error-banner');
+        var titleEl = document.getElementById('dashboard-error-title');
+        var messageEl = document.getElementById('dashboard-error-message');
+        if (!banner || !titleEl || !messageEl) return;
+        titleEl.textContent = title;
+        messageEl.textContent = message;
+        banner.hidden = false;
+    }
+
+    function clearError() {
+        var banner = document.getElementById('dashboard-error-banner');
+        if (!banner) return;
+        banner.hidden = true;
+    }
+
     function handleError(err, context) {
-        console.warn('dashboard [' + context + ']:', err);
+        var message = formatErrorMessage(err);
+        var details = context + ': ' + message;
+        var now = Date.now();
+        var key = context + '|' + message;
+        console.error('dashboard [' + context + ']:', err);
+        showErrorBanner('Dashboard degraded', details);
+        if (key !== _lastErrorKey || now-_lastErrorAt > 10000) {
+            showToast('error', 'Dashboard degraded', details);
+        }
+        _lastErrorKey = key;
+        _lastErrorAt = now;
     }
 
     function on(id, event, handler) {
@@ -1339,7 +1282,7 @@
         var html = '';
         for (var i = 0; i < cities.length; i++) {
             var c = cities[i];
-            var isActive = c.name === _selectedCity;
+            var isActive = c.name === state.selectedCity;
             var runningDot = c.running ? '<span class="city-tab-dot dot-green"></span>' : '<span class="city-tab-dot dot-red"></span>';
             html += '<a href="?city=' + encodeURIComponent(c.name) + '" class="city-tab' + (isActive ? ' active' : '') + '">' +
                 runningDot + ' ' + escapeHtml(c.name) + '</a>';
@@ -1352,182 +1295,7 @@
     // ================================================================
 
     function loadDashboard() {
-        Promise.all([
-            wsRequest('convoys.list').catch(function(err) { handleError(err, 'loadDashboard.convoys'); return {items: []}; }),
-            wsRequest('sessions.list', {state: 'active', peek: true}).catch(function(err) { handleError(err, 'loadDashboard.sessions'); return {items: []}; }),
-            wsRequest('mail.list').catch(function(err) { handleError(err, 'loadDashboard.mail'); return {items: []}; }),
-            wsRequest('beads.list', {status: 'open'}).catch(function(err) { handleError(err, 'loadDashboard.beadsOpen'); return {items: []}; }),
-            wsRequest('beads.list', {status: 'in_progress'}).catch(function(err) { handleError(err, 'loadDashboard.beadsIP'); return {items: []}; }),
-            wsRequest('events.list', {limit: 50}).catch(function(err) { handleError(err, 'loadDashboard.events'); return {items: []}; }),
-            wsRequest('status.get').catch(function(err) { handleError(err, 'loadDashboard.status'); return {}; }),
-            wsRequest('rigs.list').catch(function(err) { handleError(err, 'loadDashboard.rigs'); return {items: []}; }),
-            wsRequest('services.list').catch(function(err) { handleError(err, 'loadDashboard.services'); return {items: []}; }),
-            wsRequest('agents.list').catch(function(err) { handleError(err, 'loadDashboard.agents'); return {items: []}; })
-        ]).then(function(results) {
-            var convoys = results[0].items || [];
-            var sessions = results[1].items || [];
-            var mail = results[2].items || [];
-            var beadsOpen = results[3].items || [];
-            var beadsInProgress = results[4].items || [];
-            var events = results[5].items || [];
-            // results[6] = status.get
-            var rigs = results[7].items || [];
-            var services = results[8].items || [];
-            var agents = results[9].items || [];
-
-            // Merge open + in_progress for the beads panel.
-            var allBeads = beadsOpen.concat(beadsInProgress);
-
-            // Compute escalations from beads labeled gc:escalation.
-            var escalations = beadsOpen.filter(function(b) {
-                var labels = b.labels || [];
-                return labels.indexOf('gc:escalation') !== -1;
-            }).map(function(b) {
-                var severity = 'medium';
-                var acked = false;
-                (b.labels || []).forEach(function(l) {
-                    if (l.indexOf('severity:') === 0) severity = l.replace('severity:', '');
-                    if (l === 'acked') acked = true;
-                });
-                return {
-                    id: b.id,
-                    title: b.title,
-                    severity: severity,
-                    acked: acked,
-                    escalated_by: formatAgentAddress(b.from || ''),
-                    created_at: b.created_at,
-                    from: b.from
-                };
-            });
-            // Sort escalations by severity.
-            var sevOrder = {critical: 0, high: 1, medium: 2, low: 3};
-            escalations.sort(function(a, b) {
-                return (sevOrder[a.severity] || 3) - (sevOrder[b.severity] || 3);
-            });
-
-            // Compute assigned from in_progress beads.
-            var assigned = beadsInProgress.filter(function(b) { return b.assignee; });
-
-            // Render all panels.
-            renderConvoysPanel(convoys);
-            renderCrewPanel(sessions);
-            renderPolecatsPanel(sessions);
-            renderActivityPanel(events);
-            renderMailAllPanel(mail);
-            renderEscalationsPanel(escalations);
-            renderServicesPanel(services);
-            renderRigsPanel(rigs, sessions, agents);
-            renderDogsPanel(sessions);
-            renderQueuesPanel(allBeads);
-            renderBeadsPanel(allBeads, rigs);
-            renderAssignedPanel(assigned);
-            updateMayorBanner(sessions);
-            updateSummaryBanner({
-                sessions: sessions,
-                beadsOpen: beadsOpen,
-                beadsInProgress: beadsInProgress,
-                convoys: convoys,
-                escalations: escalations
-            });
-            updateCityTabs(_citiesList);
-
-            // Load threaded inbox view.
-            loadMailInbox(mail);
-        });
-    }
-
-    function loadMailInbox(mailData) {
-        var loading = document.getElementById('mail-loading');
-        var threadsContainer = document.getElementById('mail-threads');
-        var empty = document.getElementById('mail-empty');
-        var count = document.getElementById('mail-count');
-
-        if (!threadsContainer) return;
-
-        var doRender = function(messages) {
-            if (loading) loading.style.display = 'none';
-            var threads = groupMailIntoThreads(messages);
-
-            if (threads.length === 0) {
-                threadsContainer.style.display = 'none';
-                if (empty) empty.style.display = 'block';
-                if (count) count.textContent = '0';
-                return;
-            }
-
-            threadsContainer.style.display = 'block';
-            if (empty) empty.style.display = 'none';
-
-            var unreadTotal = 0;
-            threads.forEach(function(t) { unreadTotal += t.unread_count; });
-            if (count) {
-                count.textContent = unreadTotal > 0 ? unreadTotal + ' unread' : String(threads.length);
-                if (unreadTotal > 0) count.classList.add('has-unread');
-                else count.classList.remove('has-unread');
-            }
-
-            var html = '';
-            for (var i = 0; i < threads.length; i++) {
-                var t = threads[i];
-                var last = t.last_message || {};
-                var hasMultiple = t.count > 1;
-                var unreadClass = t.unread_count > 0 ? ' mail-thread-unread' : '';
-                var countBadge = hasMultiple ? '<span class="thread-count">' + t.count + '</span>' : '';
-                var unreadDot = t.unread_count > 0 ? '<span class="thread-unread-dot"></span>' : '';
-
-                var priorityIcon = '';
-                if (last.priority === 0 || last.priority === 'urgent') priorityIcon = '<span class="priority-urgent">\u26A1</span> ';
-                else if (last.priority === 1 || last.priority === 'high') priorityIcon = '<span class="priority-high">!</span> ';
-
-                var timeStr = last.created_at ? formatTimestamp(last.created_at) : '';
-                var relativeStr = last.created_at ? ' (' + formatAge(last.created_at) + ')' : '';
-
-                html += '<div class="mail-thread' + unreadClass + '">' +
-                    '<div class="mail-thread-header" data-thread-id="' + escapeHtml(t.thread_id) + '"' +
-                    (hasMultiple ? '' : ' data-msg-id="' + escapeHtml(last.id || '') + '" data-from="' + escapeHtml(last.from || '') + '"') + '>' +
-                    '<div class="mail-thread-left">' + unreadDot +
-                    '<span class="mail-from">' + escapeHtml(formatAgentAddress(last.from)) + '</span>' + countBadge +
-                    '</div>' +
-                    '<div class="mail-thread-center">' + priorityIcon +
-                    '<span class="mail-subject">' + escapeHtml(t.subject || '') + '</span>' +
-                    (hasMultiple && last.body ? '<span class="mail-thread-preview"> \u2014 ' + escapeHtml(last.body.substring(0, 60)) + '</span>' : '') +
-                    '</div>' +
-                    '<div class="mail-thread-right"><span class="mail-time">' + escapeHtml(timeStr + relativeStr) + '</span></div>' +
-                    '</div>';
-
-                if (hasMultiple) {
-                    html += '<div class="mail-thread-messages" style="display: none;">';
-                    for (var j = 0; j < t.messages.length; j++) {
-                        var msg = t.messages[j];
-                        var msgUnread = msg.read ? '' : ' mail-unread';
-                        html += '<div class="mail-thread-msg' + msgUnread + '" data-msg-id="' + escapeHtml(msg.id) + '" data-from="' + escapeHtml(msg.from || '') + '">' +
-                            '<div class="mail-thread-msg-header">' +
-                            '<span class="mail-from">' + escapeHtml(formatAgentAddress(msg.from)) + '</span>' +
-                            '<span class="mail-time">' + escapeHtml(msg.created_at ? formatTimestamp(msg.created_at) : '') + '</span>' +
-                            '</div>' +
-                            '<div class="mail-thread-msg-subject">' + escapeHtml(msg.subject || '') + '</div>' +
-                            '</div>';
-                    }
-                    html += '</div>';
-                }
-
-                html += '</div>';
-            }
-            threadsContainer.innerHTML = html;
-        };
-
-        if (mailData) {
-            doRender(mailData);
-        } else {
-            wsRequest('mail.list')
-                .then(function(data) {
-                    doRender(data.items || []);
-                })
-                .catch(function(err) {
-                    if (loading) loading.textContent = 'Failed to load mail';
-                    handleError(err, 'loadMailInbox');
-                });
-        }
+        return data.loadDashboard();
     }
 
     // ================================================================
@@ -2526,7 +2294,8 @@
         if (!cmd) return;
         navigator.clipboard.writeText(cmd).then(function() {
             showToast('success', 'Copied', cmd);
-        }).catch(function() {
+        }).catch(function(err) {
+            handleError(err, 'attach.copy');
             showToast('info', 'Run in terminal', cmd);
         });
     });
@@ -2535,711 +2304,54 @@
     // Section 6: Command Palette
     // ================================================================
 
-    var allCommands = [];
-    var visibleCommands = [];
-    var selectedIdx = 0;
-    var isPaletteOpen = false;
-    var executionLock = false;
-    var pendingCommand = null;
-    var cachedOptions = null;
-    var recentCommands = [];
-    var MAX_RECENT = 10;
-    var RECENT_STORAGE_KEY = 'gt-palette-recent';
-
-    // Load recent commands from localStorage.
-    function loadRecentCommands() {
-        try {
-            var stored = localStorage.getItem(RECENT_STORAGE_KEY);
-            if (stored) {
-                recentCommands = JSON.parse(stored);
-                if (!Array.isArray(recentCommands)) recentCommands = [];
-                recentCommands = recentCommands.slice(0, MAX_RECENT);
-            }
-        } catch (e) {
-            recentCommands = [];
-        }
-    }
-
-    function saveRecentCommand(cmdName) {
-        recentCommands = recentCommands.filter(function(c) { return c !== cmdName; });
-        recentCommands.unshift(cmdName);
-        recentCommands = recentCommands.slice(0, MAX_RECENT);
-        try {
-            localStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentCommands));
-        } catch (e) { /* ignore */ }
-    }
-
-    loadRecentCommands();
-
-    // Build commands from hello capabilities.
-    function _buildCommandsFromCapabilities(caps) {
-        _wsCapabilities = caps || [];
-        allCommands = [
-            {name: 'status', desc: 'Show city status', category: 'System'},
-            {name: 'mail inbox', desc: 'Show mail inbox', category: 'Mail'},
-            {name: 'mail send', desc: 'Send mail', category: 'Mail', args: '<address> -s <subject> -m <message>', argType: 'agents'},
-            {name: 'mail read', desc: 'Read a message', category: 'Mail', args: '<id>', argType: 'messages'},
-            {name: 'mail archive', desc: 'Archive a message', category: 'Mail', args: '<id>', argType: 'messages'},
-            {name: 'convoy list', desc: 'List convoys', category: 'Work'},
-            {name: 'convoy create', desc: 'Create convoy', category: 'Work', args: '<name>'},
-            {name: 'convoy status', desc: 'Show convoy detail', category: 'Work', args: '<id>', argType: 'convoys'},
-            {name: 'rig list', desc: 'List rigs', category: 'System'},
-            {name: 'agent list', desc: 'List agents', category: 'System'},
-            {name: 'sling', desc: 'Sling a bead to a rig', category: 'Work', args: '<bead_id> <rig>', argType: 'hooks'},
-            {name: 'unsling', desc: 'Unassign a bead', category: 'Work', args: '<bead_id>', argType: 'hooks'}
-        ];
-
-        // Add dynamic commands from capabilities.
-        if (_wsCapabilities.indexOf('config.get') !== -1) {
-            allCommands.push({name: 'config get', desc: 'Show city config', category: 'System'});
-        }
-        if (_wsCapabilities.indexOf('config.validate') !== -1) {
-            allCommands.push({name: 'config validate', desc: 'Validate city config', category: 'System'});
-        }
-    }
-
-    // Fetch dynamic options via WS.
-    function fetchOptions() {
-        return Promise.all([
-            wsRequest('rigs.list').catch(function() { return {items: []}; }),
-            wsRequest('sessions.list', {state: 'active'}).catch(function() { return {items: []}; }),
-            wsRequest('beads.list', {status: 'open'}).catch(function() { return {items: []}; }),
-            wsRequest('mail.list').catch(function() { return {items: []}; })
-        ]).then(function(results) {
-            cachedOptions = {
-                rigs: (results[0].items || []).map(function(r) { return r.name || ''; }).filter(Boolean),
-                agents: (results[1].items || []).map(function(s) { return s.template || s.id || ''; }).filter(Boolean),
-                hooks: (results[2].items || []).map(function(b) { return b.id; }),
-                messages: (results[3].items || []).map(function(m) { return m.id; }),
-                convoys: []
-            };
-            return cachedOptions;
-        }).catch(function() {
-            handleError(new Error('Failed to load options'), 'fetchOptions');
-            return null;
-        });
-    }
-
-    function getOptionsForType(argType) {
-        if (!cachedOptions) return [];
-        var rawOptions;
-        switch (argType) {
-        case 'rigs': rawOptions = cachedOptions.rigs || []; break;
-        case 'agents': rawOptions = cachedOptions.agents || []; break;
-        case 'hooks': rawOptions = cachedOptions.hooks || []; break;
-        case 'messages': rawOptions = cachedOptions.messages || []; break;
-        case 'convoys': rawOptions = cachedOptions.convoys || []; break;
-        default: return [];
-        }
-        return rawOptions.map(function(opt) {
-            if (typeof opt === 'string') {
-                return {value: opt, label: opt, disabled: false};
-            }
-            return {value: opt.name || '', label: opt.name || '', disabled: false};
-        });
-    }
-
-    // Map CLI-style commands to WS actions.
-    function dispatchCommandAsWSAction(cmdStr) {
-        var parts = cmdStr.trim().split(/\s+/);
-        var cmd = parts[0];
-        var subcmd = parts[1] || '';
-        var args = parts.slice(2);
-
-        switch (cmd) {
-        case 'status':
-            return wsRequest('status.get');
-        case 'sling':
-            return wsRequest('sling.run', {bead_id: parts[1], rig: parts[2] || ''});
-        case 'unsling':
-            return wsRequest('bead.assign', {id: parts[1], assignee: ''});
-        case 'mail':
-            switch (subcmd) {
-            case 'inbox': case 'check':
-                return wsRequest('mail.list');
-            case 'send':
-                return wsRequest('mail.send', {to: args[0], subject: args.slice(1).join(' '), body: ''});
-            case 'read': case 'mark-read':
-                return wsRequest('mail.read', {id: args[0]});
-            case 'archive':
-                return wsRequest('mail.archive', {id: args[0]});
-            case 'mark-unread':
-                return wsRequest('mail.mark_unread', {id: args[0]});
-            default:
-                return Promise.reject(new Error('Unknown mail command: ' + subcmd));
-            }
-        case 'convoy':
-            switch (subcmd) {
-            case 'list':
-                return wsRequest('convoys.list');
-            case 'status': case 'show':
-                return wsRequest('convoy.get', {id: args[0]});
-            case 'create':
-                return wsRequest('convoy.create', {title: args[0], items: args.slice(1)});
-            case 'add':
-                return wsRequest('convoy.add', {id: args[0], items: args.slice(1)});
-            default:
-                return Promise.reject(new Error('Unknown convoy command: ' + subcmd));
-            }
-        case 'rig':
-            switch (subcmd) {
-            case 'list':
-                return wsRequest('rigs.list');
-            default:
-                return Promise.reject(new Error('Unknown rig command: ' + subcmd));
-            }
-        case 'agent':
-            switch (subcmd) {
-            case 'list':
-                return wsRequest('agents.list');
-            default:
-                return Promise.reject(new Error('Unknown agent command: ' + subcmd));
-            }
-        case 'config':
-            switch (subcmd) {
-            case 'get':
-                return wsRequest('config.get');
-            case 'validate':
-                return wsRequest('config.validate');
-            default:
-                return Promise.reject(new Error('Unknown config command: ' + subcmd));
-            }
-        default:
-            return Promise.reject(new Error('Command not available over WebSocket: ' + cmd));
-        }
-    }
-
-    // Fuzzy match scoring.
-    function scoreCommand(cmd, query) {
-        var name = cmd.name.toLowerCase();
-        var desc = (cmd.desc || '').toLowerCase();
-        var cat = (cmd.category || '').toLowerCase();
-        var q = query.toLowerCase();
-
-        if (name.indexOf(q) === 0) return 100 + (50 - name.length);
-        var nameParts = name.split(' ');
-        for (var i = 0; i < nameParts.length; i++) {
-            if (nameParts[i].indexOf(q) === 0) return 80 + (50 - name.length);
-        }
-        if (name.indexOf(q) !== -1) return 60 + (50 - name.length);
-        if (desc.indexOf(q) !== -1) return 40;
-        if (cat.indexOf(q) !== -1) return 20;
-        // Fuzzy: all query chars in order.
-        var ni = 0;
-        for (var qi = 0; qi < q.length; qi++) {
-            ni = name.indexOf(q[qi], ni);
-            if (ni === -1) return -1;
-            ni++;
-        }
-        return 10;
-    }
-
-    function highlightMatch(text, query) {
-        if (!query) return escapeHtml(text);
-        var lowerText = text.toLowerCase();
-        var lowerQuery = query.toLowerCase();
-        var idx = lowerText.indexOf(lowerQuery);
-        if (idx !== -1) {
-            return escapeHtml(text.substring(0, idx)) +
-                '<mark>' + escapeHtml(text.substring(idx, idx + query.length)) + '</mark>' +
-                escapeHtml(text.substring(idx + query.length));
-        }
-        return escapeHtml(text);
-    }
-
-    function detectActiveContext() {
-        var expandedPanel = document.querySelector('.panel.expanded');
-        if (expandedPanel) {
-            var panelId = expandedPanel.id || '';
-            if (panelId.indexOf('mail') !== -1) return 'Mail';
-            if (panelId.indexOf('crew') !== -1) return 'System';
-            if (panelId.indexOf('bead') !== -1 || panelId.indexOf('issue') !== -1) return 'Work';
-            if (panelId.indexOf('convoy') !== -1) return 'Work';
-        }
-        var mailDetail = document.getElementById('mail-detail');
-        var mailCompose = document.getElementById('mail-compose');
-        if ((mailDetail && mailDetail.style.display !== 'none') ||
-            (mailCompose && mailCompose.style.display !== 'none')) return 'Mail';
-        var issueDetail = document.getElementById('issue-detail');
-        if (issueDetail && issueDetail.style.display !== 'none') return 'Work';
-        return null;
-    }
-
-    function parseArgsTemplate(argsStr) {
-        if (!argsStr) return [];
-        var args = [];
-        var regex = /(?:(-\w+)\s+)?<([^>]+)>/g;
-        var match;
-        while ((match = regex.exec(argsStr)) !== null) {
-            args.push({name: match[2], flag: match[1] || null});
-        }
-        return args;
-    }
-
-    var overlay = document.getElementById('command-palette-overlay');
-    var searchInput = document.getElementById('command-palette-input');
-    var resultsDiv = document.getElementById('command-palette-results');
-
-    // Output panel.
-    var outputPanel = document.getElementById('output-panel');
-    var outputContent = document.getElementById('output-panel-content');
-    var outputCmd = document.getElementById('output-panel-cmd');
-
-    function showOutput(cmd, output) {
-        if (outputCmd) outputCmd.textContent = 'gc ' + cmd;
-        if (outputContent) outputContent.textContent = typeof output === 'string' ? output : JSON.stringify(output, null, 2);
-        if (outputPanel) outputPanel.classList.add('open');
-    }
-
-    on('output-close-btn', 'click', function() {
-        if (outputPanel) outputPanel.classList.remove('open');
+    palette = createCommandPalette({
+        state: state,
+        wsRequest: wsRequest,
+        on: on,
+        escapeHtml: escapeHtml,
+        handleError: handleError,
+        clearError: clearError,
+        showToast: showToast
     });
-
-    on('output-copy-btn', 'click', function() {
-        if (outputContent) {
-            navigator.clipboard.writeText(outputContent.textContent).then(function() {
-                showToast('success', 'Copied', 'Output copied to clipboard');
-            });
-        }
-    });
-
-    function filterCommands(query) {
-        query = (query || '').trim();
-        if (!query) {
-            visibleCommands = [];
-            var shownNames = {};
-
-            // Recent section.
-            var recentItems = [];
-            for (var ri = 0; ri < recentCommands.length; ri++) {
-                var recentCmd = allCommands.find(function(c) { return c.name === recentCommands[ri]; });
-                if (recentCmd) recentItems.push(recentCmd);
-            }
-            if (recentItems.length > 0) {
-                visibleCommands.push({_section: 'Recent'});
-                for (var ri2 = 0; ri2 < recentItems.length; ri2++) {
-                    var rcmd = Object.assign({}, recentItems[ri2], {_recent: true});
-                    visibleCommands.push(rcmd);
-                    shownNames[rcmd.name] = true;
-                }
-            }
-
-            // Contextual section.
-            var context = detectActiveContext();
-            if (context) {
-                var contextItems = allCommands.filter(function(c) {
-                    return c.category === context && !shownNames[c.name];
-                });
-                if (contextItems.length > 0) {
-                    visibleCommands.push({_section: 'Suggested \u2014 ' + context});
-                    for (var ci = 0; ci < contextItems.length; ci++) {
-                        visibleCommands.push(contextItems[ci]);
-                        shownNames[contextItems[ci].name] = true;
-                    }
-                }
-            }
-
-            // All commands.
-            var remaining = allCommands.filter(function(c) { return !shownNames[c.name]; });
-            remaining.sort(function(a, b) { return a.name.localeCompare(b.name); });
-            if (remaining.length > 0) {
-                visibleCommands.push({_section: 'All Commands'});
-                for (var ai = 0; ai < remaining.length; ai++) {
-                    visibleCommands.push(remaining[ai]);
-                }
-            }
-        } else {
-            var scored = [];
-            for (var i = 0; i < allCommands.length; i++) {
-                var s = scoreCommand(allCommands[i], query);
-                if (s > 0) scored.push({cmd: allCommands[i], score: s});
-            }
-            scored.sort(function(a, b) { return b.score - a.score; });
-            visibleCommands = scored.map(function(item) { return item.cmd; });
-        }
-        selectedIdx = 0;
-        while (selectedIdx < visibleCommands.length && visibleCommands[selectedIdx]._section) selectedIdx++;
-        renderPaletteResults();
-    }
-
-    function renderPaletteResults() {
-        if (!resultsDiv) return;
-
-        if (pendingCommand) {
-            var options = pendingCommand.argType ? getOptionsForType(pendingCommand.argType) : [];
-            var argFields = parseArgsTemplate(pendingCommand.args);
-
-            var formHtml = '<div class="command-args-prompt">' +
-                '<div class="command-args-header">gc ' + escapeHtml(pendingCommand.name) + '</div>';
-
-            for (var i = 0; i < argFields.length; i++) {
-                var field = argFields[i];
-                var fieldId = 'arg-field-' + i;
-                var isFirstField = (i === 0) && !field.flag;
-                var hasOptions = isFirstField && pendingCommand.argType && options.length > 0;
-                var noOptions = isFirstField && pendingCommand.argType && options.length === 0;
-                var isMessageField = field.name === 'message' || field.name === 'body';
-
-                formHtml += '<div class="command-field">';
-                formHtml += '<label class="command-field-label" for="' + fieldId + '">' + escapeHtml(field.name) + '</label>';
-
-                if (hasOptions) {
-                    formHtml += '<select id="' + fieldId + '" class="command-field-select" data-flag="' + (field.flag || '') + '">';
-                    formHtml += '<option value="">Select ' + escapeHtml(field.name) + '...</option>';
-                    for (var j = 0; j < options.length; j++) {
-                        var opt = options[j];
-                        var disabledAttr = opt.disabled ? ' disabled' : '';
-                        formHtml += '<option value="' + escapeHtml(opt.value) + '"' + disabledAttr + '>' + escapeHtml(opt.label) + '</option>';
-                    }
-                    formHtml += '</select>';
-                } else if (noOptions) {
-                    formHtml += '<input type="text" id="' + fieldId + '" class="command-field-input" data-flag="' + (field.flag || '') + '" placeholder="No ' + escapeHtml(pendingCommand.argType) + ' available">';
-                } else if (isMessageField) {
-                    formHtml += '<textarea id="' + fieldId + '" class="command-field-textarea" data-flag="' + (field.flag || '') + '" placeholder="Enter ' + escapeHtml(field.name) + '..." rows="3"></textarea>';
-                } else {
-                    formHtml += '<input type="text" id="' + fieldId + '" class="command-field-input" data-flag="' + (field.flag || '') + '" placeholder="Enter ' + escapeHtml(field.name) + '...">';
-                }
-                formHtml += '</div>';
-            }
-
-            if (argFields.length === 0 && pendingCommand.args) {
-                formHtml += '<div class="command-field">';
-                formHtml += '<input type="text" id="arg-field-0" class="command-field-input" placeholder="' + escapeHtml(pendingCommand.args) + '">';
-                formHtml += '</div>';
-            }
-
-            formHtml += '<div class="command-args-actions">' +
-                '<button id="command-args-run" class="command-args-btn run">Run</button>' +
-                '<button id="command-args-cancel" class="command-args-btn cancel">Cancel</button>' +
-                '</div></div>';
-
-            resultsDiv.innerHTML = formHtml;
-
-            var firstField = resultsDiv.querySelector('#arg-field-0');
-            if (firstField) firstField.focus();
-
-            var runBtn = document.getElementById('command-args-run');
-            var cancelBtn = document.getElementById('command-args-cancel');
-
-            if (runBtn) {
-                runBtn.onclick = function() {
-                    runBtn.classList.add('loading');
-                    runBtn.textContent = 'Running';
-                    runWithArgsFromForm(argFields.length || 1);
-                };
-            }
-            if (cancelBtn) {
-                cancelBtn.onclick = function() {
-                    pendingCommand = null;
-                    filterCommands(searchInput ? searchInput.value : '');
-                };
-            }
-
-            resultsDiv.querySelectorAll('input, select').forEach(function(el) {
-                el.onkeydown = function(ev) {
-                    if (ev.key === 'Enter') {
-                        ev.preventDefault();
-                        runWithArgsFromForm(argFields.length || 1);
-                    } else if (ev.key === 'Escape') {
-                        ev.preventDefault();
-                        pendingCommand = null;
-                        filterCommands(searchInput ? searchInput.value : '');
-                    }
-                };
-            });
-            return;
-        }
-
-        if (visibleCommands.length === 0) {
-            resultsDiv.innerHTML = '<div class="command-palette-empty">No matching commands</div>';
-            return;
-        }
-
-        var currentQuery = searchInput ? searchInput.value.trim() : '';
-        var html = '';
-
-        if (currentQuery) {
-            for (var i2 = 0; i2 < visibleCommands.length; i2++) {
-                var cmd = visibleCommands[i2];
-                var cls = 'command-item' + (i2 === selectedIdx ? ' selected' : '');
-                var argsHint = cmd.args ? ' <span class="command-args">' + escapeHtml(cmd.args) + '</span>' : '';
-                var nameHtml = highlightMatch('gc ' + cmd.name, currentQuery);
-                html += '<div class="' + cls + '" data-cmd-name="' + escapeHtml(cmd.name) + '" data-cmd-args="' + escapeHtml(cmd.args || '') + '">' +
-                    '<span class="command-name">' + nameHtml + argsHint + '</span>' +
-                    '<span class="command-desc">' + escapeHtml(cmd.desc || '') + '</span>' +
-                    '<span class="command-category">' + escapeHtml(cmd.category || '') + '</span>' +
-                    '</div>';
-            }
-        } else {
-            for (var j2 = 0; j2 < visibleCommands.length; j2++) {
-                var item = visibleCommands[j2];
-                if (item._section) {
-                    html += '<div class="command-section-header">' + escapeHtml(item._section) + '</div>';
-                    continue;
-                }
-                var cls2 = 'command-item' + (j2 === selectedIdx ? ' selected' : '');
-                var argsHint2 = item.args ? ' <span class="command-args">' + escapeHtml(item.args) + '</span>' : '';
-                var icon2 = item._recent ? '<span class="command-recent-icon">\u21BB</span>' : '';
-                html += '<div class="' + cls2 + '" data-cmd-name="' + escapeHtml(item.name) + '" data-cmd-args="' + escapeHtml(item.args || '') + '">' +
-                    icon2 +
-                    '<span class="command-name">gc ' + escapeHtml(item.name) + argsHint2 + '</span>' +
-                    '<span class="command-desc">' + escapeHtml(item.desc || '') + '</span>' +
-                    '<span class="command-category">' + escapeHtml(item.category || '') + '</span>' +
-                    '</div>';
-            }
-        }
-        resultsDiv.innerHTML = html;
-
-        var selectedEl = resultsDiv.querySelector('.command-item.selected');
-        if (selectedEl) selectedEl.scrollIntoView({block: 'nearest'});
-    }
-
-    function runWithArgsFromForm(fieldCount) {
-        var args = [];
-        for (var i = 0; i < fieldCount; i++) {
-            var field = document.getElementById('arg-field-' + i);
-            if (field) {
-                var val = field.value.trim();
-                var flag = field.getAttribute('data-flag');
-                if (val) {
-                    if (flag) {
-                        args.push(flag);
-                        args.push('"' + val.replace(/"/g, '\\"') + '"');
-                    } else {
-                        args.push(val);
-                    }
-                }
-            }
-        }
-        if (pendingCommand) {
-            var fullCmd = pendingCommand.name + (args.length ? ' ' + args.join(' ') : '');
-            pendingCommand = null;
-            runCommand(fullCmd);
-        }
-    }
-
-    function openPalette() {
-        isPaletteOpen = true;
-        pendingCommand = null;
-        if (overlay) {
-            overlay.style.display = 'flex';
-            overlay.classList.add('open');
-        }
-        if (searchInput) {
-            searchInput.value = '';
-            searchInput.focus();
-        }
-        filterCommands('');
-        fetchOptions();
-    }
-
-    function closePalette() {
-        isPaletteOpen = false;
-        pendingCommand = null;
-        if (overlay) {
-            overlay.classList.remove('open');
-            overlay.style.display = 'none';
-        }
-        if (searchInput) searchInput.value = '';
-        visibleCommands = [];
-        if (resultsDiv) resultsDiv.innerHTML = '';
-    }
-
-    function selectCommand(cmdName, cmdArgs) {
-        if (cmdArgs) {
-            var cmd = allCommands.find(function(c) { return c.name === cmdName; });
-            if (cmd) {
-                pendingCommand = cmd;
-                if (cmd.argType && !cachedOptions) {
-                    fetchOptions().then(function() { renderPaletteResults(); });
-                } else {
-                    renderPaletteResults();
-                }
-                return;
-            }
-        }
-        runCommand(cmdName);
-    }
-
-    function runCommand(cmdName) {
-        if (executionLock || !cmdName) return;
-
-        closePalette();
-
-        var baseName = cmdName.split(' ').slice(0, 3).join(' ');
-        var matchedCmd = allCommands.find(function(c) { return cmdName.indexOf(c.name) === 0; });
-        saveRecentCommand(matchedCmd ? matchedCmd.name : baseName);
-
-        executionLock = true;
-        showToast('info', 'Running...', 'gc ' + cmdName);
-
-        dispatchCommandAsWSAction(cmdName)
-            .then(function(data) {
-                showToast('success', 'Success', 'gc ' + cmdName);
-                if (data && typeof data === 'object') {
-                    showOutput(cmdName, JSON.stringify(data, null, 2));
-                } else if (data && typeof data === 'string' && data.trim()) {
-                    showOutput(cmdName, data);
-                }
-            })
-            .catch(function(err) {
-                showToast('error', 'Error', err.message || 'Request failed');
-            })
-            .finally(function() {
-                setTimeout(function() { executionLock = false; }, 1000);
-            });
-    }
-
-    // Command palette click handler.
-    if (resultsDiv) {
-        resultsDiv.addEventListener('click', function(e) {
-            var item = e.target.closest('.command-item');
-            if (!item) return;
-            e.preventDefault();
-            e.stopPropagation();
-            var cmdName = item.getAttribute('data-cmd-name');
-            var cmdArgs = item.getAttribute('data-cmd-args');
-            if (cmdName) selectCommand(cmdName, cmdArgs);
-        });
-    }
-
-    // Open palette button.
-    document.addEventListener('click', function(e) {
-        if (e.target.closest('#open-palette-btn')) {
-            e.preventDefault();
-            openPalette();
-            return;
-        }
-        if (e.target === overlay) {
-            closePalette();
-        }
-    });
-
-    // Keyboard handling.
-    document.addEventListener('keydown', function(e) {
-        // Cmd+K / Ctrl+K toggles palette.
-        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-            e.preventDefault();
-            if (isPaletteOpen) closePalette(); else openPalette();
-            return;
-        }
-
-        // Escape closes expanded panels when palette is not open.
-        if (!isPaletteOpen && e.key === 'Escape') {
-            var expanded = document.querySelector('.panel.expanded');
-            if (expanded) {
-                e.preventDefault();
-                expanded.classList.remove('expanded');
-                var expandBtn = expanded.querySelector('.expand-btn');
-                if (expandBtn) expandBtn.textContent = 'Expand';
-                window.pauseRefresh = false;
-                return;
-            }
-        }
-
-        if (!isPaletteOpen) return;
-        if (pendingCommand) return;
-
-        if (e.key === 'Escape') {
-            e.preventDefault();
-            closePalette();
-            return;
-        }
-
-        if (e.key === 'ArrowDown') {
-            e.preventDefault();
-            if (visibleCommands.length > 0) {
-                var next = selectedIdx + 1;
-                while (next < visibleCommands.length && visibleCommands[next]._section) next++;
-                if (next < visibleCommands.length) selectedIdx = next;
-                renderPaletteResults();
-            }
-            return;
-        }
-
-        if (e.key === 'ArrowUp') {
-            e.preventDefault();
-            var prev = selectedIdx - 1;
-            while (prev >= 0 && visibleCommands[prev]._section) prev--;
-            if (prev >= 0) selectedIdx = prev;
-            renderPaletteResults();
-            return;
-        }
-
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            var selected = visibleCommands[selectedIdx];
-            if (selected && !selected._section) {
-                selectCommand(selected.name, selected.args);
-            }
-            return;
-        }
-    });
-
-    // Input filtering.
-    if (searchInput) {
-        searchInput.addEventListener('input', function() {
-            filterCommands(searchInput.value);
-        });
-    }
 
     // ================================================================
     // Section 7: Event Subscription + Refresh
     // ================================================================
 
-    function _subscribeEvents() {
-        var payload = {kind: 'events'};
-        if (_lastEventCursor) {
-            if (_selectedCity) {
-                payload.after_seq = parseInt(_lastEventCursor, 10) || 0;
-            } else {
-                payload.after_cursor = _lastEventCursor;
-            }
-        }
-        wsRequest('subscription.start', payload)
-            .then(function() { _subscriptionRetry = 0; })
-            .catch(function(err) {
-                handleError(err, 'subscription.start');
-                if (_subscriptionRetry++ < 3) {
-                    var delay = Math.min(1000 * Math.pow(2, _subscriptionRetry), 10000);
-                    setTimeout(_subscribeEvents, delay);
-                }
-            });
-    }
+    data = createDashboardData({
+        state: state,
+        wsRequest: wsRequest,
+        handleError: handleError,
+        clearError: clearError,
+        escapeHtml: escapeHtml,
+        formatAge: formatAge,
+        formatTimestamp: formatTimestamp,
+        formatAgentAddress: formatAgentAddress,
+        groupMailIntoThreads: groupMailIntoThreads,
+        renderConvoysPanel: renderConvoysPanel,
+        renderCrewPanel: renderCrewPanel,
+        renderPolecatsPanel: renderPolecatsPanel,
+        renderActivityPanel: renderActivityPanel,
+        renderMailAllPanel: renderMailAllPanel,
+        renderEscalationsPanel: renderEscalationsPanel,
+        renderServicesPanel: renderServicesPanel,
+        renderRigsPanel: renderRigsPanel,
+        renderDogsPanel: renderDogsPanel,
+        renderQueuesPanel: renderQueuesPanel,
+        renderBeadsPanel: renderBeadsPanel,
+        renderAssignedPanel: renderAssignedPanel,
+        updateMayorBanner: updateMayorBanner,
+        updateSummaryBanner: updateSummaryBanner,
+        updateCityTabs: updateCityTabs
+    });
 
-    function _handleWSEvent(msg) {
-        // Track cursor for reconnect resume.
-        if (msg.cursor) _lastEventCursor = msg.cursor;
-        else if (msg.index) _lastEventCursor = String(msg.index);
-
-        if (window.pauseRefresh) return;
-        var eventType = msg.event_type || '';
-
-        _scheduleActivityRefresh();
-        if (eventType && _observationTypes[eventType]) return;
-        _scheduleFullRefresh();
-    }
-
-    function _scheduleActivityRefresh() {
-        if (_activityTimer) return;
-        _activityTimer = setTimeout(function() {
-            _activityTimer = null;
-            if (window.pauseRefresh) return;
-            wsRequest('events.list', {limit: 50}).then(function(data) {
-                renderActivityPanel(data.items || []);
-            }).catch(function(err) { handleError(err, 'activity.refresh'); });
-        }, _activityThrottle);
-    }
-
-    function _scheduleFullRefresh() {
-        if (_fullRefreshTimer) clearTimeout(_fullRefreshTimer);
-        _fullRefreshTimer = setTimeout(function() {
-            _fullRefreshTimer = null;
-            if (_activityTimer) { clearTimeout(_activityTimer); _activityTimer = null; }
-            if (window.pauseRefresh) return;
-            loadDashboard();
-        }, 500);
-    }
+    subscriptions = createDashboardSubscriptions({
+        state: state,
+        wsRequest: wsRequest,
+        handleError: handleError,
+        renderActivityPanel: renderActivityPanel,
+        loadDashboard: loadDashboard
+    });
 
     // ================================================================
     // Section 8: Expand/Collapse + Initialization
@@ -3356,6 +2468,27 @@
         _activityAgentFilter = e.target.value;
         applyActivityFilters();
     });
+
+    transport = createDashboardTransport({
+        state: state,
+        clearError: clearError,
+        handleError: handleError,
+        updateConnectionStatus: updateConnectionStatus,
+        updateCityTabs: updateCityTabs,
+        onHello: function(msg) {
+            palette.buildCommandsFromCapabilities(msg.capabilities);
+            return _resolveDefaultCity(msg).then(function() {
+                subscriptions.subscribeEvents();
+                return loadDashboard();
+            });
+        },
+        onEvent: function(msg) {
+            subscriptions.handleWSEvent(msg);
+        }
+    });
+
+    palette.init();
+    on('dashboard-error-dismiss', 'click', clearError);
 
     // Initialize: connect WebSocket (which triggers hello -> loadDashboard).
     connectWebSocket();

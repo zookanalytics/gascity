@@ -1310,8 +1310,12 @@ func TestServerWebSocketSessionTranscriptJSONLUsesRawTranscript(t *testing.T) {
 	if len(body.Messages) != 1 {
 		t.Fatalf("messages = %d, want 1 tail message", len(body.Messages))
 	}
-	if !strings.Contains(string(body.Messages[0]), `\"world\"`) {
-		t.Fatalf("messages[0] = %s, want assistant world payload", body.Messages[0])
+	msgJSON, err := json.Marshal(body.Messages[0])
+	if err != nil {
+		t.Fatalf("marshal message: %v", err)
+	}
+	if !strings.Contains(string(msgJSON), `\"world\"`) {
+		t.Fatalf("messages[0] = %s, want assistant world payload", msgJSON)
 	}
 }
 

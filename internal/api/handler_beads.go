@@ -24,6 +24,42 @@ type beadCreateRequest struct {
 	Labels      []string `json:"labels"`
 }
 
+type beadUpdatePriorityField struct {
+	Value   *int
+	Present bool
+	Null    bool
+}
+
+func (f *beadUpdatePriorityField) UnmarshalJSON(data []byte) error {
+	f.Present = true
+	trimmed := bytes.TrimSpace(data)
+	if bytes.Equal(trimmed, []byte("null")) {
+		f.Value = nil
+		f.Null = true
+		return nil
+	}
+	var value int
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return err
+	}
+	f.Value = &value
+	f.Null = false
+	return nil
+}
+
+type beadUpdateRequest struct {
+	ID           string                  `json:"id"`
+	Title        *string                 `json:"title,omitempty"`
+	Status       *string                 `json:"status,omitempty"`
+	Type         *string                 `json:"type,omitempty"`
+	Priority     beadUpdatePriorityField `json:"priority,omitempty"`
+	Assignee     *string                 `json:"assignee,omitempty"`
+	Description  *string                 `json:"description,omitempty"`
+	Labels       []string                `json:"labels,omitempty"`
+	RemoveLabels []string                `json:"remove_labels,omitempty"`
+	Metadata     map[string]string       `json:"metadata,omitempty"`
+}
+
 func (s *Server) listBeads(query beads.ListQuery, rig string, r *http.Request) []beads.Bead {
 	if !query.HasFilter() {
 		query.AllowScan = true
@@ -87,29 +123,29 @@ func (s *Server) getBead(id string) (beads.Bead, error) {
 	return beads.Bead{}, beads.ErrNotFound
 }
 
-func (s *Server) getBeadDeps(id string) (map[string]any, error) {
+func (s *Server) getBeadDeps(id string) (beadDepsResponse, error) {
 	for _, store := range s.beadStoresForID(id) {
 		parent, err := store.Get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return beadDepsResponse{}, err
 		}
 		children, err := store.List(beads.ListQuery{
 			ParentID: id,
 			Sort:     beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, err
+			return beadDepsResponse{}, err
 		}
 		children = appendMetadataAttachedChildren(store, parent, children)
 		if children == nil {
 			children = []beads.Bead{}
 		}
-		return map[string]any{"children": children}, nil
+		return beadDepsResponse{Children: children}, nil
 	}
-	return nil, beads.ErrNotFound
+	return beadDepsResponse{}, beads.ErrNotFound
 }
 
 func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
@@ -156,72 +192,55 @@ func (s *Server) createBead(body beadCreateRequest) (beads.Bead, error) {
 	})
 }
 
-func (s *Server) closeBead(id string) (map[string]string, error) {
+func (s *Server) closeBead(id string) (mutationStatusResponse, error) {
 	for _, store := range s.beadStoresForID(id) {
 		if err := store.Close(id); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "closed"}, nil
+		return mutationStatusResponse{Status: "closed"}, nil
 	}
-	return nil, beads.ErrNotFound
+	return mutationStatusResponse{}, beads.ErrNotFound
 }
 
-func (s *Server) updateBead(id string, payload []byte) (map[string]string, error) {
-	var raw map[string]json.RawMessage
-	if len(bytes.TrimSpace(payload)) > 0 {
-		if err := json.Unmarshal(payload, &raw); err != nil {
-			return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: err.Error()}
-		}
+func (s *Server) updateBead(body beadUpdateRequest) (mutationStatusResponse, error) {
+	if strings.TrimSpace(body.ID) == "" {
+		return mutationStatusResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: "id is required"}
 	}
-	var body struct {
-		Title        *string           `json:"title"`
-		Status       *string           `json:"status"`
-		Type         *string           `json:"type"`
-		Priority     *int              `json:"priority"`
-		Assignee     *string           `json:"assignee"`
-		Description  *string           `json:"description"`
-		Labels       []string          `json:"labels"`
-		RemoveLabels []string          `json:"remove_labels"`
-		Metadata     map[string]string `json:"metadata"`
-	}
-	if err := json.Unmarshal(payload, &body); err != nil {
-		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: err.Error()}
-	}
-	if rawPriority, ok := raw["priority"]; ok && bytes.Equal(bytes.TrimSpace(rawPriority), []byte("null")) {
-		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: "clearing priority is not supported"}
+	if body.Priority.Null {
+		return mutationStatusResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: "clearing priority is not supported"}
 	}
 
 	opts := beads.UpdateOpts{
 		Title:        body.Title,
 		Status:       body.Status,
 		Type:         body.Type,
-		Priority:     body.Priority,
+		Priority:     body.Priority.Value,
 		Assignee:     body.Assignee,
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
 	}
-	for _, store := range s.beadStoresForID(id) {
-		if err := store.Update(id, opts); err != nil {
+	for _, store := range s.beadStoresForID(body.ID) {
+		if err := store.Update(body.ID, opts); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
 		if len(body.Metadata) > 0 {
-			if err := store.SetMetadataBatch(id, body.Metadata); err != nil {
-				return nil, err
+			if err := store.SetMetadataBatch(body.ID, body.Metadata); err != nil {
+				return mutationStatusResponse{}, err
 			}
 		}
-		return map[string]string{"status": "updated"}, nil
+		return mutationStatusResponse{Status: "updated"}, nil
 	}
-	return nil, beads.ErrNotFound
+	return mutationStatusResponse{}, beads.ErrNotFound
 }
 
-func (s *Server) reopenBead(id string) (map[string]string, error) {
+func (s *Server) reopenBead(id string) (mutationStatusResponse, error) {
 	status := "open"
 	for _, store := range s.beadStoresForID(id) {
 		b, err := store.Get(id)
@@ -229,30 +248,30 @@ func (s *Server) reopenBead(id string) (map[string]string, error) {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
 		if b.Status != "closed" {
-			return nil, httpError{status: http.StatusConflict, code: "conflict", message: "bead " + id + " is not closed (status: " + b.Status + ")"}
+			return mutationStatusResponse{}, httpError{status: http.StatusConflict, code: "conflict", message: "bead " + id + " is not closed (status: " + b.Status + ")"}
 		}
 		if err := store.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "reopened"}, nil
+		return mutationStatusResponse{Status: "reopened"}, nil
 	}
-	return nil, beads.ErrNotFound
+	return mutationStatusResponse{}, beads.ErrNotFound
 }
 
-func (s *Server) assignBead(id, assignee string) (map[string]string, error) {
+func (s *Server) assignBead(id, assignee string) (beadAssignResponse, error) {
 	for _, store := range s.beadStoresForID(id) {
 		if err := store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return beadAssignResponse{}, err
 		}
-		return map[string]string{"status": "assigned", "assignee": assignee}, nil
+		return beadAssignResponse{Status: "assigned", Assignee: assignee}, nil
 	}
-	return nil, beads.ErrNotFound
+	return beadAssignResponse{}, beads.ErrNotFound
 }
 
 func (s *Server) deleteBead(id string) error {

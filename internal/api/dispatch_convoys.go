@@ -1,6 +1,10 @@
 package api
 
-import "context"
+import (
+	"context"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
 
 type socketConvoyItemsPayload struct {
 	ID    string   `json:"id"`
@@ -20,7 +24,7 @@ func init() {
 	RegisterAction("convoy.get", ActionDef{
 		Description:       "Get convoy details",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]any, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (convoySnapshotResponse, error) {
 		return s.Convoys.Get(payload.ID)
 	})
 
@@ -28,7 +32,7 @@ func init() {
 		Description:       "Create a convoy",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload convoyCreateRequest) (any, error) {
+	}, func(_ context.Context, s *Server, payload convoyCreateRequest) (beads.Bead, error) {
 		return s.Convoys.Create(payload)
 	})
 
@@ -36,28 +40,28 @@ func init() {
 		Description:       "Add items to a convoy",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketConvoyItemsPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketConvoyItemsPayload) (mutationStatusResponse, error) {
 		if err := s.Convoys.AddItems(payload.ID, payload.Items); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "updated"}, nil
+		return mutationStatusResponse{Status: "updated"}, nil
 	})
 
 	RegisterAction("convoy.remove", ActionDef{
 		Description:       "Remove items from a convoy",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketConvoyItemsPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketConvoyItemsPayload) (mutationStatusResponse, error) {
 		if err := s.Convoys.RemoveItems(payload.ID, payload.Items); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "updated"}, nil
+		return mutationStatusResponse{Status: "updated"}, nil
 	})
 
 	RegisterAction("convoy.check", ActionDef{
 		Description:       "Check convoy completion",
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (any, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (convoyCheckResponse, error) {
 		return s.Convoys.Check(payload.ID)
 	})
 
@@ -65,21 +69,21 @@ func init() {
 		Description:       "Close a convoy",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (mutationStatusResponse, error) {
 		if err := s.Convoys.Close(payload.ID); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "closed"}, nil
+		return mutationStatusResponse{Status: "closed"}, nil
 	})
 
 	RegisterAction("convoy.delete", ActionDef{
 		Description:       "Delete a convoy",
 		IsMutation:        true,
 		RequiresCityScope: true,
-	}, func(_ context.Context, s *Server, payload socketIDPayload) (map[string]string, error) {
+	}, func(_ context.Context, s *Server, payload socketIDPayload) (mutationStatusResponse, error) {
 		if err := s.Convoys.Delete(payload.ID); err != nil {
-			return nil, err
+			return mutationStatusResponse{}, err
 		}
-		return map[string]string{"status": "deleted"}, nil
+		return mutationStatusResponse{Status: "deleted"}, nil
 	})
 }

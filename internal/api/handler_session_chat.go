@@ -58,27 +58,26 @@ type sessionRespondRequest struct {
 	Metadata  map[string]string `json:"metadata,omitempty"`
 }
 
-type sessionTranscriptResponse struct {
+type sessionTranscriptResult struct {
 	ID         string                     `json:"id"`
 	Template   string                     `json:"template"`
 	Format     string                     `json:"format"`
-	Turns      []outputTurn               `json:"turns"`
+	Turns      []outputTurn               `json:"turns,omitempty"`
+	Messages   []sessionRawMessage        `json:"messages,omitempty"`
 	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
 }
 
-type sessionRawTranscriptResponse struct {
-	ID         string                     `json:"id"`
-	Template   string                     `json:"template"`
-	Format     string                     `json:"format"`
-	Messages   []json.RawMessage          `json:"messages"`
-	Pagination *sessionlog.PaginationInfo `json:"pagination,omitempty"`
-}
+type sessionTranscriptResponse = sessionTranscriptResult
+
+type sessionRawTranscriptResponse = sessionTranscriptResult
 
 type sessionTranscriptQuery struct {
 	Tail   int
 	Before string
 	Raw    bool
 }
+
+type sessionRawMessage map[string]json.RawMessage
 
 func normalizeSessionTranscriptFormat(format string) (string, error) {
 	switch format {
@@ -121,6 +120,17 @@ func sliceTranscriptEntries(entries []*sessionlog.Entry, before string, tail int
 		info.TruncatedBeforeMessage = sliced[0].UUID
 	}
 	return sliced, info
+}
+
+func decodeSessionRawMessage(raw json.RawMessage) (sessionRawMessage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var msg sessionRawMessage
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "decoding raw session message: " + err.Error()}
+	}
+	return msg, nil
 }
 
 func (s *Server) sessionLogPaths() []string {
@@ -449,41 +459,41 @@ func (s *Server) persistSessionMeta(store beads.Store, sessionID, kind, projectI
 	}
 }
 
-func (s *Server) submitSessionTarget(ctx context.Context, target, message string, intent session.SubmitIntent) (map[string]any, error) {
+func (s *Server) submitSessionTarget(ctx context.Context, target, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+		return SessionSubmitResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
-		return nil, err
+		return SessionSubmitResponse{}, err
 	}
 	outcome, err := s.submitMessageToSession(ctx, store, id, message, intent)
 	if err != nil {
-		return nil, err
+		return SessionSubmitResponse{}, err
 	}
-	return map[string]any{
-		"status": "accepted",
-		"id":     id,
-		"queued": outcome.Queued,
-		"intent": string(intent),
+	return SessionSubmitResponse{
+		Status: "accepted",
+		ID:     id,
+		Queued: outcome.Queued,
+		Intent: intent,
 	}, nil
 }
 
-func (s *Server) killSessionTarget(target string) (map[string]string, error) {
+func (s *Server) killSessionTarget(target string) (mutationStatusIDResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
 	mgr := s.sessionManager(store)
 	if err := mgr.Kill(id); err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
-	return map[string]string{"status": "ok", "id": id}, nil
+	return mutationStatusIDResponse{Status: "ok", ID: id}, nil
 }
 
 func writeSocketCompatibleSessionError(w http.ResponseWriter, err error) {
@@ -535,39 +545,43 @@ func (s *Server) getSessionPending(target string) (sessionPendingResponse, error
 	return sessionPendingResponse{Supported: supported, Pending: pending}, nil
 }
 
-func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuery) (any, error) {
+func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuery) (sessionTranscriptResult, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+		return sessionTranscriptResult{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 
 	id, err := s.resolveSessionIDAllowClosedWithConfig(store, target)
 	if err != nil {
-		return nil, err
+		return sessionTranscriptResult{}, err
 	}
 
 	mgr := s.sessionManager(store)
 	info, err := mgr.Get(id)
 	if err != nil {
-		return nil, err
+		return sessionTranscriptResult{}, err
 	}
 
 	path, err := mgr.TranscriptPath(id, s.sessionLogPaths())
 	if err != nil {
-		return nil, err
+		return sessionTranscriptResult{}, err
 	}
 
 	if path != "" {
 		if query.Raw {
 			rawSess, err := sessionlog.ReadProviderFileRaw(info.Provider, path, 0)
 			if err != nil {
-				return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
+				return sessionTranscriptResult{}, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
 			}
 			entries, pagination := sliceTranscriptEntries(rawSess.Messages, query.Before, query.Tail)
-			msgs := make([]json.RawMessage, 0, len(entries))
+			msgs := make([]sessionRawMessage, 0, len(entries))
 			for _, entry := range entries {
 				if len(entry.Raw) > 0 {
-					msgs = append(msgs, entry.Raw)
+					msg, err := decodeSessionRawMessage(entry.Raw)
+					if err != nil {
+						return sessionTranscriptResult{}, err
+					}
+					msgs = append(msgs, msg)
 				}
 			}
 			return sessionRawTranscriptResponse{
@@ -581,7 +595,7 @@ func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuer
 
 		sess, err := sessionlog.ReadProviderFile(info.Provider, path, 0)
 		if err != nil {
-			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
+			return sessionTranscriptResult{}, httpError{status: http.StatusInternalServerError, code: "internal", message: "reading session log: " + err.Error()}
 		}
 
 		entries, pagination := sliceTranscriptEntries(sess.Messages, query.Before, query.Tail)
@@ -607,14 +621,14 @@ func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuer
 			ID:       info.ID,
 			Template: info.Template,
 			Format:   "raw",
-			Messages: []json.RawMessage{},
+			Messages: []sessionRawMessage{},
 		}, nil
 	}
 
 	if info.State == session.StateActive && s.state.SessionProvider().IsRunning(info.SessionName) {
 		output, peekErr := s.state.SessionProvider().Peek(info.SessionName, 100)
 		if peekErr != nil {
-			return nil, httpError{status: http.StatusInternalServerError, code: "internal", message: peekErr.Error()}
+			return sessionTranscriptResult{}, httpError{status: http.StatusInternalServerError, code: "internal", message: peekErr.Error()}
 		}
 		turns := []outputTurn{}
 		if output != "" {
@@ -636,17 +650,17 @@ func (s *Server) getSessionTranscript(target string, query sessionTranscriptQuer
 	}, nil
 }
 
-func (s *Server) respondSessionTarget(identifier string, body sessionRespondRequest) (map[string]string, error) {
+func (s *Server) respondSessionTarget(identifier string, body sessionRespondRequest) (mutationStatusIDResponse, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusServiceUnavailable, code: "unavailable", message: "no bead store configured"}
 	}
 	if body.Action == "" {
-		return nil, httpError{status: http.StatusBadRequest, code: "invalid", message: "action is required"}
+		return mutationStatusIDResponse{}, httpError{status: http.StatusBadRequest, code: "invalid", message: "action is required"}
 	}
 	id, err := s.resolveSessionIDWithConfig(store, identifier)
 	if err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
 	mgr := s.sessionManager(store)
 	if err := mgr.Respond(id, runtime.InteractionResponse{
@@ -655,20 +669,20 @@ func (s *Server) respondSessionTarget(identifier string, body sessionRespondRequ
 		Text:      body.Text,
 		Metadata:  body.Metadata,
 	}); err != nil {
-		return nil, err
+		return mutationStatusIDResponse{}, err
 	}
-	return map[string]string{"status": "accepted", "id": id}, nil
+	return mutationStatusIDResponse{Status: "accepted", ID: id}, nil
 }
 
 // createSessionInternal implements session creation for the WebSocket transport.
 // Returns the session response or an error. Handles agent and provider kinds.
-func (s *Server) createSessionInternal(ctx context.Context, body sessionCreateRequest, idemKey string) (any, int, error) {
+func (s *Server) createSessionInternal(ctx context.Context, body sessionCreateRequest, idemKey string) (sessionResponse, int, error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
-		return nil, 0, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
+		return sessionResponse{}, 0, httpError{status: 503, code: "unavailable", message: "no bead store configured"}
 	}
 	if body.LegacySessionName != nil {
-		return nil, 0, httpError{status: 400, code: "invalid", message: "session_name is no longer accepted; use alias"}
+		return sessionResponse{}, 0, httpError{status: 400, code: "invalid", message: "session_name is no longer accepted; use alias"}
 	}
 
 	// WS idempotency is handled at the dispatch layer; we use an empty
@@ -677,7 +691,7 @@ func (s *Server) createSessionInternal(ctx context.Context, body sessionCreateRe
 
 	alias, err := session.ValidateAlias(body.Alias)
 	if err != nil {
-		return nil, 0, err
+		return sessionResponse{}, 0, err
 	}
 
 	switch body.Kind {
@@ -686,28 +700,28 @@ func (s *Server) createSessionInternal(ctx context.Context, body sessionCreateRe
 	case "provider":
 		return s.createProviderSessionInternal(ctx, store, body, alias)
 	default:
-		return nil, 0, httpError{status: 400, code: "invalid_kind", message: "kind must be 'agent' or 'provider'"}
+		return sessionResponse{}, 0, httpError{status: 400, code: "invalid_kind", message: "kind must be 'agent' or 'provider'"}
 	}
 }
 
-func (s *Server) createAgentSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (any, int, error) {
+func (s *Server) createAgentSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (sessionResponse, int, error) {
 	resolved, workDir, transport, template, err := s.resolveSessionTemplate(body.Name)
 	if err != nil {
 		if errors.Is(err, errSessionTemplateNotFound) {
-			return nil, 0, httpError{status: 404, code: "agent_not_found", message: "agent '" + body.Name + "' not found"}
+			return sessionResponse{}, 0, httpError{status: 404, code: "agent_not_found", message: "agent '" + body.Name + "' not found"}
 		}
-		return nil, 0, err
+		return sessionResponse{}, 0, err
 	}
 
 	if len(body.Options) > 0 {
 		if len(resolved.OptionsSchema) == 0 {
-			return nil, 0, httpError{status: 400, code: "unknown_option", message: "agent '" + body.Name + "' does not accept options"}
+			return sessionResponse{}, 0, httpError{status: 400, code: "unknown_option", message: "agent '" + body.Name + "' does not accept options"}
 		}
 		if _, err := config.ResolveExplicitOptions(resolved.OptionsSchema, body.Options); err != nil {
 			if errors.Is(err, config.ErrUnknownOption) {
-				return nil, 0, httpError{status: 400, code: "unknown_option", message: err.Error()}
+				return sessionResponse{}, 0, httpError{status: 400, code: "unknown_option", message: err.Error()}
 			}
-			return nil, 0, httpError{status: 400, code: "invalid_option_value", message: err.Error()}
+			return sessionResponse{}, 0, httpError{status: 400, code: "invalid_option_value", message: err.Error()}
 		}
 	}
 
@@ -765,7 +779,7 @@ func (s *Server) createAgentSessionInternal(ctx context.Context, store beads.Sto
 		return createErr
 	})
 	if err != nil {
-		return nil, 0, err
+		return sessionResponse{}, 0, err
 	}
 
 	s.persistSessionMeta(store, info.ID, "agent", body.ProjectID, nil)
@@ -785,10 +799,10 @@ func (s *Server) createAgentSessionInternal(ctx context.Context, store beads.Sto
 	return resp, 202, nil
 }
 
-func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (any, int, error) {
+func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.Store, body sessionCreateRequest, alias string) (sessionResponse, int, error) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil, 0, httpError{status: 503, code: "unavailable", message: "city config not loaded yet"}
+		return sessionResponse{}, 0, httpError{status: 503, code: "unavailable", message: "city config not loaded yet"}
 	}
 	resolved, err := config.ResolveProvider(
 		&config.Agent{Provider: body.Name},
@@ -798,27 +812,27 @@ func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.
 	)
 	if err != nil {
 		if errors.Is(err, config.ErrProviderNotInPATH) {
-			return nil, 0, httpError{status: 503, code: "provider_unavailable", message: err.Error()}
+			return sessionResponse{}, 0, httpError{status: 503, code: "provider_unavailable", message: err.Error()}
 		}
 		if errors.Is(err, config.ErrProviderNotFound) {
-			return nil, 0, httpError{status: 404, code: "provider_not_found", message: "provider '" + body.Name + "' not found"}
+			return sessionResponse{}, 0, httpError{status: 404, code: "provider_not_found", message: "provider '" + body.Name + "' not found"}
 		}
-		return nil, 0, err
+		return sessionResponse{}, 0, err
 	}
 
 	var extraArgs []string
 	var optMeta map[string]string
 	if len(body.Options) > 0 && len(resolved.OptionsSchema) == 0 {
-		return nil, 0, httpError{status: 400, code: "unknown_option", message: "provider '" + body.Name + "' does not accept options"}
+		return sessionResponse{}, 0, httpError{status: 400, code: "unknown_option", message: "provider '" + body.Name + "' does not accept options"}
 	}
 	if len(resolved.OptionsSchema) > 0 {
 		var optErr error
 		extraArgs, optMeta, optErr = config.ResolveOptions(resolved.OptionsSchema, body.Options, resolved.EffectiveDefaults)
 		if optErr != nil {
 			if errors.Is(optErr, config.ErrUnknownOption) {
-				return nil, 0, httpError{status: 400, code: "unknown_option", message: optErr.Error()}
+				return sessionResponse{}, 0, httpError{status: 400, code: "unknown_option", message: optErr.Error()}
 			}
-			return nil, 0, httpError{status: 400, code: "invalid_option_value", message: optErr.Error()}
+			return sessionResponse{}, 0, httpError{status: 400, code: "invalid_option_value", message: optErr.Error()}
 		}
 	}
 
@@ -828,10 +842,10 @@ func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.
 		title = resolved.Name
 	}
 	if body.Async && strings.TrimSpace(body.Message) != "" {
-		return nil, 0, httpError{status: 400, code: "invalid", message: "message is not supported with async session creation"}
+		return sessionResponse{}, 0, httpError{status: 400, code: "invalid", message: "message is not supported with async session creation"}
 	}
 	if body.Async {
-		return nil, 0, httpError{status: 400, code: "invalid", message: "async session creation is only supported for configured agent templates"}
+		return sessionResponse{}, 0, httpError{status: 400, code: "invalid", message: "async session creation is only supported for configured agent templates"}
 	}
 
 	workDir := s.state.CityPath()
@@ -862,7 +876,7 @@ func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.
 		return createErr
 	})
 	if err != nil {
-		return nil, 0, err
+		return sessionResponse{}, 0, err
 	}
 
 	s.persistSessionMeta(store, info.ID, "provider", body.ProjectID, optMeta)
@@ -874,7 +888,7 @@ func (s *Server) createProviderSessionInternal(ctx context.Context, store beads.
 
 	if msg := strings.TrimSpace(body.Message); msg != "" {
 		if _, sendErr := s.submitMessageToSession(ctx, store, info.ID, msg, session.SubmitIntentDefault); sendErr != nil {
-			return nil, 0, httpError{status: 500, code: "message_delivery_failed", message: fmt.Sprintf("session created but initial message failed: %v", sendErr)}
+			return sessionResponse{}, 0, httpError{status: 500, code: "message_delivery_failed", message: fmt.Sprintf("session created but initial message failed: %v", sendErr)}
 		}
 	}
 

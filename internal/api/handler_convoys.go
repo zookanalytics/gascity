@@ -25,7 +25,7 @@ func (s *Server) listConvoys() []beads.Bead {
 	return convoys
 }
 
-func (s *Server) getConvoySnapshot(id string) (map[string]any, error) {
+func (s *Server) getConvoySnapshot(id string) (convoySnapshotResponse, error) {
 	stores := s.state.BeadStores()
 	for _, rigName := range sortedRigNames(stores) {
 		store := stores[rigName]
@@ -34,10 +34,10 @@ func (s *Server) getConvoySnapshot(id string) (map[string]any, error) {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
 			}
-			return nil, err
+			return convoySnapshotResponse{}, err
 		}
 		if b.Type != "convoy" {
-			return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "bead " + id + " is not a convoy"}
+			return convoySnapshotResponse{}, httpError{status: http.StatusNotFound, code: "not_found", message: "bead " + id + " is not a convoy"}
 		}
 
 		children, err := store.List(beads.ListQuery{
@@ -46,7 +46,7 @@ func (s *Server) getConvoySnapshot(id string) (map[string]any, error) {
 			Sort:          beads.SortCreatedAsc,
 		})
 		if err != nil {
-			return nil, err
+			return convoySnapshotResponse{}, err
 		}
 		if children == nil {
 			children = []beads.Bead{}
@@ -61,13 +61,13 @@ func (s *Server) getConvoySnapshot(id string) (map[string]any, error) {
 			}
 		}
 
-		return map[string]any{
-			"convoy":   b,
-			"children": children,
-			"progress": map[string]int{"total": total, "closed": closed},
+		return convoySnapshotResponse{
+			Convoy:   b,
+			Children: children,
+			Progress: convoyProgressResponse{Total: total, Closed: closed},
 		}, nil
 	}
-	return nil, httpError{status: http.StatusNotFound, code: "not_found", message: "convoy " + id + " not found"}
+	return convoySnapshotResponse{}, httpError{status: http.StatusNotFound, code: "not_found", message: "convoy " + id + " not found"}
 }
 
 // isGraphConvoyID checks if the bead is a formula-compiled graph convoy
@@ -93,27 +93,27 @@ type convoyCreateRequest struct {
 	Items []string `json:"items"`
 }
 
-func (s *Server) createConvoy(body convoyCreateRequest) (any, error) {
+func (s *Server) createConvoy(body convoyCreateRequest) (beads.Bead, error) {
 	if body.Title == "" {
-		return nil, httpError{status: 400, code: "invalid", message: "title is required"}
+		return beads.Bead{}, httpError{status: 400, code: "invalid", message: "title is required"}
 	}
 	store := s.findStore(body.Rig)
 	if store == nil {
-		return nil, httpError{status: 400, code: "invalid", message: "rig is required when multiple rigs are configured"}
+		return beads.Bead{}, httpError{status: 400, code: "invalid", message: "rig is required when multiple rigs are configured"}
 	}
 	for _, itemID := range body.Items {
 		if _, err := store.Get(itemID); err != nil {
-			return nil, err
+			return beads.Bead{}, err
 		}
 	}
 	convoy, err := store.Create(beads.Bead{Title: body.Title, Type: "convoy"})
 	if err != nil {
-		return nil, err
+		return beads.Bead{}, err
 	}
 	for _, itemID := range body.Items {
 		pid := convoy.ID
 		if err := store.Update(itemID, beads.UpdateOpts{ParentID: &pid}); err != nil {
-			return nil, err
+			return beads.Bead{}, err
 		}
 	}
 	return convoy, nil
@@ -180,15 +180,15 @@ func (s *Server) convoyRemoveItems(id string, items []string) error {
 	return nil
 }
 
-func (s *Server) convoyCheck(id string) (any, error) {
+func (s *Server) convoyCheck(id string) (convoyCheckResponse, error) {
 	store, _, err := s.findConvoyStore(id)
 	if err != nil {
-		return nil, err
+		return convoyCheckResponse{}, err
 	}
 	_ = store // used for find; check uses list
 	children, err := store.List(beads.ListQuery{ParentID: id, IncludeClosed: true, Sort: beads.SortCreatedAsc})
 	if err != nil {
-		return nil, err
+		return convoyCheckResponse{}, err
 	}
 	total := len(children)
 	closed := 0
@@ -197,7 +197,7 @@ func (s *Server) convoyCheck(id string) (any, error) {
 			closed++
 		}
 	}
-	return map[string]any{"convoy_id": id, "total": total, "closed": closed, "complete": total > 0 && closed == total}, nil
+	return convoyCheckResponse{ConvoyID: id, Total: total, Closed: closed, Complete: total > 0 && closed == total}, nil
 }
 
 func (s *Server) convoyClose(id string) error {
