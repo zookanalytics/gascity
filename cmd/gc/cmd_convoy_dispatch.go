@@ -139,7 +139,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
 				}
-				return sp.Stop(subject.Assignee)
+				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
 			}
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
@@ -148,7 +148,7 @@ func runControlDispatcher(beadID string, stdout, _ io.Writer) error {
 				if strings.TrimSpace(subject.Assignee) == "" {
 					return fmt.Errorf("subject %s missing assignee for pooled retry recycle", subject.ID)
 				}
-				return sp.Stop(subject.Assignee)
+				return workerKillSessionTargetWithConfig("", store, sp, cfg, subject.Assignee)
 			}
 		}
 	}
