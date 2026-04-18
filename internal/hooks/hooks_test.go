@@ -378,13 +378,20 @@ func TestInstallClaudeForceOverwritesUnreadableRuntimeOSFS(t *testing.T) {
 		t.Fatalf("Install with unreadable-but-writable runtime: %v", err)
 	}
 
-	// Restore read so we can verify the content was actually rewritten.
-	if err := os.Chmod(runtimePath, 0o644); err != nil {
-		t.Fatal(err)
+	// The file must be readable immediately after Install — no test-side
+	// chmod. force-overwrite is responsible for normalizing the mode so
+	// Claude can actually open --settings at launch time. A test that
+	// requires a manual chmod here would hide exactly that regression.
+	info, err := os.Stat(runtimePath)
+	if err != nil {
+		t.Fatalf("stat runtime after Install: %v", err)
+	}
+	if info.Mode().Perm()&0o400 == 0 {
+		t.Errorf("runtime must be readable after force-overwrite; got mode %o", info.Mode().Perm())
 	}
 	data, err := os.ReadFile(runtimePath)
 	if err != nil {
-		t.Fatalf("reading runtime after chmod: %v", err)
+		t.Fatalf("reading runtime immediately after Install: %v", err)
 	}
 	runtime := string(data)
 	if strings.Contains(runtime, `"stale": true`) {

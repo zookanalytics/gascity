@@ -327,6 +327,16 @@ func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFi
 	if err := fs.WriteFile(dst, data, 0o644); err != nil {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
+	// os.WriteFile preserves the existing file's mode on overwrite. For
+	// gc-owned paths that may have been left with a restrictive mode (e.g.
+	// a stat-ok-but-read-fail file we just force-overwrote), normalize the
+	// permissions so Claude can actually read the file at launch time.
+	// User-owned paths are preserved as-is.
+	if policy == forceOverwrite {
+		if err := fs.Chmod(dst, 0o644); err != nil {
+			return fmt.Errorf("chmod %s: %w", dst, err)
+		}
+	}
 	return nil
 }
 
