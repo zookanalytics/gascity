@@ -974,12 +974,12 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 	}
 
 	// Production startup sequence: sweep first, then build dispatcher.
-	// This mirrors newCityRuntime which calls sweepOrphanedOrderTracking
+	// This mirrors newCityRuntime which calls sweepOrphanedOrderTrackingRetry
 	// before buildOrderDispatcher. The sweep is intentionally NOT inside
 	// buildOrderDispatcher so config reloads don't close in-flight beads.
-	closed, err := sweepOrphanedOrderTracking(store)
+	closed, err := sweepOrphanedOrderTrackingRetry(store, 3, time.Millisecond)
 	if err != nil {
-		t.Fatalf("sweepOrphanedOrderTracking: %v", err)
+		t.Fatalf("sweepOrphanedOrderTrackingRetry: %v", err)
 	}
 	if closed != 1 {
 		t.Fatalf("closed = %d, want 1", closed)
@@ -1003,6 +1003,115 @@ func TestStartupSweepThenBuildDispatcher(t *testing.T) {
 			t.Errorf("orphaned tracking bead %s still open after startup sweep", b.ID)
 		}
 	}
+}
+
+func TestSweepOrphanedOrderTracking_RetryOnTransientError(t *testing.T) {
+	inner := beads.NewMemStore()
+	_, err := inner.Create(beads.Bead{
+		Title:  "order:test",
+		Labels: []string{"order-run:test", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Fail the first 2 ListByLabel calls, succeed on the 3rd.
+	fs := &countFailStore{Store: inner, failCount: 2}
+	closed, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error after retry: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("closed = %d, want 1", closed)
+	}
+	if fs.calls != 3 {
+		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+	}
+}
+
+func TestSweepOrphanedOrderTracking_RetryExhausted(t *testing.T) {
+	inner := beads.NewMemStore()
+	_, err := inner.Create(beads.Bead{
+		Title:  "order:test",
+		Labels: []string{"order-run:test", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Fail all 3 attempts.
+	fs := &countFailStore{Store: inner, failCount: 3}
+	_, err = sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error when retries exhausted")
+	}
+	if fs.calls != 3 {
+		t.Fatalf("ListByLabel calls = %d, want 3", fs.calls)
+	}
+}
+
+func TestSweepOrphanedOrderTracking_RetryOnPartialClose(t *testing.T) {
+	inner := beads.NewMemStore()
+	_, err := inner.Create(beads.Bead{
+		Title:  "order:test",
+		Labels: []string{"order-run:test", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// closeFailStore returns (1, err) from every CloseAll call — simulating
+	// a partial close that keeps erroring. The retry loop MUST retry because
+	// beads.Store.CloseAll skips already-closed beads, so retrying after a
+	// partial close is safe. We verify the total count accumulates across
+	// attempts and the final error is wrapped with the attempt count.
+	fs := &closeFailStore{Store: inner, closeN: 1}
+	n, err := sweepOrphanedOrderTrackingRetry(fs, 3, time.Millisecond)
+	if err == nil {
+		t.Fatal("expected error from CloseAll failure")
+	}
+	if !strings.Contains(err.Error(), "after 3 attempts") {
+		t.Fatalf("error = %q, want attempt count in message", err.Error())
+	}
+	// Each of 3 attempts closes 1 bead → total = 3.
+	if n != 3 {
+		t.Fatalf("n = %d, want 3 (accumulated across retries)", n)
+	}
+	if fs.listCalls != 3 {
+		t.Fatalf("ListByLabel calls = %d, want 3 (retry on partial close)", fs.listCalls)
+	}
+}
+
+// countFailStore wraps a Store and fails the first N ListByLabel calls.
+type countFailStore struct {
+	beads.Store
+	failCount int
+	calls     int
+}
+
+func (f *countFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	f.calls++
+	if f.calls <= f.failCount {
+		return nil, fmt.Errorf("connection refused")
+	}
+	return f.Store.ListByLabel(label, limit, opts...)
+}
+
+// closeFailStore wraps a Store and always fails CloseAll with a
+// configurable partial-close count.
+type closeFailStore struct {
+	beads.Store
+	listCalls int
+	closeN    int // number of beads "closed" before error
+}
+
+func (f *closeFailStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	f.listCalls++
+	return f.Store.ListByLabel(label, limit, opts...)
+}
+
+func (f *closeFailStore) CloseAll(_ []string, _ map[string]string) (int, error) {
+	return f.closeN, fmt.Errorf("close failed")
 }
 
 // --- helpers ---
