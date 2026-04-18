@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,17 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 func newSessionFakeState(t *testing.T) *fakeState {
@@ -2452,64 +2450,60 @@ func TestHandleSessionStreamClosedNamedSessionReturnsSnapshot(t *testing.T) {
 	}
 }
 
-func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
+func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundaries(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
-
 	searchBase := t.TempDir()
-	workDir := t.TempDir()
-	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	srv.sessionLogSearchPaths = []string{searchBase}
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{
+		ResumeFlag:    "--resume",
+		ResumeStyle:   "flag",
+		SessionIDFlag: "--session-id",
 	}
-	logPath := filepath.Join(logDir, "session.jsonl")
-	initial := strings.Join([]string{
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
 		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before compaction\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 		`{"uuid":"cb0","parentUuid":"a","type":"system","subtype":"compact_boundary","timestamp":"2025-01-01T00:00:01Z"}`,
 		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(logPath, []byte(initial), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	)
+
+	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	if err != nil {
+		t.Fatalf("workerHandleForSession: %v", err)
 	}
 
-	info := session.Info{ID: "sess-1", Template: "default"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3500*time.Millisecond)
 	defer cancel()
 
-	var bufMu sync.Mutex
-	var buf bytes.Buffer
-	send := sse.Sender(func(msg sse.Message) error {
-		bufMu.Lock()
-		defer bufMu.Unlock()
-		data, err := json.Marshal(msg.Data)
-		if err != nil {
-			return err
-		}
-		buf.Write(data)
-		buf.WriteString("\n")
-		return nil
-	})
-	getBody := func() string {
-		bufMu.Lock()
-		defer bufMu.Unlock()
-		return buf.String()
-	}
+	rec := httptest.NewRecorder()
 	done := make(chan struct{})
 	go func() {
-		srv.streamSessionTranscriptLog(ctx, send, info, logPath)
+		initial, histErr := handle.History(ctx, worker.HistoryRequest{})
+		if histErr != nil {
+			t.Errorf("History(initial): %v", histErr)
+			close(done)
+			return
+		}
+		srv.streamSessionTranscriptHistory(ctx, rec, info, handle, initial)
 		close(done)
 	}()
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if strings.Contains(getBody(), "after first boundary") {
+		if strings.Contains(rec.Body.String(), "after first boundary") {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	logDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	logPath := filepath.Join(logDir, info.SessionKey+".jsonl")
 	appendFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
 		t.Fatalf("OpenFile: %v", err)
@@ -2528,7 +2522,7 @@ func TestStreamSessionTranscriptLogDoesNotSkipTurnsAcrossCompactionBoundaries(t 
 
 	<-done
 
-	body := getBody()
+	body := rec.Body.String()
 	if !strings.Contains(body, "bridge turn") {
 		t.Fatalf("stream body missing turn written before new compact boundary: %s", body)
 	}
