@@ -440,7 +440,7 @@ func TestControllerStateOrdersIncludeVisibleCityRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(autoDir, "order.toml"), []byte(`
 [order]
 formula = "mol-digest"
-gate = "cooldown"
+trigger = "cooldown"
 interval = "24h"
 `), 0o644); err != nil {
 		t.Fatal(err)

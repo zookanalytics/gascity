@@ -31,9 +31,9 @@ func TestOrderListEmpty(t *testing.T) {
 
 func TestOrderList(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
-		{Name: "cleanup", Gate: "cron", Schedule: "0 3 * * *", Formula: "mol-cleanup"},
-		{Name: "deploy", Gate: "manual", Formula: "mol-deploy"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "cleanup", Trigger: "cron", Schedule: "0 3 * * *", Formula: "mol-cleanup"},
+		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
 	}
 
 	var stdout bytes.Buffer
@@ -51,8 +51,8 @@ func TestOrderList(t *testing.T) {
 
 func TestOrderListExecType(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "poll", Gate: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "poll", Trigger: "cooldown", Interval: "2m", Exec: "scripts/poll.sh"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 
 	var stdout bytes.Buffer
@@ -184,7 +184,7 @@ func TestScanAllOrdersCityFlatFile(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -237,7 +237,7 @@ schema = 1
 	if err := os.WriteFile(filepath.Join(cacheDir, "orders", "health-check.order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -300,7 +300,7 @@ func TestScanAllOrdersCityLegacyFormulaOrdersWarns(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cityDir, "formulas", "orders", "health-check", "order.toml"), []byte(`
 [order]
 formula = "health-check"
-gate = "cron"
+trigger = "cron"
 schedule = "*/5 * * * *"
 `), 0o644); err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestOrderShow(t *testing.T) {
 			Name:        "digest",
 			Description: "Generate daily digest",
 			Formula:     "mol-digest",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "24h",
 			Pool:        "dog",
 			Source:      "/city/formulas/orders/digest/order.toml",
@@ -382,7 +382,7 @@ func TestOrderShowExec(t *testing.T) {
 			Name:        "poll",
 			Description: "Poll wasteland",
 			Exec:        "$ORDER_DIR/scripts/poll.sh",
-			Gate:        "cooldown",
+			Trigger:     "cooldown",
 			Interval:    "2m",
 			Source:      "/city/formulas/orders/poll/order.toml",
 		},
@@ -421,7 +421,7 @@ func TestOrderShowNotFound(t *testing.T) {
 
 func TestOrderCheck(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -442,7 +442,7 @@ func TestOrderCheck(t *testing.T) {
 
 func TestOrderCheckNoneDue(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "deploy", Gate: "manual", Formula: "mol-deploy"},
+		{Name: "deploy", Trigger: "manual", Formula: "mol-deploy"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -499,7 +499,7 @@ func TestOrderLastRunFn(t *testing.T) {
 
 func TestOrderCheckWithLastRun(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	// Last ran 1 hour ago — cooldown of 24h means NOT due.
@@ -525,7 +525,7 @@ func TestOrderCheckWithLastRun(t *testing.T) {
 
 func TestOrderRun(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Formula: "mol-digest", Gate: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()
@@ -550,7 +550,7 @@ func TestOrderRun(t *testing.T) {
 
 func TestOrderRunNoPool(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "cleanup", Formula: "mol-cleanup", Gate: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
+		{Name: "cleanup", Formula: "mol-cleanup", Trigger: "cron", Schedule: "0 3 * * *", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()
@@ -608,7 +608,7 @@ title = "Do work"
 	}
 
 	aa := []orders.Order{
-		{Name: "acceptance-patrol", Formula: "graph-work", Gate: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
+		{Name: "acceptance-patrol", Formula: "graph-work", Trigger: "cooldown", Interval: "15m", Pool: "quinn", FormulaLayer: formulaDir},
 	}
 	store := beads.NewMemStore()
 
@@ -690,7 +690,7 @@ prefix = "fe"
 	a := orders.Order{
 		Name:     "poll",
 		Rig:      "frontend",
-		Gate:     "cooldown",
+		Trigger:  "cooldown",
 		Interval: "1m",
 		Exec:     fmt.Sprintf(`pwd > %q && printf '%%s\n%%s\n%%s\n%%s\n%%s\n' "$GC_STORE_ROOT" "$GC_STORE_SCOPE" "$GC_BEADS_PREFIX" "$GC_RIG" "$GC_RIG_ROOT" >> %q`, outPath, outPath),
 	}
@@ -830,8 +830,8 @@ func TestOrderHistoryEmpty(t *testing.T) {
 
 func TestOrderListWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
-		{Name: "db-health", Gate: "cooldown", Interval: "5m", Pool: "polecat", Formula: "mol-db-health", Rig: "demo-repo"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "5m", Pool: "polecat", Formula: "mol-db-health", Rig: "demo-repo"},
 	}
 
 	var stdout bytes.Buffer
@@ -840,8 +840,9 @@ func TestOrderListWithRig(t *testing.T) {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
 	out := stdout.String()
+	header := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
 	// RIG column should appear because at least one order has a rig.
-	if !strings.Contains(out, "RIG") {
+	if !strings.Contains(header, " RIG") {
 		t.Errorf("stdout missing 'RIG' column:\n%s", out)
 	}
 	if !strings.Contains(out, "demo-repo") {
@@ -851,7 +852,7 @@ func TestOrderListWithRig(t *testing.T) {
 
 func TestOrderListCityOnly(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", Formula: "mol-digest"},
 	}
 
 	var stdout bytes.Buffer
@@ -860,17 +861,18 @@ func TestOrderListCityOnly(t *testing.T) {
 		t.Fatalf("doOrderList = %d, want 0", code)
 	}
 	out := stdout.String()
+	header := strings.SplitN(strings.TrimSpace(out), "\n", 2)[0]
 	// No RIG column when all orders are city-level.
-	if strings.Contains(out, "RIG") {
+	if strings.Contains(header, " RIG") {
 		t.Errorf("stdout should not have 'RIG' column for city-only:\n%s", out)
 	}
 }
 
 func TestFindOrderRigScoped(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "dolt-health", Gate: "cooldown", Interval: "1h", Formula: "mol-dh"},
-		{Name: "dolt-health", Gate: "cooldown", Interval: "5m", Formula: "mol-dh", Rig: "repo-a"},
-		{Name: "dolt-health", Gate: "cooldown", Interval: "10m", Formula: "mol-dh", Rig: "repo-b"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "1h", Formula: "mol-dh"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "5m", Formula: "mol-dh", Rig: "repo-a"},
+		{Name: "dolt-health", Trigger: "cooldown", Interval: "10m", Formula: "mol-dh", Rig: "repo-b"},
 	}
 
 	// No rig → first match (city-level).
@@ -900,8 +902,8 @@ func TestFindOrderRigScoped(t *testing.T) {
 
 func TestOrderCheckWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "digest", Gate: "cooldown", Interval: "24h", Formula: "mol-digest"},
-		{Name: "db-health", Gate: "cooldown", Interval: "5m", Formula: "mol-db-health", Rig: "demo-repo"},
+		{Name: "digest", Trigger: "cooldown", Interval: "24h", Formula: "mol-digest"},
+		{Name: "db-health", Trigger: "cooldown", Interval: "5m", Formula: "mol-db-health", Rig: "demo-repo"},
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	neverRan := func(_ string) (time.Time, error) { return time.Time{}, nil }
@@ -922,7 +924,7 @@ func TestOrderCheckWithRig(t *testing.T) {
 
 func TestOrderShowWithRig(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "db-health", Formula: "mol-db-health", Gate: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health/order.toml"},
+		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Rig: "demo-repo", Source: "/topo/orders/db-health/order.toml"},
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -941,7 +943,7 @@ func TestOrderShowWithRig(t *testing.T) {
 
 func TestOrderRunRigQualifiesPool(t *testing.T) {
 	aa := []orders.Order{
-		{Name: "db-health", Formula: "mol-db-health", Gate: "cooldown", Interval: "5m", Pool: "polecat", Rig: "demo-repo", FormulaLayer: sharedTestFormulaDir},
+		{Name: "db-health", Formula: "mol-db-health", Trigger: "cooldown", Interval: "5m", Pool: "polecat", Rig: "demo-repo", FormulaLayer: sharedTestFormulaDir},
 	}
 
 	store := beads.NewMemStore()

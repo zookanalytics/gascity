@@ -1270,9 +1270,9 @@
           "type": "boolean",
           "description": "Enabled overrides whether the order is active."
         },
-        "gate": {
+        "trigger": {
           "type": "string",
-          "description": "Gate overrides the gate type."
+          "description": "Trigger overrides the trigger type."
         },
         "interval": {
           "type": "string",
@@ -1284,11 +1284,11 @@
         },
         "check": {
           "type": "string",
-          "description": "Check overrides the condition gate check command."
+          "description": "Check overrides the condition trigger check command."
         },
         "on": {
           "type": "string",
-          "description": "On overrides the event gate event type."
+          "description": "On overrides the event trigger event type."
         },
         "pool": {
           "type": "string",

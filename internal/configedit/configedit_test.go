@@ -3,6 +3,7 @@ package configedit_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -961,12 +962,25 @@ func TestSetOrderOverride(t *testing.T) {
 	ed := configedit.NewEditor(fsys.OSFS{}, path)
 
 	enabled := false
+	trigger := "cooldown"
 	err := ed.SetOrderOverride(config.OrderOverride{
 		Name:    "health-check",
 		Enabled: &enabled,
+		Trigger: &trigger,
 	})
 	if err != nil {
 		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if got := string(raw); got != "" && strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if !strings.Contains(string(raw), `trigger = "cooldown"`) {
+		t.Fatalf("city.toml missing canonical trigger key:\n%s", string(raw))
 	}
 
 	cfg := readTOML(t, path)
@@ -979,6 +993,9 @@ func TestSetOrderOverride(t *testing.T) {
 	}
 	if ov.Enabled == nil || *ov.Enabled {
 		t.Error("expected enabled=false")
+	}
+	if ov.Trigger == nil || *ov.Trigger != "cooldown" {
+		t.Fatalf("override trigger = %#v, want cooldown", ov.Trigger)
 	}
 }
 
@@ -1040,5 +1057,38 @@ func TestDeleteOrderOverride_NotFound(t *testing.T) {
 	err := ed.DeleteOrderOverride("nonexistent", "")
 	if err == nil {
 		t.Fatal("expected error for deleting nonexistent override")
+	}
+}
+
+func TestSetOrderOverrideNormalizesLegacyGateToTriggerOnWrite(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, minimalCity()+`
+[orders]
+
+[[orders.overrides]]
+name = "health-check"
+gate = "cooldown"
+`)
+	ed := configedit.NewEditor(fsys.OSFS{}, path)
+
+	enabled := true
+	err := ed.SetOrderOverride(config.OrderOverride{
+		Name:    "health-check",
+		Enabled: &enabled,
+	})
+	if err != nil {
+		t.Fatalf("SetOrderOverride: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	if strings.Contains(got, "gate =") {
+		t.Fatalf("city.toml still contains legacy gate key:\n%s", got)
+	}
+	if strings.Contains(got, `trigger =`) {
+		t.Fatalf("city.toml unexpectedly wrote trigger for enabled-only override:\n%s", got)
 	}
 }

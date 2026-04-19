@@ -24,10 +24,10 @@ func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage orders (scheduled and event-driven dispatch)",
 		Long: `Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/<name>.toml files. Each order pairs a gate
+Orders live in flat orders/<name>.toml files. Each order pairs a trigger
 condition (cooldown, cron, condition, event, or manual) with an action
-(a formula or an exec script). The controller evaluates gates on each
-tick and dispatches work when a gate opens.`,
+(a formula or an exec script). The controller evaluates triggers on each
+tick and dispatches work when a trigger opens.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
@@ -52,9 +52,9 @@ func newOrderListCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List available orders",
-		Long: `List all available orders with their gate type, schedule, and target.
+		Long: `List all available orders with their trigger type, schedule, and target.
 
-Scans orders/ directories for flat .toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -73,7 +73,7 @@ func newOrderShowCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Show details of an order",
 		Long: `Display detailed information about a named order.
 
-Shows the order name, description, formula reference, gate type,
+Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.`,
 		Args: cobra.ExactArgs(1),
@@ -93,7 +93,7 @@ func newOrderRunCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <name>",
 		Short: "Execute an order manually",
-		Long: `Execute an order manually, bypassing its gate conditions.
+		Long: `Execute an order manually, bypassing its trigger conditions.
 
 Instantiates a wisp from the order's formula and routes it to the
 configured target (if any). Useful for testing orders or triggering
@@ -115,9 +115,9 @@ func newOrderCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "check",
 		Short: "Check which orders are due to run",
-		Long: `Evaluate gate conditions for all orders and show which are due.
+		Long: `Evaluate trigger conditions for all orders and show which are due.
 
-Prints a table with each order's gate, due status, and reason. Returns
+Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
@@ -299,9 +299,9 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 
 	hasRig := anyOrderHasRig(aa)
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "GATE", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "GATE", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
 	}
 	for _, a := range aa {
 		typ := "formula"
@@ -327,9 +327,9 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 			rig = "-"
 		}
 		if hasRig {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Gate, timing, rig, pool) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Trigger, timing, rig, pool) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Gate, timing, pool) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Trigger, timing, pool) //nolint:errcheck
 		}
 	}
 	return 0
@@ -376,7 +376,7 @@ func doOrderShow(aa []orders.Order, name, rig string, stdout, stderr io.Writer) 
 	} else {
 		w(fmt.Sprintf("Formula:     %s", a.Formula))
 	}
-	w(fmt.Sprintf("Gate:        %s", a.Gate))
+	w(fmt.Sprintf("Trigger:     %s", a.Trigger))
 	if a.Interval != "" {
 		w(fmt.Sprintf("Interval:    %s", a.Interval))
 	}
@@ -471,7 +471,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	// Capture event head before wisp creation (race-free cursor).
 	var headSeq uint64
-	if a.Gate == "event" && ep != nil {
+	if a.Trigger == "event" && ep != nil {
 		headSeq, _ = ep.LatestSeq()
 	}
 
@@ -519,7 +519,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
-	if a.Gate == "event" && ep != nil {
+	if a.Trigger == "event" && ep != nil {
 		update.Labels = append(update.Labels,
 			"order:"+scoped,
 			fmt.Sprintf("seq:%d", headSeq),
@@ -615,7 +615,7 @@ func orderLastRunFn(store beads.Store) orders.LastRunFunc {
 	}
 }
 
-// doOrderCheck evaluates gates for all orders and prints a table.
+// doOrderCheck evaluates triggers for all orders and prints a table.
 // Returns 0 if any are due, 1 if none are due.
 func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc, ep events.Provider, cursorFn orders.CursorFunc, stdout io.Writer) int {
 	if len(aa) == 0 {
@@ -625,13 +625,13 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 
 	hasRig := anyOrderHasRig(aa)
 	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "GATE", "RIG", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "TRIGGER", "RIG", "DUE", "REASON") //nolint:errcheck
 	} else {
-		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "GATE", "DUE", "REASON") //nolint:errcheck
+		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "TRIGGER", "DUE", "REASON") //nolint:errcheck
 	}
 	anyDue := false
 	for _, a := range aa {
-		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 		due := "no"
 		if result.Due {
 			due = "yes"
@@ -642,9 +642,9 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 			if rig == "" {
 				rig = "-"
 			}
-			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Gate, rig, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Trigger, rig, due, result.Reason) //nolint:errcheck
 		} else {
-			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Gate, due, result.Reason) //nolint:errcheck
+			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, due, result.Reason) //nolint:errcheck
 		}
 	}
 

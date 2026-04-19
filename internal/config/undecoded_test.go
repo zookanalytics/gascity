@@ -183,3 +183,29 @@ proivder = "claude"
 		t.Errorf("warning should suggest provider, got: %s", warnings[0])
 	}
 }
+
+func TestParseWithMetaNoWarningsForLegacyOrderGateAlias(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+gate = "cooldown"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cooldown" {
+		t.Fatalf("Trigger = %#v, want cooldown", cfg.Orders.Overrides[0].Trigger)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+}

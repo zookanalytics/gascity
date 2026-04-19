@@ -1019,20 +1019,64 @@ type OrderOverride struct {
 	Rig string `toml:"rig,omitempty"`
 	// Enabled overrides whether the order is active.
 	Enabled *bool `toml:"enabled,omitempty"`
-	// Gate overrides the gate type.
-	Gate *string `toml:"gate,omitempty"`
+	// Trigger overrides the trigger type.
+	Trigger *string `toml:"trigger,omitempty"`
 	// Interval overrides the cooldown interval. Go duration string.
 	Interval *string `toml:"interval,omitempty"`
 	// Schedule overrides the cron expression.
 	Schedule *string `toml:"schedule,omitempty"`
-	// Check overrides the condition gate check command.
+	// Check overrides the condition trigger check command.
 	Check *string `toml:"check,omitempty"`
-	// On overrides the event gate event type.
+	// On overrides the event trigger event type.
 	On *string `toml:"on,omitempty"`
 	// Pool overrides the target session config.
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+}
+
+type orderOverrideDecode struct {
+	Name     string  `toml:"name"`
+	Rig      string  `toml:"rig,omitempty"`
+	Enabled  *bool   `toml:"enabled,omitempty"`
+	Trigger  *string `toml:"trigger,omitempty"`
+	Gate     *string `toml:"gate,omitempty"`
+	Interval *string `toml:"interval,omitempty"`
+	Schedule *string `toml:"schedule,omitempty"`
+	Check    *string `toml:"check,omitempty"`
+	On       *string `toml:"on,omitempty"`
+	Pool     *string `toml:"pool,omitempty"`
+	Timeout  *string `toml:"timeout,omitempty"`
+}
+
+// UnmarshalTOML accepts both trigger and legacy gate keys, with trigger taking precedence.
+func (o *OrderOverride) UnmarshalTOML(data interface{}) error {
+	var buf bytes.Buffer
+	enc := toml.NewEncoder(&buf)
+	enc.Indent = ""
+	if err := enc.Encode(data); err != nil {
+		return fmt.Errorf("encoding order override: %w", err)
+	}
+
+	var raw orderOverrideDecode
+	if _, err := toml.Decode(buf.String(), &raw); err != nil {
+		return fmt.Errorf("decoding order override: %w", err)
+	}
+
+	o.Name = raw.Name
+	o.Rig = raw.Rig
+	o.Enabled = raw.Enabled
+	o.Trigger = raw.Trigger
+	if o.Trigger == nil {
+		o.Trigger = raw.Gate
+	}
+	o.Interval = raw.Interval
+	o.Schedule = raw.Schedule
+	o.Check = raw.Check
+	o.On = raw.On
+	o.Pool = raw.Pool
+	o.Timeout = raw.Timeout
+	return nil
 }
 
 // MaxTimeoutDuration parses MaxTimeout as a Go duration.

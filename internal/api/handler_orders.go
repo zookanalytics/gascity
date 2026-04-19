@@ -16,7 +16,7 @@ type orderResponse struct {
 	ScopedName    string `json:"scoped_name"`
 	Description   string `json:"description,omitempty"`
 	Type          string `json:"type"`
-	Gate          string `json:"gate"`
+	Trigger       string `json:"trigger"`
 	Interval      string `json:"interval,omitempty"`
 	Schedule      string `json:"schedule,omitempty"`
 	Check         string `json:"check,omitempty"`
@@ -148,7 +148,7 @@ func toOrderResponse(a orders.Order) orderResponse {
 		ScopedName:    a.ScopedName(),
 		Description:   a.Description,
 		Type:          typ,
-		Gate:          a.Gate,
+		Trigger:       a.Trigger,
 		Interval:      a.Interval,
 		Schedule:      a.Schedule,
 		Check:         a.Check,
@@ -164,7 +164,7 @@ func toOrderResponse(a orders.Order) orderResponse {
 	}
 }
 
-// handleOrderCheck evaluates gate conditions for all orders.
+// handleOrderCheck evaluates trigger conditions for all orders.
 //
 //	GET /v0/orders/check
 //	Response: { "checks": [{ "name", "scoped_name", "rig", "due", "reason", "last_run", "last_run_outcome" }] }
@@ -214,7 +214,7 @@ func (s *Server) handleOrderCheck(w http.ResponseWriter, _ *http.Request) {
 
 	checks := make([]checkResponse, 0, len(aa))
 	for _, a := range aa {
-		result := orders.CheckGate(a, now, lastRunFn, ep, cursorFn)
+		result := orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 		cr := checkResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),

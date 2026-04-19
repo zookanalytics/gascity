@@ -498,8 +498,10 @@ gc convoy
 | [gc convoy control](#gc-convoy-control) | Execute control beads or run the control-dispatcher loop |
 | [gc convoy create](#gc-convoy-create) | Create a convoy and optionally track issues |
 | [gc convoy delete](#gc-convoy-delete) | Close and optionally delete a convoy and all its beads |
+| [gc convoy delete-source](#gc-convoy-delete-source) | Close workflows sourced from a bead |
 | [gc convoy land](#gc-convoy-land) | Land an owned convoy (terminate + cleanup) |
 | [gc convoy list](#gc-convoy-list) | List open convoys with progress |
+| [gc convoy reopen-source](#gc-convoy-reopen-source) | Reopen a source bead after workflow cleanup |
 | [gc convoy status](#gc-convoy-status) | Show detailed convoy status |
 | [gc convoy stranded](#gc-convoy-stranded) | Find convoys with ready work but no workers |
 | [gc convoy target](#gc-convoy-target) | Set the target branch on a convoy |
@@ -599,6 +601,23 @@ gc convoy delete <convoy-id> [flags]
 | `--delete` | bool |  | Also delete beads from the store after closing |
 | `-f`, `--force` | bool |  | Actually close/delete (without this, shows preview) |
 
+## gc convoy delete-source
+
+Find every live workflow root sourced from the given bead and close
+its subtree. By default this is a preview. Use --apply to mutate.
+Use --delete with --apply to also delete closed beads.
+
+```
+gc convoy delete-source <source-bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | Actually close/delete matched workflows |
+| `--delete` | bool |  | Also delete beads from the store after closing |
+| `--rig` | string |  | Select the rig store for the source bead |
+| `--store-ref` | string |  | Select the source bead store (city:&lt;name&gt; or rig:&lt;name&gt;) |
+
 ## gc convoy land
 
 Land an owned convoy, verifying all children are closed.
@@ -634,6 +653,19 @@ child issues.
 ```
 gc convoy list
 ```
+
+## gc convoy reopen-source
+
+Reopen a source bead after workflow cleanup
+
+```
+gc convoy reopen-source <source-bead-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--rig` | string |  | Select the rig store for the source bead |
+| `--store-ref` | string |  | Select the source bead store (city:&lt;name&gt; or rig:&lt;name&gt;) |
 
 ## gc convoy status
 
@@ -1304,10 +1336,10 @@ gc nudge status [session]
 
 Manage orders — scheduled or event-driven dispatch of formulas and scripts.
 
-Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a gate
+Orders live in flat orders/&lt;name&gt;.toml files. Each order pairs a trigger
 condition (cooldown, cron, condition, event, or manual) with an action
-(a formula or an exec script). The controller evaluates gates on each
-tick and dispatches work when a gate opens.
+(a formula or an exec script). The controller evaluates triggers on each
+tick and dispatches work when a trigger opens.
 
 ```
 gc order
@@ -1323,9 +1355,9 @@ gc order
 
 ## gc order check
 
-Evaluate gate conditions for all orders and show which are due.
+Evaluate trigger conditions for all orders and show which are due.
 
-Prints a table with each order's gate, due status, and reason. Returns
+Prints a table with each order's trigger, due status, and reason. Returns
 exit code 0 if any order is due, 1 if none are due.
 
 ```
@@ -1349,9 +1381,9 @@ gc order history [name] [flags]
 
 ## gc order list
 
-List all available orders with their gate type, schedule, and target.
+List all available orders with their trigger type, schedule, and target.
 
-Scans orders/ directories for flat .toml files defining gate conditions,
+Scans orders/ directories for flat .toml files defining trigger conditions,
 scheduling parameters, and target pools.
 
 ```
@@ -1360,7 +1392,7 @@ gc order list
 
 ## gc order run
 
-Execute an order manually, bypassing its gate conditions.
+Execute an order manually, bypassing its trigger conditions.
 
 Instantiates a wisp from the order's formula and routes it to the
 configured target (if any). Useful for testing orders or triggering
@@ -1379,7 +1411,7 @@ gc order run <name> [flags]
 
 Display detailed information about a named order.
 
-Shows the order name, description, formula reference, gate type,
+Shows the order name, description, formula reference, trigger type,
 scheduling parameters, check command, target, and source file.
 Use --rig to disambiguate same-name orders in different rigs.
 
@@ -2349,9 +2381,21 @@ gc supervisor status
 
 Stop the running machine-wide supervisor and all its cities.
 
+By default, returns as soon as the supervisor acknowledges the stop
+request — shutdown continues asynchronously. Pass --wait to block
+until the supervisor socket is no longer answering, which is what
+most callers that need deterministic cleanup want (e.g., integration
+tests that then expect to remove temp directories without racing
+against lingering supervisor / controller subprocesses).
+
 ```
-gc supervisor stop
+gc supervisor stop [flags]
 ```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--wait` | bool |  | Wait for the supervisor process to actually exit before returning |
+| `--wait-timeout` | duration | `30s` | Maximum time to wait when --wait is set |
 
 ## gc supervisor uninstall
 
