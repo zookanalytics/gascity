@@ -4,7 +4,6 @@
 package orders
 
 import (
-	"bytes"
 	"fmt"
 	"time"
 
@@ -134,24 +133,6 @@ func Parse(data []byte) (Order, error) {
 		return Order{}, fmt.Errorf("parsing order: %w", err)
 	}
 	return af.Order.normalized(), nil
-}
-
-// UnmarshalTOML accepts both trigger and legacy gate keys, with trigger taking precedence.
-func (a *Order) UnmarshalTOML(data interface{}) error {
-	var buf bytes.Buffer
-	enc := toml.NewEncoder(&buf)
-	enc.Indent = ""
-	if err := enc.Encode(data); err != nil {
-		return fmt.Errorf("encoding order: %w", err)
-	}
-
-	var raw orderDecode
-	if _, err := toml.Decode(buf.String(), &raw); err != nil {
-		return fmt.Errorf("decoding order: %w", err)
-	}
-
-	*a = raw.normalized()
-	return nil
 }
 
 // Validate checks an Order for structural correctness based on its trigger type.

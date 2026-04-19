@@ -184,7 +184,7 @@ proivder = "claude"
 	}
 }
 
-func TestParseWithMetaNoWarningsForLegacyOrderGateAlias(t *testing.T) {
+func TestParseWithMetaWarnsForLegacyOrderGateAlias(t *testing.T) {
 	input := `
 [workspace]
 name = "test"
@@ -205,7 +205,42 @@ gate = "cooldown"
 	if cfg.Orders.Overrides[0].Trigger == nil || *cfg.Orders.Overrides[0].Trigger != "cooldown" {
 		t.Fatalf("Trigger = %#v, want cooldown", cfg.Orders.Overrides[0].Trigger)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %v, want none", warnings)
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want 1 deprecation warning", warnings)
+	}
+	if !strings.Contains(warnings[0], `"orders.overrides.gate" is deprecated`) {
+		t.Fatalf("warning = %q, want deprecation for orders.overrides.gate", warnings[0])
+	}
+	if !strings.Contains(warnings[0], `"orders.overrides.trigger"`) {
+		t.Fatalf("warning = %q, want trigger replacement hint", warnings[0])
+	}
+}
+
+func TestParseWithMetaWarnsForOrderOverrideTypos(t *testing.T) {
+	input := `
+[workspace]
+name = "test"
+
+[orders]
+
+[[orders.overrides]]
+name = "digest"
+intervall = "24h"
+`
+	cfg, _, warnings, err := parseWithMeta([]byte(input), "test.toml")
+	if err != nil {
+		t.Fatalf("parseWithMeta: %v", err)
+	}
+	if len(cfg.Orders.Overrides) != 1 {
+		t.Fatalf("len(overrides) = %d, want 1", len(cfg.Orders.Overrides))
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warnings = %v, want 1 typo warning", warnings)
+	}
+	if !strings.Contains(warnings[0], "orders.overrides.intervall") {
+		t.Fatalf("warning = %q, want typo path", warnings[0])
+	}
+	if !strings.Contains(warnings[0], `"interval"`) {
+		t.Fatalf("warning = %q, want interval suggestion", warnings[0])
 	}
 }

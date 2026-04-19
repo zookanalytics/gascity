@@ -15,22 +15,36 @@ import (
 // match if one is within 2 edits. Returns a list of human-readable warnings.
 func CheckUndecodedKeys(md toml.MetaData, source string) []string {
 	undecoded := md.Undecoded()
-	if len(undecoded) == 0 {
-		return nil
-	}
-
-	known := knownTOMLKeys()
 	var warnings []string
-	for _, key := range undecoded {
-		keyStr := key.String()
-		// Skip deeply nested keys — we only warn on section-level and
-		// field-level keys, not on sub-sub-fields of tables.
-		suggestion := suggestKey(keyStr, known)
-		w := fmt.Sprintf("%s: unknown field %q", source, keyStr)
-		if suggestion != "" {
-			w += fmt.Sprintf(" (did you mean %q?)", suggestion)
+	if len(undecoded) > 0 {
+		known := knownTOMLKeys()
+		for _, key := range undecoded {
+			keyStr := key.String()
+			suggestion := suggestKey(keyStr, known)
+			w := fmt.Sprintf("%s: unknown field %q", source, keyStr)
+			if suggestion != "" {
+				w += fmt.Sprintf(" (did you mean %q?)", suggestion)
+			}
+			warnings = append(warnings, w)
 		}
-		warnings = append(warnings, w)
+	}
+	return append(warnings, deprecatedAliasWarnings(md, source)...)
+}
+
+func deprecatedAliasWarnings(md toml.MetaData, source string) []string {
+	var warnings []string
+	seen := make(map[string]bool)
+	for _, key := range md.Keys() {
+		keyStr := key.String()
+		if seen[keyStr] {
+			continue
+		}
+		seen[keyStr] = true
+		switch keyStr {
+		case "orders.overrides.gate":
+			warnings = append(warnings,
+				fmt.Sprintf("%s: field %q is deprecated; use %q", source, keyStr, "orders.overrides.trigger"))
+		}
 	}
 	return warnings
 }
@@ -108,6 +122,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(FormulasConfig{}),
 		reflect.TypeOf(DaemonConfig{}),
 		reflect.TypeOf(OrdersConfig{}),
+		reflect.TypeOf(OrderOverride{}),
 		reflect.TypeOf(APIConfig{}),
 		reflect.TypeOf(ConvergenceConfig{}),
 		reflect.TypeOf(Service{}),
