@@ -1231,6 +1231,46 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	gate := make(chan struct{})
+	sp.WaitForIdleGates["legacy-worker"] = gate
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(10*time.Millisecond, cancel)
+	time.AfterFunc(40*time.Millisecond, func() { close(gate) })
+
+	result, err := handle.Nudge(ctx, NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Nudge(wait_idle) err = %v, want %v", err, context.Canceled)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false after context cancellation")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery after context cancellation", sp.Calls)
+		}
+	}
+}
+
 func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {

@@ -167,7 +167,7 @@ func (h *RuntimeHandle) Interrupt(context.Context, InterruptRequest) error {
 }
 
 // Nudge submits a best-effort reminder to the live runtime session.
-func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult, error) {
+func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
 	if strings.TrimSpace(req.Text) == "" {
 		return NudgeResult{}, fmt.Errorf("nudge text is required")
 	}
@@ -189,7 +189,7 @@ func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult,
 		}
 		return NudgeResult{Delivered: true}, nil
 	case NudgeDeliveryWaitIdle:
-		return h.nudgeWaitIdle(req)
+		return h.nudgeWaitIdle(ctx, req)
 	default:
 		return NudgeResult{}, fmt.Errorf("unsupported nudge delivery %q", req.Delivery)
 	}
@@ -301,7 +301,10 @@ func (h *RuntimeHandle) nudgeNow(message string) error {
 	return h.provider.Nudge(h.sessionName, content)
 }
 
-func (h *RuntimeHandle) nudgeWaitIdle(req NudgeRequest) (NudgeResult, error) {
+func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, err
@@ -315,7 +318,10 @@ func (h *RuntimeHandle) nudgeWaitIdle(req NudgeRequest) (NudgeResult, error) {
 	if !ok {
 		return NudgeResult{Delivered: false}, nil
 	}
-	if err := waiter.WaitForIdle(context.Background(), h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return NudgeResult{Delivered: false}, err
+		}
 		return NudgeResult{Delivered: false}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
