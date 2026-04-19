@@ -93,7 +93,7 @@ $ gc order show review-check
 Order:  review-check
 Description: Check for PRs that need review
 Formula:     review
-Trigger:        cooldown
+Trigger:     cooldown
 Interval:    5m
 Target:      worker
 Source:      /Users/you/my-city/orders/review-check.toml
