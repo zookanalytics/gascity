@@ -803,6 +803,83 @@ func TestBeadsStoreCheck_FileProviderSkipsDoltPreflight(t *testing.T) {
 	}
 }
 
+// --- BDSplitStoreCheck ---
+
+func TestBDSplitStoreCheck_ServerActiveWarnsWhenEmbeddedStoreHasRepos(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "embeddeddolt", "legacy"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"legacy split store", ".beads/embeddeddolt", "1 Dolt repo"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+	if !strings.Contains(r.FixHint, "bd import --dry-run") {
+		t.Fatalf("fix hint = %q, want import dry-run guidance", r.FixHint)
+	}
+}
+
+func TestBDSplitStoreCheck_EmbeddedActiveWarnsWhenServerStoreHasRepos(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"legacy"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "embeddeddolt", "legacy"))
+	writeDoltRepoMarker(t, filepath.Join(beadsDir, "dolt", "hq"))
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	for _, want := range []string{"legacy split store", ".beads/dolt", "metadata.json dolt_mode=embedded"} {
+		if !strings.Contains(r.Message, want) {
+			t.Fatalf("message = %q, want %q", r.Message, want)
+		}
+	}
+}
+
+func TestBDSplitStoreCheck_BothDirsButInactiveEmptyIsOK(t *testing.T) {
+	dir := t.TempDir()
+	fs := fsys.OSFS{}
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+	writeDoltRepoMarker(t, filepath.Join(dir, ".beads", "dolt", "hq"))
+	if err := os.MkdirAll(filepath.Join(dir, ".beads", "embeddeddolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewBDSplitStoreCheck(dir)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+func writeDoltRepoMarker(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".dolt", "noms"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // spyPingStore is a minimal Store that records Ping calls.
 type spyPingStore struct {
 	beads.MemStore

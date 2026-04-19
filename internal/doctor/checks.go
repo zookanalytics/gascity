@@ -1,11 +1,13 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -673,6 +675,167 @@ func (c *BeadsStoreCheck) CanFix() bool { return false }
 
 // Fix is a no-op.
 func (c *BeadsStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+// BDSplitStoreCheck warns when legacy bd embedded/server store directories
+// coexist and the inactive store still contains Dolt data.
+type BDSplitStoreCheck struct {
+	name      string
+	scopePath string
+}
+
+// NewBDSplitStoreCheck creates a city-level split-store check.
+func NewBDSplitStoreCheck(scopePath string) *BDSplitStoreCheck {
+	return &BDSplitStoreCheck{name: "bd-split-store", scopePath: scopePath}
+}
+
+// NewRigBDSplitStoreCheck creates a rig-level split-store check.
+func NewRigBDSplitStoreCheck(rig config.Rig) *BDSplitStoreCheck {
+	return &BDSplitStoreCheck{name: "rig:" + rig.Name + ":bd-split-store", scopePath: rig.Path}
+}
+
+func (c *BDSplitStoreCheck) Name() string { return c.name }
+
+func (c *BDSplitStoreCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	beadsDir := filepath.Join(c.scopePath, ".beads")
+	serverDir := filepath.Join(beadsDir, "dolt")
+	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	serverExists := splitStoreDirExists(serverDir)
+	embeddedExists := splitStoreDirExists(embeddedDir)
+	if !serverExists || !embeddedExists {
+		r.Status = StatusOK
+		r.Message = "no legacy split store detected"
+		return r
+	}
+
+	serverRepos, serverErr := doltReposUnder(serverDir)
+	embeddedRepos, embeddedErr := doltReposUnder(embeddedDir)
+	if serverErr != nil || embeddedErr != nil {
+		r.Status = StatusWarning
+		r.Message = "could not inspect legacy bd split store directories"
+		r.FixHint = "inspect .beads/dolt and .beads/embeddeddolt manually before deleting either directory"
+		if serverErr != nil {
+			r.Details = append(r.Details, fmt.Sprintf("scan .beads/dolt: %v", serverErr))
+		}
+		if embeddedErr != nil {
+			r.Details = append(r.Details, fmt.Sprintf("scan .beads/embeddeddolt: %v", embeddedErr))
+		}
+		return r
+	}
+
+	mode, activeStore := activeBDStoreFromMetadata(filepath.Join(beadsDir, "metadata.json"))
+	if activeStore == "" {
+		if len(serverRepos)+len(embeddedRepos) == 0 {
+			r.Status = StatusOK
+			r.Message = "legacy split store directories present but no Dolt repos found"
+			return r
+		}
+		r.Status = StatusWarning
+		r.Message = "legacy split store detected: both .beads/dolt and .beads/embeddeddolt contain or may contain data, but metadata.json does not declare an active store"
+		r.Details = splitStoreDetails("unknown", mode, serverRepos, embeddedRepos)
+		r.FixHint = splitStoreFixHint()
+		return r
+	}
+
+	inactiveStore := "embeddeddolt"
+	inactiveRepos := embeddedRepos
+	if activeStore == "embeddeddolt" {
+		inactiveStore = "dolt"
+		inactiveRepos = serverRepos
+	}
+	if len(inactiveRepos) == 0 {
+		r.Status = StatusOK
+		r.Message = "legacy split store directories present but inactive store is empty"
+		return r
+	}
+
+	r.Status = StatusWarning
+	r.Message = fmt.Sprintf("legacy split store detected: active .beads/%s (metadata.json dolt_mode=%s), inactive .beads/%s contains %d Dolt repo(s)", activeStore, mode, inactiveStore, len(inactiveRepos))
+	r.Details = splitStoreDetails(activeStore, mode, serverRepos, embeddedRepos)
+	r.FixHint = splitStoreFixHint()
+	return r
+}
+
+func (c *BDSplitStoreCheck) CanFix() bool { return false }
+
+func (c *BDSplitStoreCheck) Fix(_ *CheckContext) error { return nil }
+
+func activeBDStoreFromMetadata(path string) (string, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ""
+	}
+	var meta struct {
+		DoltMode string `json:"dolt_mode"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", ""
+	}
+	mode := strings.ToLower(strings.TrimSpace(meta.DoltMode))
+	switch mode {
+	case "server":
+		return mode, "dolt"
+	case "embedded", "local":
+		return mode, "embeddeddolt"
+	default:
+		return mode, ""
+	}
+}
+
+func splitStoreDetails(activeStore, mode string, serverRepos, embeddedRepos []string) []string {
+	activeLine := "active store: unknown"
+	if activeStore != "unknown" && activeStore != "" {
+		activeLine = fmt.Sprintf("active store: .beads/%s (metadata.json dolt_mode=%s)", activeStore, mode)
+	}
+	details := []string{
+		activeLine,
+		fmt.Sprintf(".beads/dolt repositories: %s", describeRepoList(serverRepos)),
+		fmt.Sprintf(".beads/embeddeddolt repositories: %s", describeRepoList(embeddedRepos)),
+		"recovery: export from a copy of the inactive store, review with bd import --dry-run, then import into the active store",
+	}
+	return details
+}
+
+func splitStoreFixHint() string {
+	return "export from the inactive store into a backup JSONL, review with bd import --dry-run, then import into the active store; keep both directories until reconciled"
+}
+
+func describeRepoList(repos []string) string {
+	if len(repos) == 0 {
+		return "(none)"
+	}
+	return strings.Join(repos, ", ")
+}
+
+func doltReposUnder(root string) ([]string, error) {
+	var repos []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if d.Name() != ".dolt" {
+			return nil
+		}
+		parent := filepath.Dir(path)
+		rel, err := filepath.Rel(root, parent)
+		if err != nil || rel == "." {
+			rel = filepath.Base(parent)
+		}
+		repos = append(repos, filepath.ToSlash(rel))
+		return filepath.SkipDir
+	})
+	sort.Strings(repos)
+	return repos, err
+}
+
+func splitStoreDirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
 
 func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionTarget, string, bool, error) {
 	if !usesBDDoltStore(cityPath) {
