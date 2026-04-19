@@ -13,11 +13,11 @@ import (
 
 func TestHandleOrderList_Empty(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/orders", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/orders"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -54,11 +54,11 @@ func TestHandleOrderList(t *testing.T) {
 			Rig:     "myrig",
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/orders", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/orders"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -117,11 +117,11 @@ func TestHandleOrderGet(t *testing.T) {
 			Interval:    "5m",
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/order/dolt-health", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/dolt-health"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -149,11 +149,11 @@ func TestHandleOrderGet_EmitsTriggerAndLegacyGate(t *testing.T) {
 			Interval: "5m",
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/order/dolt-health", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/dolt-health"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -181,12 +181,12 @@ func TestHandleOrderGet_ScopedName(t *testing.T) {
 			Rig:     "myrig",
 		},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	// Match by scoped name: health:rig:myrig
-	req := httptest.NewRequest("GET", "/v0/order/health:rig:myrig", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/health:rig:myrig"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -206,11 +206,11 @@ func TestHandleOrderGet_ScopedName(t *testing.T) {
 
 func TestHandleOrderGet_NotFound(t *testing.T) {
 	fs := newFakeState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := httptest.NewRequest("GET", "/v0/order/nonexistent", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/nonexistent"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)
@@ -222,11 +222,11 @@ func TestHandleOrderDisable(t *testing.T) {
 	fs.autos = []orders.Order{
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := newPostRequest("/v0/order/health/disable", nil)
+	req := newPostRequest(cityURL(fs, "/order/health/disable"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -250,11 +250,11 @@ func TestHandleOrderEnable(t *testing.T) {
 	fs.autos = []orders.Order{
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := newPostRequest("/v0/order/health/enable", nil)
+	req := newPostRequest(cityURL(fs, "/order/health/enable"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -321,10 +321,10 @@ func TestHandleOrdersFeedReturnsWorkflowAndScheduledOrderRuns(t *testing.T) {
 		t.Fatalf("create wisp bead: %v", err)
 	}
 
-	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -379,10 +379,10 @@ func TestHandleOrderCheckTreatsWispFailedAsFailed(t *testing.T) {
 		t.Fatalf("create tracking bead: %v", err)
 	}
 
-	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/check", nil)
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", w.Code, w.Body.String())
@@ -456,10 +456,10 @@ func TestHandleOrdersFeedIgnoresUnrelatedStoreListFailures(t *testing.T) {
 		t.Fatalf("set workflow in_progress: %v", err)
 	}
 
-	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=rig&scope_ref=myrig", nil)
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=rig&scope_ref=myrig"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -507,10 +507,10 @@ func TestHandleOrdersFeedCityScopeIncludesRigWorkflowRuns(t *testing.T) {
 		t.Fatalf("create workflow root: %v", err)
 	}
 
-	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=city&scope_ref=test-city"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -557,10 +557,10 @@ func TestHandleOrdersFeedCityScopeReportsPartialRigFailures(t *testing.T) {
 		t.Fatalf("create workflow root: %v", err)
 	}
 
-	srv := New(fs)
-	req := httptest.NewRequest(http.MethodGet, "/v0/orders/feed?scope_kind=city&scope_ref=test-city", nil)
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/feed?scope_kind=city&scope_ref=test-city"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -591,21 +591,21 @@ func TestHandleOrderGet_Ambiguous(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
 	// Bare name should return 409 when ambiguous.
-	req := httptest.NewRequest("GET", "/v0/order/health", nil)
+	req := httptest.NewRequest("GET", cityURL(fs, "/order/health"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
 	}
 
 	// Scoped name should resolve unambiguously.
-	req = httptest.NewRequest("GET", "/v0/order/health:rig:rig-a", nil)
+	req = httptest.NewRequest("GET", cityURL(fs, "/order/health:rig:rig-a"), nil)
 	w = httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
@@ -625,11 +625,11 @@ func TestHandleOrderDisable_Ambiguous(t *testing.T) {
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-a"},
 		{Name: "health", Exec: "echo ok", Trigger: "cooldown", Rig: "rig-b"},
 	}
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := newPostRequest("/v0/order/health/disable", nil)
+	req := newPostRequest(cityURL(fs, "/order/health/disable"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusConflict, w.Body.String())
@@ -638,11 +638,11 @@ func TestHandleOrderDisable_Ambiguous(t *testing.T) {
 
 func TestHandleOrderDisable_NotFound(t *testing.T) {
 	fs := newFakeMutatorState(t)
-	srv := New(fs)
+	h := newTestCityHandler(t, fs)
 
-	req := newPostRequest("/v0/order/nonexistent/disable", nil)
+	req := newPostRequest(cityURL(fs, "/order/nonexistent/disable"), nil)
 	w := httptest.NewRecorder()
-	srv.ServeHTTP(w, req)
+	h.ServeHTTP(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNotFound)

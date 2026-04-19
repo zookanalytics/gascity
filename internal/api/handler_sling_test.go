@@ -16,9 +16,10 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
-// newSlingTestServer creates a test server with a fake runner that captures
-// commands without executing real shell processes.
-func newSlingTestServer(t *testing.T) (*Server, *fakeMutatorState) {
+// newSlingTestServer creates a test handler wrapping a Server that has a
+// fake runner injected (captures commands without executing real shell
+// processes).
+func newSlingTestServer(t *testing.T) (http.Handler, *fakeMutatorState) {
 	t.Helper()
 	state := newFakeMutatorState(t)
 	state.cfg.Rigs[0].Prefix = "gc" // match MemStore's auto-generated prefix
@@ -26,7 +27,7 @@ func newSlingTestServer(t *testing.T) (*Server, *fakeMutatorState) {
 	srv.SlingRunnerFunc = func(_ string, _ string, _ map[string]string) (string, error) {
 		return "", nil // no-op runner
 	}
-	return srv, state
+	return newTestCityHandlerWith(t, state, srv), state
 }
 
 func TestNewSyncsFormulaV2FeatureFlags(t *testing.T) {
@@ -53,7 +54,7 @@ func TestNewSyncsFormulaV2FeatureFlags(t *testing.T) {
 }
 
 func TestSlingWithBead(t *testing.T) {
-	srv, state := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	store := state.stores["myrig"]
 	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
 	if err != nil {
@@ -62,7 +63,7 @@ func TestSlingWithBead(t *testing.T) {
 
 	body := `{"target":"myrig/worker","bead":"` + b.ID + `"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -81,77 +82,88 @@ func TestSlingWithBead(t *testing.T) {
 }
 
 func TestSlingMissingTarget(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"bead":"abc"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+	// target is now marked required:true + minLength:1 in the spec, so
+	// Huma rejects at the validator (422 Unprocessable Entity) before
+	// the handler's explicit "target is required" 400 can fire. Either
+	// status communicates "missing required field" unambiguously.
+	if rec.Code != http.StatusBadRequest && rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 400 or 422 for missing target", rec.Code)
 	}
 }
 
 func TestSlingTargetNotFound(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"nonexistent","bead":"abc"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
 
 func TestSlingMissingBeadAndFormula(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
 func TestSlingBeadAndFormulaMutuallyExclusive(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"abc","formula":"xyz"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
 
 func TestSlingRejectsVarsWithoutFormula(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"BD-42","vars":{"issue":"BD-42"}}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestSlingRejectsScopeWithoutFormula(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"city","scope_ref":"test-city"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestSlingRejectsPartialScope(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
+	_ = state
 	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"city"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
 }
 
 func TestSlingPoolTarget(t *testing.T) {
-	srv, state := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	state.cfg.Agents = []config.Agent{
 		{
 			Name:              "polecat",
@@ -167,7 +179,7 @@ func TestSlingPoolTarget(t *testing.T) {
 
 	body := `{"target":"myrig/polecat","bead":"` + b.ID + `"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
@@ -183,8 +195,33 @@ func TestSlingPoolTarget(t *testing.T) {
 }
 
 func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
+	// The Huma migration moved sling to /v0/city/{cityName}/sling and
+	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
+	// error body with RFC 9457 Problem Details. The source-workflow
+	// conflict response now rides in the Problem Details `errors[]`
+	// extensions (keyed by location so consumers can look them up
+	// without format drift) instead of at the top level.
+	//
+	// FormulaV2 flag flow:
+	//   1. newSlingTestServer → New() → syncFeatureFlags(state.cfg) sets the
+	//      package-global `formula.IsFormulaV2Enabled` flag based on config,
+	//      which is default-false out of newFakeMutatorState.
+	//   2. We then set state.cfg.Daemon.FormulaV2 = true for reads that go
+	//      through config (handler-level checks).
+	//   3. The global flag is what formula compile calls, so we call
+	//      formula.SetFormulaV2Enabled(true) AFTER newSlingTestServer so
+	//      New()'s syncFeatureFlags doesn't stomp it back to false.
+	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() {
+		formula.SetFormulaV2Enabled(prevFormulaV2)
+		molecule.SetGraphApplyEnabled(prevGraphApply)
+	})
+
 	srv, state := newSlingTestServer(t)
 	state.cfg.Daemon.FormulaV2 = true
+	formula.SetFormulaV2Enabled(true)
+	molecule.SetGraphApplyEnabled(true)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	state.cfg.Agents = append(state.cfg.Agents,
@@ -222,26 +259,45 @@ title = "Do work"
 
 	body := `{"target":"myrig/worker","formula":"graph-work","attached_bead_id":"` + source.ID + `"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	srv.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]any
+
+	// Problem Details body: {title, status, detail, errors: [{location, value}, ...]}.
+	var resp struct {
+		Title  string `json:"title"`
+		Status int    `json:"status"`
+		Detail string `json:"detail"`
+		Errors []struct {
+			Location string `json:"location"`
+			Value    any    `json:"value"`
+		} `json:"errors"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["code"]; got != "conflict" {
-		t.Fatalf("code = %#v, want conflict", got)
+	if resp.Status != http.StatusConflict {
+		t.Fatalf("status field = %d, want 409", resp.Status)
 	}
-	if got := resp["source_bead_id"]; got != source.ID {
-		t.Fatalf("source_bead_id = %#v, want %s", got, source.ID)
+
+	// Build a location -> value lookup so assertions don't depend on
+	// the errors[] array order.
+	got := map[string]any{}
+	for _, e := range resp.Errors {
+		got[e.Location] = e.Value
 	}
-	ids, ok := resp["blocking_workflow_ids"].([]any)
+
+	if got["body.source_bead_id"] != source.ID {
+		t.Fatalf("source_bead_id = %#v, want %s", got["body.source_bead_id"], source.ID)
+	}
+	ids, ok := got["body.blocking_workflow_ids"].([]any)
 	if !ok || len(ids) != 1 || ids[0] != root.ID {
-		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", resp["blocking_workflow_ids"], root.ID)
+		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", got["body.blocking_workflow_ids"], root.ID)
 	}
-	if hint, _ := resp["hint"].(string); !strings.Contains(hint, "--store-ref rig:myrig --apply") {
+	hint, _ := got["body.hint"].(string)
+	if !strings.Contains(hint, "--store-ref rig:myrig --apply") {
 		t.Fatalf("hint = %q, want store-ref cleanup command", hint)
 	}
 }
@@ -311,13 +367,13 @@ func TestSlingRigContext(t *testing.T) {
 // scope_kind/scope_ref), and bare targets must still be qualified
 // to the matching rig-scoped agent rather than 404ing.
 func TestSlingDashboardRigQualifiesBareTarget(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// Bare "worker" with body.Rig="myrig" (no scope_kind) — mirrors
 	// `sling <bead> worker --rig=myrig` via cmd/gc/dashboard/api.go.
 	// Must resolve to myrig/worker and hit the happy direct-bead path.
 	body := `{"target":"worker","bead":"abc","rig":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code == http.StatusNotFound {
 		t.Fatalf("got 404 — body.Rig qualification did not apply; body = %s", rec.Body.String())
 	}
@@ -376,7 +432,7 @@ func TestApiAgentResolverHonorsRigContext(t *testing.T) {
 // ScopeRef flows from body.ScopeRef, so silently accepting this would
 // route beads and formula scope to different rigs. Must reject upfront.
 func TestSlingRejectsScopeRefQualifiedTargetMismatch(t *testing.T) {
-	srv, state := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// Add a second rig + agent so both "myrig/worker" and "otherrig/worker" exist.
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "gc"})
 	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
@@ -387,7 +443,7 @@ func TestSlingRejectsScopeRefQualifiedTargetMismatch(t *testing.T) {
 	// Qualified target says otherrig; scope_ref says myrig — reject.
 	body := `{"target":"otherrig/worker","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -401,14 +457,14 @@ func TestSlingRejectsScopeRefQualifiedTargetMismatch(t *testing.T) {
 // Belt-and-suspenders — ensures the mismatch guard doesn't fire on
 // consistent inputs.
 func TestSlingAllowsScopeRefQualifiedTargetMatch(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// Matching scope: target=myrig/worker, scope_ref=myrig — should pass
 	// the mismatch guard and then trip the formula-required validation
 	// (the next validation downstream). Either result is fine as long
 	// as it is NOT the mismatch error.
 	body := `{"target":"myrig/worker","bead":"BD-42","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if strings.Contains(rec.Body.String(), "conflicts") {
 		t.Errorf("should not reject matching scope_ref/target; body = %s", rec.Body.String())
 	}
@@ -420,7 +476,7 @@ func TestSlingAllowsScopeRefQualifiedTargetMatch(t *testing.T) {
 // (agentCfg.Dir == ""). findSlingStore would select the city bead
 // store while FormulaOpts.ScopeRef would claim rig scope — split-brain.
 func TestSlingRejectsCityScopedAgentWithRigScope(t *testing.T) {
-	srv, state := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// Add a city-scoped agent.
 	state.cfg.Agents = append(state.cfg.Agents, config.Agent{
 		Name:              "mayor",
@@ -432,7 +488,7 @@ func TestSlingRejectsCityScopedAgentWithRigScope(t *testing.T) {
 	// "myrig/mayor", falls through to city-scoped mayor, guard must reject.
 	body := `{"target":"mayor","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -446,13 +502,13 @@ func TestSlingRejectsCityScopedAgentWithRigScope(t *testing.T) {
 // body.Rig wins store selection in findSlingStore, so disagreement
 // produces split-brain dispatch.
 func TestSlingRejectsBodyRigMismatch(t *testing.T) {
-	srv, state := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	state.cfg.Rigs = append(state.cfg.Rigs, config.Rig{Name: "otherrig", Path: "/tmp/otherrig", Prefix: "gc"})
 	state.stores["otherrig"] = beads.NewMemStore()
 
 	body := `{"target":"myrig/worker","formula":"mol-review","scope_kind":"rig","scope_ref":"myrig","rig":"otherrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -465,11 +521,11 @@ func TestSlingRejectsBodyRigMismatch(t *testing.T) {
 // a bare target that can't be rig-qualified must still 404 (not silently
 // route to a wrong agent).
 func TestSlingRigScopeRejectsUnknownBareTarget(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// No agent named "ghost" in any scope.
 	body := `{"target":"ghost","bead":"abc","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
@@ -486,14 +542,14 @@ func TestSlingRigScopeRejectsUnknownBareTarget(t *testing.T) {
 // end-to-end /v0/sling → target rewrite wiring still works without
 // dragging in real formula instantiation machinery.
 func TestSlingRigScopeE2EReachesFormulaValidation(t *testing.T) {
-	srv, _ := newSlingTestServer(t)
+	h, state := newSlingTestServer(t)
 	// Bare "worker" must be qualified to "myrig/worker" by handleSling
 	// before findAgent is called. If the rewrite is broken, findAgent
 	// returns 404 for bare "worker". If it's working, the handler moves
 	// on and trips the "formula required when scope is set" rule (400).
 	body := `{"target":"worker","bead":"BD-42","scope_kind":"rig","scope_ref":"myrig"}`
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, newPostRequest("/v0/sling", strings.NewReader(body)))
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
 	if rec.Code == http.StatusNotFound {
 		t.Fatalf("got 404 — qualifySlingTarget did not rewrite bare target; body = %s", rec.Body.String())
 	}
