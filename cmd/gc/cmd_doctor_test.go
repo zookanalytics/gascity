@@ -177,6 +177,40 @@ dolt_port = "3308"
 	}
 }
 
+func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{
+		filepath.Join(cityDir, ".beads", "dolt", "hq", ".dolt"),
+		filepath.Join(cityDir, ".beads", "embeddeddolt", "legacy", ".dolt"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Setenv("GC_BEADS", "file")
+	origCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = origCityFlag })
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, &stdout, &stderr)
+	out := stdout.String() + stderr.String()
+	if !strings.Contains(out, "bd-split-store") {
+		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)
+	}
+	if !strings.Contains(out, "legacy split store") {
+		t.Fatalf("doctor output missing split-store warning:\n%s", out)
+	}
+}
+
 func TestCollectPackDirsEmpty(t *testing.T) {
 	cfg := &config.City{}
 	dirs := collectPackDirs(cfg)
