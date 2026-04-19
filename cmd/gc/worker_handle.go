@@ -15,14 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-func newWorkerSessionHandleWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, spec worker.SessionSpec) (worker.Handle, error) {
-	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
-	if err != nil {
-		return nil, err
-	}
-	return factory.Session(spec)
-}
-
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
@@ -48,12 +40,30 @@ func workerFactoryWithConfig(cityPath string, store beads.Store, sp runtime.Prov
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:            store,
-		Provider:         sp,
-		CityPath:         cityPath,
-		SearchPaths:      searchPaths,
-		ResolveTransport: resolveTransport,
+		Store:                 store,
+		Provider:              sp,
+		CityPath:              cityPath,
+		SearchPaths:           searchPaths,
+		ResolveTransport:      resolveTransport,
+		ResolveSessionRuntime: workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 	})
+}
+
+func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) worker.SessionRuntimeResolver {
+	if cfg == nil {
+		return nil
+	}
+	return func(info session.Info, sessionKind string) (*worker.ResolvedRuntime, error) {
+		runtimeCfg := resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind)
+		if runtimeCfg == nil {
+			return nil, nil
+		}
+		normalized, err := worker.NormalizeResolvedRuntime(*runtimeCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &normalized, nil
+	}
 }
 
 func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
@@ -77,80 +87,83 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	resolved *config.ResolvedProvider,
 	metadata map[string]string,
 ) (worker.Handle, error) {
-	if resolved == nil {
-		return nil, fmt.Errorf("resolved provider is required")
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
 	}
-	if strings.TrimSpace(command) == "" {
-		command = resolved.CommandString()
+	sessionCfg, err := resolvedWorkerSessionConfigWithConfig(
+		command,
+		provider,
+		workDir,
+		alias,
+		explicitName,
+		template,
+		title,
+		transport,
+		resolved,
+		metadata,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return factory.SessionForResolvedRuntime(sessionCfg)
+}
+
+func resolvedWorkerSessionConfigWithConfig(
+	command string,
+	provider string,
+	workDir string,
+	alias string,
+	explicitName string,
+	template string,
+	title string,
+	transport string,
+	resolved *config.ResolvedProvider,
+	metadata map[string]string,
+) (worker.ResolvedSessionConfig, error) {
+	if resolved == nil {
+		return worker.ResolvedSessionConfig{}, fmt.Errorf("resolved provider is required")
+	}
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = strings.TrimSpace(resolved.CommandString())
 	}
 	providerName := strings.TrimSpace(resolved.Name)
 	if providerName == "" {
 		providerName = strings.TrimSpace(provider)
 	}
-	if providerName == "" {
-		providerName = command
-		if idx := strings.IndexAny(providerName, " \t"); idx >= 0 {
-			providerName = providerName[:idx]
-		}
+	if command == "" {
+		command = providerName
 	}
-	return newWorkerSessionHandleWithConfig(cityPath, store, sp, cfg, worker.SessionSpec{
+	return worker.NormalizeResolvedSessionConfig(worker.ResolvedSessionConfig{
 		Alias:        alias,
 		ExplicitName: explicitName,
 		Template:     template,
 		Title:        title,
-		Command:      command,
-		WorkDir:      workDir,
-		Provider:     providerName,
 		Transport:    transport,
-		Env:          resolved.Env,
-		Resume: session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
+		Metadata:     metadata,
+		Runtime: worker.ResolvedRuntime{
+			Command:    command,
+			WorkDir:    workDir,
+			Provider:   providerName,
+			SessionEnv: resolved.Env,
+			Resume: session.ProviderResume{
+				ResumeFlag:    resolved.ResumeFlag,
+				ResumeStyle:   resolved.ResumeStyle,
+				ResumeCommand: resolved.ResumeCommand,
+				SessionIDFlag: resolved.SessionIDFlag,
+			},
+			Hints: workerSessionCreateHints(resolved),
 		},
-		Hints:    workerSessionCreateHints(resolved),
-		Metadata: metadata,
 	})
 }
 
 func workerHandleForSessionWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
-	catalog, err := workerSessionCatalogWithConfig(cityPath, store, sp, cfg)
-	if err != nil {
-		return nil, err
-	}
-	info, err := catalog.Get(id)
-	if err != nil {
-		return nil, err
-	}
-
-	sessionKind := ""
-	spec := worker.SessionSpec{
-		ID:       id,
-		Command:  info.Command,
-		Provider: info.Provider,
-		WorkDir:  info.WorkDir,
-		Resume: session.ProviderResume{
-			ResumeFlag:    info.ResumeFlag,
-			ResumeStyle:   info.ResumeStyle,
-			ResumeCommand: info.ResumeCommand,
-		},
-	}
-	if store != nil {
-		if bead, beadErr := store.Get(id); beadErr == nil {
-			sessionKind = strings.TrimSpace(bead.Metadata["mc_session_kind"])
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = worker.Profile(profile)
-			}
-		}
-	}
-	applyResolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind, &spec)
-
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	return factory.SessionByID(id)
 }
 
 func workerHandleForSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) (worker.Handle, error) {
@@ -162,29 +175,48 @@ func workerHandleForSessionTargetWithRuntimeHintsWithConfig(cityPath string, sto
 	if target == "" {
 		return nil, session.ErrSessionNotFound
 	}
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
 	if store != nil {
 		if id, err := session.ResolveSessionIDByExactID(store, target); err == nil {
-			return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+			return factory.SessionByID(id)
 		}
-		id, err := session.ResolveSessionID(store, target)
-		if err == nil {
-			return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, id)
+		if id, err := session.ResolveSessionID(store, target); err == nil {
+			return factory.SessionByID(id)
 		}
 		if sp != nil {
 			if sessionID, metaErr := sp.GetMeta(target, "GC_SESSION_ID"); metaErr == nil && strings.TrimSpace(sessionID) != "" {
-				return workerHandleForSessionWithConfig(cityPath, store, sp, cfg, strings.TrimSpace(sessionID))
+				return factory.SessionByID(strings.TrimSpace(sessionID))
 			}
 		}
 	}
 	if sp == nil {
 		return nil, session.ErrSessionNotFound
 	}
-	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  target,
-		ProviderName: target,
-		ProcessNames: append([]string(nil), processNames...),
-	})
+	providerName := target
+	if liveProvider, err := sp.GetMeta(target, "GC_PROVIDER"); err == nil && strings.TrimSpace(liveProvider) != "" {
+		providerName = strings.TrimSpace(liveProvider)
+	}
+	return factory.RuntimeHandle(target, providerName, "", processNames)
+}
+
+func runtimeWorkerHandleWithConfig(
+	cityPath string,
+	store beads.Store,
+	sp runtime.Provider,
+	cfg *config.City,
+	sessionName string,
+	providerName string,
+	transport string,
+	processNames []string,
+) (worker.Handle, error) {
+	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return factory.RuntimeHandle(sessionName, providerName, transport, processNames)
 }
 
 func workerKillSessionTargetWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, target string) error {
@@ -282,13 +314,13 @@ func workerRespondSessionTargetWithConfig(cityPath string, store beads.Store, sp
 	return handle.Respond(context.Background(), response)
 }
 
-func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string, spec *worker.SessionSpec) {
-	if cfg == nil || spec == nil {
-		return
+func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string) *worker.ResolvedRuntime {
+	if cfg == nil {
+		return nil
 	}
 	resolved := resolveWorkerRuntimeWithConfig(cfg, info, sessionKind)
 	if resolved == nil {
-		return
+		return nil
 	}
 
 	command := resolved.CommandString()
@@ -299,24 +331,28 @@ func applyResolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, inf
 		command = command + " " + sa
 	}
 
-	spec.Command = command
-	spec.Provider = resolved.Name
-	if strings.TrimSpace(spec.WorkDir) == "" {
-		spec.WorkDir = cityPath
+	workDir := strings.TrimSpace(info.WorkDir)
+	if workDir == "" {
+		workDir = cityPath
 	}
-	spec.Hints = runtime.Config{
-		WorkDir:                spec.WorkDir,
-		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
-		ReadyDelayMs:           resolved.ReadyDelayMs,
-		ProcessNames:           resolved.ProcessNames,
-		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
-		Env:                    resolved.Env,
-	}
-	spec.Resume = session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
+	return &worker.ResolvedRuntime{
+		Command:    command,
+		WorkDir:    workDir,
+		Provider:   resolved.Name,
+		SessionEnv: resolved.Env,
+		Hints: runtime.Config{
+			WorkDir:                workDir,
+			ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
+			ReadyDelayMs:           resolved.ReadyDelayMs,
+			ProcessNames:           resolved.ProcessNames,
+			EmitsPermissionWarning: resolved.EmitsPermissionWarning,
+		},
+		Resume: session.ProviderResume{
+			ResumeFlag:    resolved.ResumeFlag,
+			ResumeStyle:   resolved.ResumeStyle,
+			ResumeCommand: resolved.ResumeCommand,
+			SessionIDFlag: resolved.SessionIDFlag,
+		},
 	}
 }
 

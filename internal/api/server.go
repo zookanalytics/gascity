@@ -214,6 +214,34 @@ func (s *Server) legacySessionHandler() http.Handler {
 	return mux
 }
 
+func (s *Server) legacyAgentHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		path := strings.TrimPrefix(r.URL.Path, "/v0/agent/")
+		switch {
+		case strings.HasSuffix(path, "/output/stream"):
+			name := strings.TrimSuffix(path, "/output/stream")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutputStream(w, r, name)
+		case strings.HasSuffix(path, "/output"):
+			name := strings.TrimSuffix(path, "/output")
+			if strings.TrimSpace(name) == "" {
+				http.NotFound(w, r)
+				return
+			}
+			s.handleAgentOutput(w, r, name)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
 // ServeHTTP exists for tests that exercise a caller-provided *Server directly.
 // It delegates through the real SupervisorMux so the direct path exercises the
 // same typed routes and middleware as production. Legacy no-city session URLs
@@ -223,6 +251,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		(strings.HasPrefix(r.URL.Path, "/v0/session/") || r.URL.Path == "/v0/session" ||
 			strings.HasPrefix(r.URL.Path, "/v0/sessions")) {
 		s.legacySessionHandler().ServeHTTP(w, r)
+		return
+	}
+	if !strings.HasPrefix(r.URL.Path, "/v0/city/") && strings.HasPrefix(r.URL.Path, "/v0/agent/") {
+		s.legacyAgentHandler().ServeHTTP(w, r)
 		return
 	}
 

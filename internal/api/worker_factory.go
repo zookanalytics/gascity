@@ -18,11 +18,13 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		}
 	}
 	return worker.NewFactory(worker.FactoryConfig{
-		Store:            store,
-		Provider:         s.state.SessionProvider(),
-		CityPath:         s.state.CityPath(),
-		SearchPaths:      s.sessionLogPaths(),
-		ResolveTransport: resolveTransport,
+		Store:                 store,
+		Provider:              s.state.SessionProvider(),
+		CityPath:              s.state.CityPath(),
+		SearchPaths:           s.sessionLogPaths(),
+		Recorder:              s.state.EventProvider(),
+		ResolveTransport:      resolveTransport,
+		ResolveSessionRuntime: s.resolveWorkerSessionRuntime,
 	})
 }
 

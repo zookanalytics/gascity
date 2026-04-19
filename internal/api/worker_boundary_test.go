@@ -13,6 +13,8 @@ func TestAPINonTestFilesStayOnWorkerBoundary(t *testing.T) {
 		"worker.NewSessionHandle(",
 		"worker.NewSessionCatalog(",
 		"worker.SessionHandle",
+		"worker.SessionSpec",
+		"worker.SessionSpec{",
 		"worker.SessionLogAdapter{",
 	})
 }

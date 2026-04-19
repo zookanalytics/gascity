@@ -515,12 +515,16 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 	if target.sessionID != "" {
 		return workerHandleForSessionWithConfig(target.cityPath, store, sp, target.cfg, target.sessionID)
 	}
-	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  target.sessionName,
-		ProviderName: strings.TrimSpace(target.providerName()),
-		Transport:    strings.TrimSpace(target.sessionTransport()),
-	})
+	return runtimeWorkerHandleWithConfig(
+		target.cityPath,
+		store,
+		sp,
+		target.cfg,
+		target.sessionName,
+		strings.TrimSpace(target.providerName()),
+		strings.TrimSpace(target.sessionTransport()),
+		nil,
+	)
 }
 
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {

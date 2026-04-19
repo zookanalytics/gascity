@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -23,6 +24,7 @@ type RuntimeHandleConfig struct {
 	ProviderName string
 	Transport    string
 	ProcessNames []string
+	Recorder     events.Recorder
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
@@ -34,6 +36,7 @@ type RuntimeHandle struct {
 	providerName string
 	transport    string
 	processNames []string
+	recorder     events.Recorder
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -46,25 +49,37 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 	if strings.TrimSpace(cfg.SessionName) == "" {
 		return nil, fmt.Errorf("%w: session name is required", ErrHandleConfig)
 	}
+	recorder := cfg.Recorder
+	if recorder == nil {
+		recorder = events.Discard
+	}
 	return &RuntimeHandle{
 		provider:     cfg.Provider,
 		sessionName:  strings.TrimSpace(cfg.SessionName),
 		providerName: strings.TrimSpace(cfg.ProviderName),
 		transport:    strings.TrimSpace(cfg.Transport),
 		processNames: append([]string(nil), cfg.ProcessNames...),
+		recorder:     recorder,
 	}, nil
 }
 
 // Start reports unsupported for runtime-only handles that lack bead-backed state.
-func (h *RuntimeHandle) Start(context.Context) error {
+func (h *RuntimeHandle) Start(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStart)
+	defer func() { event.finish(err) }()
+
 	if h.provider.IsRunning(h.sessionName) {
 		return nil
 	}
-	return fmt.Errorf("%w: start requires a bead-backed session", ErrOperationUnsupported)
+	err = fmt.Errorf("%w: start requires a bead-backed session", ErrOperationUnsupported)
+	return err
 }
 
 // StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) error {
+func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, cfg runtime.Config) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
+	defer func() { event.finish(err) }()
+
 	if h.provider.IsRunning(h.sessionName) {
 		return nil
 	}
@@ -73,47 +88,78 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, startCommand string, 
 		startCfg.Command = strings.TrimSpace(startCommand)
 	}
 	if strings.TrimSpace(startCfg.Command) == "" {
-		return fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
+		err = fmt.Errorf("%w: start requires a runtime command", ErrOperationUnsupported)
+		return err
 	}
-	return h.provider.Start(ctx, h.sessionName, startCfg)
+	err = h.provider.Start(ctx, h.sessionName, startCfg)
+	return err
 }
 
 // Attach attaches to the live runtime session if it is currently running.
-func (h *RuntimeHandle) Attach(context.Context) error {
+func (h *RuntimeHandle) Attach(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationAttach)
+	defer func() { event.finish(err) }()
+
 	if !h.provider.IsRunning(h.sessionName) {
-		return fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		return err
 	}
-	return h.provider.Attach(h.sessionName)
+	err = h.provider.Attach(h.sessionName)
+	return err
 }
 
 // Create reports unsupported because runtime-only handles have no bead-backed creation path.
-func (h *RuntimeHandle) Create(context.Context, CreateMode) (sessionpkg.Info, error) {
-	return sessionpkg.Info{}, fmt.Errorf("%w: create requires a bead-backed session", ErrOperationUnsupported)
+func (h *RuntimeHandle) Create(ctx context.Context, _ CreateMode) (info sessionpkg.Info, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationCreate)
+	defer func() { event.finish(err) }()
+
+	err = fmt.Errorf("%w: create requires a bead-backed session", ErrOperationUnsupported)
+	return sessionpkg.Info{}, err
 }
 
 // Reset reports unsupported because runtime-only handles have no reset path.
-func (h *RuntimeHandle) Reset(context.Context) error {
-	return fmt.Errorf("%w: reset requires a bead-backed session", ErrOperationUnsupported)
+func (h *RuntimeHandle) Reset(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationReset)
+	defer func() { event.finish(err) }()
+
+	err = fmt.Errorf("%w: reset requires a bead-backed session", ErrOperationUnsupported)
+	return err
 }
 
 // Stop asks the provider to stop the live runtime session.
-func (h *RuntimeHandle) Stop(context.Context) error {
-	return h.provider.Stop(h.sessionName)
+func (h *RuntimeHandle) Stop(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationStop)
+	defer func() { event.finish(err) }()
+
+	err = h.provider.Stop(h.sessionName)
+	return err
 }
 
 // Kill asks the provider to stop the live runtime session immediately.
-func (h *RuntimeHandle) Kill(context.Context) error {
-	return h.provider.Stop(h.sessionName)
+func (h *RuntimeHandle) Kill(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	err = h.provider.Stop(h.sessionName)
+	return err
 }
 
 // Close asks the provider to close the live runtime session.
-func (h *RuntimeHandle) Close(context.Context) error {
-	return h.provider.Stop(h.sessionName)
+func (h *RuntimeHandle) Close(ctx context.Context) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationClose)
+	defer func() { event.finish(err) }()
+
+	err = h.provider.Stop(h.sessionName)
+	return err
 }
 
 // Rename reports unsupported because runtime-only handles have no persisted name update.
-func (h *RuntimeHandle) Rename(context.Context, string) error {
-	return fmt.Errorf("%w: rename requires a bead-backed session", ErrOperationUnsupported)
+func (h *RuntimeHandle) Rename(ctx context.Context, _ string) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationRename)
+	defer func() { event.finish(err) }()
+
+	err = fmt.Errorf("%w: rename requires a bead-backed session", ErrOperationUnsupported)
+	return err
 }
 
 // Peek returns recent runtime output lines for the live session.
@@ -148,50 +194,77 @@ func (h *RuntimeHandle) State(context.Context) (State, error) {
 }
 
 // Message submits a runtime nudge as a synchronous worker message.
-func (h *RuntimeHandle) Message(_ context.Context, req MessageRequest) (MessageResult, error) {
+func (h *RuntimeHandle) Message(ctx context.Context, req MessageRequest) (result MessageResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationMessage)
+	defer func() {
+		event.payload.Queued = boolPointer(result.Queued)
+		event.finish(err)
+	}()
+
 	if strings.TrimSpace(req.Text) == "" {
-		return MessageResult{}, fmt.Errorf("message text is required")
+		err = fmt.Errorf("message text is required")
+		return MessageResult{}, err
 	}
 	if !h.provider.IsRunning(h.sessionName) {
-		return MessageResult{}, fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		return MessageResult{}, err
 	}
 	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
 		return MessageResult{}, err
 	}
-	return MessageResult{Queued: false}, nil
+	result = MessageResult{Queued: false}
+	return result, nil
 }
 
 // Interrupt asks the provider to interrupt the live runtime session.
-func (h *RuntimeHandle) Interrupt(context.Context, InterruptRequest) error {
-	return h.provider.Interrupt(h.sessionName)
+func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
+	defer func() { event.finish(err) }()
+
+	err = h.provider.Interrupt(h.sessionName)
+	return err
 }
 
 // Nudge submits a best-effort reminder to the live runtime session.
-func (h *RuntimeHandle) Nudge(_ context.Context, req NudgeRequest) (NudgeResult, error) {
+func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationNudge)
+	defer func() {
+		event.payload.Delivered = boolPointer(result.Delivered)
+		event.finish(err)
+	}()
+
 	if strings.TrimSpace(req.Text) == "" {
-		return NudgeResult{}, fmt.Errorf("nudge text is required")
+		err = fmt.Errorf("nudge text is required")
+		return NudgeResult{}, err
 	}
 	if !h.provider.IsRunning(h.sessionName) {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			return NudgeResult{Delivered: false}, nil
+			result = NudgeResult{Delivered: false}
+			return result, nil
 		}
-		return NudgeResult{Delivered: false}, fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		result = NudgeResult{Delivered: false}
+		return result, err
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, err
 		}
-		return NudgeResult{Delivered: true}, nil
+		result = NudgeResult{Delivered: true}
+		return result, nil
 	case NudgeDeliveryImmediate:
 		if err := h.nudgeNow(req.Text); err != nil {
 			return NudgeResult{}, err
 		}
-		return NudgeResult{Delivered: true}, nil
+		result = NudgeResult{Delivered: true}
+		return result, nil
 	case NudgeDeliveryWaitIdle:
-		return h.nudgeWaitIdle(req)
+		result, err = h.nudgeWaitIdle(ctx, req)
+		return result, err
 	default:
-		return NudgeResult{}, fmt.Errorf("unsupported nudge delivery %q", req.Delivery)
+		err = fmt.Errorf("unsupported nudge delivery %q", req.Delivery)
+		return NudgeResult{}, err
 	}
 }
 
@@ -216,8 +289,11 @@ func (h *RuntimeHandle) AgentTranscript(context.Context, string) (*AgentTranscri
 }
 
 // History reports unavailable because runtime-only handles have no transcript history.
-func (h *RuntimeHandle) History(context.Context, HistoryRequest) (*HistorySnapshot, error) {
-	return nil, ErrHistoryUnavailable
+func (h *RuntimeHandle) History(ctx context.Context, _ HistoryRequest) (*HistorySnapshot, error) {
+	event := h.beginOperationEvent(ctx, workerOperationHistory)
+	err := ErrHistoryUnavailable
+	defer func() { event.finish(err) }()
+	return nil, err
 }
 
 // Pending returns the current blocking interaction for a runtime-only session if supported.
@@ -301,7 +377,10 @@ func (h *RuntimeHandle) nudgeNow(message string) error {
 	return h.provider.Nudge(h.sessionName, content)
 }
 
-func (h *RuntimeHandle) nudgeWaitIdle(req NudgeRequest) (NudgeResult, error) {
+func (h *RuntimeHandle) nudgeWaitIdle(ctx context.Context, req NudgeRequest) (NudgeResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if h.transport == "acp" {
 		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
 			return NudgeResult{}, err
@@ -315,7 +394,16 @@ func (h *RuntimeHandle) nudgeWaitIdle(req NudgeRequest) (NudgeResult, error) {
 	if !ok {
 		return NudgeResult{Delivered: false}, nil
 	}
-	if err := waiter.WaitForIdle(context.Background(), h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+	if err := waiter.WaitForIdle(ctx, h.sessionName, runtimeHandleWaitIdleTimeout); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return NudgeResult{Delivered: false}, err
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return NudgeResult{Delivered: false}, ctxErr
+			}
+			return NudgeResult{Delivered: false}, nil
+		}
 		return NudgeResult{Delivered: false}, nil
 	}
 	if err := h.nudgeNow(formatRuntimeWaitIdleReminder(req.Source, req.Text)); err != nil {
@@ -336,4 +424,31 @@ func formatRuntimeWaitIdleReminder(source, message string) string {
 	sb.WriteString("\nHandle them after this turn.\n")
 	sb.WriteString("</system-reminder>\n")
 	return sb.String()
+}
+
+func (h *RuntimeHandle) beginOperationEvent(ctx context.Context, op workerOperation) *operationEvent {
+	return newOperationEvent(ctx, h, op, h.providerName, h.transport, "")
+}
+
+func (h *RuntimeHandle) populateOperationEventIdentity(payload *operationEventPayload) {
+	if payload == nil {
+		return
+	}
+	if strings.TrimSpace(payload.SessionName) == "" {
+		payload.SessionName = h.sessionName
+	}
+	if strings.TrimSpace(payload.Provider) == "" {
+		payload.Provider = h.providerName
+	}
+	if strings.TrimSpace(payload.Transport) == "" {
+		payload.Transport = h.transport
+	}
+}
+
+func (h *RuntimeHandle) operationEventRecordingEnabled() bool {
+	return h != nil && h.recorder != nil && h.recorder != events.Discard
+}
+
+func (h *RuntimeHandle) recordWorkerOperationEvent(payload operationEventPayload) {
+	recordOperationEvent(h.recorder, payload)
 }

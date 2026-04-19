@@ -78,6 +78,25 @@ func (a SessionLogAdapter) TailMeta(path string) (*sessionlog.TailMeta, error) {
 	return sessionlog.ExtractTailMetaFromSearchPaths(a.SearchPaths, path)
 }
 
+// TailActivity reads the transcript tail activity without loading full history.
+func (a SessionLogAdapter) TailActivity(path string) (TailActivity, error) {
+	meta, err := a.TailMeta(path)
+	if err != nil {
+		return TailActivityUnknown, err
+	}
+	if meta == nil {
+		return TailActivityUnknown, nil
+	}
+	switch strings.TrimSpace(meta.Activity) {
+	case string(TailActivityIdle):
+		return TailActivityIdle, nil
+	case "in-turn":
+		return TailActivityInTurn, nil
+	default:
+		return TailActivityUnknown, nil
+	}
+}
+
 // AgentMappings lists subagent transcript mappings for a parent transcript.
 func (a SessionLogAdapter) AgentMappings(path string) ([]sessionlog.AgentMapping, error) {
 	return sessionlog.FindAgentMappings(strings.TrimSpace(path))

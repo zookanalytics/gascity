@@ -23,15 +23,11 @@ type LiveObservation struct {
 
 // ObserveHandle returns worker-owned runtime observations for handles that
 // support them.
-func ObserveHandle(ctx context.Context, h Handle) (LiveObservation, error) {
-	type observer interface {
-		LiveObservation(context.Context) (LiveObservation, error)
-	}
-	observed, ok := h.(observer)
-	if !ok {
+func ObserveHandle(ctx context.Context, h LiveObservationHandle) (LiveObservation, error) {
+	if h == nil {
 		return LiveObservation{}, fmt.Errorf("%w: live observation unavailable", ErrOperationUnsupported)
 	}
-	return observed.LiveObservation(ctx)
+	return h.LiveObservation(ctx)
 }
 
 // LiveObservation reports runtime presence and attachment metadata for a

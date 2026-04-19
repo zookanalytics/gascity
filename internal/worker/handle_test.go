@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -98,6 +100,67 @@ func TestSessionHandleStartStopState(t *testing.T) {
 		if call.Method == "Pending" {
 			t.Fatalf("State(after stop) probed Pending on a stopped session: %#v", sp.Calls[callCount:])
 		}
+	}
+}
+
+func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	manager := sessionpkg.NewManager(store, sp)
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		Session: SessionSpec{
+			Profile:  ProfileClaudeTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "claude",
+			WorkDir:  workDir,
+			Provider: "claude",
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := manager.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", handle.sessionID, err)
+	}
+
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", slugDir, err)
+	}
+	path := filepath.Join(slugDir, info.SessionKey+".jsonl")
+	writeWorkerTestJSONL(t, path, []map[string]any{
+		{"type": "assistant", "message": map[string]any{
+			"role":        "assistant",
+			"model":       "claude-opus-4-5-20251101",
+			"stop_reason": "end_turn",
+			"content":     "done",
+			"usage":       map[string]any{"input_tokens": 1000},
+		}},
+		{"type": "user", "message": map[string]any{"role": "user", "content": "next"}},
+	})
+
+	if handle.history != nil {
+		t.Fatal("history cache initialized before State")
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseBusy {
+		t.Fatalf("State().Phase = %s, want %s", state.Phase, PhaseBusy)
+	}
+	if handle.history != nil {
+		t.Fatal("State() primed history cache, want tail-only busy probe")
 	}
 }
 
@@ -941,6 +1004,79 @@ func TestSessionHandleHistoryPersistsCodexResumeKeyForLaterRestart(t *testing.T)
 	}
 }
 
+func TestSessionHandleStatePersistsCodexResumeKeyWithoutPrimingHistoryCache(t *testing.T) {
+	base := t.TempDir()
+	dayDir := filepath.Join(base, "2026", "04", "14")
+	if err := os.MkdirAll(dayDir, 0o755); err != nil {
+		t.Fatalf("mkdir dayDir: %v", err)
+	}
+
+	workDir := "/tmp/codex-project"
+	resumeID := "019d8afb-efe8-7280-abf9-5901fd92e0cd"
+	transcriptPath := filepath.Join(dayDir, "rollout-2026-04-14T09-54-20-"+resumeID+".jsonl")
+	transcript := strings.Join([]string{
+		fmt.Sprintf(`{"timestamp":"2026-04-14T09:54:20Z","type":"session_meta","payload":{"cwd":%q}}`, workDir),
+		`{"timestamp":"2026-04-14T09:54:21Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"text":"remember alpha"}]}}`,
+		`{"timestamp":"2026-04-14T09:54:22Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"remembered"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(transcriptPath, []byte(transcript), 0o644); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+
+	handle, store, sp, _ := newTestSessionHandle(t, SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex --dangerously-bypass-approvals-and-sandbox",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Resume: sessionpkg.ProviderResume{
+			ResumeFlag:  "resume",
+			ResumeStyle: "subcommand",
+		},
+	})
+	handle.adapter.SearchPaths = []string{base}
+
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(first): %v", err)
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if state.Phase != PhaseReady {
+		t.Fatalf("State().Phase = %s, want %s", state.Phase, PhaseReady)
+	}
+	if handle.history != nil {
+		t.Fatal("State() primed history cache, want tail-only resume-key probe")
+	}
+
+	bead, err := store.Get(handle.sessionID)
+	if err != nil {
+		t.Fatalf("store.Get(%q): %v", handle.sessionID, err)
+	}
+	if bead.Metadata["session_key"] != resumeID {
+		t.Fatalf("session_key = %q, want %q", bead.Metadata["session_key"], resumeID)
+	}
+
+	if err := handle.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := handle.Start(context.Background()); err != nil {
+		t.Fatalf("Start(second): %v", err)
+	}
+
+	secondStart := lastCall(sp.Calls, "Start")
+	if secondStart == nil {
+		t.Fatalf("runtime calls = %#v, want second Start", sp.Calls)
+	}
+	wantResume := "codex resume " + resumeID
+	if !strings.Contains(secondStart.Config.Command, wantResume) {
+		t.Fatalf("second start command = %q, want %q", secondStart.Config.Command, wantResume)
+	}
+}
+
 func TestSessionHandleAgentMappingsAndTranscriptUseWorkerBoundary(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")
@@ -1102,6 +1238,86 @@ func TestRuntimeHandleExpandedWorkerSurface(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandleStateStoppedSkipsPendingProbe(t *testing.T) {
+	sp := runtime.NewFake()
+	sp.SetPendingInteraction("legacy-worker", &runtime.PendingInteraction{
+		RequestID: "req-stopped",
+		Kind:      "approval",
+		Prompt:    "Proceed?",
+	})
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "stub",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	state, err := handle.State(context.Background())
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	if got, want := state.Phase, PhaseStopped; got != want {
+		t.Fatalf("State().Phase = %s, want %s", got, want)
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Pending" {
+			t.Fatalf("calls = %#v, want no Pending probe for stopped runtime handle", sp.Calls)
+		}
+	}
+}
+
+func TestRuntimeHandleLiveObservationUsesRuntimeMetadataAndLiveness(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := sp.SetMeta("legacy-worker", "suspended", "true"); err != nil {
+		t.Fatalf("SetMeta(suspended): %v", err)
+	}
+	if err := sp.SetMeta("legacy-worker", "GC_SESSION_ID", "session-123"); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	sp.SetAttached("legacy-worker", true)
+	lastActivity := time.Date(2026, time.April, 19, 9, 30, 0, 0, time.UTC)
+	sp.SetActivity("legacy-worker", lastActivity)
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	obs, err := handle.LiveObservation(context.Background())
+	if err != nil {
+		t.Fatalf("LiveObservation: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("LiveObservation.Running = false, want true; obs=%#v", obs)
+	}
+	if !obs.Alive {
+		t.Fatalf("LiveObservation.Alive = false, want true; obs=%#v", obs)
+	}
+	if !obs.Attached {
+		t.Fatalf("LiveObservation.Attached = false, want true; obs=%#v", obs)
+	}
+	if !obs.Suspended {
+		t.Fatalf("LiveObservation.Suspended = false, want true; obs=%#v", obs)
+	}
+	if got, want := obs.RuntimeSessionID, "session-123"; got != want {
+		t.Fatalf("LiveObservation.RuntimeSessionID = %q, want %q", got, want)
+	}
+	if obs.LastActivity == nil || !obs.LastActivity.Equal(lastActivity) {
+		t.Fatalf("LiveObservation.LastActivity = %#v, want %v", obs.LastActivity, lastActivity)
+	}
+}
+
 func TestRuntimeHandleStartResolvedStartsLegacyRuntimeSession(t *testing.T) {
 	sp := runtime.NewFake()
 
@@ -1227,6 +1443,85 @@ func TestRuntimeHandleNudgeWaitIdleClaudeWrapsReminder(t *testing.T) {
 	}
 	if !strings.Contains(delivered, "[mail] check deploy status") {
 		t.Fatalf("delivered message = %q, want mail-tagged reminder", delivered)
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleHonorsCallerContext(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = nil
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	sp.WaitForIdleGates["legacy-worker"] = gate
+	sp.WaitForIdleStarted["legacy-worker"] = started
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	result, err := handle.Nudge(ctx, NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Nudge(wait_idle) err = %v, want %v", err, context.Canceled)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false after context cancellation")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery after context cancellation", sp.Calls)
+		}
+	}
+}
+
+func TestRuntimeHandleNudgeWaitIdleInternalTimeoutReturnsUndeliveredWithoutError(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	sp.WaitForIdleErrors["legacy-worker"] = context.DeadlineExceeded
+
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  "legacy-worker",
+		ProviderName: "claude",
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+
+	result, err := handle.Nudge(context.Background(), NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: NudgeDeliveryWaitIdle,
+		Source:   "mail",
+	})
+	if err != nil {
+		t.Fatalf("Nudge(wait_idle) err = %v, want nil for internal timeout", err)
+	}
+	if result.Delivered {
+		t.Fatal("Nudge(wait_idle) Delivered = true, want false after internal timeout")
+	}
+	for _, call := range sp.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			t.Fatalf("calls = %#v, want no delivery after internal timeout", sp.Calls)
+		}
 	}
 }
 
@@ -1590,14 +1885,34 @@ func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) 
 }
 
 func newTestSessionHandle(t *testing.T, spec SessionSpec) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
+	return newTestSessionHandleWithRecorder(t, spec, nil)
+}
+
+func writeWorkerTestJSONL(t *testing.T, path string, lines []map[string]any) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create(%q): %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck // test helper
+	enc := json.NewEncoder(f)
+	for _, line := range lines {
+		if err := enc.Encode(line); err != nil {
+			t.Fatalf("Encode(%q): %v", path, err)
+		}
+	}
+}
+
+func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder events.Recorder) (*SessionHandle, *beads.MemStore, *runtime.Fake, *sessionpkg.Manager) {
 	t.Helper()
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	manager := sessionpkg.NewManager(store, sp)
 	handle, err := NewSessionHandle(SessionHandleConfig{
-		Manager: manager,
-		Session: spec,
+		Manager:  manager,
+		Recorder: recorder,
+		Session:  spec,
 	})
 	if err != nil {
 		t.Fatalf("NewSessionHandle: %v", err)

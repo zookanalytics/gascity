@@ -39,6 +39,10 @@ type Fake struct {
 	// and the lock is released before the block, so other Fake methods
 	// remain callable while a probe is gated.
 	WaitForIdleGates map[string]chan struct{}
+	// WaitForIdleStarted signals when WaitForIdle has recorded its call and is
+	// about to consult configured results. Tests use this to coordinate
+	// cancellation without relying on wall-clock sleeps.
+	WaitForIdleStarted map[string]chan struct{}
 }
 
 // Call records a single method invocation on [Fake].
@@ -74,6 +78,7 @@ func NewFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
+		WaitForIdleStarted:      make(map[string]chan struct{}),
 	}
 }
 
@@ -97,6 +102,7 @@ func NewFailFake() *Fake {
 		ResetTurnErrors:         make(map[string]error),
 		InterruptBoundaryErrors: make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
+		WaitForIdleStarted:      make(map[string]chan struct{}),
 		broken:                  true,
 	}
 }
@@ -481,6 +487,10 @@ func (f *Fake) ClearScrollback(name string) error {
 func (f *Fake) WaitForIdle(ctx context.Context, name string, _ time.Duration) error {
 	f.mu.Lock()
 	f.Calls = append(f.Calls, Call{Method: "WaitForIdle", Name: name})
+	if started := f.WaitForIdleStarted[name]; started != nil {
+		close(started)
+		delete(f.WaitForIdleStarted, name)
+	}
 	if f.broken {
 		f.mu.Unlock()
 		return fmt.Errorf("session unavailable")

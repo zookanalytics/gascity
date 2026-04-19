@@ -23,7 +23,35 @@ const (
 	apiNamedSessionModeKey     = session.NamedSessionModeMetadata
 )
 
-var errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+var (
+	errConfiguredNamedSessionConflict = errors.New("configured named session conflict")
+	errSessionTargetRejectedByConfig  = errors.New("session target rejected by config")
+)
+
+type apiSessionTargetNotFoundError struct {
+	identifier       string
+	rejectedByConfig bool
+}
+
+func (e apiSessionTargetNotFoundError) Error() string {
+	return fmt.Sprintf("%v: %q", session.ErrSessionNotFound, e.identifier)
+}
+
+func (e apiSessionTargetNotFoundError) Unwrap() error {
+	return session.ErrSessionNotFound
+}
+
+func (e apiSessionTargetNotFoundError) Is(target error) bool {
+	return target == session.ErrSessionNotFound || (e.rejectedByConfig && target == errSessionTargetRejectedByConfig)
+}
+
+func apiSessionTargetNotFound(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier}
+}
+
+func apiSessionTargetRejectedByConfig(identifier string) error {
+	return apiSessionTargetNotFoundError{identifier: identifier, rejectedByConfig: true}
+}
 
 type apiSessionResolveOptions struct {
 	allowClosed bool
@@ -246,32 +274,17 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 	if err != nil {
 		return "", err
 	}
-	resume := session.ProviderResume{
-		ResumeFlag:    resolved.ResumeFlag,
-		ResumeStyle:   resolved.ResumeStyle,
-		ResumeCommand: resolved.ResumeCommand,
-		SessionIDFlag: resolved.SessionIDFlag,
-	}
 	extraMeta := map[string]string{
 		apiNamedSessionMetadataKey: "true",
 		apiNamedSessionIdentityKey: spec.Identity,
 		apiNamedSessionModeKey:     spec.Mode,
 		"session_origin":           "named",
 	}
-	handle, err := s.newWorkerSessionHandle(store, worker.SessionSpec{
-		Alias:        spec.Identity,
-		ExplicitName: spec.SessionName,
-		Template:     qualifiedTemplate,
-		Title:        spec.Identity,
-		Command:      resolved.CommandString(),
-		WorkDir:      workDir,
-		Provider:     resolved.Name,
-		Transport:    transport,
-		Env:          resolved.Env,
-		Resume:       resume,
-		Hints:        sessionCreateHints(resolved),
-		Metadata:     extraMeta,
-	})
+	resolvedCfg, err := resolvedSessionConfigForProvider(spec.Identity, spec.SessionName, qualifiedTemplate, spec.Identity, transport, extraMeta, resolved, "", workDir)
+	if err != nil {
+		return "", err
+	}
+	handle, err := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 	if err != nil {
 		return "", err
 	}
@@ -312,7 +325,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		return "", fmt.Errorf("session store unavailable")
 	}
 	if _, ok := parseAPITemplateTarget(identifier); ok {
-		return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+		return "", apiSessionTargetNotFound(identifier)
 	}
 	if id, err := session.ResolveSessionIDByExactID(store, identifier); err == nil {
 		return id, nil
@@ -329,7 +342,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			if bead, getErr := store.Get(id); getErr == nil && apiIsNamedSessionBead(bead) {
 				identity := apiNamedSessionIdentity(bead)
 				if identity != "" && config.FindNamedSession(cfg, identity) == nil {
-					return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+					return "", apiSessionTargetRejectedByConfig(identifier)
 				}
 			}
 		}
@@ -341,7 +354,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		if _, ok, err := s.findNamedSessionSpecForTarget(store, identifier); err != nil {
 			return "", err
 		} else if ok {
-			return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+			return "", apiSessionTargetNotFound(identifier)
 		}
 		if id, err := session.ResolveSessionIDAllowClosed(store, identifier); err == nil {
 			return id, nil
@@ -349,7 +362,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 			return "", err
 		}
 	}
-	return "", fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
+	return "", apiSessionTargetNotFound(identifier)
 }
 
 func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
@@ -407,49 +420,11 @@ func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store
 }
 
 func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {
-	catalog, err := s.workerSessionCatalog(store)
-	if err != nil {
-		return nil, err
-	}
-	info, err := catalog.Get(id)
-	if err != nil {
-		return nil, err
-	}
-
-	spec := worker.SessionSpec{
-		ID:       id,
-		Provider: info.Provider,
-		WorkDir:  info.WorkDir,
-		Resume: session.ProviderResume{
-			ResumeFlag:    info.ResumeFlag,
-			ResumeStyle:   info.ResumeStyle,
-			ResumeCommand: info.ResumeCommand,
-		},
-	}
-	if store != nil {
-		if bead, beadErr := store.Get(id); beadErr == nil {
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = worker.Profile(profile)
-			}
-		}
-	}
-	if resolved, workDir := s.resolveSessionRuntime(info); resolved != nil {
-		spec.Provider = firstNonEmptyString(resolved.Name, spec.Provider)
-		spec.WorkDir = firstNonEmptyString(spec.WorkDir, workDir)
-		spec.Hints = sessionResumeHints(resolved, spec.WorkDir)
-		spec.Resume = session.ProviderResume{
-			ResumeFlag:    resolved.ResumeFlag,
-			ResumeStyle:   resolved.ResumeStyle,
-			ResumeCommand: resolved.ResumeCommand,
-			SessionIDFlag: resolved.SessionIDFlag,
-		}
-	}
-
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	return factory.SessionByID(id)
 }
 
 func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
@@ -457,34 +432,26 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	if target == "" {
 		return nil, session.ErrSessionNotFound
 	}
-	if store != nil {
-		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
-			return s.workerHandleForSession(store, id)
-		} else if !errors.Is(err, session.ErrSessionNotFound) {
-			return nil, err
-		}
-	}
-	sp := s.state.SessionProvider()
-	if sp == nil {
-		return nil, session.ErrSessionNotFound
-	}
-	sessionID, err := sp.GetMeta(target, "GC_SESSION_ID")
-	if store != nil && err == nil && strings.TrimSpace(sessionID) != "" {
-		return s.workerHandleForSession(store, strings.TrimSpace(sessionID))
-	}
-	return worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
-		Provider:     sp,
-		SessionName:  target,
-		ProviderName: target,
-	})
-}
-
-func (s *Server) newWorkerSessionHandle(store beads.Store, spec worker.SessionSpec) (worker.Handle, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err
 	}
-	return factory.Session(spec)
+	if store != nil {
+		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
+			return factory.SessionByID(id)
+		} else if !errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, errSessionTargetRejectedByConfig) {
+			return nil, err
+		}
+	}
+	return factory.HandleForTarget(target, nil)
+}
+
+func (s *Server) newResolvedWorkerSessionHandle(store beads.Store, cfg worker.ResolvedSessionConfig) (worker.Handle, error) {
+	factory, err := s.workerFactory(store)
+	if err != nil {
+		return nil, err
+	}
+	return factory.SessionForResolvedRuntime(cfg)
 }
 
 func workerDeliveryIntent(intent session.SubmitIntent) worker.DeliveryIntent {

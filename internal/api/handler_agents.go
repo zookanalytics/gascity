@@ -2,7 +2,6 @@ package api
 
 import (
 	"fmt"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -315,30 +314,16 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 
 // enrichSessionMeta populates model and context usage fields on the agent
 // response by reading the tail of the agent's session JSONL file.
-func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string, cfg *config.City) {
-	workDir := workdirutil.ResolveWorkDirPath(
-		s.state.CityPath(),
-		workdirutil.CityName(s.state.CityPath(), cfg),
-		qualifiedName,
-		agentCfg,
-		cfg.Rigs,
-	)
-	if workDir == "" {
-		return
-	}
-	// Resolve to absolute path for correct slug generation.
-	if abs, err := filepath.Abs(workDir); err == nil {
-		workDir = abs
-	}
+func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string) {
 	factory, err := s.workerFactory(s.state.CityBeadStore())
 	if err != nil {
 		return
 	}
-	provider := strings.TrimSpace(agentCfg.Provider)
-	if provider == "" && cfg != nil {
-		provider = strings.TrimSpace(cfg.Workspace.Provider)
+	transcriptState, err := s.resolveAgentTranscript(qualifiedName, agentCfg)
+	if err != nil {
+		return
 	}
-	sessionFile := factory.DiscoverTranscript(provider, workDir, "")
+	sessionFile := transcriptState.path
 	if sessionFile == "" {
 		return
 	}

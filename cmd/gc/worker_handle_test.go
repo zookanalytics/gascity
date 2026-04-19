@@ -2,13 +2,29 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+type failingSessionLookupStore struct {
+	beads.Store
+	err error
+}
+
+func (s *failingSessionLookupStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, s.err
+}
+
+func (s *failingSessionLookupStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, s.err
+}
 
 func TestWorkerHandleForSessionWithConfigUsesResolvedProviderOnFirstStart(t *testing.T) {
 	cityDir := t.TempDir()
@@ -217,6 +233,53 @@ session_id_flag = "--session-id"
 	}
 }
 
+func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", nil, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q", target)
+	}
+}
+
+func TestWorkerObserveSessionTargetWithConfigIgnoresStoreLookupFailuresForRuntimeFallback(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city"},
+		Agents: []config.Agent{
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+		},
+	}
+
+	target := cliSessionName("/home/user/city", cfg.Workspace.Name, "mayor", cfg.Workspace.SessionTemplate)
+	store := &failingSessionLookupStore{err: fmt.Errorf("store lookup failed")}
+	obs, err := workerObserveSessionTargetWithConfig("/home/user/city", store, sp, cfg, target)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true for %q when runtime session is live", target)
+	}
+}
+
 func TestWorkerKillSessionTargetWithConfigResolvesRuntimeSessionMeta(t *testing.T) {
 	cityDir := t.TempDir()
 	writePhase0InterfaceCity(t, cityDir, `[workspace]
@@ -300,5 +363,121 @@ func TestWorkerNudgeDeliveryForMode(t *testing.T) {
 				t.Fatalf("workerNudgeDeliveryForMode(%q) = %q, want %q", tt.mode, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolvedWorkerSessionConfigWithConfigFallsBackToResolvedProviderNameForCommand(t *testing.T) {
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		"",
+		"",
+		"/tmp/work",
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{
+			Name: "custom-provider",
+		},
+		map[string]string{"session_origin": "test"},
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	if got, want := cfg.Runtime.Command, "custom-provider"; got != want {
+		t.Fatalf("Runtime.Command = %q, want %q", got, want)
+	}
+	if got, want := cfg.Runtime.Provider, "custom-provider"; got != want {
+		t.Fatalf("Runtime.Provider = %q, want %q", got, want)
+	}
+}
+
+func TestResolvedWorkerSessionConfigWithConfigFallsBackToProviderArgForCommand(t *testing.T) {
+	cfg, err := resolvedWorkerSessionConfigWithConfig(
+		"",
+		"legacy-provider",
+		"/tmp/work",
+		"worker",
+		"",
+		"worker",
+		"Worker",
+		"",
+		&config.ResolvedProvider{},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
+	}
+	if got, want := cfg.Runtime.Command, "legacy-provider"; got != want {
+		t.Fatalf("Runtime.Command = %q, want %q", got, want)
+	}
+	if got, want := cfg.Runtime.Provider, "legacy-provider"; got != want {
+		t.Fatalf("Runtime.Provider = %q, want %q", got, want)
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigFallsBackToCityPathAndSyncsHintsWorkDir(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+ready_prompt_prefix = "stub-ready>"
+ready_delay_ms = 250
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	runtimeCfg := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template: "worker",
+	}, "")
+	if runtimeCfg == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
+	}
+	if got, want := runtimeCfg.WorkDir, cityDir; got != want {
+		t.Fatalf("WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Hints.WorkDir, cityDir; got != want {
+		t.Fatalf("Hints.WorkDir = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Provider, "stub"; got != want {
+		t.Fatalf("Provider = %q, want %q", got, want)
+	}
+	if got, want := runtimeCfg.Command, "/bin/echo"; got != want {
+		t.Fatalf("Command = %q, want %q", got, want)
+	}
+}
+
+func TestWorkerSessionRuntimeResolverWithConfigReturnsErrorForInvalidResolvedRuntime(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "worker",
+			Provider: "stub",
+		}},
+		Providers: map[string]config.ProviderSpec{
+			"stub": {},
+		},
+	}
+
+	resolver := workerSessionRuntimeResolverWithConfig(t.TempDir(), cfg)
+	if resolver == nil {
+		t.Fatal("workerSessionRuntimeResolverWithConfig() = nil")
+	}
+
+	_, err := resolver(session.Info{Template: "worker"}, "")
+	if err == nil {
+		t.Fatal("resolver error = nil, want invalid resolved runtime error")
 	}
 }

@@ -66,6 +66,11 @@ type sessionResponse struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+type sessionResponseHandle interface {
+	worker.StateHandle
+	worker.PeekHandle
+}
+
 func sessionToResponse(info session.Info, cfg *config.City) sessionResponse {
 	provider, displayName := info.Provider, ""
 	if cfg != nil {
@@ -448,10 +453,17 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	if info.State != session.StateActive {
 		return
 	}
-	var handle worker.Handle
+	var (
+		stateHandle worker.StateHandle
+		peekHandle  worker.PeekHandle
+	)
 	switch v := runtimeHandle.(type) {
 	case worker.Handle:
-		handle = v
+		stateHandle = v
+		peekHandle = v
+	case sessionResponseHandle:
+		stateHandle = v
+		peekHandle = v
 	case runtime.Provider:
 		store := s.state.CityBeadStore()
 		if store == nil {
@@ -461,14 +473,15 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if err != nil {
 			return
 		}
-		handle = resolved
+		stateHandle = resolved
+		peekHandle = resolved
 	default:
 		return
 	}
-	if handle == nil {
+	if stateHandle == nil {
 		return
 	}
-	state, err := handle.State(context.Background())
+	state, err := stateHandle.State(context.Background())
 	if err != nil {
 		return
 	}
@@ -488,8 +501,8 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 	resp.ActiveBead = s.findActiveBeadForAssignees("", info.ID, info.SessionName, info.Alias, info.Template)
 
 	// Peek preview (opt-in, only when running).
-	if wantPeek && resp.Running {
-		if output, err := handle.Peek(context.Background(), 5); err == nil {
+	if wantPeek && resp.Running && peekHandle != nil {
+		if output, err := peekHandle.Peek(context.Background(), 5); err == nil {
 			resp.LastOutput = output
 		}
 	}
