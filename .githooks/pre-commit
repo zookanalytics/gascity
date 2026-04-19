@@ -2,7 +2,7 @@
 set -euo pipefail
 
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
-staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
+staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
 
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ]; then
   exit 0

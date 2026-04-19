@@ -34,7 +34,10 @@ that the Go static server embeds via `go:embed`). The hook needs
 Node / npm on your PATH; if npm is missing, the hook warns and
 skips the rebuild (CI enforces it). Run `make dashboard-dev` to
 iterate with Vite HMR, `make dashboard-build` to produce a fresh
-bundle, `make dashboard-check` for typecheck + build + test.
+bundle, `make dashboard-check` for typecheck + build + test. For
+dashboard or API-schema changes, also smoke the built app with
+`npm run preview -- --host 127.0.0.1 --port <port>` from
+`cmd/gc/dashboard/web/` and load the served page before pushing.
 
 ## Development Workflow
 
