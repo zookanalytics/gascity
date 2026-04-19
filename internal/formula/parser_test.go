@@ -1706,6 +1706,71 @@ path = "scripts/verify.sh"
 	}
 }
 
+func TestParseTOML_ChildCheckHybridExecTableRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-child-check-hybrid"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "parent"
+title = "Parent"
+
+[[steps.children]]
+id = "child"
+title = "Child"
+
+[steps.children.check]
+max_attempts = 2
+
+[steps.children.check.exec]
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want nested hybrid exec table rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "exec"`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported exec table rejection", err)
+	}
+}
+
+func TestParseTOML_LoopBodyCheckHybridExecTableRejected(t *testing.T) {
+	tomlData := `
+formula = "mol-loop-check-hybrid"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "loop"
+title = "Loop"
+
+[steps.loop]
+count = 2
+
+[[steps.loop.body]]
+id = "attempt"
+title = "Attempt"
+
+[steps.loop.body.check]
+max_attempts = 2
+
+[steps.loop.body.check.exec]
+path = "scripts/verify.sh"
+`
+
+	p := NewParser()
+	_, err := p.ParseTOML([]byte(tomlData))
+	if err == nil {
+		t.Fatal("ParseTOML succeeded, want loop body hybrid exec table rejection")
+	}
+	if !strings.Contains(err.Error(), `step.check: unsupported key "exec"`) {
+		t.Fatalf("ParseTOML error = %v, want unsupported exec table rejection", err)
+	}
+}
+
 func TestValidateRalphUsesCheckTerminology(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-bad-check",

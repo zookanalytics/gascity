@@ -381,8 +381,8 @@ type stepTOMLAlias struct {
 	Gate            *Gate             `json:"gate,omitempty"`
 	Loop            *loopTOMLAlias    `json:"loop,omitempty"`
 	OnComplete      *OnCompleteSpec   `json:"on_complete,omitempty"`
-	Check           *RalphSpec        `json:"check,omitempty"`
-	Ralph           *RalphSpec        `json:"ralph,omitempty"`
+	Check           json.RawMessage   `json:"check,omitempty"`
+	Ralph           json.RawMessage   `json:"ralph,omitempty"`
 	Retry           *RetrySpec        `json:"retry,omitempty"`
 }
 
@@ -396,7 +396,9 @@ type loopTOMLAlias struct {
 }
 
 func (a stepTOMLAlias) toStep() (Step, error) {
-	if a.Check != nil && a.Ralph != nil {
+	hasCheck := len(a.Check) > 0
+	hasRalph := len(a.Ralph) > 0
+	if hasCheck && hasRalph {
 		return Step{}, fmt.Errorf("step.check: cannot be specified more than once")
 	}
 
@@ -412,9 +414,20 @@ func (a stepTOMLAlias) toStep() (Step, error) {
 		children = append(children, &step)
 	}
 
-	ralph := a.Ralph
-	if a.Check != nil {
-		ralph = a.Check
+	var ralph *RalphSpec
+	switch {
+	case hasCheck:
+		spec, err := decodePublicCheckSpec(a.Check)
+		if err != nil {
+			return Step{}, err
+		}
+		ralph = spec
+	case hasRalph:
+		spec, err := decodePublicCheckSpec(a.Ralph)
+		if err != nil {
+			return Step{}, err
+		}
+		ralph = spec
 	}
 	loop, err := a.Loop.toLoopSpec()
 	if err != nil {
