@@ -2,9 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net"
 	"strings"
 	"time"
 
@@ -113,7 +113,7 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 	if err != nil {
 		if isControllerUnavailableError(err) {
 			if msg := reloadUnavailableMessageHook(cityPath); msg != "" {
-				fmt.Fprintf(stderr, "gc reload: %s\n", msg) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc reload: %s: %v\n", msg, err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
@@ -131,6 +131,9 @@ func cmdReload(args []string, async bool, timeoutValue string, timeoutChanged bo
 		}
 		return 0
 	case reloadOutcomeFailed:
+		for _, warning := range reply.Warnings {
+			fmt.Fprintf(stderr, "gc reload: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
+		}
 		switch {
 		case strings.TrimSpace(reply.Error) != "":
 			fmt.Fprintln(stderr, strings.TrimSpace(reply.Error)) //nolint:errcheck // best-effort stderr
@@ -157,7 +160,7 @@ func isControllerUnavailableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "connecting to controller:")
+	return errors.Is(err, errControllerUnavailable) || errors.Is(err, errControllerUnresponsive)
 }
 
 func sendReloadControlRequest(cityPath string, req reloadControlRequest) (reloadControlReply, error) {
@@ -223,36 +226,4 @@ func supervisorCityInfo(cityPath string) (api.CityInfo, bool) {
 		}
 	}
 	return api.CityInfo{}, false
-}
-
-func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout time.Duration) ([]byte, error) {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("connecting to controller: %w (is the controller running?)", err)
-	}
-	defer conn.Close()                                     //nolint:errcheck
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-	conn.SetReadDeadline(time.Now().Add(readTimeout))      //nolint:errcheck
-	if _, err := conn.Write([]byte(command + "\n")); err != nil {
-		return nil, fmt.Errorf("sending command: %w", err)
-	}
-	var data []byte
-	buf := make([]byte, 64*1024)
-	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			data = append(data, buf[:n]...)
-			if strings.Contains(string(data), "\n") {
-				break
-			}
-		}
-		if err != nil {
-			if len(data) > 0 && strings.Contains(string(data), "\n") {
-				break
-			}
-			return nil, fmt.Errorf("reading response: %w", err)
-		}
-	}
-	return []byte(strings.TrimSpace(string(data))), nil
 }

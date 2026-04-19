@@ -32,7 +32,40 @@ import (
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
-var errControllerAlreadyRunning = errors.New("controller already running")
+var (
+	errControllerAlreadyRunning = errors.New("controller already running")
+	errControllerUnavailable    = errors.New("controller unavailable")
+	errControllerUnresponsive   = errors.New("controller unresponsive")
+)
+
+type controllerCommandError struct {
+	op           string
+	err          error
+	unavailable  bool
+	unresponsive bool
+}
+
+func (e controllerCommandError) Error() string {
+	if e.op == "" {
+		if e.err == nil {
+			return "controller command failed"
+		}
+		return e.err.Error()
+	}
+	if e.err == nil {
+		return e.op
+	}
+	return fmt.Sprintf("%s: %v", e.op, e.err)
+}
+
+func (e controllerCommandError) Unwrap() error {
+	return e.err
+}
+
+func (e controllerCommandError) Is(target error) bool {
+	return (target == errControllerUnavailable && e.unavailable) ||
+		(target == errControllerUnresponsive && e.unresponsive)
+}
 
 const controllerSocketPathLimit = 100
 
@@ -194,26 +227,28 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 	}
 
 	var timeout time.Duration
-	if wire.Timeout != "" {
-		parsed, err := time.ParseDuration(wire.Timeout)
-		if err != nil {
+	if wire.Wait {
+		if wire.Timeout != "" {
+			parsed, err := time.ParseDuration(wire.Timeout)
+			if err != nil {
+				writeJSONLine(conn, reloadControlReply{
+					Outcome: reloadOutcomeFailed,
+					Error:   fmt.Sprintf("invalid reload timeout %q: %v", wire.Timeout, err),
+				})
+				return
+			}
+			timeout = parsed
+		}
+		if timeout <= 0 {
 			writeJSONLine(conn, reloadControlReply{
 				Outcome: reloadOutcomeFailed,
-				Error:   fmt.Sprintf("invalid reload timeout %q: %v", wire.Timeout, err),
+				Error:   "reload timeout must be greater than 0",
 			})
 			return
 		}
-		timeout = parsed
-	}
-	if wire.Wait && timeout <= 0 {
-		writeJSONLine(conn, reloadControlReply{
-			Outcome: reloadOutcomeFailed,
-			Error:   "reload timeout must be greater than 0",
-		})
-		return
 	}
 
-	totalDeadline := controllerReloadAcceptTimeout + 5*time.Second
+	totalDeadline := 2*controllerReloadAcceptTimeout + 5*time.Second
 	if wire.Wait {
 		totalDeadline += timeout
 	}
@@ -269,11 +304,11 @@ func handleReloadSocketCmd(conn net.Conn, payload string, ch chan reloadRequest)
 		return
 	}
 
-	reply, ok := waitFor(req.acceptedCh, remaining())
+	reply, ok := waitFor(req.acceptedCh, controllerReloadAcceptTimeout)
 	if !ok {
 		writeJSONLine(conn, reloadControlReply{
-			Outcome: reloadOutcomeBusy,
-			Message: "Reload request could not be accepted because the controller is busy.",
+			Outcome: reloadOutcomeFailed,
+			Message: "Reload request was handed to the controller but was not acknowledged in time.",
 		})
 		return
 	}
@@ -337,6 +372,41 @@ func writeJSONLine(w net.Conn, v any) {
 // route through the controller.
 func sendControllerCommand(cityPath, command string) ([]byte, error) {
 	return sendControllerCommandWithReadTimeout(cityPath, command, 95*time.Second)
+}
+
+func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout time.Duration) ([]byte, error) {
+	sockPath := controllerSocketPath(cityPath)
+	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	if err != nil {
+		return nil, controllerCommandError{
+			op:          "connecting to controller",
+			err:         fmt.Errorf("%w (is the controller running?)", err),
+			unavailable: true,
+		}
+	}
+	defer conn.Close()                                     //nolint:errcheck
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	conn.SetReadDeadline(time.Now().Add(readTimeout))      //nolint:errcheck
+	if _, err := conn.Write([]byte(command + "\n")); err != nil {
+		return nil, fmt.Errorf("sending command: %w", err)
+	}
+	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, controllerCommandError{
+				op:           "reading response",
+				err:          err,
+				unresponsive: true,
+			}
+		}
+		return nil, controllerCommandError{
+			op:           "reading response",
+			err:          io.ErrUnexpectedEOF,
+			unresponsive: true,
+		}
+	}
+	return []byte(strings.TrimSpace(scanner.Text())), nil
 }
 
 // controllerAlive checks whether a controller is running by connecting
@@ -455,12 +525,44 @@ type reloadResult struct {
 	Warnings []string
 }
 
+type reloadWarningError struct {
+	err      error
+	warnings []string
+}
+
+func (e reloadWarningError) Error() string {
+	return e.err.Error()
+}
+
+func (e reloadWarningError) Unwrap() error {
+	return e.err
+}
+
+func (e reloadWarningError) ReloadWarnings() []string {
+	return append([]string(nil), e.warnings...)
+}
+
+type reloadWarningCarrier interface {
+	ReloadWarnings() []string
+}
+
+const reloadStrictWarningHint = "use --no-strict to disable strict checking"
+
+func reloadWarningsFromError(err error) []string {
+	var carrier reloadWarningCarrier
+	if errors.As(err, &carrier) {
+		return carrier.ReloadWarnings()
+	}
+	return nil
+}
+
 // tryReloadConfig attempts to reload city.toml with includes and patches.
 // Returns the new config, provenance, revision, and non-fatal warnings on
 // success, or an error on failure (parse error, validation error, cityName
-// changed). Callers should keep the old config on error. Strict mode
-// (default) makes composition warnings fatal — use --no-strict to disable.
-func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer) (*reloadResult, error) {
+// changed). Some failures after composition also return warning metadata via
+// the result and error; callers should report those details while keeping the
+// old config. Strict mode (default) makes composition warnings fatal.
+func tryReloadConfig(tomlPath, lockedCityName, cityRoot string) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
 		if fErr := config.FetchPacks(quickCfg.Packs, cityRoot); fErr != nil {
@@ -473,31 +575,49 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
 	applyFeatureFlags(newCfg)
-	if strictMode && len(prov.Warnings) > 0 {
-		for _, w := range prov.Warnings {
-			fmt.Fprintf(stderr, "gc start: strict: %s\n", w) //nolint:errcheck // best-effort stderr
+	reloadWarnings := append([]string(nil), prov.Warnings...)
+	resultWithWarnings := func(warnings []string) *reloadResult {
+		return &reloadResult{
+			Cfg:      newCfg,
+			Prov:     prov,
+			Warnings: append([]string(nil), warnings...),
 		}
-		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
-		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings))
+	}
+	failWithWarnings := func(err error) (*reloadResult, error) {
+		if len(reloadWarnings) == 0 {
+			return nil, err
+		}
+		return resultWithWarnings(reloadWarnings), reloadWarningError{
+			err:      err,
+			warnings: reloadWarnings,
+		}
+	}
+	if strictMode && len(prov.Warnings) > 0 {
+		warnings := append(append([]string(nil), reloadWarnings...), reloadStrictWarningHint)
+		result := resultWithWarnings(warnings)
+		return result, reloadWarningError{
+			err:      fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings)),
+			warnings: warnings,
+		}
 	}
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
-		return nil, fmt.Errorf("validating agents: %w", err)
+		return failWithWarnings(fmt.Errorf("validating agents: %w", err))
 	}
 	if err := config.ValidateServices(newCfg.Services); err != nil {
-		return nil, fmt.Errorf("validating services: %w", err)
+		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
 	if err := workspacesvc.ValidateRuntimeSupport(newCfg.Services); err != nil {
-		return nil, fmt.Errorf("validating services: %w", err)
+		return failWithWarnings(fmt.Errorf("validating services: %w", err))
 	}
 	newName := newCfg.Workspace.Name
 	if newName == "" {
 		newName = filepath.Base(filepath.Dir(tomlPath))
 	}
 	if newName != lockedCityName {
-		return nil, fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedCityName, newName)
+		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedCityName, newName))
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
-	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: prov.Warnings}, nil
+	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
 }
 
 // gracefulStopAll performs two-pass graceful shutdown:

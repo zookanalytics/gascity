@@ -96,6 +96,7 @@ Reload failure is defined at the config-load boundary:
 - parse/load
 - validation
 - `workspace.name` mismatch
+- required bead lifecycle setup for the newly loaded config
 
 If any of those fail, reload returns non-zero and the old live config
 stays active.
@@ -104,10 +105,18 @@ After a config is successfully applied, subsequent runtime-execution
 issues are warnings rather than rollback triggers. Examples include:
 
 - provider swap setup failures
-- rig validation or bead lifecycle refresh errors
+- rig validation errors
 - formula or script resolution errors
 - service reload errors
 - standalone city bead-store refresh errors
+
+An `applied` reply with warnings means the new effective config is live,
+but one or more post-apply runtime updates could not fully converge. For
+example, if a session provider swap fails, the reload may still succeed
+while the old provider remains active. Operators and scripts that need
+to distinguish full convergence from degraded success must inspect the
+`warnings` array in the structured reply or stderr warning lines in the
+CLI projection.
 
 ### Existing Runtime Behavior Preserved
 
@@ -288,8 +297,8 @@ Rules:
   already dirty from watcher activity
 - the resulting reload is still a single reload attempt, not a watcher
   reload followed by a separate manual replay
-- tick trigger stays `poke`; manual reload is distinguished with
-  `trigger_detail="manual_reload"`
+- tick trigger records the actual tick source; manual reload is
+  distinguished with `trigger_detail="manual_reload"`
 
 ### Telemetry
 

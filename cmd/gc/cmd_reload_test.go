@@ -87,7 +87,12 @@ func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
 	})
 
 	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
-		return reloadControlReply{}, errors.New("connecting to controller: dial failed")
+		return reloadControlReply{}, controllerCommandError{
+			op:           "connecting to controller",
+			err:          errors.New("dial failed"),
+			unavailable:  true,
+			unresponsive: false,
+		}
 	}
 	reloadUnavailableMessageHook = func(string) string {
 		return "city failed to start under supervisor: fetching packs: auth denied"
@@ -97,7 +102,38 @@ func TestCmdReloadControllerUnavailableUsesRicherMessage(t *testing.T) {
 	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
 		t.Fatalf("cmdReload = %d, want 1", code)
 	}
-	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied" {
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: city failed to start under supervisor: fetching packs: auth denied: connecting to controller: dial failed" {
+		t.Fatalf("stderr = %q", got)
+	}
+}
+
+func TestCmdReloadControllerUnresponsiveUsesRicherMessage(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-unresponsive-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, controllerCommandError{
+			op:           "reading response",
+			err:          errors.New("i/o timeout"),
+			unresponsive: true,
+		}
+	}
+	reloadUnavailableMessageHook = func(string) string {
+		return "controller is running but not responding"
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "gc reload: controller is running but not responding: reading response: i/o timeout" {
 		t.Fatalf("stderr = %q", got)
 	}
 }
@@ -129,6 +165,41 @@ func TestCmdReloadPreservesProtocolErrors(t *testing.T) {
 	}
 }
 
+func TestCmdReloadFailedReplyPrintsWarnings(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-reload-failed-warnings-")
+	writeCityTOML(t, dir, "test", "mayor")
+
+	oldSend := sendReloadControlRequestHook
+	oldUnavailable := reloadUnavailableMessageHook
+	t.Cleanup(func() {
+		sendReloadControlRequestHook = oldSend
+		reloadUnavailableMessageHook = oldUnavailable
+	})
+
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{
+			Outcome: reloadOutcomeFailed,
+			Warnings: []string{
+				`workspace.install_agent_hooks redefined by "override.toml"`,
+			},
+			Error: "strict mode: 1 collision warning(s)",
+		}, nil
+	}
+	reloadUnavailableMessageHook = func(string) string { return "" }
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdReload([]string{dir}, false, "5s", true, &stdout, &stderr); code != 1 {
+		t.Fatalf("cmdReload = %d, want 1", code)
+	}
+	got := stderr.String()
+	if !strings.Contains(got, `gc reload: warning: workspace.install_agent_hooks redefined by "override.toml"`) {
+		t.Fatalf("stderr = %q, want warning detail", got)
+	}
+	if !strings.Contains(got, "strict mode: 1 collision warning(s)") {
+		t.Fatalf("stderr = %q, want strict error", got)
+	}
+}
+
 func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
@@ -155,6 +226,42 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 	}
 	if reply.Message != "Reload requested." {
 		t.Fatalf("reply.Message = %q", reply.Message)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
+}
+
+func TestHandleReloadSocketCmdAsyncIgnoresInvalidTimeout(t *testing.T) {
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false,"timeout":"bad"}`, reloadReqCh)
+		close(done)
+	}()
+
+	req := <-reloadReqCh
+	if req.wait {
+		t.Fatal("req.wait = true, want false")
+	}
+	if req.timeout != 0 {
+		t.Fatalf("req.timeout = %s, want 0 for async request", req.timeout)
+	}
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
 	}
 
 	client.Close() //nolint:errcheck
@@ -229,6 +336,42 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 	case req := <-reloadReqCh:
 		t.Fatalf("unexpected queued reload request after busy reply: %+v", req)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
+	oldAccept := controllerReloadAcceptTimeout
+	controllerReloadAcceptTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+
+	reloadReqCh := make(chan reloadRequest)
+	done := make(chan struct{})
+	go func() {
+		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
+		close(done)
+	}()
+
+	time.Sleep(180 * time.Millisecond)
+	req := <-reloadReqCh
+	time.Sleep(50 * time.Millisecond)
+	req.acceptedCh <- reloadControlReply{
+		Outcome: reloadOutcomeAccepted,
+		Message: "Reload requested.",
+	}
+
+	reply := readReloadSocketReply(t, client)
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
+	}
+
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
 	}
 }
 
