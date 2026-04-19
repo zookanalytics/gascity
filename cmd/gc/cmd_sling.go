@@ -965,8 +965,7 @@ func decorateGraphWorkflowRecipe(recipe *formula.Recipe, routeVars map[string]st
 			step.Metadata["gc.run_target"] = routedTo
 			continue
 		}
-		switch step.Metadata["gc.kind"] {
-		case "workflow", "scope", "spec":
+		if sling.IsWorkflowTopologyKind(step.Metadata["gc.kind"]) {
 			continue
 		}
 		binding, err := resolveGraphStepBindingWithVars(step.ID, stepByID, stepAlias, depsByStep, bindingCache, resolving, routeVars, defaultRoute, routingRigContext, store, cityName, cityPath, cfg)
