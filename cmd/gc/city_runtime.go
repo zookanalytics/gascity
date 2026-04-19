@@ -575,7 +575,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	result, err := tryReloadConfig(cr.tomlPath, cr.cityName, cityRoot, cr.stderr)
 	if err != nil {
 		fmt.Fprintf(cr.stderr, "%s: config reload: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
-		telemetry.RecordConfigReload(ctx, "", source, reloadOutcomeFailed, len(warnings), err)
+		telemetry.RecordConfigReload(ctx, "", string(source), string(reloadOutcomeFailed), len(warnings), err)
 		if trace != nil {
 			trace.RecordConfigReload("", "", TraceOutcomeFailed, source, nil, nil, false, warnings, err)
 		}
@@ -584,11 +584,14 @@ func (cr *CityRuntime) reloadConfigTraced(
 			Error:   err.Error(),
 		}
 	}
+	for _, warning := range result.Warnings {
+		appendWarning(warning)
+	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
 		if trace != nil {
 			trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeNoChange, source, nil, nil, false, warnings, nil)
 		}
-		telemetry.RecordConfigReload(ctx, result.Revision, source, reloadOutcomeNoChange, len(warnings), nil)
+		telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeNoChange), len(warnings), nil)
 		return reloadControlReply{
 			Outcome:  reloadOutcomeNoChange,
 			Message:  "No config changes detected.",
@@ -762,7 +765,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		configReloadSummary(oldAgentCount, oldRigCount, len(nextCfg.Agents), len(nextCfg.Rigs)),
 		shortRev(result.Revision))
 	fmt.Fprintln(cr.stdout, message) //nolint:errcheck // best-effort stdout
-	telemetry.RecordConfigReload(ctx, result.Revision, source, reloadOutcomeApplied, len(warnings), nil)
+	telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeApplied), len(warnings), nil)
 	if trace != nil {
 		trace.RecordConfigReload(oldRevision, result.Revision, TraceOutcomeApplied, source, nil, nil, providerChanged, warnings, nil)
 	}

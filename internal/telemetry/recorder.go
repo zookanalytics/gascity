@@ -6,7 +6,6 @@ package telemetry
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -309,21 +308,21 @@ func RecordNudge(ctx context.Context, target string, err error) {
 }
 
 // RecordConfigReload records a config reload attempt (metrics + log event).
-func RecordConfigReload(ctx context.Context, revision string, source any, outcome any, warningCount int, err error) {
+func RecordConfigReload(ctx context.Context, revision, source, outcome string, warningCount int, err error) {
 	initInstruments()
 	status := statusStr(err)
 	inst.configReloadTotal.Add(ctx, 1,
 		metric.WithAttributes(
 			attribute.String("status", status),
-			attribute.String("source", fmt.Sprint(source)),
-			attribute.String("outcome", fmt.Sprint(outcome)),
+			attribute.String("source", source),
+			attribute.String("outcome", outcome),
 		),
 	)
 	emit(ctx, "config.reload", severity(err),
 		otellog.String("revision", revision),
 		otellog.String("status", status),
-		otellog.String("source", fmt.Sprint(source)),
-		otellog.String("outcome", fmt.Sprint(outcome)),
+		otellog.String("source", source),
+		otellog.String("outcome", outcome),
 		otellog.Int("warning_count", warningCount),
 		errKV(err),
 	)

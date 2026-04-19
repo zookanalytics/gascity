@@ -452,13 +452,14 @@ type reloadResult struct {
 	Cfg      *config.City
 	Prov     *config.Provenance
 	Revision string
+	Warnings []string
 }
 
 // tryReloadConfig attempts to reload city.toml with includes and patches.
-// Returns the new config, provenance, and revision on success, or an error
-// on failure (parse error, validation error, cityName changed). Callers
-// should keep the old config on error. Warnings are written to stderr;
-// strict mode (default) makes them fatal — use --no-strict to disable.
+// Returns the new config, provenance, revision, and non-fatal warnings on
+// success, or an error on failure (parse error, validation error, cityName
+// changed). Callers should keep the old config on error. Strict mode
+// (default) makes composition warnings fatal — use --no-strict to disable.
 func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer) (*reloadResult, error) {
 	// Auto-fetch remote packs before full config load (mirrors cmd_start).
 	if quickCfg, qErr := config.Load(fsys.OSFS{}, tomlPath); qErr == nil && len(quickCfg.Packs) > 0 {
@@ -479,9 +480,6 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		fmt.Fprintln(stderr, "gc start: use --no-strict to disable strict checking") //nolint:errcheck // best-effort stderr
 		return nil, fmt.Errorf("strict mode: %d collision warning(s)", len(prov.Warnings))
 	}
-	for _, w := range prov.Warnings {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
-	}
 	if err := config.ValidateAgents(newCfg.Agents); err != nil {
 		return nil, fmt.Errorf("validating agents: %w", err)
 	}
@@ -499,7 +497,7 @@ func tryReloadConfig(tomlPath, lockedCityName, cityRoot string, stderr io.Writer
 		return nil, fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedCityName, newName)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
-	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev}, nil
+	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: prov.Warnings}, nil
 }
 
 // gracefulStopAll performs two-pass graceful shutdown:
