@@ -589,11 +589,16 @@ func reconcileSessionBeadsTraced(
 							// tmux-attached, or recent activity). This prevents
 							// draining a working agent mid-task without graceful
 							// handoff. See gastownhall/gascity#119.
-							if namedSessionActivelyInUse(*session, sp, name, clk) {
+							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, store, sp, name, clk, storedHash+":"+currentHash)
+							if deferErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
+							}
+							if active {
 								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_active", traceRecordPayload{
-										"stored_hash":  storedHash,
-										"current_hash": currentHash,
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), traceRecordPayload{
+										"stored_hash":   storedHash,
+										"current_hash":  currentHash,
+										"active_reason": activeReason,
 									}, nil, "")
 								}
 								continue
@@ -658,6 +663,12 @@ func reconcileSessionBeadsTraced(
 							Message: "config drift detected",
 						})
 						continue
+					}
+
+					if isNamedSessionBead(*session) {
+						if err := clearNamedSessionConfigDriftDeferral(*session, store); err != nil {
+							fmt.Fprintf(stderr, "session reconciler: clearing config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+						}
 					}
 
 					// Core config matches — check live-only drift.
@@ -1043,41 +1054,115 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 	return false, nil
 }
 
-// namedSessionActivityThreshold is the maximum age of the last activity
-// timestamp for a named session to be considered "actively in use" for
-// config-drift deferral. Sessions with activity more recent than this
-// threshold will not be drained for config-drift.
+// namedSessionActivityThreshold is the maximum age of the last reliable activity
+// reference for a named session to be considered "actively in use" for
+// config-drift deferral.
 const namedSessionActivityThreshold = 2 * time.Minute
+const namedSessionConfigDriftDeferredAtMetadata = "config_drift_deferred_at"
+const namedSessionConfigDriftDeferredKeyMetadata = "config_drift_deferred_key"
 
 // namedSessionActivelyInUse returns true if a named session is currently
 // in active use and should not be immediately drained for config-drift.
-// It checks three signals beyond tmux attachment:
+// It checks three positive-use signals:
 //  1. A pending interaction (user waiting for response)
 //  2. Tmux session attachment
-//  3. Recent activity within the activity threshold
+//  3. A recent reliable activity timestamp within the activity threshold
 //
-// This prevents config-drift from killing a working agent mid-task.
+// If the provider cannot report activity, the function is conservative and
+// treats the live named session as active because config-drift cannot prove the
+// session is idle.
 func namedSessionActivelyInUse(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) bool {
+	_, active := namedSessionActiveUseReason(session, sp, name, clk)
+	return active
+}
+
+func shouldDeferNamedSessionConfigDrift(session beads.Bead, store beads.Store, sp runtime.Provider, name string, clk clock.Clock, driftKey string) (string, bool, error) {
+	reason, active := namedSessionActiveUseReason(session, sp, name, clk)
+	if !active {
+		return "", false, nil
+	}
+	if reason != "activity_unknown" || clk == nil {
+		return reason, true, nil
+	}
+
+	now := clk.Now().UTC()
+	if session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] != driftKey {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	raw := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]
+	if raw == "" {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	deferredAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		if err := recordNamedSessionConfigDriftDeferredAt(session, store, now, driftKey); err != nil {
+			return "", false, err
+		}
+		return reason, true, nil
+	}
+	if now.Sub(deferredAt) < namedSessionActivityThreshold {
+		return reason, true, nil
+	}
+	return "", false, nil
+}
+
+func recordNamedSessionConfigDriftDeferredAt(session beads.Bead, store beads.Store, t time.Time, driftKey string) error {
+	if store == nil || session.ID == "" {
+		return nil
+	}
+	return store.SetMetadataBatch(session.ID, map[string]string{
+		namedSessionConfigDriftDeferredAtMetadata:  t.UTC().Format(time.RFC3339),
+		namedSessionConfigDriftDeferredKeyMetadata: driftKey,
+	})
+}
+
+func clearNamedSessionConfigDriftDeferral(session beads.Bead, store beads.Store) error {
+	if store == nil || session.ID == "" {
+		return nil
+	}
+	if session.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" &&
+		session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		return nil
+	}
+	return store.SetMetadataBatch(session.ID, map[string]string{
+		namedSessionConfigDriftDeferredAtMetadata:  "",
+		namedSessionConfigDriftDeferredKeyMetadata: "",
+	})
+}
+
+func namedSessionActiveUseReason(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
 	if sp == nil || name == "" {
-		return false
+		return "", false
 	}
 	// Pending interaction means a user is actively waiting.
 	if pendingInteractionKeepsAwake(session, sp, name, clk) {
-		return true
+		return "pending_interaction", true
 	}
 	// Tmux attachment means a user is watching.
 	if sp.IsAttached(name) {
-		return true
+		return "attached", true
 	}
-	// Recent activity means the agent is actively working.
+	// Providers that cannot report activity for this routed session cannot
+	// prove a live named session is idle. Defer config-drift rather than
+	// stopping a potentially working headless agent mid-task.
+	sleepCapability := resolveSleepCapability(sp, name)
+	if sleepCapability == runtime.SessionSleepCapabilityDisabled ||
+		(sleepCapability == runtime.SessionSleepCapabilityTimedOnly && !sp.Capabilities().CanReportActivity) {
+		return "activity_unknown", true
+	}
+	// Recent activity means the agent may still be in active use.
 	if clk != nil {
-		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() {
-			if clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
-				return true
-			}
+		if lastActivity, err := sp.GetLastActivity(name); err == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) < namedSessionActivityThreshold {
+			return "recent_activity", true
 		}
 	}
-	return false
+	return "", false
 }
 
 func resetConfiguredNamedSessionForConfigDrift(
@@ -1105,6 +1190,8 @@ func resetConfiguredNamedSessionForConfigDrift(
 		newSessionKey = newKey
 	}
 	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
+	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
+	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return

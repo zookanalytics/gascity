@@ -12,6 +12,20 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
+type capabilityOverrideProvider struct {
+	runtime.Provider
+	caps     runtime.ProviderCapabilities
+	sleepCap runtime.SessionSleepCapability
+}
+
+func (p capabilityOverrideProvider) Capabilities() runtime.ProviderCapabilities {
+	return p.caps
+}
+
+func (p capabilityOverrideProvider) SleepCapability(string) runtime.SessionSleepCapability {
+	return p.sleepCap
+}
+
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
 // - Resume vs fresh rematerialization
 // - Reconciler Contract / duplicate canonical repair
@@ -184,7 +198,7 @@ func TestPhase0ConfigDrift_NamedSessionDefersWhenRecentActivity(t *testing.T) {
 		t.Fatalf("Start(old runtime): %v", err)
 	}
 	// NOT attached, but has recent activity (30 seconds ago).
-	env.sp.SetActivity(sessionName, env.clk.Now().Add(-30 * time.Second))
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-30*time.Second))
 
 	session := env.createSessionBead(sessionName, "worker")
 	env.markSessionActive(&session)
@@ -242,7 +256,7 @@ func TestPhase0ConfigDrift_NamedSessionDrainsWhenStaleActivity(t *testing.T) {
 		t.Fatalf("Start(old runtime): %v", err)
 	}
 	// NOT attached, activity is 5 minutes old (beyond 2-minute threshold).
-	env.sp.SetActivity(sessionName, env.clk.Now().Add(-5 * time.Minute))
+	env.sp.SetActivity(sessionName, env.clk.Now().Add(-5*time.Minute))
 
 	session := env.createSessionBead(sessionName, "worker")
 	env.markSessionActive(&session)
@@ -291,15 +305,42 @@ func TestNamedSessionActivelyInUse(t *testing.T) {
 	sp.SetAttached(name, false)
 
 	// Recent activity -> active.
-	sp.SetActivity(name, clk.Now().Add(-30 * time.Second))
+	sp.SetActivity(name, clk.Now().Add(-30*time.Second))
 	if !namedSessionActivelyInUse(session, sp, name, clk) {
 		t.Error("expected active with recent activity (30s ago)")
 	}
 
 	// Stale activity -> not active.
-	sp.SetActivity(name, clk.Now().Add(-5 * time.Minute))
+	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
 	if namedSessionActivelyInUse(session, sp, name, clk) {
 		t.Error("expected not active with stale activity (5m ago)")
+	}
+
+	// Unknown provider activity is conservative: an alive named session is
+	// treated as active because config-drift cannot prove it is idle.
+	unknownActivity := capabilityOverrideProvider{Provider: sp}
+	if !namedSessionActivelyInUse(session, unknownActivity, name, clk) {
+		t.Error("expected active when provider cannot report activity")
+	}
+
+	// Routed providers can have conservative global capabilities while the
+	// specific session backend still reports enough idle data. Honor the
+	// routed sleep capability rather than the global capability intersection.
+	routedActivity := capabilityOverrideProvider{
+		Provider: sp,
+		sleepCap: runtime.SessionSleepCapabilityFull,
+	}
+	sp.SetActivity(name, clk.Now().Add(-5*time.Minute))
+	if namedSessionActivelyInUse(session, routedActivity, name, clk) {
+		t.Error("expected not active when routed backend reports stale activity")
+	}
+
+	timedOnlyUnknownActivity := capabilityOverrideProvider{
+		Provider: sp,
+		sleepCap: runtime.SessionSleepCapabilityTimedOnly,
+	}
+	if !namedSessionActivelyInUse(session, timedOnlyUnknownActivity, name, clk) {
+		t.Error("expected active when timed-only backend cannot report activity")
 	}
 
 	// Nil provider -> not active.
@@ -310,6 +351,112 @@ func TestNamedSessionActivelyInUse(t *testing.T) {
 	// Empty name -> not active.
 	if namedSessionActivelyInUse(session, sp, "", clk) {
 		t.Error("expected not active with empty name")
+	}
+}
+
+func TestShouldDeferNamedSessionConfigDriftBoundsUnknownActivity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "test-session"
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "test"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := capabilityOverrideProvider{Provider: sp}
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: name,
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": name,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	reason, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift: %v", err)
+	}
+	if !deferDrift {
+		t.Fatal("expected initial unknown-activity config drift to defer")
+	}
+	if reason != "activity_unknown" {
+		t.Fatalf("reason = %q, want activity_unknown", reason)
+	}
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]; got == "" {
+		t.Fatal("config drift deferred timestamp was not recorded")
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "drift-1" {
+		t.Fatalf("config drift deferred key = %q, want drift-1", got)
+	}
+
+	clk.Time = clk.Now().Add(namedSessionActivityThreshold + time.Second)
+	_, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-1")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift after threshold: %v", err)
+	}
+	if deferDrift {
+		t.Fatal("expected unknown-activity config drift to stop deferring after threshold")
+	}
+
+	reason, deferDrift, err = shouldDeferNamedSessionConfigDrift(session, store, provider, name, clk, "drift-2")
+	if err != nil {
+		t.Fatalf("shouldDeferNamedSessionConfigDrift new drift: %v", err)
+	}
+	if !deferDrift {
+		t.Fatal("expected new config drift episode to get a fresh unknown-activity deferral")
+	}
+	if reason != "activity_unknown" {
+		t.Fatalf("new drift reason = %q, want activity_unknown", reason)
+	}
+
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after new drift: %v", err)
+	}
+	if err := clearNamedSessionConfigDriftDeferral(session, store); err != nil {
+		t.Fatalf("clearNamedSessionConfigDriftDeferral: %v", err)
+	}
+	session, err = store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get session bead after clear: %v", err)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredAtMetadata]; got != "" {
+		t.Fatalf("deferred timestamp after clear = %q, want empty", got)
+	}
+	if got := session.Metadata[namedSessionConfigDriftDeferredKeyMetadata]; got != "" {
+		t.Fatalf("deferred key after clear = %q, want empty", got)
+	}
+}
+
+func TestShouldDeferNamedSessionConfigDriftDoesNotDeferWhenMarkerWriteFails(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	name := "test-session"
+	if err := sp.Start(context.Background(), name, runtime.Config{Command: "test"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	provider := capabilityOverrideProvider{Provider: sp}
+	session := beads.Bead{
+		ID:    "missing",
+		Title: name,
+		Type:  sessionBeadType,
+		Metadata: map[string]string{
+			"session_name": name,
+		},
+	}
+
+	_, deferDrift, err := shouldDeferNamedSessionConfigDrift(session, beads.NewMemStore(), provider, name, clk, "drift-1")
+	if err == nil {
+		t.Fatal("expected marker write error")
+	}
+	if deferDrift {
+		t.Fatal("expected config drift not to defer when marker write fails")
 	}
 }
 
@@ -330,6 +477,9 @@ func TestPoolSessionConfigDriftNotAffectedByActiveGuard(t *testing.T) {
 	})
 	// Attach the session -- pool sessions should still defer via existing guard.
 	env.sp.SetAttached("worker", true)
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("pool session test setup did not start the runtime")
+	}
 
 	env.reconcile([]beads.Bead{session})
 

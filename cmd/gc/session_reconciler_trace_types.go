@@ -636,6 +636,7 @@ func normalizeTraceOutcomeCode(raw string) (TraceOutcomeCode, string) {
 		TraceOutcomeClosed,
 		TraceOutcomeRollback,
 		TraceOutcomeDeferredAttached,
+		TraceOutcomeDeferredActive,
 		TraceOutcomeStop,
 		TraceOutcomeStartCandidate,
 		TraceOutcomeRetry,
