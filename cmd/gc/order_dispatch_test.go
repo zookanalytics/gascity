@@ -601,6 +601,7 @@ func TestOrderDispatchExecRigUsesScopedWorkdirAndStoreEnv(t *testing.T) {
 	checks := map[string]string{
 		"GC_CITY":         cityDir,
 		"GC_CITY_PATH":    cityDir,
+		"BEADS_DIR":       filepath.Join(rigDir, ".beads"),
 		"GC_STORE_ROOT":   rigDir,
 		"GC_STORE_SCOPE":  "rig",
 		"GC_BEADS_PREFIX": "fe",
@@ -1125,9 +1126,15 @@ func buildOrderDispatcherFromList(aa []orders.Order, store beads.Store, ep event
 // buildOrderDispatcherFromListExec builds a dispatcher with exec runner support.
 func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep events.Provider, execRun ExecRunner, rec events.Recorder) orderDispatcher {
 	var auto []orders.Order
+	cfg := &config.City{}
+	seenRigs := make(map[string]bool)
 	for _, a := range aa {
 		if a.Gate != "manual" {
 			auto = append(auto, a)
+		}
+		if a.Rig != "" && !seenRigs[a.Rig] {
+			cfg.Rigs = append(cfg.Rigs, config.Rig{Name: a.Rig, Path: a.Rig})
+			seenRigs[a.Rig] = true
 		}
 	}
 	if len(auto) == 0 {
@@ -1141,13 +1148,14 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 	}
 	return &memoryOrderDispatcher{
 		aa: auto,
-		storeFn: func() (beads.Store, error) {
+		storeFn: func(_ execStoreTarget) (beads.Store, error) {
 			return store, nil
 		},
 		ep:      ep,
 		execRun: execRun,
 		rec:     rec,
 		stderr:  &bytes.Buffer{},
+		cfg:     cfg,
 	}
 }
 
@@ -1372,6 +1380,83 @@ pool = "worker"
 	work := workBeadByOrderLabel(t, store, "order-run:file-order")
 	if work.Metadata["gc.routed_to"] != "worker" {
 		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "worker")
+	}
+}
+
+func TestBuildOrderDispatcherRigOrderUsesRigFileStore(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	cityLayer := filepath.Join(cityDir, "formulas")
+	rigLayer := filepath.Join(rigDir, "formulas")
+	orderDir := filepath.Join(rigDir, "orders", "rig-digest")
+	for _, dir := range []string{cityLayer, rigLayer, orderDir} {
+		if err := mkdirAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(orderDir, "order.toml"), `[order]
+formula = "test-formula"
+gate = "cooldown"
+interval = "1m"
+pool = "worker"
+`)
+	formulaText, err := os.ReadFile(filepath.Join(sharedTestFormulaDir, "test-formula.formula.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(test-formula): %v", err)
+	}
+	writeFile(t, filepath.Join(rigLayer, "test-formula.formula.toml"), string(formulaText))
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo", Prefix: "ct"},
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, rigLayer},
+			},
+		},
+		Rigs: []config.Rig{{
+			Name:   "frontend",
+			Path:   "frontend",
+			Prefix: "fe",
+		}},
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("expected non-nil dispatcher; stderr: %s", stderr.String())
+	}
+
+	ad.dispatch(context.Background(), cityDir, time.Now())
+	time.Sleep(100 * time.Millisecond)
+
+	cityStore, err := openStoreAtForCity(cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(city): %v", err)
+	}
+	cityRuns := trackingBeads(t, cityStore, "order-run:rig-digest:rig:frontend")
+	if len(cityRuns) != 0 {
+		t.Fatalf("city store has %d rig order bead(s), want 0", len(cityRuns))
+	}
+
+	rigStore, err := openStoreAtForCity(rigDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(rig): %v", err)
+	}
+	work := workBeadByOrderLabel(t, rigStore, "order-run:rig-digest:rig:frontend")
+	if work.Metadata["gc.routed_to"] != "frontend/worker" {
+		t.Errorf("gc.routed_to = %q, want %q", work.Metadata["gc.routed_to"], "frontend/worker")
 	}
 }
 

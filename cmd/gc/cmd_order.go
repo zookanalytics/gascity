@@ -157,17 +157,23 @@ name. Use --rig to filter by rig.`,
 // loadOrders is the common preamble for order commands: resolve city,
 // load config, scan formula layers for all orders (city + rig).
 func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
+	_, _, aa, code := loadOrdersWithCity(stderr, cmdName)
+	return aa, code
+}
+
+func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return "", nil, nil, 1
 	}
 	cfg, err := loadCityConfig(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
-		return nil, 1
+		return "", nil, nil, 1
 	}
-	return loadAllOrders(cityPath, cfg, stderr, cmdName)
+	aa, code := loadAllOrders(cityPath, cfg, stderr, cmdName)
+	return cityPath, cfg, aa, code
 }
 
 // loadAllOrders scans city layers + per-rig exclusive layers for orders.
@@ -413,15 +419,25 @@ func openCityOrderStore(stderr io.Writer, cmdName string) (beads.Store, int) {
 	return store, 0
 }
 
+func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, stderr io.Writer, cmdName string) (beads.Store, int) {
+	target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "hint: run \"gc doctor\" for diagnostics") //nolint:errcheck // best-effort stderr
+		return nil, 1
+	}
+	return store, 0
+}
+
 func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order run")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order run")
 	if code != 0 {
 		return code
-	}
-	cityPath, err := resolveCity()
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 	a, ok := findOrder(aa, name, rig)
 	if !ok {
@@ -429,14 +445,9 @@ func cmdOrderRun(name, rig string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	if a.IsExec() {
-		cfg, cfgErr := loadCityConfig(cityPath)
-		if cfgErr != nil {
-			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
-	store, storeCode := openCityOrderStore(stderr, "gc order run")
+	store, storeCode := openOrderStoreForOrder(cityPath, cfg, a, stderr, "gc order run")
 	if store == nil {
 		return storeCode
 	}
@@ -554,7 +565,7 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	env := orderExecEnv(cityPath, target, a)
+	env := orderExecEnv(cityPath, cfg, target, a)
 
 	output, err := shellExecRunner(ctx, a.Exec, target.ScopeRoot, env)
 	if err != nil {
@@ -574,24 +585,17 @@ func doOrderRunExec(a orders.Order, cityPath string, cfg *config.City, stdout, s
 // --- gc order check ---
 
 func cmdOrderCheck(stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order check")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order check")
 	if code != 0 {
 		return code
 	}
-
-	store, storeCode := openCityOrderStore(stderr, "gc order check")
-	if store == nil {
-		return storeCode
-	}
-	lastRunFn := orderLastRunFn(store)
-	cursorFn := bdCursorFunc(store)
 
 	ep, epCode := openCityEventsProvider(stderr, "gc order check")
 	if ep == nil {
 		return epCode
 	}
 	defer ep.Close() //nolint:errcheck // best-effort
-	return doOrderCheck(aa, time.Now(), lastRunFn, ep, cursorFn, stdout)
+	return doOrderCheckWithStoreResolver(aa, time.Now(), ep, cachedOrderStoreResolver(cityPath, cfg), stdout, stderr)
 }
 
 // orderLastRunFn returns a LastRunFunc that queries BdStore for the most
@@ -654,24 +658,90 @@ func doOrderCheck(aa []orders.Order, now time.Time, lastRunFn orders.LastRunFunc
 	return 1
 }
 
+type orderStoreResolver func(orders.Order) (beads.Store, error)
+
+func cachedOrderStoreResolver(cityPath string, cfg *config.City) orderStoreResolver {
+	stores := make(map[string]beads.Store)
+	return func(a orders.Order) (beads.Store, error) {
+		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
+		if err != nil {
+			return nil, err
+		}
+		key := orderStoreTargetKey(target)
+		if store, ok := stores[key]; ok {
+			return store, nil
+		}
+		store, err := openStoreAtForCity(target.ScopeRoot, cityPath)
+		if err != nil {
+			return nil, err
+		}
+		stores[key] = store
+		return store, nil
+	}
+}
+
+func doOrderCheckWithStoreResolver(aa []orders.Order, now time.Time, ep events.Provider, resolveStore orderStoreResolver, stdout, stderr io.Writer) int {
+	if len(aa) == 0 {
+		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
+		return 1
+	}
+
+	hasRig := anyOrderHasRig(aa)
+	if hasRig {
+		fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", "NAME", "GATE", "RIG", "DUE", "REASON") //nolint:errcheck
+	} else {
+		fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", "NAME", "GATE", "DUE", "REASON") //nolint:errcheck
+	}
+	anyDue := false
+	for _, a := range aa {
+		store, err := resolveStore(a)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		result := orders.CheckGate(a, now, orderLastRunFn(store), ep, bdCursorFunc(store))
+		due := "no"
+		if result.Due {
+			due = "yes"
+			anyDue = true
+		}
+		if hasRig {
+			rig := a.Rig
+			if rig == "" {
+				rig = "-"
+			}
+			fmt.Fprintf(stdout, "%-20s %-12s %-15s %-5s %s\n", a.Name, a.Gate, rig, due, result.Reason) //nolint:errcheck
+		} else {
+			fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Gate, due, result.Reason) //nolint:errcheck
+		}
+	}
+
+	if anyDue {
+		return 0
+	}
+	return 1
+}
+
 // --- gc order history ---
 
 func cmdOrderHistory(name, rig string, stdout, stderr io.Writer) int {
-	aa, code := loadOrders(stderr, "gc order history")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order history")
 	if code != 0 {
 		return code
 	}
-	store, storeCode := openCityOrderStore(stderr, "gc order history")
-	if store == nil {
-		return storeCode
-	}
-	return doOrderHistory(name, rig, aa, store, stdout)
+	return doOrderHistoryWithStoreResolver(name, rig, aa, cachedOrderStoreResolver(cityPath, cfg), stdout, stderr)
 }
 
 // doOrderHistory queries bead history for order runs and prints a table.
 // When name is empty, shows history for all orders. When name is given,
 // filters to that order only. When rig is non-empty, also filters by rig.
 func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdout io.Writer) int {
+	return doOrderHistoryWithStoreResolver(name, rig, aa, func(orders.Order) (beads.Store, error) {
+		return store, nil
+	}, stdout, io.Discard)
+}
+
+func doOrderHistoryWithStoreResolver(name, rig string, aa []orders.Order, resolveStore orderStoreResolver, stdout, stderr io.Writer) int {
 	// Filter orders if name or rig specified.
 	targets := aa
 	if name != "" || rig != "" {
@@ -696,6 +766,11 @@ func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdo
 	var entries []historyEntry
 
 	for _, a := range targets {
+		store, err := resolveStore(a)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		label := "order-run:" + a.ScopedName()
 		results, err := store.List(beads.ListQuery{
 			Label:         label,
@@ -703,7 +778,8 @@ func doOrderHistory(name, rig string, aa []orders.Order, store beads.Store, stdo
 			Sort:          beads.SortCreatedDesc,
 		})
 		if err != nil {
-			continue
+			fmt.Fprintf(stderr, "gc order history: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		for _, b := range results {
 			entries = append(entries, historyEntry{

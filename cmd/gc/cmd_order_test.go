@@ -521,6 +521,40 @@ func TestOrderCheckWithLastRun(t *testing.T) {
 	}
 }
 
+func TestOrderCheckWithStoreResolverUsesRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:  "recent rig run",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:     "digest",
+		Rig:      "frontend",
+		Gate:     "cooldown",
+		Interval: "24h",
+		Formula:  "mol-digest",
+	}}
+	resolver := func(a orders.Order) (beads.Store, error) {
+		if a.Rig == "frontend" {
+			return rigStore, nil
+		}
+		return cityStore, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderCheckWithStoreResolver(aa, time.Now().Add(time.Second), nil, resolver, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderCheckWithStoreResolver = %d, want 1 (rig cooldown active); stderr: %s; stdout: %s", code, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "no") {
+		t.Fatalf("stdout missing not-due row:\n%s", stdout.String())
+	}
+}
+
 // --- gc order run ---
 
 func TestOrderRun(t *testing.T) {
@@ -692,7 +726,7 @@ prefix = "fe"
 		Rig:      "frontend",
 		Gate:     "cooldown",
 		Interval: "1m",
-		Exec:     fmt.Sprintf(`pwd > %q && printf '%%s\n%%s\n%%s\n%%s\n%%s\n' "$GC_STORE_ROOT" "$GC_STORE_SCOPE" "$GC_BEADS_PREFIX" "$GC_RIG" "$GC_RIG_ROOT" >> %q`, outPath, outPath),
+		Exec:     fmt.Sprintf(`pwd > %q && printf '%%s\n%%s\n%%s\n%%s\n%%s\n%%s\n' "$BEADS_DIR" "$GC_STORE_ROOT" "$GC_STORE_SCOPE" "$GC_BEADS_PREFIX" "$GC_RIG" "$GC_RIG_ROOT" >> %q`, outPath, outPath),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -705,26 +739,29 @@ prefix = "fe"
 		t.Fatalf("ReadFile(exec-env): %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 6 {
-		t.Fatalf("exec env lines = %d, want 6 (%q)", len(lines), string(data))
+	if len(lines) != 7 {
+		t.Fatalf("exec env lines = %d, want 7 (%q)", len(lines), string(data))
 	}
 	if lines[0] != rigDir {
 		t.Fatalf("pwd = %q, want %q", lines[0], rigDir)
 	}
-	if lines[1] != rigDir {
-		t.Fatalf("GC_STORE_ROOT = %q, want %q", lines[1], rigDir)
+	if lines[1] != filepath.Join(rigDir, ".beads") {
+		t.Fatalf("BEADS_DIR = %q, want %q", lines[1], filepath.Join(rigDir, ".beads"))
 	}
-	if lines[2] != "rig" {
-		t.Fatalf("GC_STORE_SCOPE = %q, want rig", lines[2])
+	if lines[2] != rigDir {
+		t.Fatalf("GC_STORE_ROOT = %q, want %q", lines[2], rigDir)
 	}
-	if lines[3] != "fe" {
-		t.Fatalf("GC_BEADS_PREFIX = %q, want fe", lines[3])
+	if lines[3] != "rig" {
+		t.Fatalf("GC_STORE_SCOPE = %q, want rig", lines[3])
 	}
-	if lines[4] != "frontend" {
-		t.Fatalf("GC_RIG = %q, want frontend", lines[4])
+	if lines[4] != "fe" {
+		t.Fatalf("GC_BEADS_PREFIX = %q, want fe", lines[4])
 	}
-	if lines[5] != rigDir {
-		t.Fatalf("GC_RIG_ROOT = %q, want %q", lines[5], rigDir)
+	if lines[5] != "frontend" {
+		t.Fatalf("GC_RIG = %q, want frontend", lines[5])
+	}
+	if lines[6] != rigDir {
+		t.Fatalf("GC_RIG_ROOT = %q, want %q", lines[6], rigDir)
 	}
 }
 
@@ -823,6 +860,43 @@ func TestOrderHistoryEmpty(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "No order history") {
 		t.Errorf("stdout = %q, want 'No order history'", stdout.String())
+	}
+}
+
+func TestOrderHistoryWithStoreResolverUsesRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	run, err := rigStore.Create(beads.Bead{
+		Title:  "rig digest",
+		Labels: []string{"order-run:digest:rig:frontend"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	aa := []orders.Order{{
+		Name:    "digest",
+		Rig:     "frontend",
+		Formula: "mol-digest",
+	}}
+	resolver := func(a orders.Order) (beads.Store, error) {
+		if a.Rig == "frontend" {
+			return rigStore, nil
+		}
+		return cityStore, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderHistoryWithStoreResolver("", "", aa, resolver, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderHistoryWithStoreResolver = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, run.ID) {
+		t.Fatalf("stdout missing rig run %q:\n%s", run.ID, out)
+	}
+	if !strings.Contains(out, "frontend") {
+		t.Fatalf("stdout missing rig name:\n%s", out)
 	}
 }
 
