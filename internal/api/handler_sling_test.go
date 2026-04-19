@@ -195,14 +195,33 @@ func TestSlingPoolTarget(t *testing.T) {
 }
 
 func TestSlingConflictReturns409ForExistingLiveWorkflow(t *testing.T) {
-	// Upstream-added test that expects the pre-Huma handleSling handler
-	// behavior. The Huma migration moved sling to /v0/city/{cityName}/sling
-	// and changed how FormulaV2 feature-flag state reaches the handler.
-	// This test needs reworking for the new Huma wiring; skipped for now
-	// as an upstream-only regression, separate from the migration.
-	t.Skip("upstream-added test; needs rework for Huma migration sling routing")
+	// The Huma migration moved sling to /v0/city/{cityName}/sling and
+	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`
+	// error body with RFC 9457 Problem Details. The source-workflow
+	// conflict response now rides in the Problem Details `errors[]`
+	// extensions (keyed by location so consumers can look them up
+	// without format drift) instead of at the top level.
+	//
+	// FormulaV2 flag flow:
+	//   1. newSlingTestServer → New() → syncFeatureFlags(state.cfg) sets the
+	//      package-global `formula.IsFormulaV2Enabled` flag based on config,
+	//      which is default-false out of newFakeMutatorState.
+	//   2. We then set state.cfg.Daemon.FormulaV2 = true for reads that go
+	//      through config (handler-level checks).
+	//   3. The global flag is what formula compile calls, so we call
+	//      formula.SetFormulaV2Enabled(true) AFTER newSlingTestServer so
+	//      New()'s syncFeatureFlags doesn't stomp it back to false.
+	prevFormulaV2 := formula.IsFormulaV2Enabled()
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	t.Cleanup(func() {
+		formula.SetFormulaV2Enabled(prevFormulaV2)
+		molecule.SetGraphApplyEnabled(prevGraphApply)
+	})
+
 	srv, state := newSlingTestServer(t)
 	state.cfg.Daemon.FormulaV2 = true
+	formula.SetFormulaV2Enabled(true)
+	molecule.SetGraphApplyEnabled(true)
 	formulaDir := t.TempDir()
 	state.cfg.FormulaLayers.City = []string{formulaDir}
 	state.cfg.Agents = append(state.cfg.Agents,
@@ -245,21 +264,40 @@ title = "Do work"
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
-	var resp map[string]any
+
+	// Problem Details body: {title, status, detail, errors: [{location, value}, ...]}.
+	var resp struct {
+		Title  string `json:"title"`
+		Status int    `json:"status"`
+		Detail string `json:"detail"`
+		Errors []struct {
+			Location string `json:"location"`
+			Value    any    `json:"value"`
+		} `json:"errors"`
+	}
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got := resp["code"]; got != "conflict" {
-		t.Fatalf("code = %#v, want conflict", got)
+	if resp.Status != http.StatusConflict {
+		t.Fatalf("status field = %d, want 409", resp.Status)
 	}
-	if got := resp["source_bead_id"]; got != source.ID {
-		t.Fatalf("source_bead_id = %#v, want %s", got, source.ID)
+
+	// Build a location -> value lookup so assertions don't depend on
+	// the errors[] array order.
+	got := map[string]any{}
+	for _, e := range resp.Errors {
+		got[e.Location] = e.Value
 	}
-	ids, ok := resp["blocking_workflow_ids"].([]any)
+
+	if got["body.source_bead_id"] != source.ID {
+		t.Fatalf("source_bead_id = %#v, want %s", got["body.source_bead_id"], source.ID)
+	}
+	ids, ok := got["body.blocking_workflow_ids"].([]any)
 	if !ok || len(ids) != 1 || ids[0] != root.ID {
-		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", resp["blocking_workflow_ids"], root.ID)
+		t.Fatalf("blocking_workflow_ids = %#v, want [%s]", got["body.blocking_workflow_ids"], root.ID)
 	}
-	if hint, _ := resp["hint"].(string); !strings.Contains(hint, "--store-ref rig:myrig --apply") {
+	hint, _ := got["body.hint"].(string)
+	if !strings.Contains(hint, "--store-ref rig:myrig --apply") {
 		t.Fatalf("hint = %q, want store-ref cleanup command", hint)
 	}
 }

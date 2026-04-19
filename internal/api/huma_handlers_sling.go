@@ -89,10 +89,29 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		}
 	}
 
-	resp, status, code, message := s.execSling(ctx, body, agentCfg.EffectiveDefaultSlingFormula())
+	resp, status, code, message, conflict := s.execSling(ctx, body, agentCfg.EffectiveDefaultSlingFormula())
 	if code != "" {
 		if status == http.StatusNotFound {
 			return nil, huma.Error404NotFound(message)
+		}
+		// Source-workflow conflict: render the rich 409 shape the CLI and
+		// dashboard use to offer a "force or clean up" decision. Huma's
+		// generic Error4xx collapses everything into Problem Details with
+		// only a string detail, so we build the Problem Details error
+		// manually with structured extensions.
+		if conflict != nil && status == http.StatusConflict {
+			storeRef := s.slingStoreRef(body.Rig, agentCfg)
+			hint := sourceWorkflowCleanupHint(conflict.SourceBeadID, storeRef)
+			return nil, &huma.ErrorModel{
+				Status: http.StatusConflict,
+				Title:  http.StatusText(http.StatusConflict),
+				Detail: message,
+				Errors: []*huma.ErrorDetail{
+					{Location: "body.source_bead_id", Value: conflict.SourceBeadID},
+					{Location: "body.blocking_workflow_ids", Value: conflict.WorkflowIDs},
+					{Location: "body.hint", Value: hint},
+				},
+			}
 		}
 		return nil, huma.Error400BadRequest(message)
 	}

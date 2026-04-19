@@ -44,7 +44,19 @@ type slingResponse struct {
 
 // execSling calls the intent-based Sling API directly. The Huma handler
 // humaHandleSling performs all validation before calling this.
-func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slingResponse, int, string, string) {
+//
+// Return tuple:
+//   - resp: the success body (nil when code != "")
+//   - status: HTTP status for the success or error case
+//   - code: short error code ("" on success)
+//   - message: human-readable error message ("" on success)
+//   - conflict: populated when code == "conflict"; carries the blocking
+//     source_bead_id, workflow IDs, and cleanup hint the caller needs
+//     to render a rich 409 Problem Details body. Returning it out-of-band
+//     keeps Huma's structured error path available without widening the
+//     (*slingResponse, int, string, string) shape every non-conflict
+//     caller already consumes.
+func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slingResponse, int, string, string, *sourceworkflow.ConflictError) {
 	cfg := s.state.Config()
 	agentCfg, _ := findAgent(cfg, body.Target)
 
@@ -70,7 +82,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	}
 	sl, err := sling.New(deps)
 	if err != nil {
-		return nil, http.StatusInternalServerError, "internal", err.Error()
+		return nil, http.StatusInternalServerError, "internal", err.Error(), nil
 	}
 
 	// Build vars slice from map (sorted for determinism).
@@ -127,9 +139,9 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	if err != nil {
 		var conflictErr *sourceworkflow.ConflictError
 		if errors.As(err, &conflictErr) {
-			return nil, http.StatusConflict, "conflict", err.Error()
+			return nil, http.StatusConflict, "conflict", err.Error(), conflictErr
 		}
-		return nil, http.StatusBadRequest, "invalid", err.Error()
+		return nil, http.StatusBadRequest, "invalid", err.Error(), nil
 	}
 
 	resp := &slingResponse{
@@ -140,7 +152,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Warnings: result.MetadataErrors,
 	}
 	if !workflowLaunch {
-		return resp, http.StatusOK, "", ""
+		return resp, http.StatusOK, "", "", nil
 	}
 
 	resp.Formula = formulaName
@@ -149,9 +161,21 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	resp.WorkflowID = result.WorkflowID
 	resp.RootBeadID = result.BeadID
 	if resp.WorkflowID == "" && resp.RootBeadID == "" {
-		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id"
+		return nil, http.StatusInternalServerError, "internal", "sling did not produce a workflow or bead id", nil
 	}
-	return resp, http.StatusCreated, "", ""
+	return resp, http.StatusCreated, "", "", nil
+}
+
+// sourceWorkflowCleanupHint renders the CLI command that clears the blocking
+// source workflow. Surfaced in the conflict response body so users can fix
+// the state without grepping docs.
+func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
+	args := []string{"gc workflow delete-source", sourceBeadID}
+	if storeRef = strings.TrimSpace(storeRef); storeRef != "" {
+		args = append(args, "--store-ref", storeRef)
+	}
+	args = append(args, "--apply")
+	return strings.Join(args, " ")
 }
 
 // findSlingStore returns the bead store for sling operations.
