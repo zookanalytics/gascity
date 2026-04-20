@@ -10,6 +10,44 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// awakeSessionBeadFromBead projects a stored session bead into the awake-set
+// model used by ComputeAwakeSet. It keeps the reconciliation bridge focused on
+// transport while the projection rules live in one place.
+func awakeSessionBeadFromBead(b beads.Bead, clk time.Time) (AwakeSessionBead, bool) {
+	if b.Status == "closed" {
+		return AwakeSessionBead{}, false
+	}
+	name := strings.TrimSpace(b.Metadata["session_name"])
+	if name == "" {
+		return AwakeSessionBead{}, false
+	}
+	lifecycle := session.ProjectLifecycle(session.LifecycleInput{
+		Status:   b.Status,
+		Metadata: b.Metadata,
+		Now:      clk,
+	})
+	bead := AwakeSessionBead{
+		ID:             b.ID,
+		SessionName:    name,
+		Template:       b.Metadata["template"],
+		State:          string(lifecycle.CompatState),
+		SleepReason:    b.Metadata["sleep_reason"],
+		ManualSession:  isManualSessionBead(b),
+		PendingCreate:  lifecycle.HasWakeCause(session.WakeCausePendingCreate),
+		DependencyOnly: b.Metadata["dependency_only"] == "true",
+		NamedIdentity:  lifecycle.NamedIdentity,
+		Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
+		Drained:        lifecycle.BaseState == session.BaseStateDrained,
+		WaitHold:       b.Metadata["wait_hold"] == "true",
+	}
+	bead.HeldUntil = lifecycle.HeldUntil
+	bead.QuarantinedUntil = lifecycle.QuarantinedUntil
+	if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
+		bead.IdleSince = t
+	}
+	return bead, true
+}
+
 // buildAwakeInputFromReconciler constructs AwakeInput from the reconciler's
 // existing data. Runtime liveness is populated from the already-computed
 // wakeTargets; attachment and pending interactions come from provider
@@ -72,37 +110,9 @@ func buildAwakeInputFromReconciler(
 
 	// Session beads
 	for i := range sessionBeads {
-		b := &sessionBeads[i]
-		if b.Status == "closed" {
+		bead, ok := awakeSessionBeadFromBead(sessionBeads[i], clk)
+		if !ok {
 			continue
-		}
-		name := strings.TrimSpace(b.Metadata["session_name"])
-		if name == "" {
-			continue
-		}
-		lifecycle := session.ProjectLifecycle(session.LifecycleInput{
-			Status:   b.Status,
-			Metadata: b.Metadata,
-			Now:      clk,
-		})
-		bead := AwakeSessionBead{
-			ID:             b.ID,
-			SessionName:    name,
-			Template:       b.Metadata["template"],
-			State:          string(lifecycle.CompatState),
-			SleepReason:    b.Metadata["sleep_reason"],
-			ManualSession:  isManualSessionBead(*b),
-			PendingCreate:  lifecycle.HasWakeCause(session.WakeCausePendingCreate),
-			DependencyOnly: b.Metadata["dependency_only"] == "true",
-			NamedIdentity:  lifecycle.NamedIdentity,
-			Pinned:         lifecycle.HasWakeCause(session.WakeCausePinned),
-			Drained:        lifecycle.BaseState == session.BaseStateDrained,
-			WaitHold:       b.Metadata["wait_hold"] == "true",
-		}
-		bead.HeldUntil = lifecycle.HeldUntil
-		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
-		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
-			bead.IdleSince = t
 		}
 		input.SessionBeads = append(input.SessionBeads, bead)
 	}
