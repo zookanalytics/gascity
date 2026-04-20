@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,8 +17,8 @@ type wispGC interface {
 
 	// runGC lists closed molecules, deletes those older than TTL, and returns
 	// the count of purged entries. Errors from individual deletes are
-	// best-effort (logged but not fatal); the returned error is for list
-	// failures.
+	// best-effort and surfaced without stopping the purge; the returned error
+	// also covers list failures.
 	runGC(store beads.Store, now time.Time) (int, error)
 }
 
@@ -56,26 +57,30 @@ func (m *memoryWispGC) runGC(store beads.Store, now time.Time) (int, error) {
 	}
 
 	cutoff := now.Add(-m.ttl)
-	purged := purgeExpiredBeads(store, entries, cutoff)
+	purged, deleteErr := purgeExpiredBeads(store, entries, cutoff)
 
 	trackEntries, trackErr := store.List(beads.ListQuery{Status: "closed", Label: labelOrderTracking})
 	if trackErr == nil {
-		purged += purgeExpiredBeads(store, trackEntries, cutoff)
+		trackPurged, trackDeleteErr := purgeExpiredBeads(store, trackEntries, cutoff)
+		purged += trackPurged
+		deleteErr = errors.Join(deleteErr, trackDeleteErr)
 	}
 
-	return purged, nil
+	return purged, deleteErr
 }
 
-func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time) int {
+func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time) (int, error) {
 	purged := 0
+	var deleteErr error
 	for _, entry := range entries {
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
 		if err := store.Delete(entry.ID); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting expired bead %q: %w", entry.ID, err))
 			continue
 		}
 		purged++
 	}
-	return purged
+	return purged, deleteErr
 }

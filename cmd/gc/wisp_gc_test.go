@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -95,7 +96,7 @@ func TestWispGC_EmptyList(t *testing.T) {
 	}
 }
 
-func TestWispGC_DeleteErrorContinues(t *testing.T) {
+func TestWispGC_DeleteErrorIsSurfacedAndContinues(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
 		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
@@ -105,11 +106,14 @@ func TestWispGC_DeleteErrorContinues(t *testing.T) {
 
 	wg := newWispGC(5*time.Minute, time.Hour)
 	purged, err := wg.runGC(store, now)
-	if err != nil {
-		t.Fatalf("runGC: %v", err)
+	if err == nil {
+		t.Fatal("expected delete error to be surfaced")
 	}
 	if purged != 1 {
 		t.Fatalf("purged = %d, want 1", purged)
+	}
+	if !strings.Contains(err.Error(), "delete failed") {
+		t.Fatalf("err = %v, want delete failure to be included", err)
 	}
 	assertDeletedIDs(t, store.deletedIDs, "mol-2")
 }
