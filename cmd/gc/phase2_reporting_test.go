@@ -201,11 +201,13 @@ func phase2TemplateEvidence(tc phase2ProviderCase, tp TemplateParams) map[string
 		"session_name": tp.SessionName,
 		"workdir":      tp.WorkDir,
 		"command":      tp.Command,
+		"hook_enabled": strconv.FormatBool(tp.HookEnabled),
 	}
 	if tp.ResolvedProvider != nil {
 		evidence["resolved_provider"] = tp.ResolvedProvider.Name
 		evidence["prompt_mode"] = tp.ResolvedProvider.PromptMode
 		evidence["default_args"] = strings.Join(tp.ResolvedProvider.ResolveDefaultArgs(), " ")
+		evidence["supports_hooks"] = strconv.FormatBool(tp.ResolvedProvider.SupportsHooks)
 	}
 	return evidence
 }
@@ -258,10 +260,12 @@ func phase2PreparedEvidence(tc phase2ProviderCase, prepared *preparedStart) map[
 	evidence["session_name"] = prepared.candidate.name()
 	evidence["started_config_hash"] = prepared.candidate.session.Metadata["started_config_hash"]
 	evidence["template_overrides"] = prepared.candidate.session.Metadata["template_overrides"]
+	evidence["hook_enabled"] = strconv.FormatBool(prepared.candidate.tp.HookEnabled)
 
 	if prepared.candidate.tp.ResolvedProvider != nil {
 		evidence["resolved_provider"] = prepared.candidate.tp.ResolvedProvider.Name
 		evidence["resolved_default_args"] = strings.Join(prepared.candidate.tp.ResolvedProvider.ResolveDefaultArgs(), " ")
+		evidence["supports_hooks"] = strconv.FormatBool(prepared.candidate.tp.ResolvedProvider.SupportsHooks)
 	}
 
 	return evidence

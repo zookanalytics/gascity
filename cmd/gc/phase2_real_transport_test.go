@@ -19,6 +19,7 @@ import (
 )
 
 const phase2RealTransportBound = 5 * time.Second
+const phase2RealTransportMarkerBound = 500 * time.Millisecond
 
 func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 	tmuxtest.RequireTmux(t)
@@ -37,21 +38,55 @@ func TestPhase2WorkerCoreRealTransportProof(t *testing.T) {
 	}
 }
 
+func TestPhase2HookEnabledClaudeAutonomousStartupProof(t *testing.T) {
+	tmuxtest.RequireTmux(t)
+
+	tc := phase2ProviderCaseForFamily(t, "claude")
+	tp := resolvePhase2Template(t, tc)
+	if !tp.HookEnabled {
+		t.Fatal("HookEnabled = false, want true for Claude phase2 profile")
+	}
+	if tp.ResolvedProvider == nil {
+		t.Fatal("ResolvedProvider = nil, want Claude provider metadata")
+	}
+	if !tp.ResolvedProvider.SupportsHooks {
+		t.Fatal("SupportsHooks = false, want true for Claude phase2 profile")
+	}
+
+	materialized := templateParamsToConfig(tp)
+	run := launchPhase2RealTransportSession(t, tc, materialized)
+
+	if run.ErrorStage != "" {
+		t.Fatalf("%s failed: %s", run.ErrorStage, run.Error)
+	}
+	if got, want := run.ObservedStartupPrompt, run.ExpectedStartupPrompt; got != want {
+		t.Fatalf("startup prompt = %q, want %q", got, want)
+	}
+	if !run.AutonomousStarted {
+		t.Fatal("autonomous marker = missing, want launch-prompt work before any explicit rescue nudge")
+	}
+}
+
 type phase2RealTransportRun struct {
-	Transport         string
-	SocketName        string
-	SessionName       string
-	ProviderPath      string
-	StartedPath       string
-	InputPath         string
-	ErrorStage        string
-	Error             string
-	ExpectedInput     string
-	ObservedInput     string
-	ObservedProvider  string
-	Started           bool
-	RunningAfterInput bool
-	StartElapsed      time.Duration
+	Transport             string
+	SocketName            string
+	SessionName           string
+	ProviderPath          string
+	StartedPath           string
+	InputPath             string
+	StartupPromptPath     string
+	AutonomousPath        string
+	ErrorStage            string
+	Error                 string
+	ExpectedInput         string
+	ObservedInput         string
+	ExpectedStartupPrompt string
+	ObservedStartupPrompt string
+	ObservedProvider      string
+	Started               bool
+	AutonomousStarted     bool
+	RunningAfterInput     bool
+	StartElapsed          time.Duration
 }
 
 func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, materialized runtime.Config) phase2RealTransportRun {
@@ -62,8 +97,44 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	startedPath := filepath.Join(dir, "started.txt")
 	providerPath := filepath.Join(dir, "provider.txt")
 	inputPath := filepath.Join(dir, "input.txt")
+	startupPromptPath := filepath.Join(dir, "startup-prompt.txt")
+	expectedPromptPath := filepath.Join(dir, "expected-startup-prompt.txt")
+	autonomousPath := filepath.Join(dir, "autonomous.txt")
 	stopPath := filepath.Join(dir, "stop.txt")
 	sessionName := guard.SessionName("phase2-" + tc.family)
+	expectedStartupPrompt, promptErr := singleShellArgValue(materialized.PromptSuffix)
+	if promptErr != nil {
+		return phase2RealTransportRun{
+			Transport:             "tmux",
+			SocketName:            guard.SocketName(),
+			SessionName:           sessionName,
+			ProviderPath:          providerPath,
+			StartedPath:           startedPath,
+			InputPath:             inputPath,
+			StartupPromptPath:     startupPromptPath,
+			AutonomousPath:        autonomousPath,
+			ErrorStage:            "prompt_suffix_parse",
+			Error:                 promptErr.Error(),
+			ExpectedInput:         materialized.Nudge,
+			ExpectedStartupPrompt: expectedStartupPrompt,
+		}
+	}
+	if err := os.WriteFile(expectedPromptPath, []byte(expectedStartupPrompt), 0o644); err != nil {
+		return phase2RealTransportRun{
+			Transport:             "tmux",
+			SocketName:            guard.SocketName(),
+			SessionName:           sessionName,
+			ProviderPath:          providerPath,
+			StartedPath:           startedPath,
+			InputPath:             inputPath,
+			StartupPromptPath:     startupPromptPath,
+			AutonomousPath:        autonomousPath,
+			ErrorStage:            "expected_prompt_write",
+			Error:                 err.Error(),
+			ExpectedInput:         materialized.Nudge,
+			ExpectedStartupPrompt: expectedStartupPrompt,
+		}
+	}
 
 	sp, err := newSessionProviderByName("", config.SessionConfig{
 		Socket:             guard.SocketName(),
@@ -74,15 +145,18 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	}, guard.CityName(), dir)
 	if err != nil {
 		return phase2RealTransportRun{
-			Transport:     "tmux",
-			SocketName:    guard.SocketName(),
-			SessionName:   sessionName,
-			ProviderPath:  providerPath,
-			StartedPath:   startedPath,
-			InputPath:     inputPath,
-			ErrorStage:    "provider",
-			Error:         err.Error(),
-			ExpectedInput: materialized.Nudge,
+			Transport:             "tmux",
+			SocketName:            guard.SocketName(),
+			SessionName:           sessionName,
+			ProviderPath:          providerPath,
+			StartedPath:           startedPath,
+			InputPath:             inputPath,
+			StartupPromptPath:     startupPromptPath,
+			AutonomousPath:        autonomousPath,
+			ErrorStage:            "provider",
+			Error:                 err.Error(),
+			ExpectedInput:         materialized.Nudge,
+			ExpectedStartupPrompt: expectedStartupPrompt,
 		}
 	}
 
@@ -95,6 +169,8 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 		`set -eu`,
 		`printf "%s\n" "$GC_PROVIDER" > "$GC_REAL_TRANSPORT_PROVIDER_PATH"`,
 		`printf "started\n" > "$GC_REAL_TRANSPORT_STARTED_PATH"`,
+		`printf "%s" "$0" > "$GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"`,
+		`if [ "$0" = "$(cat "$GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH")" ]; then printf "autonomous\n" > "$GC_REAL_TRANSPORT_AUTONOMOUS_PATH"; fi`,
 		`IFS= read -r line`,
 		`printf "%s\n" "$line" > "$GC_REAL_TRANSPORT_INPUT_PATH"`,
 		`while [ ! -f "$GC_REAL_TRANSPORT_STOP_PATH" ]; do sleep 0.05; done`,
@@ -117,6 +193,9 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	cfg.Env["GC_REAL_TRANSPORT_PROVIDER_PATH"] = providerPath
 	cfg.Env["GC_REAL_TRANSPORT_STARTED_PATH"] = startedPath
 	cfg.Env["GC_REAL_TRANSPORT_INPUT_PATH"] = inputPath
+	cfg.Env["GC_REAL_TRANSPORT_STARTUP_PROMPT_PATH"] = startupPromptPath
+	cfg.Env["GC_REAL_TRANSPORT_EXPECTED_PROMPT_PATH"] = expectedPromptPath
+	cfg.Env["GC_REAL_TRANSPORT_AUTONOMOUS_PATH"] = autonomousPath
 	cfg.Env["GC_REAL_TRANSPORT_STOP_PATH"] = stopPath
 
 	ctx, cancel := context.WithTimeout(context.Background(), phase2RealTransportBound)
@@ -125,27 +204,35 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	start := time.Now()
 	if err := sp.Start(ctx, sessionName, cfg); err != nil {
 		return phase2RealTransportRun{
-			Transport:     "tmux",
-			SocketName:    guard.SocketName(),
-			SessionName:   sessionName,
-			ProviderPath:  providerPath,
-			StartedPath:   startedPath,
-			InputPath:     inputPath,
-			ErrorStage:    "start",
-			Error:         err.Error(),
-			ExpectedInput: materialized.Nudge,
-			StartElapsed:  time.Since(start),
+			Transport:             "tmux",
+			SocketName:            guard.SocketName(),
+			SessionName:           sessionName,
+			ProviderPath:          providerPath,
+			StartedPath:           startedPath,
+			InputPath:             inputPath,
+			StartupPromptPath:     startupPromptPath,
+			AutonomousPath:        autonomousPath,
+			ErrorStage:            "start",
+			Error:                 err.Error(),
+			ExpectedInput:         materialized.Nudge,
+			ExpectedStartupPrompt: expectedStartupPrompt,
+			StartElapsed:          time.Since(start),
 		}
 	}
 	startElapsed := time.Since(start)
 
 	observedInput, inputErr := waitForPhase2FileText(inputPath, phase2RealTransportBound)
 	observedProvider, providerErr := waitForPhase2FileText(providerPath, phase2RealTransportBound)
+	observedStartupPrompt, startupPromptErr := waitForPhase2FileText(startupPromptPath, phase2RealTransportBound)
+	autonomousStarted := waitForPhase2FileExists(autonomousPath, phase2RealTransportMarkerBound)
 	_, startedErr := os.Stat(startedPath)
 
 	errorStage := ""
 	errorDetail := ""
 	switch {
+	case startupPromptErr != nil:
+		errorStage = "startup_prompt_wait"
+		errorDetail = startupPromptErr.Error()
 	case inputErr != nil:
 		errorStage = "input_wait"
 		errorDetail = inputErr.Error()
@@ -155,40 +242,50 @@ func launchPhase2RealTransportSession(t *testing.T, tc phase2ProviderCase, mater
 	}
 
 	return phase2RealTransportRun{
-		Transport:         "tmux",
-		SocketName:        guard.SocketName(),
-		SessionName:       sessionName,
-		ProviderPath:      providerPath,
-		StartedPath:       startedPath,
-		InputPath:         inputPath,
-		ErrorStage:        errorStage,
-		Error:             errorDetail,
-		ExpectedInput:     materialized.Nudge,
-		ObservedInput:     strings.TrimSpace(observedInput),
-		ObservedProvider:  strings.TrimSpace(observedProvider),
-		Started:           startedErr == nil,
-		RunningAfterInput: sp.IsRunning(sessionName),
-		StartElapsed:      startElapsed,
+		Transport:             "tmux",
+		SocketName:            guard.SocketName(),
+		SessionName:           sessionName,
+		ProviderPath:          providerPath,
+		StartedPath:           startedPath,
+		InputPath:             inputPath,
+		StartupPromptPath:     startupPromptPath,
+		AutonomousPath:        autonomousPath,
+		ErrorStage:            errorStage,
+		Error:                 errorDetail,
+		ExpectedInput:         materialized.Nudge,
+		ObservedInput:         strings.TrimSpace(observedInput),
+		ExpectedStartupPrompt: expectedStartupPrompt,
+		ObservedStartupPrompt: observedStartupPrompt,
+		ObservedProvider:      strings.TrimSpace(observedProvider),
+		Started:               startedErr == nil,
+		AutonomousStarted:     autonomousStarted,
+		RunningAfterInput:     sp.IsRunning(sessionName),
+		StartElapsed:          startElapsed,
 	}
 }
 
 func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun) workertest.Result {
 	evidence := map[string]string{
-		"family":              tc.family,
-		"profile":             string(tc.profileID),
-		"transport":           run.Transport,
-		"socket_name":         run.SocketName,
-		"session_name":        run.SessionName,
-		"started_path":        run.StartedPath,
-		"provider_path":       run.ProviderPath,
-		"input_path":          run.InputPath,
-		"error_stage":         run.ErrorStage,
-		"error":               run.Error,
-		"expected_input":      run.ExpectedInput,
-		"observed_input":      run.ObservedInput,
-		"observed_provider":   run.ObservedProvider,
-		"running_after_input": fmt.Sprintf("%t", run.RunningAfterInput),
-		"start_elapsed":       run.StartElapsed.String(),
+		"family":                  tc.family,
+		"profile":                 string(tc.profileID),
+		"transport":               run.Transport,
+		"socket_name":             run.SocketName,
+		"session_name":            run.SessionName,
+		"started_path":            run.StartedPath,
+		"provider_path":           run.ProviderPath,
+		"input_path":              run.InputPath,
+		"startup_prompt_path":     run.StartupPromptPath,
+		"autonomous_path":         run.AutonomousPath,
+		"error_stage":             run.ErrorStage,
+		"error":                   run.Error,
+		"expected_input":          run.ExpectedInput,
+		"observed_input":          run.ObservedInput,
+		"expected_startup_prompt": run.ExpectedStartupPrompt,
+		"observed_startup_prompt": run.ObservedStartupPrompt,
+		"observed_provider":       run.ObservedProvider,
+		"autonomous_started":      fmt.Sprintf("%t", run.AutonomousStarted),
+		"running_after_input":     fmt.Sprintf("%t", run.RunningAfterInput),
+		"start_elapsed":           run.StartElapsed.String(),
 	}
 	switch {
 	case run.ErrorStage != "":
@@ -203,6 +300,12 @@ func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun
 	case run.ObservedProvider != tc.family:
 		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
 			fmt.Sprintf("GC_PROVIDER = %q, want %q", run.ObservedProvider, tc.family)).WithEvidence(evidence)
+	case run.ObservedStartupPrompt != run.ExpectedStartupPrompt:
+		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
+			fmt.Sprintf("startup prompt = %q, want %q", run.ObservedStartupPrompt, run.ExpectedStartupPrompt)).WithEvidence(evidence)
+	case !run.AutonomousStarted:
+		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
+			"launch prompt did not trigger autonomous pre-nudge work").WithEvidence(evidence)
 	case run.ObservedInput != run.ExpectedInput:
 		return workertest.Fail(tc.profileID, workertest.RequirementRealTransportProof,
 			fmt.Sprintf("nudge input = %q, want %q", run.ObservedInput, run.ExpectedInput)).WithEvidence(evidence)
@@ -214,7 +317,7 @@ func phase2RealTransportResult(tc phase2ProviderCase, run phase2RealTransportRun
 			fmt.Sprintf("startup elapsed = %s, want <= %s", run.StartElapsed, phase2RealTransportBound)).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementRealTransportProof,
-			"production tmux runtime launched and delivered initial input deterministically").WithEvidence(evidence)
+			"production tmux runtime launched, delivered the first-turn startup prompt, and preserved stdin nudge delivery deterministically").WithEvidence(evidence)
 	}
 }
 
@@ -238,4 +341,15 @@ func waitForPhase2FileText(path string, timeout time.Duration) (string, error) {
 		time.Sleep(25 * time.Millisecond)
 	}
 	return "", fmt.Errorf("timed out waiting for %s: %w", path, lastErr)
+}
+
+func waitForPhase2FileExists(path string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
 }
