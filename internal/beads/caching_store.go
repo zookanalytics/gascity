@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -275,22 +274,10 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 	case "bead.updated":
 		c.beads[b.ID] = cloneBead(b)
 	case "bead.closed":
-		if existing, ok := c.beads[b.ID]; ok {
-			existing.Status = "closed"
-			// Merge metadata from the event — close events often carry
-			// gc.outcome and other fields set in the same bd update.
-			for k, v := range b.Metadata {
-				if existing.Metadata == nil {
-					existing.Metadata = make(map[string]string)
-				}
-				existing.Metadata[k] = v
-			}
-			c.beads[b.ID] = existing
-		} else {
-			// Bead not in cache yet — store the closed version.
-			c.beads[b.ID] = cloneBead(b)
+		if _, exists := c.beads[b.ID]; !exists {
 			c.updateStatsLocked()
 		}
+		c.beads[b.ID] = cloneBead(b)
 	}
 }
 
@@ -531,20 +518,9 @@ func (c *CachingStore) DepList(id, direction string) ([]Dep, error) {
 			c.mu.Unlock()
 			return deps, nil
 		}
-		// "up" — reverse lookup (best-effort from cache, fall through for uncached)
-		var result []Dep
-		for _, deps := range c.deps {
-			for _, d := range deps {
-				if d.DependsOnID == id {
-					result = append(result, d)
-				}
-			}
-		}
+		// Reverse lookups are only partially cached; defer to the backing
+		// store so callers do not observe incomplete results.
 		c.mu.RUnlock()
-		if len(result) > 0 {
-			return result, nil
-		}
-		// Cache might be incomplete for "up" — fall through.
 		return c.backing.DepList(id, direction)
 	}
 	c.mu.RUnlock()
@@ -866,32 +842,27 @@ func (c *CachingStore) updateStatsLocked() {
 }
 
 func beadChanged(old, fresh Bead) bool {
-	return old.ID != fresh.ID ||
-		old.Title != fresh.Title ||
-		old.Status != fresh.Status ||
-		old.Type != fresh.Type ||
-		!intPtrEqual(old.Priority, fresh.Priority) ||
-		!old.CreatedAt.Equal(fresh.CreatedAt) ||
-		old.Assignee != fresh.Assignee ||
-		old.From != fresh.From ||
-		old.ParentID != fresh.ParentID ||
-		old.Ref != fresh.Ref ||
-		old.Description != fresh.Description ||
-		!slices.Equal(old.Labels, fresh.Labels) ||
-		!slices.Equal(old.Needs, fresh.Needs) ||
-		!maps.Equal(old.Metadata, fresh.Metadata) ||
-		!slices.Equal(old.Dependencies, fresh.Dependencies)
-}
-
-func intPtrEqual(left, right *int) bool {
-	switch {
-	case left == nil && right == nil:
+	if old.Status != fresh.Status {
 		return true
-	case left == nil || right == nil:
-		return false
-	default:
-		return *left == *right
 	}
+	if old.Title != fresh.Title {
+		return true
+	}
+	if old.Assignee != fresh.Assignee {
+		return true
+	}
+	if old.Description != fresh.Description {
+		return true
+	}
+	if len(old.Metadata) != len(fresh.Metadata) {
+		return true
+	}
+	for k, v := range old.Metadata {
+		if fresh.Metadata[k] != v {
+			return true
+		}
+	}
+	return !slices.Equal(old.Labels, fresh.Labels)
 }
 
 // Delete passes through to the backing store and removes from cache.

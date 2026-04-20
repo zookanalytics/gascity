@@ -276,6 +276,25 @@ func TestFileStoreOpenEmpty(t *testing.T) {
 	}
 }
 
+func TestFileStorePingDetectsReadFailures(t *testing.T) {
+	path := "/city/beads.json"
+	f := fsys.NewFake()
+	f.Dirs["/city"] = true
+	f.Files[path] = []byte(`{}`)
+
+	s, err := beads.OpenFileStore(f, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f.Errors[path] = fmt.Errorf("permission denied")
+	if err := s.Ping(); err == nil {
+		t.Fatal("expected ping error")
+	} else if !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("Ping error = %v, want permission denied", err)
+	}
+}
+
 func TestFileStoreOpenCorruptedJSON(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "beads.json")
 	if err := os.WriteFile(path, []byte("{not json!!!"), 0o644); err != nil {
