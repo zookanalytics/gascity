@@ -537,6 +537,9 @@ func (s *BdStore) SetMetadata(id, key, value string) error {
 	_, err := s.runner(s.dir, "bd", "update", "--json", id,
 		"--set-metadata", key+"="+value)
 	if err != nil {
+		if isBdNotFound(err) {
+			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
+		}
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil
@@ -560,6 +563,9 @@ func (s *BdStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	}
 	_, err := s.runner(s.dir, "bd", args...)
 	if err != nil {
+		if isBdNotFound(err) {
+			return fmt.Errorf("setting metadata on %q: %w", id, ErrNotFound)
+		}
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil

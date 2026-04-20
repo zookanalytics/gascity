@@ -1095,6 +1095,34 @@ func TestBdStoreSetMetadataError(t *testing.T) {
 	}
 }
 
+func TestBdStoreSetMetadataCLINotFound(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, fmt.Errorf("exit status 1: Error updating x: issue not found: bd-42")
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.SetMetadata("bd-42", "key", "value")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestBdStoreSetMetadataBatchCLINotFound(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, fmt.Errorf("exit status 1: Error updating x: no issue found matching \"bd-42\"")
+	}
+	s := beads.NewBdStore("/city", runner)
+	err := s.SetMetadataBatch("bd-42", map[string]string{"key": "value"})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound", err)
+	}
+}
+
 // --- ListByLabel ---
 
 func TestBdStoreListByLabel(t *testing.T) {
