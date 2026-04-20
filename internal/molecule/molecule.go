@@ -503,10 +503,6 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if !fromOK || !toOK {
 				continue // step was filtered out (RootOnly or condition)
 			}
-			// Skip parent-child deps — already handled via ParentID field.
-			if dep.Type == "parent-child" {
-				continue
-			}
 			if embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] {
 				continue
 			}
@@ -622,6 +618,20 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 				b.Needs = append(b.Needs, dep.Type+":"+dep.DependsOnID)
 			}
 		}
+		for _, dep := range recipe.Deps {
+			if dep.StepID == step.ID && dep.Type == "parent-child" {
+				if parentBeadID, ok := idMapping[dep.DependsOnID]; ok {
+					b.ParentID = parentBeadID
+				}
+				break
+			}
+		}
+		for _, dep := range externalDepsByStep[step.ID] {
+			if dep.Type == "parent-child" && dep.DependsOnID != "" {
+				b.ParentID = dep.DependsOnID
+				break
+			}
+		}
 
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, 2)
@@ -665,7 +675,7 @@ func InstantiateFragment(ctx context.Context, store beads.Store, recipe *formula
 	for _, dep := range recipe.Deps {
 		fromID, fromOK := idMapping[dep.StepID]
 		toID, toOK := idMapping[dep.DependsOnID]
-		if !fromOK || !toOK || dep.Type == "parent-child" {
+		if !fromOK || !toOK {
 			continue
 		}
 		if embeddedDeps[dep.StepID+"|"+dep.DependsOnID+"|"+dep.Type] {

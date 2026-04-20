@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -72,10 +73,82 @@ func purgeExpiredBeads(store beads.Store, entries []beads.Bead, cutoff time.Time
 		if entry.CreatedAt.IsZero() || !entry.CreatedAt.Before(cutoff) {
 			continue
 		}
-		if err := store.Delete(entry.ID); err != nil {
+		if err := deleteExpiredBeadClosure(store, entry.ID); err != nil {
 			continue
 		}
 		purged++
 	}
 	return purged
+}
+
+func deleteExpiredBeadClosure(store beads.Store, rootID string) error {
+	ids, err := collectExpiredBeadClosure(store, rootID)
+	if err != nil {
+		return err
+	}
+	_, errs := deleteWorkflowBeads(store, ids)
+	if len(errs) == 0 {
+		return nil
+	}
+	joined := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			joined = append(joined, err)
+		}
+	}
+	if len(joined) == 0 {
+		return nil
+	}
+	return errors.Join(joined...)
+}
+
+func collectExpiredBeadClosure(store beads.Store, rootID string) ([]string, error) {
+	if store == nil {
+		return nil, fmt.Errorf("bead store unavailable")
+	}
+	queue := []string{rootID}
+	if related, err := store.List(beads.ListQuery{
+		Metadata:      map[string]string{"gc.root_bead_id": rootID},
+		IncludeClosed: true,
+	}); err == nil {
+		for _, bead := range related {
+			queue = append(queue, bead.ID)
+		}
+	}
+
+	seen := make(map[string]struct{}, len(queue))
+	ids := make([]string, 0, len(queue))
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+
+		upDeps, err := store.DepList(id, "up")
+		if err != nil {
+			return nil, fmt.Errorf("list dependents for %s: %w", id, err)
+		}
+		for _, dep := range upDeps {
+			if dep.IssueID != "" {
+				queue = append(queue, dep.IssueID)
+			}
+		}
+
+		children, err := store.Children(id, beads.IncludeClosed)
+		if err != nil {
+			return nil, fmt.Errorf("list children for %s: %w", id, err)
+		}
+		for _, child := range children {
+			if child.ID != "" {
+				queue = append(queue, child.ID)
+			}
+		}
+	}
+	return ids, nil
 }
