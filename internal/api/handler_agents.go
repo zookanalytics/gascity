@@ -235,6 +235,7 @@ func (s *Server) findActiveBeadForAssignees(rig string, assignees ...string) str
 			matches, err := stores[rn].List(beads.ListQuery{
 				Assignee: assignee,
 				Status:   "in_progress",
+				Live:     true,
 				Limit:    1,
 				Sort:     beads.SortCreatedDesc,
 			})

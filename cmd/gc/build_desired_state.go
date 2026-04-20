@@ -523,7 +523,7 @@ func collectAssignedWorkBeadsWithStores(
 	for _, s := range stores {
 		seen := make(map[string]struct{})
 		// In-progress beads with an assignee (active work).
-		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress"}); err == nil {
+		if inProgress, err := s.List(beads.ListQuery{Status: "in_progress", Live: true}); err == nil {
 			appendAssignedUnique(&result, &resultStores, inProgress, seen, s)
 		} else {
 			log.Printf("collectAssignedWorkBeads: List(in_progress) failed: %v", err)
