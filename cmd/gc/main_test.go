@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -1536,6 +1538,20 @@ func TestDoInitGastownWritesCanonicalPackV2Shape(t *testing.T) {
 	if !strings.Contains(packToml, "[defaults.rig.imports.gastown]") {
 		t.Fatalf("pack.toml missing canonical default-rig import:\n%s", packToml)
 	}
+	if strings.Contains(packToml, `append_fragments = ["command-glossary", "operational-awareness"]`) {
+		t.Fatalf("pack.toml should not rewrite workspace.global_fragments into append_fragments:\n%s", packToml)
+	}
+	if !strings.Contains(cityToml, `global_fragments = ["command-glossary", "operational-awareness"]`) {
+		t.Fatalf("city.toml should preserve gastown workspace.global_fragments:\n%s", cityToml)
+	}
+
+	cfg, err := config.Parse([]byte(cityToml))
+	if err != nil {
+		t.Fatalf("parsing written city.toml: %v", err)
+	}
+	if got := cfg.Workspace.GlobalFragments; !reflect.DeepEqual(got, []string{"command-glossary", "operational-awareness"}) {
+		t.Fatalf("Workspace.GlobalFragments = %v, want %v", got, []string{"command-glossary", "operational-awareness"})
+	}
 }
 
 func TestDoInitAlreadyInitialized(t *testing.T) {
@@ -2502,6 +2518,10 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"template\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(srcDir, "prompts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -2528,20 +2548,40 @@ func TestDoInitFromDirSuccess(t *testing.T) {
 		t.Errorf("stdout missing city name: %q", out)
 	}
 
-	// Verify city.toml was copied and name updated.
+	// Verify city.toml keeps runtime-local settings only; machine-local
+	// identity lives in .gc/site.toml and pack.toml adopts the target name.
 	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing written config: %v", err)
 	}
-	if cfg.Workspace.Name != "bright-lights" {
-		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "bright-lights")
+	if raw.Workspace.Name != "" {
+		t.Errorf("Workspace.Name = %q, want empty", raw.Workspace.Name)
 	}
-	if cfg.Workspace.Provider != "claude" {
-		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
+	if raw.Workspace.Provider != "claude" {
+		t.Errorf("Workspace.Provider = %q, want %q", raw.Workspace.Provider, "claude")
+	}
+
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading written config: %v", err)
+	}
+	if cfg.ResolvedWorkspaceName != "bright-lights" {
+		t.Errorf("ResolvedWorkspaceName = %q, want %q", cfg.ResolvedWorkspaceName, "bright-lights")
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	if !strings.Contains(string(packData), `name = "bright-lights"`) {
+		t.Errorf("pack.toml should keep init name aligned with site workspace name, got:\n%s", string(packData))
+	}
+	if strings.Contains(string(packData), `name = "template"`) {
+		t.Errorf("pack.toml should not keep copied source name, got:\n%s", string(packData))
 	}
 
 	// Verify files were copied.
@@ -2594,6 +2634,10 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"template\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(srcDir, "prompts", "mayor.md"), []byte("prompt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2610,12 +2654,26 @@ func TestInitNameFlagWithFrom(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing config: %v", err)
 	}
-	if cfg.Workspace.Name != "my-custom-name" {
-		t.Errorf("Workspace.Name = %q, want %q", cfg.Workspace.Name, "my-custom-name")
+	if raw.Workspace.Name != "" {
+		t.Errorf("Workspace.Name = %q, want empty", raw.Workspace.Name)
+	}
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.ResolvedWorkspaceName != "my-custom-name" {
+		t.Errorf("ResolvedWorkspaceName = %q, want %q", cfg.ResolvedWorkspaceName, "my-custom-name")
+	}
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	if !strings.Contains(string(packData), `name = "my-custom-name"`) {
+		t.Errorf("pack.toml should keep init name aligned with site workspace name, got:\n%s", string(packData))
 	}
 }
 
@@ -2702,6 +2760,10 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"),
+		[]byte("[pack]\nname = \"template\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(srcDir, "prompts", "mayor.md"), []byte("prompt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -2718,12 +2780,242 @@ func TestInitFromDefaultsToTargetDirBasename(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading city.toml: %v", err)
 	}
-	cfg, err := config.Parse(data)
+	raw, err := config.Parse(data)
 	if err != nil {
 		t.Fatalf("parsing config: %v", err)
 	}
-	if cfg.Workspace.Name != "my-new-city" {
-		t.Errorf("Workspace.Name = %q, want %q (--from should default to target dir basename)", cfg.Workspace.Name, "my-new-city")
+	if raw.Workspace.Name != "" {
+		t.Errorf("Workspace.Name = %q, want empty", raw.Workspace.Name)
+	}
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.ResolvedWorkspaceName != "my-new-city" {
+		t.Errorf("ResolvedWorkspaceName = %q, want %q (--from should default to target dir basename)", cfg.ResolvedWorkspaceName, "my-new-city")
+	}
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	if !strings.Contains(string(packData), `name = "my-new-city"`) {
+		t.Errorf("pack.toml should keep init name aligned with site workspace name, got:\n%s", string(packData))
+	}
+	if strings.Contains(string(packData), `name = "template"`) {
+		t.Errorf("pack.toml should not keep copied source name, got:\n%s", string(packData))
+	}
+}
+
+func TestInitFromPreservesCopiedPackDefaultRigImportOrder(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
+name = "template"
+schema = 2
+
+[defaults.rig.imports.zeta]
+source = "./packs/zeta"
+
+[defaults.rig.imports.alpha]
+source = "./packs/alpha"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	packText := string(packData)
+	zetaIdx := strings.Index(packText, "[defaults.rig.imports.zeta]")
+	alphaIdx := strings.Index(packText, "[defaults.rig.imports.alpha]")
+	if zetaIdx == -1 || alphaIdx == -1 {
+		t.Fatalf("pack.toml missing copied default rig imports:\n%s", packText)
+	}
+	if zetaIdx > alphaIdx {
+		t.Fatalf("pack.toml reordered copied default rig imports:\n%s", packText)
+	}
+
+	defaultRigImports, err := config.LoadRootPackDefaultRigImports(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadRootPackDefaultRigImports: %v", err)
+	}
+	if len(defaultRigImports) != 2 {
+		t.Fatalf("LoadRootPackDefaultRigImports len = %d, want 2", len(defaultRigImports))
+	}
+	if defaultRigImports[0].Binding != "zeta" || defaultRigImports[1].Binding != "alpha" {
+		t.Fatalf("LoadRootPackDefaultRigImports = %v, want [zeta alpha]", []string{
+			defaultRigImports[0].Binding,
+			defaultRigImports[1].Binding,
+		})
+	}
+}
+
+func TestInitFromPreservesCopiedPackLegacyAgentDefaultsAlias(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nprovider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "pack.toml"), []byte(`[pack]
+name = "template"
+schema = 2
+
+[agents]
+append_fragments = ["legacy-footer"]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading pack.toml: %v", err)
+	}
+	packText := string(packData)
+	if !strings.Contains(packText, "[agents]") {
+		t.Fatalf("pack.toml dropped copied [agents] alias:\n%s", packText)
+	}
+
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("loading written config: %v", err)
+	}
+	if got := cfg.AgentDefaults.AppendFragments; len(got) != 1 || got[0] != "legacy-footer" {
+		t.Fatalf("AgentDefaults.AppendFragments = %v, want [legacy-footer]", got)
+	}
+}
+
+func TestInitFromWithoutPackTomlPreservesLegacyWorkspaceIdentity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "template")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "city.toml"),
+		[]byte("[workspace]\nname = \"template\"\nprovider = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cityPath := filepath.Join(dir, "bright-lights")
+	var stdout, stderr bytes.Buffer
+	code := doInitFromDirWithOptions(srcDir, cityPath, "", &stdout, &stderr, true)
+	if code != 0 {
+		t.Fatalf("doInitFromDirWithOptions = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	raw, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if raw.Workspace.Name != "bright-lights" {
+		t.Fatalf("Workspace.Name = %q, want %q", raw.Workspace.Name, "bright-lights")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, "pack.toml")); !os.IsNotExist(err) {
+		t.Fatalf("pack.toml should not be created for legacy --from templates without a pack manifest")
+	}
+	if _, err := os.Stat(filepath.Join(cityPath, ".gc", "site.toml")); !os.IsNotExist(err) {
+		t.Fatalf(".gc/site.toml should not be written for legacy --from templates without a pack manifest")
+	}
+}
+
+func TestRewritePackNameInCopiedPackTomlPreservesInlineComment(t *testing.T) {
+	out, err := rewritePackNameInCopiedPackToml([]byte(`[pack]
+name = "template" # keep me
+schema = 2
+`), "bright-lights")
+	if err != nil {
+		t.Fatalf("rewritePackNameInCopiedPackToml: %v", err)
+	}
+	got := string(out)
+	if !strings.Contains(got, `name = "bright-lights" # keep me`) {
+		t.Fatalf("rewritePackNameInCopiedPackToml should preserve inline comments, got:\n%s", got)
+	}
+
+	var cfg initPackConfig
+	if _, err := toml.Decode(got, &cfg); err != nil {
+		t.Fatalf("toml.Decode(rewritten pack.toml): %v", err)
+	}
+	if cfg.Pack.Name != "bright-lights" {
+		t.Fatalf("Pack.Name = %q, want %q", cfg.Pack.Name, "bright-lights")
+	}
+}
+
+func TestRewritePackNameInCopiedPackTomlIgnoresTableLikeLinesInsideMultilineString(t *testing.T) {
+	out, err := rewritePackNameInCopiedPackToml([]byte(`[pack]
+description = """
+[not-a-table]
+still description
+"""
+schema = 2
+
+[agents]
+append_fragments = ["legacy-footer"]
+`), "bright-lights")
+	if err != nil {
+		t.Fatalf("rewritePackNameInCopiedPackToml: %v", err)
+	}
+	got := string(out)
+	nameIdx := strings.Index(got, `name = "bright-lights"`)
+	if nameIdx == -1 {
+		t.Fatalf("rewritten pack.toml missing name:\n%s", got)
+	}
+	if nameIdx < strings.LastIndex(got, `"""`) {
+		t.Fatalf("rewritePackNameInCopiedPackToml inserted name inside multiline string:\n%s", got)
+	}
+	if agentsIdx := strings.Index(got, "[agents]"); agentsIdx == -1 || nameIdx > agentsIdx {
+		t.Fatalf("rewritePackNameInCopiedPackToml inserted name after [agents]:\n%s", got)
+	}
+
+	var cfg initPackConfig
+	if _, err := toml.Decode(got, &cfg); err != nil {
+		t.Fatalf("toml.Decode(rewritten pack.toml): %v", err)
+	}
+	if cfg.Pack.Name != "bright-lights" {
+		t.Fatalf("Pack.Name = %q, want %q", cfg.Pack.Name, "bright-lights")
+	}
+	if cfg.Pack.Description != "[not-a-table]\nstill description\n" {
+		t.Fatalf("Pack.Description = %q, want multiline description preserved", cfg.Pack.Description)
 	}
 }
 
