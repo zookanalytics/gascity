@@ -119,9 +119,12 @@ func FindAgentMappings(parentLogPath string) ([]AgentMapping, error) {
 	var mappings []AgentMapping
 	for _, path := range agentPaths {
 		agentID := agentIDFromPath(path)
-		toolUseID := extractParentToolUseID(path)
 		if agentID == "" {
 			continue
+		}
+		toolUseID, err := extractParentToolUseID(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading agent %q mapping: %w", agentID, err)
 		}
 		mappings = append(mappings, AgentMapping{
 			AgentID:         agentID,
@@ -193,10 +196,10 @@ func agentIDFromPath(path string) string {
 // extractParentToolUseID reads the first few lines of an agent JSONL file
 // and looks for the parentToolUseId field. Claude Code writes this on
 // the first entry of every subagent session.
-func extractParentToolUseID(path string) string {
+func extractParentToolUseID(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("opening transcript: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only
 
@@ -216,10 +219,13 @@ func extractParentToolUseID(path string) string {
 			continue
 		}
 		if entry.ParentToolUseID != "" {
-			return entry.ParentToolUseID
+			return entry.ParentToolUseID, nil
 		}
 	}
-	return ""
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scanning transcript: %w", err)
+	}
+	return "", nil
 }
 
 // inferAgentStatus determines the agent's status from its message history.

@@ -134,7 +134,10 @@ func TestExtractParentToolUseID(t *testing.T) {
 		`{"uuid":"u2","type":"user","message":{"role":"user","content":"hello"}}` + "\n"
 	writeTestFile(t, path, content)
 
-	got := extractParentToolUseID(path)
+	got, err := extractParentToolUseID(path)
+	if err != nil {
+		t.Fatalf("extractParentToolUseID: %v", err)
+	}
 	if got != "toolu_abc123" {
 		t.Errorf("extractParentToolUseID = %q, want %q", got, "toolu_abc123")
 	}
@@ -145,7 +148,10 @@ func TestExtractParentToolUseID_Missing(t *testing.T) {
 	path := filepath.Join(dir, "agent-test.jsonl")
 	writeTestFile(t, path, `{"uuid":"u1","type":"user"}`+"\n")
 
-	got := extractParentToolUseID(path)
+	got, err := extractParentToolUseID(path)
+	if err != nil {
+		t.Fatalf("extractParentToolUseID: %v", err)
+	}
 	if got != "" {
 		t.Errorf("extractParentToolUseID = %q, want empty", got)
 	}
@@ -177,6 +183,22 @@ func TestFindAgentMappings(t *testing.T) {
 	}
 	if found["ghi"] != "toolu_222" {
 		t.Errorf("agent ghi: want toolu_222, got %q", found["ghi"])
+	}
+}
+
+func TestFindAgentMappings_PropagatesReadErrors(t *testing.T) {
+	dir := t.TempDir()
+	parentPath, subDir := makeSessionDir(t, dir, "session-abc")
+
+	brokenTarget := filepath.Join(subDir, "missing-target.jsonl")
+	brokenPath := filepath.Join(subDir, "agent-broken.jsonl")
+	if err := os.Symlink(brokenTarget, brokenPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	_, err := FindAgentMappings(parentPath)
+	if err == nil {
+		t.Fatal("expected error when reading a broken agent transcript")
 	}
 }
 
