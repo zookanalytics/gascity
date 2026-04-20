@@ -250,6 +250,56 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	}
 }
 
+func TestSendControllerCommandWithReadTimeout(t *testing.T) {
+	dir := shortSocketTempDir(t, "gc-controller-command-")
+	sockPath := controllerSocketPath(dir)
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		lis.Close()         //nolint:errcheck
+		os.Remove(sockPath) //nolint:errcheck
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close() //nolint:errcheck
+
+		buf := make([]byte, 16)
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Errorf("read command: %v", err)
+			return
+		}
+		if got := strings.TrimSpace(string(buf[:n])); got != "ping" {
+			t.Errorf("command = %q, want ping", got)
+			return
+		}
+		if _, err := conn.Write([]byte("123\n")); err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}()
+
+	resp, err := sendControllerCommandWithReadTimeout(dir, "ping", time.Second)
+	if err != nil {
+		t.Fatalf("sendControllerCommandWithReadTimeout: %v", err)
+	}
+	if got := strings.TrimSpace(string(resp)); got != "123" {
+		t.Fatalf("response = %q, want 123", got)
+	}
+	<-done
+}
+
 // writeCityTOML is a test helper that writes a city.toml with the given agents.
 func writeCityTOML(t *testing.T, dir string, cityName string, agentNames ...string) string {
 	t.Helper()

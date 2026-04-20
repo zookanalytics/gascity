@@ -414,20 +414,11 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 // to the controller.sock and sending a "ping". Returns the PID if alive,
 // or 0 if not reachable.
 func controllerAlive(cityPath string) int {
-	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	resp, err := sendControllerCommandWithReadTimeout(cityPath, "ping", 2*time.Second)
 	if err != nil {
 		return 0
 	}
-	defer conn.Close()                                    //nolint:errcheck // best-effort
-	conn.Write([]byte("ping\n"))                          //nolint:errcheck // best-effort
-	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck // best-effort
-	buf := make([]byte, 64)
-	n, err := conn.Read(buf)
-	if err != nil || n == 0 {
-		return 0
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(buf[:n])))
+	pid, err := strconv.Atoi(strings.TrimSpace(string(resp)))
 	if err != nil {
 		return 0
 	}
