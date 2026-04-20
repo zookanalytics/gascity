@@ -41,6 +41,37 @@ func TestCachingStoreRunReconciliationDetectsLabelContentChanges(t *testing.T) {
 	}
 }
 
+func TestCachingStoreListInProgressUsesBackingStore(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	bead, err := backing.Create(Bead{
+		Title:    "claimed work",
+		Assignee: "worker",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := backing.Update(bead.ID, UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+
+	got, err := cache.List(ListQuery{Status: "in_progress"})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != bead.ID {
+		t.Fatalf("List(in_progress) = %+v, want %s from backing store", got, bead.ID)
+	}
+}
+
 func TestCachingStoreRunReconciliationDetectsPriorityChanges(t *testing.T) {
 	t.Parallel()
 
@@ -569,10 +600,10 @@ func (s *partialCloseAllStore) CloseAll(ids []string, metadata map[string]string
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if err := s.Store.SetMetadataBatch(ids[0], metadata); err != nil {
+	if err := s.SetMetadataBatch(ids[0], metadata); err != nil {
 		return 0, err
 	}
-	if err := s.Store.Close(ids[0]); err != nil {
+	if err := s.Close(ids[0]); err != nil {
 		return 0, err
 	}
 	return 1, nil
@@ -586,10 +617,10 @@ func (s *partialCloseAllErrorStore) CloseAll(ids []string, metadata map[string]s
 	if len(ids) == 0 {
 		return 0, errors.New("no ids")
 	}
-	if err := s.Store.SetMetadataBatch(ids[0], metadata); err != nil {
+	if err := s.SetMetadataBatch(ids[0], metadata); err != nil {
 		return 0, err
 	}
-	if err := s.Store.Close(ids[0]); err != nil {
+	if err := s.Close(ids[0]); err != nil {
 		return 0, err
 	}
 	return 1, errors.New("second close failed")
@@ -603,10 +634,10 @@ func (s *nonPrefixCloseAllErrorStore) CloseAll(ids []string, metadata map[string
 	if len(ids) < 2 {
 		return 0, errors.New("need two ids")
 	}
-	if err := s.Store.SetMetadataBatch(ids[1], metadata); err != nil {
+	if err := s.SetMetadataBatch(ids[1], metadata); err != nil {
 		return 0, err
 	}
-	if err := s.Store.Close(ids[1]); err != nil {
+	if err := s.Close(ids[1]); err != nil {
 		return 0, err
 	}
 	return 1, errors.New("first close failed")
@@ -626,11 +657,11 @@ func (s *closeAllRefreshFailingStore) Get(id string) (Bead, error) {
 	return s.Store.Get(id)
 }
 
-func (s *closeAllRefreshFailingStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+func (s *closeAllRefreshFailingStore) CloseAll(ids []string, _ map[string]string) (int, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if err := s.Store.Close(ids[0]); err != nil {
+	if err := s.Close(ids[0]); err != nil {
 		return 0, err
 	}
 	return 1, nil

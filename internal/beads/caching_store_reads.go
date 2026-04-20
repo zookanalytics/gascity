@@ -14,6 +14,9 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	if query.Status == "in_progress" {
+		return c.backing.List(query)
+	}
 
 	c.mu.RLock()
 	state := c.state

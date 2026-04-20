@@ -29,12 +29,6 @@ func (c *CachingStore) reconcileLoop(ctx context.Context) {
 	}
 }
 
-func (c *CachingStore) adaptiveInterval() time.Duration {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.adaptiveIntervalLocked()
-}
-
 func (c *CachingStore) adaptiveIntervalLocked() time.Duration {
 	total := len(c.beads)
 	switch {
