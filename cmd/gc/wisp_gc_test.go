@@ -262,6 +262,76 @@ func TestWispGC_LeavesRootWhenChildDeleteFails(t *testing.T) {
 	}
 }
 
+func TestWispGC_PartialChildDeleteRemainsRetryable(t *testing.T) {
+	now := time.Now()
+	store := newGCStore([]beads.Bead{
+		makeGCBead("mol-1", now.Add(-2*time.Hour), "closed", "molecule"),
+		{
+			ID:        "mol-1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+		{
+			ID:        "mol-1.1.1",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1.1",
+		},
+		{
+			ID:        "mol-1.2",
+			Status:    "open",
+			Type:      "task",
+			CreatedAt: now.Add(-2 * time.Hour),
+			ParentID:  "mol-1",
+		},
+	})
+	if err := store.DepAdd("mol-1.1", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1->mol-1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.1.1", "mol-1.1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.1.1->mol-1.1): %v", err)
+	}
+	if err := store.DepAdd("mol-1.2", "mol-1", "parent-child"); err != nil {
+		t.Fatalf("DepAdd(mol-1.2->mol-1): %v", err)
+	}
+	store.deleteErrors["mol-1.2"] = fmt.Errorf("delete failed")
+
+	wg := newWispGC(5*time.Minute, time.Hour)
+	purged, err := wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC first pass: %v", err)
+	}
+	if purged != 0 {
+		t.Fatalf("first purged = %d, want 0", purged)
+	}
+	if _, err := store.Get("mol-1"); err != nil {
+		t.Fatalf("root deleted after partial child failure: %v", err)
+	}
+	if _, err := store.Get("mol-1.2"); err != nil {
+		t.Fatalf("failing child deleted unexpectedly: %v", err)
+	}
+	if _, err := store.Get("mol-1.1"); err == nil {
+		t.Fatalf("expected an earlier child to be deleted before downstream failure")
+	}
+
+	delete(store.deleteErrors, "mol-1.2")
+	purged, err = wg.runGC(store, now)
+	if err != nil {
+		t.Fatalf("runGC second pass: %v", err)
+	}
+	if purged != 1 {
+		t.Fatalf("second purged = %d, want 1", purged)
+	}
+	for _, id := range []string{"mol-1", "mol-1.2"} {
+		if _, err := store.Get(id); err == nil {
+			t.Fatalf("Get(%s) succeeded after retry cleanup", id)
+		}
+	}
+}
+
 func TestWispGC_PurgesExpiredTrackingBeads(t *testing.T) {
 	now := time.Now()
 	store := newGCStore([]beads.Bead{
