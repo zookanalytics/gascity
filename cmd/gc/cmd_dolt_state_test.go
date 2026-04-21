@@ -62,16 +62,17 @@ func requireDeletedPathHeld(t *testing.T, pid int, targetPath string) {
 
 func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 	cityPath := t.TempDir()
+	wantCityPath := normalizePathForCompare(cityPath)
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"dolt-state", "runtime-layout", "--city", cityPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
 	}
 	got := parseDoltRuntimeLayoutOutput(t, stdout.String())
-	wantPack := citylayout.PackStateDir(cityPath, "dolt")
+	wantPack := citylayout.PackStateDir(wantCityPath, "dolt")
 	want := map[string]string{
 		"GC_PACK_STATE_DIR":   wantPack,
-		"GC_DOLT_DATA_DIR":    filepath.Join(cityPath, ".beads", "dolt"),
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
 		"GC_DOLT_LOG_FILE":    filepath.Join(wantPack, "dolt.log"),
 		"GC_DOLT_STATE_FILE":  filepath.Join(wantPack, "dolt-provider-state.json"),
 		"GC_DOLT_PID_FILE":    filepath.Join(wantPack, "dolt.pid"),
@@ -82,6 +83,43 @@ func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 		if got[key] != wantValue {
 			t.Fatalf("%s = %q, want %q; output=%q", key, got[key], wantValue, stdout.String())
 		}
+	}
+}
+
+func TestResolveManagedDoltRuntimeLayoutCanonicalizesSymlinkedCityPath(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	aliasCity := filepath.Join(aliasParent, "bright-lights")
+	realCity := filepath.Join(realParent, "bright-lights")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantCityPath := normalizePathForCompare(realCity)
+
+	layout, err := resolveManagedDoltRuntimeLayout(aliasCity)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
+	want := managedDoltRuntimeLayout{
+		PackStateDir: packStateDir,
+		DataDir:      filepath.Join(wantCityPath, ".beads", "dolt"),
+		LogFile:      filepath.Join(packStateDir, "dolt.log"),
+		StateFile:    filepath.Join(packStateDir, "dolt-provider-state.json"),
+		PIDFile:      filepath.Join(packStateDir, "dolt.pid"),
+		LockFile:     filepath.Join(packStateDir, "dolt.lock"),
+		ConfigFile:   filepath.Join(packStateDir, "dolt-config.yaml"),
+	}
+	if layout != want {
+		t.Fatalf("resolveManagedDoltRuntimeLayout() = %+v, want %+v", layout, want)
 	}
 }
 

@@ -61,6 +61,7 @@ func TestEnsureBeadsProvider_exec(t *testing.T) {
 
 func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 	cityPath := t.TempDir()
+	wantCityPath := normalizePathForCompare(cityPath)
 	t.Setenv("GC_PACK_STATE_DIR", "/tmp/wrong-pack")
 	t.Setenv("GC_DOLT_DATA_DIR", "/tmp/wrong-data")
 	t.Setenv("GC_DOLT_LOG_FILE", "/tmp/wrong-log")
@@ -78,14 +79,57 @@ func TestProviderLifecycleProcessEnvProjectsCanonicalDoltPaths(t *testing.T) {
 		}
 	}
 
-	packStateDir := citylayout.PackStateDir(cityPath, "dolt")
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
 	want := map[string]string{
 		"GC_PACK_STATE_DIR":   packStateDir,
-		"GC_DOLT_DATA_DIR":    filepath.Join(cityPath, ".beads", "dolt"),
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
 		"GC_DOLT_LOG_FILE":    filepath.Join(packStateDir, "dolt.log"),
 		"GC_DOLT_STATE_FILE":  filepath.Join(packStateDir, "dolt-provider-state.json"),
 		"GC_DOLT_PID_FILE":    filepath.Join(packStateDir, "dolt.pid"),
 		"GC_DOLT_LOCK_FILE":   filepath.Join(packStateDir, "dolt.lock"),
+		"GC_DOLT_CONFIG_FILE": filepath.Join(packStateDir, "dolt-config.yaml"),
+	}
+	for key, expected := range want {
+		if got := env[key]; got != expected {
+			t.Fatalf("providerLifecycleProcessEnv()[%s] = %q, want %q", key, got, expected)
+		}
+	}
+}
+
+func TestProviderLifecycleProcessEnvCanonicalizesSymlinkedCityPath(t *testing.T) {
+	root := t.TempDir()
+	realParent := filepath.Join(root, "real")
+	if err := os.MkdirAll(realParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasParent := filepath.Join(root, "alias")
+	if err := os.Symlink(realParent, aliasParent); err != nil {
+		t.Skip("symlinks not supported")
+	}
+	aliasCity := filepath.Join(aliasParent, "bright-lights")
+	realCity := filepath.Join(realParent, "bright-lights")
+	if err := os.MkdirAll(realCity, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wantCityPath := normalizePathForCompare(realCity)
+
+	envEntries := providerLifecycleProcessEnv(aliasCity, "exec:"+gcBeadsBdScriptPath(aliasCity))
+	env := map[string]string{}
+	for _, entry := range envEntries {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			env[key] = value
+		}
+	}
+
+	packStateDir := citylayout.PackStateDir(wantCityPath, "dolt")
+	want := map[string]string{
+		"GC_CITY":             wantCityPath,
+		"GC_CITY_PATH":        wantCityPath,
+		"GC_CITY_RUNTIME_DIR": filepath.Join(wantCityPath, ".gc", "runtime"),
+		"GC_PACK_STATE_DIR":   packStateDir,
+		"GC_DOLT_DATA_DIR":    filepath.Join(wantCityPath, ".beads", "dolt"),
+		"GC_DOLT_STATE_FILE":  filepath.Join(packStateDir, "dolt-provider-state.json"),
 		"GC_DOLT_CONFIG_FILE": filepath.Join(packStateDir, "dolt-config.yaml"),
 	}
 	for key, expected := range want {
