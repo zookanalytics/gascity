@@ -1078,7 +1078,11 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 		t.Fatal(err)
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
-	tp := TemplateParams{SessionName: "sky", TemplateName: "helper"}
+	tp := TemplateParams{
+		SessionName:      "sky",
+		TemplateName:     "helper",
+		ResolvedProvider: &config.ResolvedProvider{Name: "gemini", BuiltinAncestor: "gemini"},
+	}
 	clkTime := time.Date(2026, 3, 18, 12, 0, 1, 0, time.UTC)
 
 	if !recoverRunningPendingCreate(&bead, tp, cfg, store, &clock.Fake{Time: clkTime}, nil) {
@@ -1095,6 +1099,10 @@ func TestRecoverRunningPendingCreate_StampsCreationCompleteAtForAlreadyActive(t 
 	if got.Metadata["creation_complete_at"] != clkTime.Format(time.RFC3339) {
 		t.Fatalf("creation_complete_at = %q, want %q — sweep guard would treat healed bead as stale without this stamp",
 			got.Metadata["creation_complete_at"], clkTime.Format(time.RFC3339))
+	}
+	wantFamilyHash := resolvedProviderSessionMetadataHash(tp.ResolvedProvider, resolvedProviderFamilyMetadataKeys)
+	if got.Metadata[startedProviderFamilyHashKey] != wantFamilyHash {
+		t.Fatalf("%s = %q, want %q", startedProviderFamilyHashKey, got.Metadata[startedProviderFamilyHashKey], wantFamilyHash)
 	}
 }
 
@@ -2359,6 +2367,53 @@ func TestPrepareStartCandidateUsesBuiltinAncestorForGCProviderEnv(t *testing.T) 
 	}
 	if got := prepared.cfg.Env["GC_PROVIDER"]; got != "claude" {
 		t.Fatalf("GC_PROVIDER = %q, want claude", got)
+	}
+}
+
+func TestPrepareStartCandidate_PrefersResolvedProviderFamilyOverBeadMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title: "mayor",
+		Type:  "task",
+		Metadata: map[string]string{
+			"session_name":       "s-gc-test",
+			"template":           "mayor",
+			"session_origin":     "manual",
+			"provider":           "claude-wrapper",
+			"provider_kind":      "claude",
+			"builtin_ancestor":   "claude",
+			"generation":         "1",
+			"continuation_epoch": "1",
+			"instance_token":     "tok",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create bead: %v", err)
+	}
+	tp := TemplateParams{
+		Command:     "claude",
+		WorkDir:     t.TempDir(),
+		SessionName: "s-gc-test",
+		Alias:       "mayor",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:            "gemini-wrapper",
+			BuiltinAncestor: "gemini",
+		},
+		TemplateName: "mayor",
+		InstanceName: "mayor",
+	}
+
+	prepared, err := prepareStartCandidate(
+		startCandidate{session: &bead, tp: tp},
+		&config.City{},
+		store,
+		clock.Real{},
+	)
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+	if got := prepared.cfg.Env["GC_PROVIDER"]; got != "gemini" {
+		t.Fatalf("GC_PROVIDER = %q, want gemini", got)
 	}
 }
 

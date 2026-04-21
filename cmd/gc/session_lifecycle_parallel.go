@@ -428,7 +428,11 @@ func buildPreparedStart(
 		delete(runtimeEnv, "GC_ALIAS")
 	}
 	agentCfg.Env = mergeEnv(agentCfg.Env, runtimeEnv)
-	if gcProvider := sessionProviderFamily(*session); gcProvider != "" {
+	gcProvider := resolvedProviderLaunchFamily(tp.ResolvedProvider)
+	if gcProvider == "" {
+		gcProvider = sessionProviderFamily(*session)
+	}
+	if gcProvider != "" {
 		agentCfg.Env = mergeEnv(agentCfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
@@ -758,9 +762,10 @@ func recoverRunningPendingCreate(
 		now = time.Now()
 	}
 	metadata := sessionpkg.CommitStartedPatch(sessionpkg.CommitStartedPatchInput{
-		CoreHash:      prepared.coreHash,
-		LiveHash:      prepared.liveHash,
-		CoreBreakdown: coreBreakdown,
+		CoreHash:           prepared.coreHash,
+		ProviderFamilyHash: prepared.familyHash,
+		LiveHash:           prepared.liveHash,
+		CoreBreakdown:      coreBreakdown,
 		ConfirmState: confirmPendingStart(session.Metadata["state"]) ||
 			sessionpkg.State(strings.TrimSpace(session.Metadata["state"])) == sessionpkg.StateAwake,
 		ClearSleepReason: session.Metadata["sleep_reason"] != "",
