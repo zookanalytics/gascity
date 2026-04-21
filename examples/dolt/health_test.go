@@ -307,7 +307,7 @@ exit 1
 		{
 			name:     "mismatched lsof pid still rejects port",
 			lsofBody: "#!/bin/sh\necho $$\nsleep 5\n",
-			ncBody: func(port string) string {
+			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 0
 `
@@ -317,7 +317,7 @@ exit 0
 		{
 			name:     "inconclusive lsof with unreachable port still rejects port",
 			lsofBody: "#!/bin/sh\nexit 0\n",
-			ncBody: func(port string) string {
+			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 1
 `
@@ -375,7 +375,7 @@ func TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid(t *testing.T) {
 		{
 			name:     "listener pid match via ps fallback",
 			lsofBody: "#!/bin/sh\necho 424242\n",
-			ncBody: func(port string) string {
+			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 1
 `
