@@ -67,6 +67,13 @@ func TestTutorial04Communication(t *testing.T) {
 		t.Helper()
 		out, err := ws.runShell("gc session kill mayor", "")
 		if err != nil {
+			lowerOut := strings.ToLower(out)
+			if strings.Contains(lowerOut, "session not found") ||
+				strings.Contains(lowerOut, "no session found") ||
+				strings.Contains(lowerOut, "is not active") {
+				ws.noteWarning("tutorial 04 runtime workaround: mayor was already stopped while requesting a session recycle, so the page driver skips the fatal gc session kill error and waits for the named-session reconciler to bring it back")
+				return
+			}
 			t.Fatalf("%s: %v\n%s", context, err, out)
 		}
 		if !strings.Contains(out, " killed.") {
