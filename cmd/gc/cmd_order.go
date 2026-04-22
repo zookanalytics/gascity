@@ -483,7 +483,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	}
 
 	if a.Pool != "" && cfg != nil {
-		pool := qualifyPool(a.Pool, a.Rig)
+		pool := qualifyPool(a.Pool, a.Rig, cfg)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, cityName, cityPath, cfg); err != nil {
 			fmt.Fprintf(stderr, "gc order run: routing decoration failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
@@ -509,7 +509,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{
-			"gc.routed_to": qualifyPool(a.Pool, a.Rig),
+			"gc.routed_to": qualifyPool(a.Pool, a.Rig, cfg),
 		}
 	}
 	if err := store.Update(rootID, update); err != nil {
@@ -519,7 +519,7 @@ func doOrderRun(aa []orders.Order, name, rig, cityPath string, store beads.Store
 
 	fmt.Fprintf(stdout, "Order %q executed: wisp %s", name, rootID) //nolint:errcheck
 	if a.Pool != "" {
-		fmt.Fprintf(stdout, " → gc.routed_to=%s", qualifyPool(a.Pool, a.Rig)) //nolint:errcheck
+		fmt.Fprintf(stdout, " → gc.routed_to=%s", qualifyPool(a.Pool, a.Rig, cfg)) //nolint:errcheck
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return 0

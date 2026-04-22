@@ -323,7 +323,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// Decorate graph workflow recipes with routing metadata so child step
 	// beads get gc.routed_to set before instantiation.
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
+		pool := qualifyPool(a.Pool, a.Rig, m.cfg)
 		if err := applyGraphRouting(recipe, nil, pool, nil, "", "", "", "", store, m.cityName, cityPath, m.cfg); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: routing decoration failed: %v", scoped, err)
 			// Non-fatal — molecule still works, just without step-level routing.
@@ -353,7 +353,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		)
 	}
 	if a.Pool != "" {
-		pool := qualifyPool(a.Pool, a.Rig)
+		pool := qualifyPool(a.Pool, a.Rig, m.cfg)
 		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
@@ -388,7 +388,7 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	if m.cfg == nil {
 		return false
 	}
-	qualified := qualifyPool(a.Pool, a.Rig)
+	qualified := qualifyPool(a.Pool, a.Rig, m.cfg)
 	rigName, _ := config.ParseQualifiedName(qualified)
 	if rigName == "" {
 		rigName = a.Rig
@@ -512,14 +512,57 @@ func rigExclusiveLayers(rigLayers, cityLayers []string) []string {
 	return rigLayers[len(cityLayers):]
 }
 
-// qualifyPool prefixes an unqualified pool name with the rig name for
-// rig-scoped orders. Already-qualified names (containing "/") are
-// returned as-is. City orders (empty rig) are unchanged.
-func qualifyPool(pool, rig string) string {
-	if rig == "" || strings.Contains(pool, "/") {
+// qualifyPool resolves an order's pool name into the gc.routed_to value
+// used to stamp dispatched wisps. Bare names are looked up in the city
+// config so that binding-qualified agents (e.g., a dog imported under
+// binding "gastown") get their full QualifiedName ("gastown.dog") on the
+// wire — the same value the agent's scale_check and work_query use to
+// find work. Rig-scoped orders scope lookup to agents in that rig.
+//
+// Fallback when no agent matches: rig-scoped orders return "rig/pool",
+// city orders return the bare pool. This preserves the legacy shape for
+// pools that don't correspond to a configured agent template.
+func qualifyPool(pool, rig string, cfg *config.City) string {
+	pool = strings.TrimSpace(pool)
+	if pool == "" {
 		return pool
 	}
-	return rig + "/" + pool
+	if strings.Contains(pool, "/") {
+		if cfg != nil {
+			dir, bare := config.ParseQualifiedName(pool)
+			if a, ok := findConfiguredAgent(cfg, dir, bare); ok {
+				return a.QualifiedName()
+			}
+		}
+		return pool
+	}
+	if cfg != nil {
+		if a, ok := findConfiguredAgent(cfg, rig, pool); ok {
+			return a.QualifiedName()
+		}
+	}
+	if rig != "" {
+		return rig + "/" + pool
+	}
+	return pool
+}
+
+// findConfiguredAgent looks up an explicit agent template by (Dir, Name).
+// Implicit provider-synthesized agents are skipped — pool routing targets
+// are user-configured agents.
+func findConfiguredAgent(cfg *config.City, dir, name string) (config.Agent, bool) {
+	if cfg == nil || name == "" {
+		return config.Agent{}, false
+	}
+	for _, a := range cfg.Agents {
+		if a.Implicit {
+			continue
+		}
+		if a.Dir == dir && a.Name == name {
+			return a, true
+		}
+	}
+	return config.Agent{}, false
 }
 
 // convertOverrides converts config.OrderOverride to orders.Override.

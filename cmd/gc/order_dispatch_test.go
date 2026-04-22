@@ -124,6 +124,41 @@ func TestOrderDispatchCooldownDue(t *testing.T) {
 	}
 }
 
+// TestOrderDispatchResolvesBindingQualifiedPool verifies that an order with a
+// bare pool name (e.g. `pool = "dog"`) stamps the dispatched wisp with the
+// agent's full QualifiedName when the pool resolves to a binding-imported
+// agent. Without this, scale_check's `gc.routed_to=gastown.dog` query never
+// matches wisps stamped with `gc.routed_to=dog` and the dog pool never
+// spawns (gc-8il).
+func TestOrderDispatchResolvesBindingQualifiedPool(t *testing.T) {
+	store := beads.NewMemStore()
+
+	aa := []orders.Order{{
+		Name:         "dog-order",
+		Trigger:      "cooldown",
+		Interval:     "1m",
+		Formula:      "test-formula",
+		Pool:         "dog",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, store, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cfg = &config.City{Agents: []config.Agent{
+		{Name: "dog", BindingName: "gastown"},
+	}}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	time.Sleep(50 * time.Millisecond)
+
+	work := workBeadByOrderLabel(t, store, "order-run:dog-order")
+	if got := work.Metadata["gc.routed_to"]; got != "gastown.dog" {
+		t.Errorf("gc.routed_to = %q, want %q", got, "gastown.dog")
+	}
+}
+
 func TestOrderDispatchCooldownNotDue(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -1348,17 +1383,74 @@ func TestRigExclusiveLayersNoCityPrefix(t *testing.T) {
 
 func TestQualifyPool(t *testing.T) {
 	tests := []struct {
-		pool, rig, want string
+		name, pool, rig, want string
+		cfg                   *config.City
 	}{
-		{"polecat", "demo-repo", "demo-repo/polecat"},
-		{"demo-repo/polecat", "demo-repo", "demo-repo/polecat"}, // already qualified
-		{"dog", "", "dog"}, // city order
+		{name: "rig-prefix with nil cfg", pool: "polecat", rig: "demo-repo", want: "demo-repo/polecat"},
+		{name: "already qualified with nil cfg", pool: "demo-repo/polecat", rig: "demo-repo", want: "demo-repo/polecat"},
+		{name: "city order with nil cfg", pool: "dog", rig: "", want: "dog"},
+		{
+			name: "bare bound dog resolves to binding-qualified",
+			pool: "dog",
+			rig:  "",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "dog", BindingName: "gastown"},
+			}},
+			want: "gastown.dog",
+		},
+		{
+			name: "bare unbound dog stays bare",
+			pool: "dog",
+			rig:  "",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "dog"},
+			}},
+			want: "dog",
+		},
+		{
+			name: "rig-scoped bound polecat resolves with binding",
+			pool: "polecat",
+			rig:  "proj",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "polecat", BindingName: "gs", Dir: "proj"},
+			}},
+			want: "proj/gs.polecat",
+		},
+		{
+			name: "rig-qualified name resolves binding",
+			pool: "proj/polecat",
+			rig:  "proj",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "polecat", BindingName: "gs", Dir: "proj"},
+			}},
+			want: "proj/gs.polecat",
+		},
+		{
+			name: "unmatched pool with rig falls back to prefix",
+			pool: "ghost",
+			rig:  "proj",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "other", Dir: "proj"},
+			}},
+			want: "proj/ghost",
+		},
+		{
+			name: "unmatched pool without rig returns as-is",
+			pool: "ghost",
+			rig:  "",
+			cfg: &config.City{Agents: []config.Agent{
+				{Name: "other"},
+			}},
+			want: "ghost",
+		},
 	}
 	for _, tt := range tests {
-		got := qualifyPool(tt.pool, tt.rig)
-		if got != tt.want {
-			t.Errorf("qualifyPool(%q, %q) = %q, want %q", tt.pool, tt.rig, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			got := qualifyPool(tt.pool, tt.rig, tt.cfg)
+			if got != tt.want {
+				t.Errorf("qualifyPool(%q, %q, cfg) = %q, want %q", tt.pool, tt.rig, got, tt.want)
+			}
+		})
 	}
 }
 
