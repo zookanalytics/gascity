@@ -1,0 +1,305 @@
+package main
+
+// cityinit.Initializer implementation. Bridges the domain interface
+// declared in internal/cityinit to the concrete scaffold + finalize
+// helpers in this package. Supplied to api.NewSupervisorMux at
+// construction so POST /v0/city calls Init in-process — no
+// subprocess, no 30-second deadline, no stderr-scraping.
+//
+// The long-term plan is to move doInit/finalizeInit and their
+// helpers into internal/cityinit so the domain logic physically
+// lives in the object model (per specs/architecture.md §1). This
+// bridge is the minimum viable unblocker: the HTTP API no longer
+// shells out, both surfaces drive the same in-process code path via
+// the same typed contract, and the refactor of where the body lives
+// is a follow-up.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/cityinit"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/supervisor"
+)
+
+// localInitializer implements cityinit.Initializer by dispatching to
+// this package's existing doInit + finalizeInit functions.
+type localInitializer struct{}
+
+// NewInitializer returns the Initializer the supervisor uses to
+// service POST /v0/city. Exported so `gc supervisor run` can wire it
+// into api.NewSupervisorMux.
+func NewInitializer() cityinit.Initializer {
+	return localInitializer{}
+}
+
+// Scaffold runs the fast portion of city creation so the HTTP API
+// handler can return 202 Accepted without blocking on the slow
+// finalize work. Writes the on-disk shape (via doInit), then
+// registers the city with the supervisor so the reconciler picks
+// it up on its next tick. The reconciler owns finalize from there;
+// readiness is signaled via city.ready / city.init_failed events on
+// the supervisor event bus (see internal/api/event_payloads.go).
+func (localInitializer) Scaffold(_ context.Context, req cityinit.InitRequest) (*cityinit.InitResult, error) {
+	if err := validateInitRequest(&req); err != nil {
+		return nil, err
+	}
+	dir := req.Dir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating directory %q: %w", dir, err)
+	}
+
+	wiz := wizardConfig{
+		configName:       req.ConfigName,
+		provider:         req.Provider,
+		startCommand:     req.StartCommand,
+		bootstrapProfile: req.BootstrapProfile,
+	}
+	if wiz.configName == "" {
+		wiz.configName = "tutorial"
+	}
+
+	if cityHasScaffoldFS(fsys.OSFS{}, dir) {
+		return nil, cityinit.ErrAlreadyInitialized
+	}
+	if code := doInit(fsys.OSFS{}, dir, wiz, req.NameOverride, io.Discard, io.Discard); code != 0 {
+		if code == initExitAlreadyInitialized {
+			return nil, cityinit.ErrAlreadyInitialized
+		}
+		return nil, fmt.Errorf("scaffold failed (exit %d)", code)
+	}
+
+	cityName := resolveCityName(req.NameOverride, "", dir)
+
+	// Create .gc/events.jsonl immediately and emit city.created before
+	// the supervisor reconciler picks up the city. Two reasons:
+	//
+	// 1. The supervisor event multiplexer (see
+	//    internal/api/supervisor.go:buildMultiplexer) includes
+	//    transient-city event providers via
+	//    TransientCityEventSource. With the file in place, a
+	//    subscriber to /v0/events/stream that connects right after
+	//    POST returns 202 sees a non-empty multiplexer and can
+	//    replay events via after_cursor=0.
+	//
+	// 2. The supervisor event stream's no-providers precheck rejects
+	//    subscriptions with 503 when the multiplexer is empty. By
+	//    populating at least one event log before registration,
+	//    POST /v0/city → subscribe works even when no other cities
+	//    exist yet (the fresh-supervisor scenario).
+	//
+	// Best-effort: a failure to open the recorder does not fail the
+	// Scaffold call — the reconciler creates its own recorder later
+	// and city.ready/city.init_failed will land there. The city is
+	// still usable, just without the leading city.created marker.
+	if fr, frErr := events.NewFileRecorder(filepath.Join(dir, ".gc", "events.jsonl"), io.Discard); frErr == nil {
+		if payload, mErr := json.Marshal(api.CityCreatedPayload{Name: cityName, Path: dir}); mErr == nil {
+			fr.Record(events.Event{
+				Type:    events.CityCreated,
+				Actor:   "gc",
+				Subject: cityName,
+				Payload: payload,
+			})
+		}
+		fr.Close() //nolint:errcheck // best-effort
+	}
+
+	// Register the city with the supervisor without blocking on the
+	// reconciler's tick. The standard registerCityWithSupervisor
+	// waits for prepareCityForSupervisor to complete, which is the
+	// very blocking behavior the async POST /v0/city contract
+	// exists to avoid. registerCityForAPI fires a reload signal at
+	// the supervisor and returns immediately; the reconciler picks
+	// up the city on its own schedule.
+	if err := registerCityForAPI(dir, req.NameOverride); err != nil {
+		return nil, fmt.Errorf("register with supervisor: %w", err)
+	}
+
+	return &cityinit.InitResult{
+		CityName:     cityName,
+		CityPath:     dir,
+		ProviderUsed: req.Provider,
+	}, nil
+}
+
+// Init scaffolds + finalizes a new city. Errors are mapped to the
+// typed sentinels in package cityinit so callers (HTTP API, future
+// in-process consumers) can pattern-match via errors.Is.
+func (localInitializer) Init(_ context.Context, req cityinit.InitRequest) (*cityinit.InitResult, error) {
+	if err := validateInitRequest(&req); err != nil {
+		return nil, err
+	}
+	dir := req.Dir
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating directory %q: %w", dir, err)
+	}
+
+	wiz := wizardConfig{
+		configName:       req.ConfigName,
+		provider:         req.Provider,
+		startCommand:     req.StartCommand,
+		bootstrapProfile: req.BootstrapProfile,
+	}
+	if wiz.configName == "" {
+		wiz.configName = "tutorial"
+	}
+
+	// Check for an already-initialized directory BEFORE calling
+	// doInit so we can return ErrAlreadyInitialized without also
+	// writing "gc init: already initialized" to stderr (the CLI
+	// path wants that; the API does not).
+	if cityHasScaffoldFS(fsys.OSFS{}, dir) {
+		return nil, cityinit.ErrAlreadyInitialized
+	}
+
+	// doInit writes directly to io.Writer arguments (CLI progress
+	// narration). The API path discards those; error return is
+	// carried as an exit code, which we translate into typed
+	// sentinels below.
+	if code := doInit(fsys.OSFS{}, dir, wiz, req.NameOverride, io.Discard, io.Discard); code != 0 {
+		if code == initExitAlreadyInitialized {
+			return nil, cityinit.ErrAlreadyInitialized
+		}
+		return nil, fmt.Errorf("scaffold failed (exit %d)", code)
+	}
+
+	// finalizeInit likewise writes to io.Writer and returns 0/1.
+	// Discard its narration; the HTTP response conveys structured
+	// errors via the sentinel types.
+	if code := finalizeInit(dir, io.Discard, io.Discard, initFinalizeOptions{
+		skipProviderReadiness: req.SkipProviderReadiness,
+		showProgress:          false,
+		commandName:           "gc init",
+	}); code != 0 {
+		// finalizeInit's current contract is "blocked, check
+		// stderr". Without a structured return type we can't map
+		// to specific sentinels; future work splits this out.
+		return nil, fmt.Errorf("finalize failed (exit %d)", code)
+	}
+
+	cityName := resolveCityName(req.NameOverride, "", dir)
+	return &cityinit.InitResult{
+		CityName:     cityName,
+		CityPath:     dir,
+		ProviderUsed: req.Provider,
+	}, nil
+}
+
+// Unregister removes the city's registry entry and signals the
+// supervisor to reconcile. Fire-and-forget: returns as soon as the
+// registry file is updated and the reload signal is sent. The
+// supervisor reconciler discovers the missing entry on its next
+// tick, stops the city's controller, and emits city.unregistered
+// (or city.unregister_failed on stop failure). See cmd_supervisor.go
+// for the reconciler side.
+//
+// Looks the city up by name. The registry is keyed by path on disk,
+// so we scan entries to find the one whose effective name matches.
+// Name collisions would violate the registry's uniqueness invariant
+// and are rejected at Register time; we take the first match.
+//
+// Emits city.unregister_requested to the city's event log before
+// unregistering so /v0/events/stream subscribers see the start of
+// the teardown. Once the registry entry is gone, the transient
+// event-provider lookup (cityRegistry.TransientCityEventProviders)
+// will still surface this city to new subscribers via its snap.all
+// entry until the reconciler fully drops it.
+func (localInitializer) Unregister(_ context.Context, req cityinit.UnregisterRequest) (*cityinit.UnregisterResult, error) {
+	name := strings.TrimSpace(req.CityName)
+	if name == "" {
+		return nil, fmt.Errorf("%w: city_name is required", cityinit.ErrNotRegistered)
+	}
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	entries, err := reg.List()
+	if err != nil {
+		return nil, fmt.Errorf("reading supervisor registry: %w", err)
+	}
+	var match supervisor.CityEntry
+	var found bool
+	for _, e := range entries {
+		if e.EffectiveName() == name {
+			match = e
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: %q", cityinit.ErrNotRegistered, name)
+	}
+
+	// Emit city.unregister_requested so subscribers that connected
+	// before the unregister call see the start of the teardown. The
+	// city's event file exists for any city that got far enough into
+	// Scaffold; best-effort if it's missing.
+	if fr, frErr := events.NewFileRecorder(filepath.Join(match.Path, ".gc", "events.jsonl"), io.Discard); frErr == nil {
+		if payload, mErr := json.Marshal(api.CityUnregisterRequestedPayload{Name: match.EffectiveName(), Path: match.Path}); mErr == nil {
+			fr.Record(events.Event{
+				Type:    events.CityUnregisterRequested,
+				Actor:   "gc",
+				Subject: match.EffectiveName(),
+				Payload: payload,
+			})
+		}
+		fr.Close() //nolint:errcheck // best-effort
+	}
+
+	if err := reg.Unregister(match.Path); err != nil {
+		// Should not happen — we just read this entry — but wrap to
+		// satisfy the ErrNotRegistered contract if it does.
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %q: %w", cityinit.ErrNotRegistered, name, err)
+		}
+		return nil, fmt.Errorf("removing %q from supervisor registry: %w", name, err)
+	}
+
+	// Wake the reconciler; same fire-and-forget signal the Scaffold
+	// path uses. If the supervisor isn't reachable the periodic
+	// ticker picks up the change on its next interval.
+	reloadSupervisorNoWait()
+
+	return &cityinit.UnregisterResult{
+		CityName: match.EffectiveName(),
+		CityPath: match.Path,
+	}, nil
+}
+
+// validateInitRequest performs the membership / mutual-exclusion
+// checks that the HTTP layer previously did inline. Keeping them in
+// the bridge means the CLI also benefits from the same validation
+// when its call site moves (follow-up).
+func validateInitRequest(req *cityinit.InitRequest) error {
+	if req.Dir == "" {
+		return fmt.Errorf("%w: dir is required", cityinit.ErrInvalidProvider)
+	}
+	if !filepath.IsAbs(req.Dir) {
+		return fmt.Errorf("dir must be absolute: %q", req.Dir)
+	}
+	if req.Provider == "" && req.StartCommand == "" {
+		return fmt.Errorf("%w: provider or start_command required", cityinit.ErrInvalidProvider)
+	}
+	if req.Provider != "" {
+		if _, ok := config.BuiltinProviders()[req.Provider]; !ok {
+			return fmt.Errorf("%w: unknown provider %q", cityinit.ErrInvalidProvider, req.Provider)
+		}
+	}
+	if req.BootstrapProfile != "" {
+		// normalizeBootstrapProfile accepts every spelling the CLI
+		// and HTTP API currently support; reuse it here so the two
+		// projections can't disagree.
+		if _, err := normalizeBootstrapProfile(req.BootstrapProfile); err != nil {
+			return fmt.Errorf("%w: %w", cityinit.ErrInvalidBootstrapProfile, err)
+		}
+	}
+	return nil
+}

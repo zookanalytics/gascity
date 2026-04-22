@@ -506,10 +506,19 @@ type CityCreateRequestBootstrapProfile string
 
 // CityCreateResponse defines model for CityCreateResponse.
 type CityCreateResponse struct {
-	// Ok True on success.
+	// Name Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.
+	Name string `json:"name"`
+
+	// Ok True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.
 	Ok bool `json:"ok"`
 
-	// Path Resolved absolute path of the created city.
+	// Path Resolved absolute path of the created city directory.
+	Path string `json:"path"`
+}
+
+// CityCreatedPayload defines model for CityCreatedPayload.
+type CityCreatedPayload struct {
+	Name string `json:"name"`
 	Path string `json:"path"`
 }
 
@@ -536,10 +545,55 @@ type CityInfo struct {
 	Status          *string   `json:"status,omitempty"`
 }
 
+// CityInitFailedPayload defines model for CityInitFailedPayload.
+type CityInitFailedPayload struct {
+	Error           string    `json:"error"`
+	Name            string    `json:"name"`
+	Path            string    `json:"path"`
+	PhasesCompleted *[]string `json:"phases_completed,omitempty"`
+}
+
 // CityPatchInputBody defines model for CityPatchInputBody.
 type CityPatchInputBody struct {
 	// Suspended Whether the city is suspended.
 	Suspended *bool `json:"suspended,omitempty"`
+}
+
+// CityReadyPayload defines model for CityReadyPayload.
+type CityReadyPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// CityUnregisterFailedPayload defines model for CityUnregisterFailedPayload.
+type CityUnregisterFailedPayload struct {
+	Error string `json:"error"`
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+}
+
+// CityUnregisterRequestedPayload defines model for CityUnregisterRequestedPayload.
+type CityUnregisterRequestedPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// CityUnregisterResponse defines model for CityUnregisterResponse.
+type CityUnregisterResponse struct {
+	// Name Resolved registry name. Filter the event stream by this to observe completion.
+	Name string `json:"name"`
+
+	// Ok True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.
+	Ok bool `json:"ok"`
+
+	// Path Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.
+	Path string `json:"path"`
+}
+
+// CityUnregisteredPayload defines model for CityUnregisteredPayload.
+type CityUnregisteredPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
 }
 
 // ConfigAgentResponse defines model for ConfigAgentResponse.
@@ -2620,6 +2674,30 @@ type WorkspaceResponse struct {
 	Suspended       bool    `json:"suspended"`
 }
 
+// PostV0CityParams defines parameters for PostV0City.
+type PostV0CityParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameParams defines parameters for PatchV0CityByCityName.
+type PatchV0CityByCityNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameAgentByBaseParams defines parameters for DeleteV0CityByCityNameAgentByBase.
+type DeleteV0CityByCityNameAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameAgentByBaseParams defines parameters for PatchV0CityByCityNameAgentByBase.
+type PatchV0CityByCityNameAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameAgentByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByBaseOutput.
 type GetV0CityByCityNameAgentByBaseOutputParams struct {
 	// Tail Number of recent compaction segments to return. This API parameter keeps compaction-segment semantics even though gc session logs --tail counts displayed transcript entries. Omit for the endpoint default (usually 1); 0 returns all segments; N>0 returns the last N.
@@ -2629,8 +2707,26 @@ type GetV0CityByCityNameAgentByBaseOutputParams struct {
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// PostV0CityByCityNameAgentByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByBaseByAction.
+type PostV0CityByCityNameAgentByBaseByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameAgentByBaseByActionParamsAction defines parameters for PostV0CityByCityNameAgentByBaseByAction.
 type PostV0CityByCityNameAgentByBaseByActionParamsAction string
+
+// DeleteV0CityByCityNameAgentByDirByBaseParams defines parameters for DeleteV0CityByCityNameAgentByDirByBase.
+type DeleteV0CityByCityNameAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameAgentByDirByBaseParams defines parameters for PatchV0CityByCityNameAgentByDirByBase.
+type PatchV0CityByCityNameAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
 
 // GetV0CityByCityNameAgentByDirByBaseOutputParams defines parameters for GetV0CityByCityNameAgentByDirByBaseOutput.
 type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
@@ -2639,6 +2735,12 @@ type GetV0CityByCityNameAgentByDirByBaseOutputParams struct {
 
 	// Before Message UUID cursor for loading older messages.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
+}
+
+// PostV0CityByCityNameAgentByDirByBaseByActionParams defines parameters for PostV0CityByCityNameAgentByDirByBaseByAction.
+type PostV0CityByCityNameAgentByDirByBaseByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionParamsAction defines parameters for PostV0CityByCityNameAgentByDirByBaseByAction.
@@ -2667,6 +2769,48 @@ type GetV0CityByCityNameAgentsParams struct {
 
 // GetV0CityByCityNameAgentsParamsRunning defines parameters for GetV0CityByCityNameAgents.
 type GetV0CityByCityNameAgentsParamsRunning string
+
+// CreateAgentParams defines parameters for CreateAgent.
+type CreateAgentParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameBeadByIdParams defines parameters for DeleteV0CityByCityNameBeadById.
+type DeleteV0CityByCityNameBeadByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameBeadByIdParams defines parameters for PatchV0CityByCityNameBeadById.
+type PatchV0CityByCityNameBeadByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdAssignParams defines parameters for PostV0CityByCityNameBeadByIdAssign.
+type PostV0CityByCityNameBeadByIdAssignParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdCloseParams defines parameters for PostV0CityByCityNameBeadByIdClose.
+type PostV0CityByCityNameBeadByIdCloseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdReopenParams defines parameters for PostV0CityByCityNameBeadByIdReopen.
+type PostV0CityByCityNameBeadByIdReopenParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameBeadByIdUpdateParams defines parameters for PostV0CityByCityNameBeadByIdUpdate.
+type PostV0CityByCityNameBeadByIdUpdateParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
 
 // GetV0CityByCityNameBeadsParams defines parameters for GetV0CityByCityNameBeads.
 type GetV0CityByCityNameBeadsParams struct {
@@ -2700,6 +2844,9 @@ type GetV0CityByCityNameBeadsParams struct {
 
 // CreateBeadParams defines parameters for CreateBead.
 type CreateBeadParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
 	// IdempotencyKey Idempotency key for safe retries.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
@@ -2711,6 +2858,30 @@ type GetV0CityByCityNameBeadsReadyParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+}
+
+// DeleteV0CityByCityNameConvoyByIdParams defines parameters for DeleteV0CityByCityNameConvoyById.
+type DeleteV0CityByCityNameConvoyByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdAddParams defines parameters for PostV0CityByCityNameConvoyByIdAdd.
+type PostV0CityByCityNameConvoyByIdAddParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdCloseParams defines parameters for PostV0CityByCityNameConvoyByIdClose.
+type PostV0CityByCityNameConvoyByIdCloseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameConvoyByIdRemoveParams defines parameters for PostV0CityByCityNameConvoyByIdRemove.
+type PostV0CityByCityNameConvoyByIdRemoveParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameConvoysParams defines parameters for GetV0CityByCityNameConvoys.
@@ -2726,6 +2897,12 @@ type GetV0CityByCityNameConvoysParams struct {
 
 	// Limit Maximum number of results to return. 0 = server default.
 	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// CreateConvoyParams defines parameters for CreateConvoy.
+type CreateConvoyParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameEventsParams defines parameters for GetV0CityByCityNameEvents.
@@ -2752,6 +2929,12 @@ type GetV0CityByCityNameEventsParams struct {
 	Since *string `form:"since,omitempty" json:"since,omitempty"`
 }
 
+// EmitEventParams defines parameters for EmitEvent.
+type EmitEventParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // StreamEventsParams defines parameters for StreamEvents.
 type StreamEventsParams struct {
 	// AfterSeq Reconnect position: only deliver events after this sequence number.
@@ -2759,6 +2942,24 @@ type StreamEventsParams struct {
 
 	// LastEventID SSE reconnect position from the last received event ID.
 	LastEventID *string `json:"Last-Event-ID,omitempty"`
+}
+
+// DeleteV0CityByCityNameExtmsgAdaptersParams defines parameters for DeleteV0CityByCityNameExtmsgAdapters.
+type DeleteV0CityByCityNameExtmsgAdaptersParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// RegisterExtmsgAdapterParams defines parameters for RegisterExtmsgAdapter.
+type RegisterExtmsgAdapterParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgBindParams defines parameters for PostV0CityByCityNameExtmsgBind.
+type PostV0CityByCityNameExtmsgBindParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameExtmsgBindingsParams defines parameters for GetV0CityByCityNameExtmsgBindings.
@@ -2785,6 +2986,36 @@ type GetV0CityByCityNameExtmsgGroupsParams struct {
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
 }
 
+// EnsureExtmsgGroupParams defines parameters for EnsureExtmsgGroup.
+type EnsureExtmsgGroupParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgInboundParams defines parameters for PostV0CityByCityNameExtmsgInbound.
+type PostV0CityByCityNameExtmsgInboundParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgOutboundParams defines parameters for PostV0CityByCityNameExtmsgOutbound.
+type PostV0CityByCityNameExtmsgOutboundParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNameExtmsgParticipantsParams defines parameters for DeleteV0CityByCityNameExtmsgParticipants.
+type DeleteV0CityByCityNameExtmsgParticipantsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgParticipantsParams defines parameters for PostV0CityByCityNameExtmsgParticipants.
+type PostV0CityByCityNameExtmsgParticipantsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameExtmsgTranscriptParams defines parameters for GetV0CityByCityNameExtmsgTranscript.
 type GetV0CityByCityNameExtmsgTranscriptParams struct {
 	// ScopeId Scope ID.
@@ -2804,6 +3035,18 @@ type GetV0CityByCityNameExtmsgTranscriptParams struct {
 
 	// Kind Conversation kind.
 	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
+// PostV0CityByCityNameExtmsgTranscriptAckParams defines parameters for PostV0CityByCityNameExtmsgTranscriptAck.
+type PostV0CityByCityNameExtmsgTranscriptAckParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameExtmsgUnbindParams defines parameters for PostV0CityByCityNameExtmsgUnbind.
+type PostV0CityByCityNameExtmsgUnbindParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameFormulaByNameParams defines parameters for GetV0CityByCityNameFormulaByName.
@@ -2851,6 +3094,12 @@ type GetV0CityByCityNameFormulasByNameParams struct {
 	Target string `form:"target" json:"target"`
 }
 
+// PostV0CityByCityNameFormulasByNamePreviewParams defines parameters for PostV0CityByCityNameFormulasByNamePreview.
+type PostV0CityByCityNameFormulasByNamePreviewParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameFormulasByNameRunsParams defines parameters for GetV0CityByCityNameFormulasByNameRuns.
 type GetV0CityByCityNameFormulasByNameRunsParams struct {
 	// ScopeKind Scope kind (city or rig).
@@ -2889,6 +3138,9 @@ type GetV0CityByCityNameMailParams struct {
 
 // SendMailParams defines parameters for SendMail.
 type SendMailParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
 	// IdempotencyKey Idempotency key for safe retries.
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
@@ -2912,6 +3164,9 @@ type GetV0CityByCityNameMailThreadByIdParams struct {
 type DeleteV0CityByCityNameMailByIdParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameMailByIdParams defines parameters for GetV0CityByCityNameMailById.
@@ -2924,30 +3179,54 @@ type GetV0CityByCityNameMailByIdParams struct {
 type PostV0CityByCityNameMailByIdArchiveParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameMailByIdMarkUnreadParams defines parameters for PostV0CityByCityNameMailByIdMarkUnread.
 type PostV0CityByCityNameMailByIdMarkUnreadParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // PostV0CityByCityNameMailByIdReadParams defines parameters for PostV0CityByCityNameMailByIdRead.
 type PostV0CityByCityNameMailByIdReadParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // ReplyMailParams defines parameters for ReplyMail.
 type ReplyMailParams struct {
 	// Rig Rig hint.
 	Rig *string `form:"rig,omitempty" json:"rig,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameOrderHistoryByBeadIdParams defines parameters for GetV0CityByCityNameOrderHistoryByBeadId.
 type GetV0CityByCityNameOrderHistoryByBeadIdParams struct {
 	// StoreRef Store reference for disambiguating store-local bead IDs.
 	StoreRef *string `form:"store_ref,omitempty" json:"store_ref,omitempty"`
+}
+
+// PostV0CityByCityNameOrderByNameDisableParams defines parameters for PostV0CityByCityNameOrderByNameDisable.
+type PostV0CityByCityNameOrderByNameDisableParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameOrderByNameEnableParams defines parameters for PostV0CityByCityNameOrderByNameEnable.
+type PostV0CityByCityNameOrderByNameEnableParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameOrdersFeedParams defines parameters for GetV0CityByCityNameOrdersFeed.
@@ -2974,6 +3253,48 @@ type GetV0CityByCityNameOrdersHistoryParams struct {
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
 }
 
+// DeleteV0CityByCityNamePatchesAgentByBaseParams defines parameters for DeleteV0CityByCityNamePatchesAgentByBase.
+type DeleteV0CityByCityNamePatchesAgentByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesAgentByDirByBaseParams defines parameters for DeleteV0CityByCityNamePatchesAgentByDirByBase.
+type DeleteV0CityByCityNamePatchesAgentByDirByBaseParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesAgentsParams defines parameters for PutV0CityByCityNamePatchesAgents.
+type PutV0CityByCityNamePatchesAgentsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesProviderByNameParams defines parameters for DeleteV0CityByCityNamePatchesProviderByName.
+type DeleteV0CityByCityNamePatchesProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesProvidersParams defines parameters for PutV0CityByCityNamePatchesProviders.
+type PutV0CityByCityNamePatchesProvidersParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// DeleteV0CityByCityNamePatchesRigByNameParams defines parameters for DeleteV0CityByCityNamePatchesRigByName.
+type DeleteV0CityByCityNamePatchesRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PutV0CityByCityNamePatchesRigsParams defines parameters for PutV0CityByCityNamePatchesRigs.
+type PutV0CityByCityNamePatchesRigsParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameProviderReadinessParams defines parameters for GetV0CityByCityNameProviderReadiness.
 type GetV0CityByCityNameProviderReadinessParams struct {
 	// Providers Comma-separated provider names to check (default: claude,codex,gemini).
@@ -2981,6 +3302,24 @@ type GetV0CityByCityNameProviderReadinessParams struct {
 
 	// Fresh Force fresh probe, bypassing cache.
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
+}
+
+// DeleteV0CityByCityNameProviderByNameParams defines parameters for DeleteV0CityByCityNameProviderByName.
+type DeleteV0CityByCityNameProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PatchV0CityByCityNameProviderByNameParams defines parameters for PatchV0CityByCityNameProviderByName.
+type PatchV0CityByCityNameProviderByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// CreateProviderParams defines parameters for CreateProvider.
+type CreateProviderParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameReadinessParams defines parameters for GetV0CityByCityNameReadiness.
@@ -2992,10 +3331,28 @@ type GetV0CityByCityNameReadinessParams struct {
 	Fresh *bool `form:"fresh,omitempty" json:"fresh,omitempty"`
 }
 
+// DeleteV0CityByCityNameRigByNameParams defines parameters for DeleteV0CityByCityNameRigByName.
+type DeleteV0CityByCityNameRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameRigByNameParams defines parameters for GetV0CityByCityNameRigByName.
 type GetV0CityByCityNameRigByNameParams struct {
 	// Git Include git status.
 	Git *bool `form:"git,omitempty" json:"git,omitempty"`
+}
+
+// PatchV0CityByCityNameRigByNameParams defines parameters for PatchV0CityByCityNameRigByName.
+type PatchV0CityByCityNameRigByNameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameRigByNameByActionParams defines parameters for PostV0CityByCityNameRigByNameByAction.
+type PostV0CityByCityNameRigByNameByActionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameRigsParams defines parameters for GetV0CityByCityNameRigs.
@@ -3010,22 +3367,85 @@ type GetV0CityByCityNameRigsParams struct {
 	Git *bool `form:"git,omitempty" json:"git,omitempty"`
 }
 
+// CreateRigParams defines parameters for CreateRig.
+type CreateRigParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameServiceByNameRestartParams defines parameters for PostV0CityByCityNameServiceByNameRestart.
+type PostV0CityByCityNameServiceByNameRestartParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameSessionByIdParams defines parameters for GetV0CityByCityNameSessionById.
 type GetV0CityByCityNameSessionByIdParams struct {
 	// Peek Include last output preview.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 }
 
+// PatchV0CityByCityNameSessionByIdParams defines parameters for PatchV0CityByCityNameSessionById.
+type PatchV0CityByCityNameSessionByIdParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdCloseParams defines parameters for PostV0CityByCityNameSessionByIdClose.
 type PostV0CityByCityNameSessionByIdCloseParams struct {
 	// Delete Permanently delete bead after closing.
 	Delete *bool `form:"delete,omitempty" json:"delete,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdKillParams defines parameters for PostV0CityByCityNameSessionByIdKill.
+type PostV0CityByCityNameSessionByIdKillParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// SendSessionMessageParams defines parameters for SendSessionMessage.
+type SendSessionMessageParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdRenameParams defines parameters for PostV0CityByCityNameSessionByIdRename.
+type PostV0CityByCityNameSessionByIdRenameParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// RespondSessionParams defines parameters for RespondSession.
+type RespondSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdStopParams defines parameters for PostV0CityByCityNameSessionByIdStop.
+type PostV0CityByCityNameSessionByIdStopParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // StreamSessionParams defines parameters for StreamSession.
 type StreamSessionParams struct {
 	// Format Transcript format: conversation (default) or raw.
 	Format *string `form:"format,omitempty" json:"format,omitempty"`
+}
+
+// SubmitSessionParams defines parameters for SubmitSession.
+type SubmitSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSessionByIdSuspendParams defines parameters for PostV0CityByCityNameSessionByIdSuspend.
+type PostV0CityByCityNameSessionByIdSuspendParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
@@ -3038,6 +3458,12 @@ type GetV0CityByCityNameSessionByIdTranscriptParams struct {
 
 	// Before Pagination cursor: return entries before this UUID.
 	Before *string `form:"before,omitempty" json:"before,omitempty"`
+}
+
+// PostV0CityByCityNameSessionByIdWakeParams defines parameters for PostV0CityByCityNameSessionByIdWake.
+type PostV0CityByCityNameSessionByIdWakeParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameSessionsParams defines parameters for GetV0CityByCityNameSessions.
@@ -3058,6 +3484,18 @@ type GetV0CityByCityNameSessionsParams struct {
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
 }
 
+// CreateSessionParams defines parameters for CreateSession.
+type CreateSessionParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
+// PostV0CityByCityNameSlingParams defines parameters for PostV0CityByCityNameSling.
+type PostV0CityByCityNameSlingParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // GetV0CityByCityNameStatusParams defines parameters for GetV0CityByCityNameStatus.
 type GetV0CityByCityNameStatusParams struct {
 	// Index Event sequence number; when provided, blocks until a newer event arrives.
@@ -3065,6 +3503,12 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+}
+
+// PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
+type PostV0CityByCityNameUnregisterParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdParams defines parameters for DeleteV0CityByCityNameWorkflowByWorkflowId.
@@ -3077,6 +3521,9 @@ type DeleteV0CityByCityNameWorkflowByWorkflowIdParams struct {
 
 	// Delete Permanently delete beads from store.
 	Delete *bool `form:"delete,omitempty" json:"delete,omitempty"`
+
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
 }
 
 // GetV0CityByCityNameWorkflowByWorkflowIdParams defines parameters for GetV0CityByCityNameWorkflowByWorkflowId.
@@ -3318,6 +3765,162 @@ func (t *EventPayload) FromBoundEventPayload(v BoundEventPayload) error {
 
 // MergeBoundEventPayload performs a merge with any union data inside the EventPayload, using the provided BoundEventPayload
 func (t *EventPayload) MergeBoundEventPayload(v BoundEventPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityCreatedPayload returns the union data inside the EventPayload as a CityCreatedPayload
+func (t EventPayload) AsCityCreatedPayload() (CityCreatedPayload, error) {
+	var body CityCreatedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityCreatedPayload overwrites any union data inside the EventPayload as the provided CityCreatedPayload
+func (t *EventPayload) FromCityCreatedPayload(v CityCreatedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityCreatedPayload performs a merge with any union data inside the EventPayload, using the provided CityCreatedPayload
+func (t *EventPayload) MergeCityCreatedPayload(v CityCreatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityInitFailedPayload returns the union data inside the EventPayload as a CityInitFailedPayload
+func (t EventPayload) AsCityInitFailedPayload() (CityInitFailedPayload, error) {
+	var body CityInitFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityInitFailedPayload overwrites any union data inside the EventPayload as the provided CityInitFailedPayload
+func (t *EventPayload) FromCityInitFailedPayload(v CityInitFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityInitFailedPayload performs a merge with any union data inside the EventPayload, using the provided CityInitFailedPayload
+func (t *EventPayload) MergeCityInitFailedPayload(v CityInitFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityReadyPayload returns the union data inside the EventPayload as a CityReadyPayload
+func (t EventPayload) AsCityReadyPayload() (CityReadyPayload, error) {
+	var body CityReadyPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityReadyPayload overwrites any union data inside the EventPayload as the provided CityReadyPayload
+func (t *EventPayload) FromCityReadyPayload(v CityReadyPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityReadyPayload performs a merge with any union data inside the EventPayload, using the provided CityReadyPayload
+func (t *EventPayload) MergeCityReadyPayload(v CityReadyPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityUnregisterFailedPayload returns the union data inside the EventPayload as a CityUnregisterFailedPayload
+func (t EventPayload) AsCityUnregisterFailedPayload() (CityUnregisterFailedPayload, error) {
+	var body CityUnregisterFailedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityUnregisterFailedPayload overwrites any union data inside the EventPayload as the provided CityUnregisterFailedPayload
+func (t *EventPayload) FromCityUnregisterFailedPayload(v CityUnregisterFailedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityUnregisterFailedPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisterFailedPayload
+func (t *EventPayload) MergeCityUnregisterFailedPayload(v CityUnregisterFailedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityUnregisterRequestedPayload returns the union data inside the EventPayload as a CityUnregisterRequestedPayload
+func (t EventPayload) AsCityUnregisterRequestedPayload() (CityUnregisterRequestedPayload, error) {
+	var body CityUnregisterRequestedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityUnregisterRequestedPayload overwrites any union data inside the EventPayload as the provided CityUnregisterRequestedPayload
+func (t *EventPayload) FromCityUnregisterRequestedPayload(v CityUnregisterRequestedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityUnregisterRequestedPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisterRequestedPayload
+func (t *EventPayload) MergeCityUnregisterRequestedPayload(v CityUnregisterRequestedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsCityUnregisteredPayload returns the union data inside the EventPayload as a CityUnregisteredPayload
+func (t EventPayload) AsCityUnregisteredPayload() (CityUnregisteredPayload, error) {
+	var body CityUnregisteredPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromCityUnregisteredPayload overwrites any union data inside the EventPayload as the provided CityUnregisteredPayload
+func (t *EventPayload) FromCityUnregisteredPayload(v CityUnregisteredPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeCityUnregisteredPayload performs a merge with any union data inside the EventPayload, using the provided CityUnregisteredPayload
+func (t *EventPayload) MergeCityUnregisteredPayload(v CityUnregisteredPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -3600,28 +4203,28 @@ type ClientInterface interface {
 	GetV0Cities(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityWithBody request with any body
-	PostV0CityWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityWithBody(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0City(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0City(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityName request
 	GetV0CityByCityName(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameWithBody request with any body
-	PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityName(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityName(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameAgentByBase request
-	DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByBase request
 	GetV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameAgentByBaseWithBody request with any body
-	PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByBaseOutput request
 	GetV0CityByCityNameAgentByBaseOutput(ctx context.Context, cityName string, base string, params *GetV0CityByCityNameAgentByBaseOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3630,18 +4233,18 @@ type ClientInterface interface {
 	StreamAgentOutput(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByBaseByAction request
-	PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameAgentByDirByBase request
-	DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByDirByBase request
 	GetV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameAgentByDirByBaseWithBody request with any body
-	PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseOutput request
 	GetV0CityByCityNameAgentByDirByBaseOutput(ctx context.Context, cityName string, dir string, base string, params *GetV0CityByCityNameAgentByDirByBaseOutputParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3650,45 +4253,45 @@ type ClientInterface interface {
 	StreamAgentOutputQualified(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByAction request
-	PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameAgents request
 	GetV0CityByCityNameAgents(ctx context.Context, cityName string, params *GetV0CityByCityNameAgentsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateAgentWithBody request with any body
-	CreateAgentWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateAgentWithBody(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateAgent(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateAgent(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameBeadById request
-	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadById request
 	GetV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBody request with any body
-	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdAssignWithBody request with any body
-	PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdClose request
-	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeadByIdDeps request
 	GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdReopen request
-	PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameBeadByIdUpdateWithBody request with any body
-	PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameBeads request
 	GetV0CityByCityNameBeads(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3714,63 +4317,63 @@ type ClientInterface interface {
 	GetV0CityByCityNameConfigValidate(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameConvoyById request
-	DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoyById request
 	GetV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdAddWithBody request with any body
-	PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoyByIdCheck request
 	GetV0CityByCityNameConvoyByIdCheck(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdClose request
-	PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameConvoyByIdRemoveWithBody request with any body
-	PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameConvoys request
 	GetV0CityByCityNameConvoys(ctx context.Context, cityName string, params *GetV0CityByCityNameConvoysParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateConvoyWithBody request with any body
-	CreateConvoyWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateConvoyWithBody(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateConvoy(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateConvoy(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameEvents request
 	GetV0CityByCityNameEvents(ctx context.Context, cityName string, params *GetV0CityByCityNameEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EmitEventWithBody request with any body
-	EmitEventWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EmitEventWithBody(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamEvents request
 	StreamEvents(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameExtmsgAdaptersWithBody request with any body
-	DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgAdapters request
 	GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RegisterExtmsgAdapterWithBody request with any body
-	RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RegisterExtmsgAdapter(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgBindWithBody request with any body
-	PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgBindings request
 	GetV0CityByCityNameExtmsgBindings(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3779,42 +4382,42 @@ type ClientInterface interface {
 	GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// EnsureExtmsgGroupWithBody request with any body
-	EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	EnsureExtmsgGroup(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgInboundWithBody request with any body
-	PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgOutboundWithBody request with any body
-	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameExtmsgParticipantsWithBody request with any body
-	DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgParticipantsWithBody request with any body
-	PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameExtmsgTranscript request
 	GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgTranscriptAckWithBody request with any body
-	PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameExtmsgUnbindWithBody request with any body
-	PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameFormulaByName request
 	GetV0CityByCityNameFormulaByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3829,9 +4432,9 @@ type ClientInterface interface {
 	GetV0CityByCityNameFormulasByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBody request with any body
-	PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameFormulasByNameRuns request
 	GetV0CityByCityNameFormulasByNameRuns(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3880,10 +4483,10 @@ type ClientInterface interface {
 	GetV0CityByCityNameOrderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameOrderByNameDisable request
-	PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameOrderByNameEnable request
-	PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameOrders request
 	GetV0CityByCityNameOrders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3901,13 +4504,13 @@ type ClientInterface interface {
 	GetV0CityByCityNamePacks(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByBase request
-	DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesAgentByBase request
 	GetV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByDirByBase request
-	DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesAgentByDirByBase request
 	GetV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3916,12 +4519,12 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesAgentsWithBody request with any body
-	PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesProviderByName request
-	DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesProviderByName request
 	GetV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3930,12 +4533,12 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesProvidersWithBody request with any body
-	PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNamePatchesRigByName request
-	DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNamePatchesRigByName request
 	GetV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3944,31 +4547,31 @@ type ClientInterface interface {
 	GetV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PutV0CityByCityNamePatchesRigsWithBody request with any body
-	PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviderReadiness request
 	GetV0CityByCityNameProviderReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameProviderByName request
-	DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviderByName request
 	GetV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameProviderByNameWithBody request with any body
-	PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProviders request
 	GetV0CityByCityNameProviders(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateProviderWithBody request with any body
-	CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateProviderWithBody(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateProvider(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameProvidersPublic request
 	GetV0CityByCityNameProvidersPublic(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -3977,32 +4580,32 @@ type ClientInterface interface {
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameRigByName request
-	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRigByName request
 	GetV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameRigByNameWithBody request with any body
-	PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameRigByNameByAction request
-	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameRigs request
 	GetV0CityByCityNameRigs(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateRigWithBody request with any body
-	CreateRigWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateRigWithBody(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateRig(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameServiceByName request
 	GetV0CityByCityNameServiceByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameServiceByNameRestart request
-	PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameServices request
 	GetV0CityByCityNameServices(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4011,9 +4614,9 @@ type ClientInterface interface {
 	GetV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PatchV0CityByCityNameSessionByIdWithBody request with any body
-	PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdAgents request
 	GetV0CityByCityNameSessionByIdAgents(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4025,61 +4628,64 @@ type ClientInterface interface {
 	PostV0CityByCityNameSessionByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdKill request
-	PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SendSessionMessageWithBody request with any body
-	SendSessionMessageWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SendSessionMessageWithBody(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	SendSessionMessage(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdPending request
 	GetV0CityByCityNameSessionByIdPending(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdRenameWithBody request with any body
-	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RespondSessionWithBody request with any body
-	RespondSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	RespondSession(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	RespondSession(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdStop request
-	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamSession request
 	StreamSession(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// SubmitSessionWithBody request with any body
-	SubmitSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SubmitSessionWithBody(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	SubmitSession(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	SubmitSession(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdSuspend request
-	PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSessionByIdWake request
-	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessions request
 	GetV0CityByCityNameSessions(ctx context.Context, cityName string, params *GetV0CityByCityNameSessionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// CreateSessionWithBody request with any body
-	CreateSessionWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateSessionWithBody(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	CreateSession(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	CreateSession(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PostV0CityByCityNameSlingWithBody request with any body
-	PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	PostV0CityByCityNameSling(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+	PostV0CityByCityNameSling(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameStatus request
 	GetV0CityByCityNameStatus(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostV0CityByCityNameUnregister request
+	PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowId request
 	DeleteV0CityByCityNameWorkflowByWorkflowId(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -4124,8 +4730,8 @@ func (c *Client) GetV0Cities(ctx context.Context, reqEditors ...RequestEditorFn)
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityRequestWithBody(c.Server, contentType, body)
+func (c *Client) PostV0CityWithBody(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4136,8 +4742,8 @@ func (c *Client) PostV0CityWithBody(ctx context.Context, contentType string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0City(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityRequest(c.Server, body)
+func (c *Client) PostV0City(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4160,8 +4766,8 @@ func (c *Client) GetV0CityByCityName(ctx context.Context, cityName string, reqEd
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4172,8 +4778,8 @@ func (c *Client) PatchV0CityByCityNameWithBody(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRequest(c.Server, cityName, body)
+func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4184,8 +4790,8 @@ func (c *Client) PatchV0CityByCityName(ctx context.Context, cityName string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base)
+func (c *Client) DeleteV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4208,8 +4814,8 @@ func (c *Client) GetV0CityByCityNameAgentByBase(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByBaseRequestWithBody(c.Server, cityName, base, contentType, body)
+func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByBaseRequestWithBody(c.Server, cityName, base, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4220,8 +4826,8 @@ func (c *Client) PatchV0CityByCityNameAgentByBaseWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, body)
+func (c *Client) PatchV0CityByCityNameAgentByBase(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByBaseRequest(c.Server, cityName, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4256,8 +4862,8 @@ func (c *Client) StreamAgentOutput(ctx context.Context, cityName string, base st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameAgentByBaseByActionRequest(c.Server, cityName, base, action)
+func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameAgentByBaseByActionRequest(c.Server, cityName, base, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4268,8 +4874,8 @@ func (c *Client) PostV0CityByCityNameAgentByBaseByAction(ctx context.Context, ci
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base)
+func (c *Client) DeleteV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4292,8 +4898,8 @@ func (c *Client) GetV0CityByCityNameAgentByDirByBase(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(c.Server, cityName, dir, base, contentType, body)
+func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(c.Server, cityName, dir, base, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4304,8 +4910,8 @@ func (c *Client) PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, body)
+func (c *Client) PatchV0CityByCityNameAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameAgentByDirByBaseRequest(c.Server, cityName, dir, base, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4340,8 +4946,8 @@ func (c *Client) StreamAgentOutputQualified(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(c.Server, cityName, dir, base, action)
+func (c *Client) PostV0CityByCityNameAgentByDirByBaseByAction(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(c.Server, cityName, dir, base, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4364,8 +4970,8 @@ func (c *Client) GetV0CityByCityNameAgents(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateAgentRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4376,8 +4982,8 @@ func (c *Client) CreateAgentWithBody(ctx context.Context, cityName string, conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateAgent(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateAgentRequest(c.Server, cityName, body)
+func (c *Client) CreateAgent(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateAgentRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4388,8 +4994,8 @@ func (c *Client) CreateAgent(ctx context.Context, cityName string, body CreateAg
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameBeadByIdRequest(c.Server, cityName, id)
+func (c *Client) DeleteV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4412,8 +5018,8 @@ func (c *Client) GetV0CityByCityNameBeadById(ctx context.Context, cityName strin
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameBeadByIdRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameBeadByIdRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4424,8 +5030,8 @@ func (c *Client) PatchV0CityByCityNameBeadByIdWithBody(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, body)
+func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameBeadByIdRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4436,8 +5042,8 @@ func (c *Client) PatchV0CityByCityNameBeadById(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4448,8 +5054,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssignWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdAssignRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdAssignRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4460,8 +5066,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdAssign(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameBeadByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdCloseRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4484,8 +5090,8 @@ func (c *Client) GetV0CityByCityNameBeadByIdDeps(ctx context.Context, cityName s
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdReopenRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdReopenRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4496,8 +5102,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdReopen(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4508,8 +5114,8 @@ func (c *Client) PostV0CityByCityNameBeadByIdUpdateWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameBeadByIdUpdate(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameBeadByIdUpdateRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4616,8 +5222,8 @@ func (c *Client) GetV0CityByCityNameConfigValidate(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameConvoyByIdRequest(c.Server, cityName, id)
+func (c *Client) DeleteV0CityByCityNameConvoyById(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameConvoyByIdRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4640,8 +5246,8 @@ func (c *Client) GetV0CityByCityNameConvoyById(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4652,8 +5258,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdAddWithBody(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdAddRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdAdd(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdAddRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4676,8 +5282,8 @@ func (c *Client) GetV0CityByCityNameConvoyByIdCheck(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdCloseRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdCloseRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -4688,8 +5294,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdClose(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4700,8 +5306,8 @@ func (c *Client) PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameConvoyByIdRemove(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameConvoyByIdRemoveRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4724,8 +5330,8 @@ func (c *Client) GetV0CityByCityNameConvoys(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateConvoyRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConvoyRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4736,8 +5342,8 @@ func (c *Client) CreateConvoyWithBody(ctx context.Context, cityName string, cont
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateConvoy(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateConvoyRequest(c.Server, cityName, body)
+func (c *Client) CreateConvoy(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateConvoyRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4760,8 +5366,8 @@ func (c *Client) GetV0CityByCityNameEvents(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEmitEventRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEmitEventRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4772,8 +5378,8 @@ func (c *Client) EmitEventWithBody(ctx context.Context, cityName string, content
 	return c.Client.Do(req)
 }
 
-func (c *Client) EmitEvent(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEmitEventRequest(c.Server, cityName, body)
+func (c *Client) EmitEvent(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEmitEventRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4796,8 +5402,8 @@ func (c *Client) StreamEvents(ctx context.Context, cityName string, params *Stre
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4808,8 +5414,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx context.Contex
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgAdaptersRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4832,8 +5438,8 @@ func (c *Client) GetV0CityByCityNameExtmsgAdapters(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4844,8 +5450,8 @@ func (c *Client) RegisterExtmsgAdapterWithBody(ctx context.Context, cityName str
 	return c.Client.Do(req)
 }
 
-func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRegisterExtmsgAdapterRequest(c.Server, cityName, body)
+func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterExtmsgAdapterRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4856,8 +5462,8 @@ func (c *Client) RegisterExtmsgAdapter(ctx context.Context, cityName string, bod
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgBindRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4868,8 +5474,8 @@ func (c *Client) PostV0CityByCityNameExtmsgBindWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgBindRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgBind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgBindRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4904,8 +5510,8 @@ func (c *Client) GetV0CityByCityNameExtmsgGroups(ctx context.Context, cityName s
 	return c.Client.Do(req)
 }
 
-func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4916,8 +5522,8 @@ func (c *Client) EnsureExtmsgGroupWithBody(ctx context.Context, cityName string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewEnsureExtmsgGroupRequest(c.Server, cityName, body)
+func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewEnsureExtmsgGroupRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4928,8 +5534,8 @@ func (c *Client) EnsureExtmsgGroup(ctx context.Context, cityName string, body En
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgInboundRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4940,8 +5546,8 @@ func (c *Client) PostV0CityByCityNameExtmsgInboundWithBody(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgInboundRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4952,8 +5558,8 @@ func (c *Client) PostV0CityByCityNameExtmsgInbound(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4964,8 +5570,8 @@ func (c *Client) PostV0CityByCityNameExtmsgOutboundWithBody(ctx context.Context,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgOutboundRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgOutboundRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4976,8 +5582,8 @@ func (c *Client) PostV0CityByCityNameExtmsgOutbound(ctx context.Context, cityNam
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -4988,8 +5594,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Co
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5000,8 +5606,8 @@ func (c *Client) DeleteV0CityByCityNameExtmsgParticipants(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5012,8 +5618,8 @@ func (c *Client) PostV0CityByCityNameExtmsgParticipantsWithBody(ctx context.Cont
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgParticipants(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgParticipantsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5036,8 +5642,8 @@ func (c *Client) GetV0CityByCityNameExtmsgTranscript(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5048,8 +5654,8 @@ func (c *Client) PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx context.Con
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgTranscriptAckRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5060,8 +5666,8 @@ func (c *Client) PostV0CityByCityNameExtmsgTranscriptAck(ctx context.Context, ci
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5072,8 +5678,8 @@ func (c *Client) PostV0CityByCityNameExtmsgUnbindWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameExtmsgUnbindRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameExtmsgUnbind(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameExtmsgUnbindRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5132,8 +5738,8 @@ func (c *Client) GetV0CityByCityNameFormulasByName(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5144,8 +5750,8 @@ func (c *Client) PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx context.C
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequest(c.Server, cityName, name, body)
+func (c *Client) PostV0CityByCityNameFormulasByNamePreview(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameFormulasByNamePreviewRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5348,8 +5954,8 @@ func (c *Client) GetV0CityByCityNameOrderByName(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameOrderByNameDisableRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameDisableRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5360,8 +5966,8 @@ func (c *Client) PostV0CityByCityNameOrderByNameDisable(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameOrderByNameEnableRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameOrderByNameEnable(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameOrderByNameEnableRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5432,8 +6038,8 @@ func (c *Client) GetV0CityByCityNamePacks(ctx context.Context, cityName string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(c.Server, cityName, base)
+func (c *Client) DeleteV0CityByCityNamePatchesAgentByBase(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(c.Server, cityName, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5456,8 +6062,8 @@ func (c *Client) GetV0CityByCityNamePatchesAgentByBase(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(c.Server, cityName, dir, base)
+func (c *Client) DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(c.Server, cityName, dir, base, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5492,8 +6098,8 @@ func (c *Client) GetV0CityByCityNamePatchesAgents(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesAgentsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesAgentsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5504,8 +6110,8 @@ func (c *Client) PutV0CityByCityNamePatchesAgentsWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesAgentsRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesAgentsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5516,8 +6122,8 @@ func (c *Client) PutV0CityByCityNamePatchesAgents(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesProviderByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNamePatchesProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesProviderByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5552,8 +6158,8 @@ func (c *Client) GetV0CityByCityNamePatchesProviders(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesProvidersRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesProvidersRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5564,8 +6170,8 @@ func (c *Client) PutV0CityByCityNamePatchesProvidersWithBody(ctx context.Context
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesProvidersRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesProvidersRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5576,8 +6182,8 @@ func (c *Client) PutV0CityByCityNamePatchesProviders(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNamePatchesRigByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNamePatchesRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNamePatchesRigByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5612,8 +6218,8 @@ func (c *Client) GetV0CityByCityNamePatchesRigs(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesRigsRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesRigsRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5624,8 +6230,8 @@ func (c *Client) PutV0CityByCityNamePatchesRigsWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPutV0CityByCityNamePatchesRigsRequest(c.Server, cityName, body)
+func (c *Client) PutV0CityByCityNamePatchesRigs(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutV0CityByCityNamePatchesRigsRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5648,8 +6254,8 @@ func (c *Client) GetV0CityByCityNameProviderReadiness(ctx context.Context, cityN
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameProviderByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5672,8 +6278,8 @@ func (c *Client) GetV0CityByCityNameProviderByName(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameProviderByNameRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameProviderByNameRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5684,8 +6290,8 @@ func (c *Client) PatchV0CityByCityNameProviderByNameWithBody(ctx context.Context
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, body)
+func (c *Client) PatchV0CityByCityNameProviderByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameProviderByNameRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5708,8 +6314,8 @@ func (c *Client) GetV0CityByCityNameProviders(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateProviderRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateProviderRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5720,8 +6326,8 @@ func (c *Client) CreateProviderWithBody(ctx context.Context, cityName string, co
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateProvider(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateProviderRequest(c.Server, cityName, body)
+func (c *Client) CreateProvider(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateProviderRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5756,8 +6362,8 @@ func (c *Client) GetV0CityByCityNameReadiness(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewDeleteV0CityByCityNameRigByNameRequest(c.Server, cityName, name)
+func (c *Client) DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteV0CityByCityNameRigByNameRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5780,8 +6386,8 @@ func (c *Client) GetV0CityByCityNameRigByName(ctx context.Context, cityName stri
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRigByNameRequestWithBody(c.Server, cityName, name, contentType, body)
+func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRigByNameRequestWithBody(c.Server, cityName, name, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5792,8 +6398,8 @@ func (c *Client) PatchV0CityByCityNameRigByNameWithBody(ctx context.Context, cit
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameRigByNameRequest(c.Server, cityName, name, body)
+func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameRigByNameRequest(c.Server, cityName, name, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5804,8 +6410,8 @@ func (c *Client) PatchV0CityByCityNameRigByName(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameRigByNameByActionRequest(c.Server, cityName, name, action)
+func (c *Client) PostV0CityByCityNameRigByNameByAction(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameRigByNameByActionRequest(c.Server, cityName, name, action, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5828,8 +6434,8 @@ func (c *Client) GetV0CityByCityNameRigs(ctx context.Context, cityName string, p
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateRigRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateRigRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5840,8 +6446,8 @@ func (c *Client) CreateRigWithBody(ctx context.Context, cityName string, content
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateRig(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateRigRequest(c.Server, cityName, body)
+func (c *Client) CreateRig(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateRigRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5864,8 +6470,8 @@ func (c *Client) GetV0CityByCityNameServiceByName(ctx context.Context, cityName 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameServiceByNameRestartRequest(c.Server, cityName, name)
+func (c *Client) PostV0CityByCityNameServiceByNameRestart(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameServiceByNameRestartRequest(c.Server, cityName, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5900,8 +6506,8 @@ func (c *Client) GetV0CityByCityNameSessionById(ctx context.Context, cityName st
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameSessionByIdRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameSessionByIdRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5912,8 +6518,8 @@ func (c *Client) PatchV0CityByCityNameSessionByIdWithBody(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPatchV0CityByCityNameSessionByIdRequest(c.Server, cityName, id, body)
+func (c *Client) PatchV0CityByCityNameSessionById(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPatchV0CityByCityNameSessionByIdRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5960,8 +6566,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdClose(ctx context.Context, cityN
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdKillRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdKillRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -5972,8 +6578,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdKill(ctx context.Context, cityNa
 	return c.Client.Do(req)
 }
 
-func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSendSessionMessageRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSendSessionMessageRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -5984,8 +6590,8 @@ func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string
 	return c.Client.Do(req)
 }
 
-func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, body)
+func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6008,8 +6614,8 @@ func (c *Client) GetV0CityByCityNameSessionByIdPending(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6020,8 +6626,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdRenameWithBody(ctx context.Conte
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, body)
+func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdRenameRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6032,8 +6638,8 @@ func (c *Client) PostV0CityByCityNameSessionByIdRename(ctx context.Context, city
 	return c.Client.Do(req)
 }
 
-func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRespondSessionRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRespondSessionRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6044,8 +6650,8 @@ func (c *Client) RespondSessionWithBody(ctx context.Context, cityName string, id
 	return c.Client.Do(req)
 }
 
-func (c *Client) RespondSession(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewRespondSessionRequest(c.Server, cityName, id, body)
+func (c *Client) RespondSession(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRespondSessionRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6056,8 +6662,8 @@ func (c *Client) RespondSession(ctx context.Context, cityName string, id string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6080,8 +6686,8 @@ func (c *Client) StreamSession(ctx context.Context, cityName string, id string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSubmitSessionRequestWithBody(c.Server, cityName, id, contentType, body)
+func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitSessionRequestWithBody(c.Server, cityName, id, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6092,8 +6698,8 @@ func (c *Client) SubmitSessionWithBody(ctx context.Context, cityName string, id 
 	return c.Client.Do(req)
 }
 
-func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewSubmitSessionRequest(c.Server, cityName, id, body)
+func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewSubmitSessionRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6104,8 +6710,8 @@ func (c *Client) SubmitSession(ctx context.Context, cityName string, id string, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdSuspendRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdSuspendRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6128,8 +6734,8 @@ func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, c
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdWakeRequest(c.Server, cityName, id)
+func (c *Client) PostV0CityByCityNameSessionByIdWake(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdWakeRequest(c.Server, cityName, id, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6152,8 +6758,8 @@ func (c *Client) GetV0CityByCityNameSessions(ctx context.Context, cityName strin
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateSessionRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSessionRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6164,8 +6770,8 @@ func (c *Client) CreateSessionWithBody(ctx context.Context, cityName string, con
 	return c.Client.Do(req)
 }
 
-func (c *Client) CreateSession(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateSessionRequest(c.Server, cityName, body)
+func (c *Client) CreateSession(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSessionRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6176,8 +6782,8 @@ func (c *Client) CreateSession(ctx context.Context, cityName string, body Create
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSlingRequestWithBody(c.Server, cityName, contentType, body)
+func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSlingRequestWithBody(c.Server, cityName, params, contentType, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6188,8 +6794,8 @@ func (c *Client) PostV0CityByCityNameSlingWithBody(ctx context.Context, cityName
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSlingRequest(c.Server, cityName, body)
+func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSlingRequest(c.Server, cityName, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -6202,6 +6808,18 @@ func (c *Client) PostV0CityByCityNameSling(ctx context.Context, cityName string,
 
 func (c *Client) GetV0CityByCityNameStatus(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameStatusRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameUnregister(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameUnregisterRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -6339,18 +6957,18 @@ func NewGetV0CitiesRequest(server string) (*http.Request, error) {
 }
 
 // NewPostV0CityRequest calls the generic PostV0City builder with application/json body
-func NewPostV0CityRequest(server string, body PostV0CityJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityRequest(server string, params *PostV0CityParams, body PostV0CityJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityRequestWithBody(server, "application/json", bodyReader)
+	return NewPostV0CityRequestWithBody(server, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityRequestWithBody generates requests for PostV0City with any type of body
-func NewPostV0CityRequestWithBody(server string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityRequestWithBody(server string, params *PostV0CityParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -6374,6 +6992,19 @@ func NewPostV0CityRequestWithBody(server string, contentType string, body io.Rea
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -6413,18 +7044,18 @@ func NewGetV0CityByCityNameRequest(server string, cityName string) (*http.Reques
 }
 
 // NewPatchV0CityByCityNameRequest calls the generic PatchV0CityByCityName builder with application/json body
-func NewPatchV0CityByCityNameRequest(server string, cityName string, body PatchV0CityByCityNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameRequest(server string, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameRequestWithBody generates requests for PatchV0CityByCityName with any type of body
-func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6456,11 +7087,24 @@ func NewPatchV0CityByCityNameRequestWithBody(server string, cityName string, con
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameAgentByBaseRequest generates requests for DeleteV0CityByCityNameAgentByBase
-func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6495,6 +7139,19 @@ func NewDeleteV0CityByCityNameAgentByBaseRequest(server string, cityName string,
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -6542,18 +7199,18 @@ func NewGetV0CityByCityNameAgentByBaseRequest(server string, cityName string, ba
 }
 
 // NewPatchV0CityByCityNameAgentByBaseRequest calls the generic PatchV0CityByCityNameAgentByBase builder with application/json body
-func NewPatchV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByBaseRequest(server string, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server, cityName, base, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server, cityName, base, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameAgentByBaseRequestWithBody generates requests for PatchV0CityByCityNameAgentByBase with any type of body
-func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName string, base string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6591,6 +7248,19 @@ func NewPatchV0CityByCityNameAgentByBaseRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -6716,7 +7386,7 @@ func NewStreamAgentOutputRequest(server string, cityName string, base string) (*
 }
 
 // NewPostV0CityByCityNameAgentByBaseByActionRequest generates requests for PostV0CityByCityNameAgentByBaseByAction
-func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction) (*http.Request, error) {
+func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6760,11 +7430,24 @@ func NewPostV0CityByCityNameAgentByBaseByActionRequest(server string, cityName s
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameAgentByDirByBaseRequest generates requests for DeleteV0CityByCityNameAgentByDirByBase
-func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6806,6 +7489,19 @@ func NewDeleteV0CityByCityNameAgentByDirByBaseRequest(server string, cityName st
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -6860,18 +7556,18 @@ func NewGetV0CityByCityNameAgentByDirByBaseRequest(server string, cityName strin
 }
 
 // NewPatchV0CityByCityNameAgentByDirByBaseRequest calls the generic PatchV0CityByCityNameAgentByDirByBase builder with application/json body
-func NewPatchV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server, cityName, dir, base, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server, cityName, dir, base, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody generates requests for PatchV0CityByCityNameAgentByDirByBase with any type of body
-func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, cityName string, dir string, base string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -6916,6 +7612,19 @@ func NewPatchV0CityByCityNameAgentByDirByBaseRequestWithBody(server string, city
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -7055,7 +7764,7 @@ func NewStreamAgentOutputQualifiedRequest(server string, cityName string, dir st
 }
 
 // NewPostV0CityByCityNameAgentByDirByBaseByActionRequest generates requests for PostV0CityByCityNameAgentByDirByBaseByAction
-func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction) (*http.Request, error) {
+func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7104,6 +7813,19 @@ func NewPostV0CityByCityNameAgentByDirByBaseByActionRequest(server string, cityN
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7246,18 +7968,18 @@ func NewGetV0CityByCityNameAgentsRequest(server string, cityName string, params 
 }
 
 // NewCreateAgentRequest calls the generic CreateAgent builder with application/json body
-func NewCreateAgentRequest(server string, cityName string, body CreateAgentJSONRequestBody) (*http.Request, error) {
+func NewCreateAgentRequest(server string, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateAgentRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateAgentRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateAgentRequestWithBody generates requests for CreateAgent with any type of body
-func NewCreateAgentRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateAgentRequestWithBody(server string, cityName string, params *CreateAgentParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7289,11 +8011,24 @@ func NewCreateAgentRequestWithBody(server string, cityName string, contentType s
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameBeadByIdRequest generates requests for DeleteV0CityByCityNameBeadById
-func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7328,6 +8063,19 @@ func NewDeleteV0CityByCityNameBeadByIdRequest(server string, cityName string, id
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7375,18 +8123,18 @@ func NewGetV0CityByCityNameBeadByIdRequest(server string, cityName string, id st
 }
 
 // NewPatchV0CityByCityNameBeadByIdRequest calls the generic PatchV0CityByCityNameBeadById builder with application/json body
-func NewPatchV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameBeadByIdRequest(server string, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameBeadByIdRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameBeadByIdRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameBeadByIdRequestWithBody generates requests for PatchV0CityByCityNameBeadById with any type of body
-func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7425,22 +8173,35 @@ func NewPatchV0CityByCityNameBeadByIdRequestWithBody(server string, cityName str
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdAssignRequest calls the generic PostV0CityByCityNameBeadByIdAssign builder with application/json body
-func NewPostV0CityByCityNameBeadByIdAssignRequest(server string, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdAssignRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameBeadByIdAssignRequestWithBody generates requests for PostV0CityByCityNameBeadByIdAssign with any type of body
-func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7479,11 +8240,24 @@ func NewPostV0CityByCityNameBeadByIdAssignRequestWithBody(server string, cityNam
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdCloseRequest generates requests for PostV0CityByCityNameBeadByIdClose
-func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7518,6 +8292,19 @@ func NewPostV0CityByCityNameBeadByIdCloseRequest(server string, cityName string,
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -7565,7 +8352,7 @@ func NewGetV0CityByCityNameBeadByIdDepsRequest(server string, cityName string, i
 }
 
 // NewPostV0CityByCityNameBeadByIdReopenRequest generates requests for PostV0CityByCityNameBeadByIdReopen
-func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7602,22 +8389,35 @@ func NewPostV0CityByCityNameBeadByIdReopenRequest(server string, cityName string
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameBeadByIdUpdateRequest calls the generic PostV0CityByCityNameBeadByIdUpdate builder with application/json body
-func NewPostV0CityByCityNameBeadByIdUpdateRequest(server string, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdUpdateRequest(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody generates requests for PostV0CityByCityNameBeadByIdUpdate with any type of body
-func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -7655,6 +8455,19 @@ func NewPostV0CityByCityNameBeadByIdUpdateRequestWithBody(server string, cityNam
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -7889,15 +8702,24 @@ func NewCreateBeadRequestWithBody(server string, cityName string, params *Create
 
 	if params != nil {
 
-		if params.IdempotencyKey != nil {
-			var headerParam0 string
+		var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("Idempotency-Key", headerParam0)
+			req.Header.Set("Idempotency-Key", headerParam1)
 		}
 
 	}
@@ -8121,7 +8943,7 @@ func NewGetV0CityByCityNameConfigValidateRequest(server string, cityName string)
 }
 
 // NewDeleteV0CityByCityNameConvoyByIdRequest generates requests for DeleteV0CityByCityNameConvoyById
-func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8156,6 +8978,19 @@ func NewDeleteV0CityByCityNameConvoyByIdRequest(server string, cityName string, 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -8203,18 +9038,18 @@ func NewGetV0CityByCityNameConvoyByIdRequest(server string, cityName string, id 
 }
 
 // NewPostV0CityByCityNameConvoyByIdAddRequest calls the generic PostV0CityByCityNameConvoyByIdAdd builder with application/json body
-func NewPostV0CityByCityNameConvoyByIdAddRequest(server string, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdAddRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameConvoyByIdAddRequestWithBody generates requests for PostV0CityByCityNameConvoyByIdAdd with any type of body
-func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8252,6 +9087,19 @@ func NewPostV0CityByCityNameConvoyByIdAddRequestWithBody(server string, cityName
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8298,7 +9146,7 @@ func NewGetV0CityByCityNameConvoyByIdCheckRequest(server string, cityName string
 }
 
 // NewPostV0CityByCityNameConvoyByIdCloseRequest generates requests for PostV0CityByCityNameConvoyByIdClose
-func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8335,22 +9183,35 @@ func NewPostV0CityByCityNameConvoyByIdCloseRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameConvoyByIdRemoveRequest calls the generic PostV0CityByCityNameConvoyByIdRemove builder with application/json body
-func NewPostV0CityByCityNameConvoyByIdRemoveRequest(server string, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdRemoveRequest(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody generates requests for PostV0CityByCityNameConvoyByIdRemove with any type of body
-func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8388,6 +9249,19 @@ func NewPostV0CityByCityNameConvoyByIdRemoveRequestWithBody(server string, cityN
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8497,18 +9371,18 @@ func NewGetV0CityByCityNameConvoysRequest(server string, cityName string, params
 }
 
 // NewCreateConvoyRequest calls the generic CreateConvoy builder with application/json body
-func NewCreateConvoyRequest(server string, cityName string, body CreateConvoyJSONRequestBody) (*http.Request, error) {
+func NewCreateConvoyRequest(server string, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateConvoyRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateConvoyRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateConvoyRequestWithBody generates requests for CreateConvoy with any type of body
-func NewCreateConvoyRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateConvoyRequestWithBody(server string, cityName string, params *CreateConvoyParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8539,6 +9413,19 @@ func NewCreateConvoyRequestWithBody(server string, cityName string, contentType 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8696,18 +9583,18 @@ func NewGetV0CityByCityNameEventsRequest(server string, cityName string, params 
 }
 
 // NewEmitEventRequest calls the generic EmitEvent builder with application/json body
-func NewEmitEventRequest(server string, cityName string, body EmitEventJSONRequestBody) (*http.Request, error) {
+func NewEmitEventRequest(server string, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewEmitEventRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewEmitEventRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewEmitEventRequestWithBody generates requests for EmitEvent with any type of body
-func NewEmitEventRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewEmitEventRequestWithBody(server string, cityName string, params *EmitEventParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8738,6 +9625,19 @@ func NewEmitEventRequestWithBody(server string, cityName string, contentType str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8814,18 +9714,18 @@ func NewStreamEventsRequest(server string, cityName string, params *StreamEvents
 }
 
 // NewDeleteV0CityByCityNameExtmsgAdaptersRequest calls the generic DeleteV0CityByCityNameExtmsgAdapters builder with application/json body
-func NewDeleteV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgAdapters with any type of body
-func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8856,6 +9756,19 @@ func NewDeleteV0CityByCityNameExtmsgAdaptersRequestWithBody(server string, cityN
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -8895,18 +9808,18 @@ func NewGetV0CityByCityNameExtmsgAdaptersRequest(server string, cityName string)
 }
 
 // NewRegisterExtmsgAdapterRequest calls the generic RegisterExtmsgAdapter builder with application/json body
-func NewRegisterExtmsgAdapterRequest(server string, cityName string, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
+func NewRegisterExtmsgAdapterRequest(server string, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRegisterExtmsgAdapterRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewRegisterExtmsgAdapterRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewRegisterExtmsgAdapterRequestWithBody generates requests for RegisterExtmsgAdapter with any type of body
-func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8938,22 +9851,35 @@ func NewRegisterExtmsgAdapterRequestWithBody(server string, cityName string, con
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgBindRequest calls the generic PostV0CityByCityNameExtmsgBind builder with application/json body
-func NewPostV0CityByCityNameExtmsgBindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgBindRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgBindRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgBindRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgBindRequestWithBody generates requests for PostV0CityByCityNameExtmsgBind with any type of body
-func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -8984,6 +9910,19 @@ func NewPostV0CityByCityNameExtmsgBindRequestWithBody(server string, cityName st
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9165,18 +10104,18 @@ func NewGetV0CityByCityNameExtmsgGroupsRequest(server string, cityName string, p
 }
 
 // NewEnsureExtmsgGroupRequest calls the generic EnsureExtmsgGroup builder with application/json body
-func NewEnsureExtmsgGroupRequest(server string, cityName string, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
+func NewEnsureExtmsgGroupRequest(server string, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewEnsureExtmsgGroupRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewEnsureExtmsgGroupRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewEnsureExtmsgGroupRequestWithBody generates requests for EnsureExtmsgGroup with any type of body
-func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9208,22 +10147,35 @@ func NewEnsureExtmsgGroupRequestWithBody(server string, cityName string, content
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgInboundRequest calls the generic PostV0CityByCityNameExtmsgInbound builder with application/json body
-func NewPostV0CityByCityNameExtmsgInboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgInboundRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgInboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgInbound with any type of body
-func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9255,22 +10207,35 @@ func NewPostV0CityByCityNameExtmsgInboundRequestWithBody(server string, cityName
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgOutboundRequest calls the generic PostV0CityByCityNameExtmsgOutbound builder with application/json body
-func NewPostV0CityByCityNameExtmsgOutboundRequest(server string, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgOutboundRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgOutboundRequestWithBody generates requests for PostV0CityByCityNameExtmsgOutbound with any type of body
-func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9302,22 +10267,35 @@ func NewPostV0CityByCityNameExtmsgOutboundRequestWithBody(server string, cityNam
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNameExtmsgParticipantsRequest calls the generic DeleteV0CityByCityNameExtmsgParticipants builder with application/json body
-func NewDeleteV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for DeleteV0CityByCityNameExtmsgParticipants with any type of body
-func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9349,22 +10327,35 @@ func NewDeleteV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, c
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgParticipantsRequest calls the generic PostV0CityByCityNameExtmsgParticipants builder with application/json body
-func NewPostV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgParticipantsRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody generates requests for PostV0CityByCityNameExtmsgParticipants with any type of body
-func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9395,6 +10386,19 @@ func NewPostV0CityByCityNameExtmsgParticipantsRequestWithBody(server string, cit
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9536,18 +10540,18 @@ func NewGetV0CityByCityNameExtmsgTranscriptRequest(server string, cityName strin
 }
 
 // NewPostV0CityByCityNameExtmsgTranscriptAckRequest calls the generic PostV0CityByCityNameExtmsgTranscriptAck builder with application/json body
-func NewPostV0CityByCityNameExtmsgTranscriptAckRequest(server string, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody generates requests for PostV0CityByCityNameExtmsgTranscriptAck with any type of body
-func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9579,22 +10583,35 @@ func NewPostV0CityByCityNameExtmsgTranscriptAckRequestWithBody(server string, ci
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameExtmsgUnbindRequest calls the generic PostV0CityByCityNameExtmsgUnbind builder with application/json body
-func NewPostV0CityByCityNameExtmsgUnbindRequest(server string, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgUnbindRequest(server string, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameExtmsgUnbindRequestWithBody generates requests for PostV0CityByCityNameExtmsgUnbind with any type of body
-func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -9625,6 +10642,19 @@ func NewPostV0CityByCityNameExtmsgUnbindRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -9972,18 +11002,18 @@ func NewGetV0CityByCityNameFormulasByNameRequest(server string, cityName string,
 }
 
 // NewPostV0CityByCityNameFormulasByNamePreviewRequest calls the generic PostV0CityByCityNameFormulasByNamePreview builder with application/json body
-func NewPostV0CityByCityNameFormulasByNamePreviewRequest(server string, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameFormulasByNamePreviewRequest(server string, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody generates requests for PostV0CityByCityNameFormulasByNamePreview with any type of body
-func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -10021,6 +11051,19 @@ func NewPostV0CityByCityNameFormulasByNamePreviewRequestWithBody(server string, 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -10352,15 +11395,24 @@ func NewSendMailRequestWithBody(server string, cityName string, params *SendMail
 
 	if params != nil {
 
-		if params.IdempotencyKey != nil {
-			var headerParam0 string
+		var headerParam0 string
 
-			headerParam0, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
 			if err != nil {
 				return nil, err
 			}
 
-			req.Header.Set("Idempotency-Key", headerParam0)
+			req.Header.Set("Idempotency-Key", headerParam1)
 		}
 
 	}
@@ -10563,6 +11615,19 @@ func NewDeleteV0CityByCityNameMailByIdRequest(server string, cityName string, id
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10689,6 +11754,19 @@ func NewPostV0CityByCityNameMailByIdArchiveRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10752,6 +11830,19 @@ func NewPostV0CityByCityNameMailByIdMarkUnreadRequest(server string, cityName st
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
@@ -10813,6 +11904,19 @@ func NewPostV0CityByCityNameMailByIdReadRequest(server string, cityName string, 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -10890,6 +11994,19 @@ func NewReplyMailRequestWithBody(server string, cityName string, id string, para
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -10999,7 +12116,7 @@ func NewGetV0CityByCityNameOrderByNameRequest(server string, cityName string, na
 }
 
 // NewPostV0CityByCityNameOrderByNameDisableRequest generates requests for PostV0CityByCityNameOrderByNameDisable
-func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11036,11 +12153,24 @@ func NewPostV0CityByCityNameOrderByNameDisableRequest(server string, cityName st
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameOrderByNameEnableRequest generates requests for PostV0CityByCityNameOrderByNameEnable
-func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11075,6 +12205,19 @@ func NewPostV0CityByCityNameOrderByNameEnableRequest(server string, cityName str
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11355,7 +12498,7 @@ func NewGetV0CityByCityNamePacksRequest(server string, cityName string) (*http.R
 }
 
 // NewDeleteV0CityByCityNamePatchesAgentByBaseRequest generates requests for DeleteV0CityByCityNamePatchesAgentByBase
-func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11390,6 +12533,19 @@ func NewDeleteV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11437,7 +12593,7 @@ func NewGetV0CityByCityNamePatchesAgentByBaseRequest(server string, cityName str
 }
 
 // NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest generates requests for DeleteV0CityByCityNamePatchesAgentByDirByBase
-func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, cityName string, dir string, base string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11479,6 +12635,19 @@ func NewDeleteV0CityByCityNamePatchesAgentByDirByBaseRequest(server string, city
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11567,18 +12736,18 @@ func NewGetV0CityByCityNamePatchesAgentsRequest(server string, cityName string) 
 }
 
 // NewPutV0CityByCityNamePatchesAgentsRequest calls the generic PutV0CityByCityNamePatchesAgents builder with application/json body
-func NewPutV0CityByCityNamePatchesAgentsRequest(server string, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesAgentsRequest(server string, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesAgentsRequestWithBody generates requests for PutV0CityByCityNamePatchesAgents with any type of body
-func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11610,11 +12779,24 @@ func NewPutV0CityByCityNamePatchesAgentsRequestWithBody(server string, cityName 
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNamePatchesProviderByNameRequest generates requests for DeleteV0CityByCityNamePatchesProviderByName
-func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11649,6 +12831,19 @@ func NewDeleteV0CityByCityNamePatchesProviderByNameRequest(server string, cityNa
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11730,18 +12925,18 @@ func NewGetV0CityByCityNamePatchesProvidersRequest(server string, cityName strin
 }
 
 // NewPutV0CityByCityNamePatchesProvidersRequest calls the generic PutV0CityByCityNamePatchesProviders builder with application/json body
-func NewPutV0CityByCityNamePatchesProvidersRequest(server string, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesProvidersRequest(server string, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesProvidersRequestWithBody generates requests for PutV0CityByCityNamePatchesProviders with any type of body
-func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11773,11 +12968,24 @@ func NewPutV0CityByCityNamePatchesProvidersRequestWithBody(server string, cityNa
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewDeleteV0CityByCityNamePatchesRigByNameRequest generates requests for DeleteV0CityByCityNamePatchesRigByName
-func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11812,6 +13020,19 @@ func NewDeleteV0CityByCityNamePatchesRigByNameRequest(server string, cityName st
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -11893,18 +13114,18 @@ func NewGetV0CityByCityNamePatchesRigsRequest(server string, cityName string) (*
 }
 
 // NewPutV0CityByCityNamePatchesRigsRequest calls the generic PutV0CityByCityNamePatchesRigs builder with application/json body
-func NewPutV0CityByCityNamePatchesRigsRequest(server string, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesRigsRequest(server string, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPutV0CityByCityNamePatchesRigsRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPutV0CityByCityNamePatchesRigsRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPutV0CityByCityNamePatchesRigsRequestWithBody generates requests for PutV0CityByCityNamePatchesRigs with any type of body
-func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -11935,6 +13156,19 @@ func NewPutV0CityByCityNamePatchesRigsRequestWithBody(server string, cityName st
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12012,7 +13246,7 @@ func NewGetV0CityByCityNameProviderReadinessRequest(server string, cityName stri
 }
 
 // NewDeleteV0CityByCityNameProviderByNameRequest generates requests for DeleteV0CityByCityNameProviderByName
-func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12047,6 +13281,19 @@ func NewDeleteV0CityByCityNameProviderByNameRequest(server string, cityName stri
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12094,18 +13341,18 @@ func NewGetV0CityByCityNameProviderByNameRequest(server string, cityName string,
 }
 
 // NewPatchV0CityByCityNameProviderByNameRequest calls the generic PatchV0CityByCityNameProviderByName builder with application/json body
-func NewPatchV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameProviderByNameRequest(server string, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameProviderByNameRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameProviderByNameRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameProviderByNameRequestWithBody generates requests for PatchV0CityByCityNameProviderByName with any type of body
-func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12143,6 +13390,19 @@ func NewPatchV0CityByCityNameProviderByNameRequestWithBody(server string, cityNa
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12182,18 +13442,18 @@ func NewGetV0CityByCityNameProvidersRequest(server string, cityName string) (*ht
 }
 
 // NewCreateProviderRequest calls the generic CreateProvider builder with application/json body
-func NewCreateProviderRequest(server string, cityName string, body CreateProviderJSONRequestBody) (*http.Request, error) {
+func NewCreateProviderRequest(server string, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateProviderRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateProviderRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateProviderRequestWithBody generates requests for CreateProvider with any type of body
-func NewCreateProviderRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateProviderRequestWithBody(server string, cityName string, params *CreateProviderParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12224,6 +13484,19 @@ func NewCreateProviderRequestWithBody(server string, cityName string, contentTyp
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12335,7 +13608,7 @@ func NewGetV0CityByCityNameReadinessRequest(server string, cityName string, para
 }
 
 // NewDeleteV0CityByCityNameRigByNameRequest generates requests for DeleteV0CityByCityNameRigByName
-func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12370,6 +13643,19 @@ func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, n
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12439,18 +13725,18 @@ func NewGetV0CityByCityNameRigByNameRequest(server string, cityName string, name
 }
 
 // NewPatchV0CityByCityNameRigByNameRequest calls the generic PatchV0CityByCityNameRigByName builder with application/json body
-func NewPatchV0CityByCityNameRigByNameRequest(server string, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameRigByNameRequestWithBody(server, cityName, name, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameRigByNameRequestWithBody(server, cityName, name, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameRigByNameRequestWithBody generates requests for PatchV0CityByCityNameRigByName with any type of body
-func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName string, name string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12489,11 +13775,24 @@ func NewPatchV0CityByCityNameRigByNameRequestWithBody(server string, cityName st
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameRigByNameByActionRequest generates requests for PostV0CityByCityNameRigByNameByAction
-func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action string) (*http.Request, error) {
+func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12535,6 +13834,19 @@ func NewPostV0CityByCityNameRigByNameByActionRequest(server string, cityName str
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12629,18 +13941,18 @@ func NewGetV0CityByCityNameRigsRequest(server string, cityName string, params *G
 }
 
 // NewCreateRigRequest calls the generic CreateRig builder with application/json body
-func NewCreateRigRequest(server string, cityName string, body CreateRigJSONRequestBody) (*http.Request, error) {
+func NewCreateRigRequest(server string, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateRigRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateRigRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateRigRequestWithBody generates requests for CreateRig with any type of body
-func NewCreateRigRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateRigRequestWithBody(server string, cityName string, params *CreateRigParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12671,6 +13983,19 @@ func NewCreateRigRequestWithBody(server string, cityName string, contentType str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -12717,7 +14042,7 @@ func NewGetV0CityByCityNameServiceByNameRequest(server string, cityName string, 
 }
 
 // NewPostV0CityByCityNameServiceByNameRestartRequest generates requests for PostV0CityByCityNameServiceByNameRestart
-func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName string, name string) (*http.Request, error) {
+func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12752,6 +14077,19 @@ func NewPostV0CityByCityNameServiceByNameRestartRequest(server string, cityName 
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -12855,18 +14193,18 @@ func NewGetV0CityByCityNameSessionByIdRequest(server string, cityName string, id
 }
 
 // NewPatchV0CityByCityNameSessionByIdRequest calls the generic PatchV0CityByCityNameSessionById builder with application/json body
-func NewPatchV0CityByCityNameSessionByIdRequest(server string, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody) (*http.Request, error) {
+func NewPatchV0CityByCityNameSessionByIdRequest(server string, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPatchV0CityByCityNameSessionByIdRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPatchV0CityByCityNameSessionByIdRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPatchV0CityByCityNameSessionByIdRequestWithBody generates requests for PatchV0CityByCityNameSessionById with any type of body
-func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -12904,6 +14242,19 @@ func NewPatchV0CityByCityNameSessionByIdRequestWithBody(server string, cityName 
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13057,11 +14408,24 @@ func NewPostV0CityByCityNameSessionByIdCloseRequest(server string, cityName stri
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdKillRequest generates requests for PostV0CityByCityNameSessionByIdKill
-func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13098,22 +14462,35 @@ func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName strin
 		return nil, err
 	}
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewSendSessionMessageRequest calls the generic SendSessionMessage builder with application/json body
-func NewSendSessionMessageRequest(server string, cityName string, id string, body SendSessionMessageJSONRequestBody) (*http.Request, error) {
+func NewSendSessionMessageRequest(server string, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewSendSessionMessageRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewSendSessionMessageRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewSendSessionMessageRequestWithBody generates requests for SendSessionMessage with any type of body
-func NewSendSessionMessageRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewSendSessionMessageRequestWithBody(server string, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13151,6 +14528,19 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13197,18 +14587,18 @@ func NewGetV0CityByCityNameSessionByIdPendingRequest(server string, cityName str
 }
 
 // NewPostV0CityByCityNameSessionByIdRenameRequest calls the generic PostV0CityByCityNameSessionByIdRename builder with application/json body
-func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdRenameRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameSessionByIdRenameRequestWithBody generates requests for PostV0CityByCityNameSessionByIdRename with any type of body
-func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13247,22 +14637,35 @@ func NewPostV0CityByCityNameSessionByIdRenameRequestWithBody(server string, city
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewRespondSessionRequest calls the generic RespondSession builder with application/json body
-func NewRespondSessionRequest(server string, cityName string, id string, body RespondSessionJSONRequestBody) (*http.Request, error) {
+func NewRespondSessionRequest(server string, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewRespondSessionRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewRespondSessionRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewRespondSessionRequestWithBody generates requests for RespondSession with any type of body
-func NewRespondSessionRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewRespondSessionRequestWithBody(server string, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13301,11 +14704,24 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdStopRequest generates requests for PostV0CityByCityNameSessionByIdStop
-func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13340,6 +14756,19 @@ func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName strin
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13409,18 +14838,18 @@ func NewStreamSessionRequest(server string, cityName string, id string, params *
 }
 
 // NewSubmitSessionRequest calls the generic SubmitSession builder with application/json body
-func NewSubmitSessionRequest(server string, cityName string, id string, body SubmitSessionJSONRequestBody) (*http.Request, error) {
+func NewSubmitSessionRequest(server string, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewSubmitSessionRequestWithBody(server, cityName, id, "application/json", bodyReader)
+	return NewSubmitSessionRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
 }
 
 // NewSubmitSessionRequestWithBody generates requests for SubmitSession with any type of body
-func NewSubmitSessionRequestWithBody(server string, cityName string, id string, contentType string, body io.Reader) (*http.Request, error) {
+func NewSubmitSessionRequestWithBody(server string, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13459,11 +14888,24 @@ func NewSubmitSessionRequestWithBody(server string, cityName string, id string, 
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSessionByIdSuspendRequest generates requests for PostV0CityByCityNameSessionByIdSuspend
-func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13498,6 +14940,19 @@ func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName st
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13599,7 +15054,7 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 }
 
 // NewPostV0CityByCityNameSessionByIdWakeRequest generates requests for PostV0CityByCityNameSessionByIdWake
-func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string) (*http.Request, error) {
+func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13634,6 +15089,19 @@ func NewPostV0CityByCityNameSessionByIdWakeRequest(server string, cityName strin
 	req, err := http.NewRequest("POST", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -13760,18 +15228,18 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 }
 
 // NewCreateSessionRequest calls the generic CreateSession builder with application/json body
-func NewCreateSessionRequest(server string, cityName string, body CreateSessionJSONRequestBody) (*http.Request, error) {
+func NewCreateSessionRequest(server string, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewCreateSessionRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewCreateSessionRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewCreateSessionRequestWithBody generates requests for CreateSession with any type of body
-func NewCreateSessionRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewCreateSessionRequestWithBody(server string, cityName string, params *CreateSessionParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13803,22 +15271,35 @@ func NewCreateSessionRequestWithBody(server string, cityName string, contentType
 
 	req.Header.Add("Content-Type", contentType)
 
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
 	return req, nil
 }
 
 // NewPostV0CityByCityNameSlingRequest calls the generic PostV0CityByCityNameSling builder with application/json body
-func NewPostV0CityByCityNameSlingRequest(server string, cityName string, body PostV0CityByCityNameSlingJSONRequestBody) (*http.Request, error) {
+func NewPostV0CityByCityNameSlingRequest(server string, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
 	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
 	bodyReader = bytes.NewReader(buf)
-	return NewPostV0CityByCityNameSlingRequestWithBody(server, cityName, "application/json", bodyReader)
+	return NewPostV0CityByCityNameSlingRequestWithBody(server, cityName, params, "application/json", bodyReader)
 }
 
 // NewPostV0CityByCityNameSlingRequestWithBody generates requests for PostV0CityByCityNameSling with any type of body
-func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string, contentType string, body io.Reader) (*http.Request, error) {
+func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -13849,6 +15330,19 @@ func NewPostV0CityByCityNameSlingRequestWithBody(server string, cityName string,
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
 
 	return req, nil
 }
@@ -13920,6 +15414,53 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewPostV0CityByCityNameUnregisterRequest generates requests for PostV0CityByCityNameUnregister
+func NewPostV0CityByCityNameUnregisterRequest(server string, cityName string, params *PostV0CityByCityNameUnregisterParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/unregister", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -14015,6 +15556,19 @@ func NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest(server string, cityNam
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
 	}
 
 	return req, nil
@@ -14440,28 +15994,28 @@ type ClientWithResponsesInterface interface {
 	GetV0CitiesWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetV0CitiesResponse, error)
 
 	// PostV0CityWithBodyWithResponse request with any body
-	PostV0CityWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
+	PostV0CityWithBodyWithResponse(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
 
-	PostV0CityWithResponse(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
+	PostV0CityWithResponse(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error)
 
 	// GetV0CityByCityNameWithResponse request
 	GetV0CityByCityNameWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameResponse, error)
 
 	// PatchV0CityByCityNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
+	PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
 
-	PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
+	PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error)
 
 	// DeleteV0CityByCityNameAgentByBaseWithResponse request
-	DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error)
+	DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByBaseWithResponse request
 	GetV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseResponse, error)
 
 	// PatchV0CityByCityNameAgentByBaseWithBodyWithResponse request with any body
-	PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
+	PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
 
-	PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
+	PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByBaseOutputWithResponse request
 	GetV0CityByCityNameAgentByBaseOutputWithResponse(ctx context.Context, cityName string, base string, params *GetV0CityByCityNameAgentByBaseOutputParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByBaseOutputResponse, error)
@@ -14470,18 +16024,18 @@ type ClientWithResponsesInterface interface {
 	StreamAgentOutputWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputResponse, error)
 
 	// PostV0CityByCityNameAgentByBaseByActionWithResponse request
-	PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error)
+	PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error)
 
 	// DeleteV0CityByCityNameAgentByDirByBaseWithResponse request
-	DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error)
+	DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseWithResponse request
 	GetV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse request with any body
-	PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
 
-	PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
+	PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNameAgentByDirByBaseOutputWithResponse request
 	GetV0CityByCityNameAgentByDirByBaseOutputWithResponse(ctx context.Context, cityName string, dir string, base string, params *GetV0CityByCityNameAgentByDirByBaseOutputParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentByDirByBaseOutputResponse, error)
@@ -14490,45 +16044,45 @@ type ClientWithResponsesInterface interface {
 	StreamAgentOutputQualifiedWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*StreamAgentOutputQualifiedResponse, error)
 
 	// PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request
-	PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error)
+	PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error)
 
 	// GetV0CityByCityNameAgentsWithResponse request
 	GetV0CityByCityNameAgentsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameAgentsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameAgentsResponse, error)
 
 	// CreateAgentWithBodyWithResponse request with any body
-	CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
+	CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
 
-	CreateAgentWithResponse(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
+	CreateAgentWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error)
 
 	// DeleteV0CityByCityNameBeadByIdWithResponse request
-	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
+	DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error)
 
 	// GetV0CityByCityNameBeadByIdWithResponse request
 	GetV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdResponse, error)
 
 	// PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with any body
-	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
+	PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
 
-	PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
+	PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error)
 
 	// PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse request with any body
-	PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
+	PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
-	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
+	PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error)
 
 	// PostV0CityByCityNameBeadByIdCloseWithResponse request
-	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
+	PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error)
 
 	// GetV0CityByCityNameBeadByIdDepsWithResponse request
 	GetV0CityByCityNameBeadByIdDepsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadByIdDepsResponse, error)
 
 	// PostV0CityByCityNameBeadByIdReopenWithResponse request
-	PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error)
+	PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error)
 
 	// PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse request with any body
-	PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
+	PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
 
-	PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
+	PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error)
 
 	// GetV0CityByCityNameBeadsWithResponse request
 	GetV0CityByCityNameBeadsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameBeadsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameBeadsResponse, error)
@@ -14554,63 +16108,63 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameConfigValidateWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConfigValidateResponse, error)
 
 	// DeleteV0CityByCityNameConvoyByIdWithResponse request
-	DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error)
+	DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error)
 
 	// GetV0CityByCityNameConvoyByIdWithResponse request
 	GetV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoyByIdResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse request with any body
-	PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
+	PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
 
-	PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
+	PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error)
 
 	// GetV0CityByCityNameConvoyByIdCheckWithResponse request
 	GetV0CityByCityNameConvoyByIdCheckWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoyByIdCheckResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdCloseWithResponse request
-	PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error)
+	PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error)
 
 	// PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse request with any body
-	PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
 
-	PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
+	PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error)
 
 	// GetV0CityByCityNameConvoysWithResponse request
 	GetV0CityByCityNameConvoysWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameConvoysParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameConvoysResponse, error)
 
 	// CreateConvoyWithBodyWithResponse request with any body
-	CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
+	CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
 
-	CreateConvoyWithResponse(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
+	CreateConvoyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error)
 
 	// GetV0CityByCityNameEventsWithResponse request
 	GetV0CityByCityNameEventsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameEventsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameEventsResponse, error)
 
 	// EmitEventWithBodyWithResponse request with any body
-	EmitEventWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
+	EmitEventWithBodyWithResponse(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
-	EmitEventWithResponse(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
+	EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error)
 
 	// StreamEventsWithResponse request
 	StreamEventsWithResponse(ctx context.Context, cityName string, params *StreamEventsParams, reqEditors ...RequestEditorFn) (*StreamEventsResponse, error)
 
 	// DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with any body
-	DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
 
-	DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
+	DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error)
 
 	// GetV0CityByCityNameExtmsgAdaptersWithResponse request
 	GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgAdaptersResponse, error)
 
 	// RegisterExtmsgAdapterWithBodyWithResponse request with any body
-	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+	RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
 
-	RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
+	RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error)
 
 	// PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+	PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
 
-	PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
+	PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error)
 
 	// GetV0CityByCityNameExtmsgBindingsWithResponse request
 	GetV0CityByCityNameExtmsgBindingsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgBindingsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgBindingsResponse, error)
@@ -14619,42 +16173,42 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameExtmsgGroupsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgGroupsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgGroupsResponse, error)
 
 	// EnsureExtmsgGroupWithBodyWithResponse request with any body
-	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+	EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
 
-	EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
+	EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error)
 
 	// PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+	PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
 
-	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
+	PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error)
 
 	// PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+	PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
 
-	PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
+	PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error)
 
 	// DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
-	DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
 
-	DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
+	DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error)
 
 	// PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+	PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
 
-	PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
+	PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error)
 
 	// GetV0CityByCityNameExtmsgTranscriptWithResponse request
 	GetV0CityByCityNameExtmsgTranscriptWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameExtmsgTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameExtmsgTranscriptResponse, error)
 
 	// PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
 
-	PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
+	PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error)
 
 	// PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with any body
-	PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+	PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
 
-	PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
+	PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error)
 
 	// GetV0CityByCityNameFormulaByNameWithResponse request
 	GetV0CityByCityNameFormulaByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulaByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulaByNameResponse, error)
@@ -14669,9 +16223,9 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameFormulasByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameResponse, error)
 
 	// PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with any body
-	PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
 
-	PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
+	PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error)
 
 	// GetV0CityByCityNameFormulasByNameRunsWithResponse request
 	GetV0CityByCityNameFormulasByNameRunsWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameFormulasByNameRunsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameFormulasByNameRunsResponse, error)
@@ -14720,10 +16274,10 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameOrderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrderByNameResponse, error)
 
 	// PostV0CityByCityNameOrderByNameDisableWithResponse request
-	PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error)
+	PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error)
 
 	// PostV0CityByCityNameOrderByNameEnableWithResponse request
-	PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error)
+	PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error)
 
 	// GetV0CityByCityNameOrdersWithResponse request
 	GetV0CityByCityNameOrdersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameOrdersResponse, error)
@@ -14741,13 +16295,13 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePacksWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePacksResponse, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request
-	DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error)
+	DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error)
 
 	// GetV0CityByCityNamePatchesAgentByBaseWithResponse request
 	GetV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentByBaseResponse, error)
 
 	// DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse request
-	DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
+	DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
 
 	// GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse request
 	GetV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentByDirByBaseResponse, error)
@@ -14756,12 +16310,12 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesAgentsResponse, error)
 
 	// PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
+	PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
 
-	PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
+	PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error)
 
 	// DeleteV0CityByCityNamePatchesProviderByNameWithResponse request
-	DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error)
+	DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error)
 
 	// GetV0CityByCityNamePatchesProviderByNameWithResponse request
 	GetV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesProviderByNameResponse, error)
@@ -14770,12 +16324,12 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesProvidersResponse, error)
 
 	// PutV0CityByCityNamePatchesProvidersWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
+	PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
 
-	PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
+	PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error)
 
 	// DeleteV0CityByCityNamePatchesRigByNameWithResponse request
-	DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error)
+	DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error)
 
 	// GetV0CityByCityNamePatchesRigByNameWithResponse request
 	GetV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesRigByNameResponse, error)
@@ -14784,31 +16338,31 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNamePatchesRigsResponse, error)
 
 	// PutV0CityByCityNamePatchesRigsWithBodyWithResponse request with any body
-	PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
+	PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
 
-	PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
+	PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error)
 
 	// GetV0CityByCityNameProviderReadinessWithResponse request
 	GetV0CityByCityNameProviderReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameProviderReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderReadinessResponse, error)
 
 	// DeleteV0CityByCityNameProviderByNameWithResponse request
-	DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error)
+	DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error)
 
 	// GetV0CityByCityNameProviderByNameWithResponse request
 	GetV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProviderByNameResponse, error)
 
 	// PatchV0CityByCityNameProviderByNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
+	PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
 
-	PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
+	PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error)
 
 	// GetV0CityByCityNameProvidersWithResponse request
 	GetV0CityByCityNameProvidersWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersResponse, error)
 
 	// CreateProviderWithBodyWithResponse request with any body
-	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
+	CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
-	CreateProviderWithResponse(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
+	CreateProviderWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error)
 
 	// GetV0CityByCityNameProvidersPublicWithResponse request
 	GetV0CityByCityNameProvidersPublicWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameProvidersPublicResponse, error)
@@ -14817,32 +16371,32 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
 
 	// DeleteV0CityByCityNameRigByNameWithResponse request
-	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
+	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
 
 	// GetV0CityByCityNameRigByNameWithResponse request
 	GetV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *GetV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRigByNameResponse, error)
 
 	// PatchV0CityByCityNameRigByNameWithBodyWithResponse request with any body
-	PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
+	PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
 
-	PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
+	PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error)
 
 	// PostV0CityByCityNameRigByNameByActionWithResponse request
-	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
+	PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error)
 
 	// GetV0CityByCityNameRigsWithResponse request
 	GetV0CityByCityNameRigsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameRigsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameRigsResponse, error)
 
 	// CreateRigWithBodyWithResponse request with any body
-	CreateRigWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
+	CreateRigWithBodyWithResponse(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
-	CreateRigWithResponse(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
+	CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error)
 
 	// GetV0CityByCityNameServiceByNameWithResponse request
 	GetV0CityByCityNameServiceByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServiceByNameResponse, error)
 
 	// PostV0CityByCityNameServiceByNameRestartWithResponse request
-	PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error)
+	PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error)
 
 	// GetV0CityByCityNameServicesWithResponse request
 	GetV0CityByCityNameServicesWithResponse(ctx context.Context, cityName string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameServicesResponse, error)
@@ -14851,9 +16405,9 @@ type ClientWithResponsesInterface interface {
 	GetV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdResponse, error)
 
 	// PatchV0CityByCityNameSessionByIdWithBodyWithResponse request with any body
-	PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
+	PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
 
-	PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
+	PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error)
 
 	// GetV0CityByCityNameSessionByIdAgentsWithResponse request
 	GetV0CityByCityNameSessionByIdAgentsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdAgentsResponse, error)
@@ -14865,61 +16419,64 @@ type ClientWithResponsesInterface interface {
 	PostV0CityByCityNameSessionByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdCloseResponse, error)
 
 	// PostV0CityByCityNameSessionByIdKillWithResponse request
-	PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error)
+	PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error)
 
 	// SendSessionMessageWithBodyWithResponse request with any body
-	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
-	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
 	// GetV0CityByCityNameSessionByIdPendingWithResponse request
 	GetV0CityByCityNameSessionByIdPendingWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdPendingResponse, error)
 
 	// PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with any body
-	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+	PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
-	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
+	PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error)
 
 	// RespondSessionWithBodyWithResponse request with any body
-	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
+	RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
 
-	RespondSessionWithResponse(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
+	RespondSessionWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
 
 	// PostV0CityByCityNameSessionByIdStopWithResponse request
-	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
+	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
 
 	// StreamSessionWithResponse request
 	StreamSessionWithResponse(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*StreamSessionResponse, error)
 
 	// SubmitSessionWithBodyWithResponse request with any body
-	SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
+	SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
 
-	SubmitSessionWithResponse(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
+	SubmitSessionWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error)
 
 	// PostV0CityByCityNameSessionByIdSuspendWithResponse request
-	PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error)
+	PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error)
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
 
 	// PostV0CityByCityNameSessionByIdWakeWithResponse request
-	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
+	PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error)
 
 	// GetV0CityByCityNameSessionsWithResponse request
 	GetV0CityByCityNameSessionsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameSessionsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionsResponse, error)
 
 	// CreateSessionWithBodyWithResponse request with any body
-	CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
+	CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
 
-	CreateSessionWithResponse(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
+	CreateSessionWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error)
 
 	// PostV0CityByCityNameSlingWithBodyWithResponse request with any body
-	PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
+	PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
 
-	PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
+	PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error)
 
 	// GetV0CityByCityNameStatusWithResponse request
 	GetV0CityByCityNameStatusWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameStatusParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameStatusResponse, error)
+
+	// PostV0CityByCityNameUnregisterWithResponse request
+	PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request
 	DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameWorkflowByWorkflowIdResponse, error)
@@ -14989,7 +16546,7 @@ func (r GetV0CitiesResponse) StatusCode() int {
 type PostV0CityResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
-	JSON200                       *CityCreateResponse
+	JSON202                       *CityCreateResponse
 	ApplicationproblemJSONDefault *ErrorModel
 }
 
@@ -18064,6 +19621,29 @@ func (r GetV0CityByCityNameStatusResponse) StatusCode() int {
 	return 0
 }
 
+type PostV0CityByCityNameUnregisterResponse struct {
+	Body                          []byte
+	HTTPResponse                  *http.Response
+	JSON202                       *CityUnregisterResponse
+	ApplicationproblemJSONDefault *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r PostV0CityByCityNameUnregisterResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostV0CityByCityNameUnregisterResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameWorkflowByWorkflowIdResponse struct {
 	Body                          []byte
 	HTTPResponse                  *http.Response
@@ -18220,16 +19800,16 @@ func (c *ClientWithResponses) GetV0CitiesWithResponse(ctx context.Context, reqEd
 }
 
 // PostV0CityWithBodyWithResponse request with arbitrary body returning *PostV0CityResponse
-func (c *ClientWithResponses) PostV0CityWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
-	rsp, err := c.PostV0CityWithBody(ctx, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityWithBodyWithResponse(ctx context.Context, params *PostV0CityParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
+	rsp, err := c.PostV0CityWithBody(ctx, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityWithResponse(ctx context.Context, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
-	rsp, err := c.PostV0City(ctx, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityWithResponse(ctx context.Context, params *PostV0CityParams, body PostV0CityJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityResponse, error) {
+	rsp, err := c.PostV0City(ctx, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18246,16 +19826,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameWithResponse(ctx context.Contex
 }
 
 // PatchV0CityByCityNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameWithBodyWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityName(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Context, cityName string, params *PatchV0CityByCityNameParams, body PatchV0CityByCityNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityName(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18263,8 +19843,8 @@ func (c *ClientWithResponses) PatchV0CityByCityNameWithResponse(ctx context.Cont
 }
 
 // DeleteV0CityByCityNameAgentByBaseWithResponse request returning *DeleteV0CityByCityNameAgentByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameAgentByBase(ctx, cityName, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNameAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameAgentByBase(ctx, cityName, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18281,16 +19861,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentByBaseWithResponse(ctx con
 }
 
 // PatchV0CityByCityNameAgentByBaseWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameAgentByBaseResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByBaseWithBody(ctx, cityName, base, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithBodyWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByBaseWithBody(ctx, cityName, base, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameAgentByBaseResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByBase(ctx, cityName, base, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *PatchV0CityByCityNameAgentByBaseParams, body PatchV0CityByCityNameAgentByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByBase(ctx, cityName, base, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18316,8 +19896,8 @@ func (c *ClientWithResponses) StreamAgentOutputWithResponse(ctx context.Context,
 }
 
 // PostV0CityByCityNameAgentByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByBaseByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameAgentByBaseByAction(ctx, cityName, base, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithResponse(ctx context.Context, cityName string, base string, action PostV0CityByCityNameAgentByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByBaseByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameAgentByBaseByAction(ctx, cityName, base, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18325,8 +19905,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameAgentByBaseByActionWithRespons
 }
 
 // DeleteV0CityByCityNameAgentByDirByBaseWithResponse request returning *DeleteV0CityByCityNameAgentByDirByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNameAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18343,16 +19923,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentByDirByBaseWithResponse(ct
 }
 
 // PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameAgentByDirByBaseResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx, cityName, dir, base, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithBodyWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByDirByBaseWithBody(ctx, cityName, dir, base, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameAgentByDirByBaseResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *PatchV0CityByCityNameAgentByDirByBaseParams, body PatchV0CityByCityNameAgentByDirByBaseJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameAgentByDirByBaseResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameAgentByDirByBase(ctx, cityName, dir, base, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18378,8 +19958,8 @@ func (c *ClientWithResponses) StreamAgentOutputQualifiedWithResponse(ctx context
 }
 
 // PostV0CityByCityNameAgentByDirByBaseByActionWithResponse request returning *PostV0CityByCityNameAgentByDirByBaseByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameAgentByDirByBaseByAction(ctx, cityName, dir, base, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameAgentByDirByBaseByActionWithResponse(ctx context.Context, cityName string, dir string, base string, action PostV0CityByCityNameAgentByDirByBaseByActionParamsAction, params *PostV0CityByCityNameAgentByDirByBaseByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameAgentByDirByBaseByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameAgentByDirByBaseByAction(ctx, cityName, dir, base, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18396,16 +19976,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameAgentsWithResponse(ctx context.
 }
 
 // CreateAgentWithBodyWithResponse request with arbitrary body returning *CreateAgentResponse
-func (c *ClientWithResponses) CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
-	rsp, err := c.CreateAgentWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateAgentWithBodyWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
+	rsp, err := c.CreateAgentWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateAgentResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityName string, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
-	rsp, err := c.CreateAgent(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityName string, params *CreateAgentParams, body CreateAgentJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateAgentResponse, error) {
+	rsp, err := c.CreateAgent(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18413,8 +19993,8 @@ func (c *ClientWithResponses) CreateAgentWithResponse(ctx context.Context, cityN
 }
 
 // DeleteV0CityByCityNameBeadByIdWithResponse request returning *DeleteV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameBeadById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameBeadByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameBeadById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18431,16 +20011,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdWithResponse(ctx contex
 }
 
 // PatchV0CityByCityNameBeadByIdWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameBeadByIdResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameBeadByIdWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameBeadByIdWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameBeadByIdResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameBeadById(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameBeadByIdParams, body PatchV0CityByCityNameBeadByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameBeadByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameBeadById(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18448,16 +20028,16 @@ func (c *ClientWithResponses) PatchV0CityByCityNameBeadByIdWithResponse(ctx cont
 }
 
 // PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadByIdAssignResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdAssignWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdAssignWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameBeadByIdAssignResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdAssign(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdAssignParams, body PostV0CityByCityNameBeadByIdAssignJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdAssignResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdAssign(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18465,8 +20045,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdAssignWithResponse(ctx
 }
 
 // PostV0CityByCityNameBeadByIdCloseWithResponse request returning *PostV0CityByCityNameBeadByIdCloseResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdClose(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18483,8 +20063,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameBeadByIdDepsWithResponse(ctx co
 }
 
 // PostV0CityByCityNameBeadByIdReopenWithResponse request returning *PostV0CityByCityNameBeadByIdReopenResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdReopen(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdReopenParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdReopenResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdReopen(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18492,16 +20072,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdReopenWithResponse(ctx
 }
 
 // PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameBeadByIdUpdateResponse
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdUpdateWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdUpdateWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameBeadByIdUpdateResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
-	rsp, err := c.PostV0CityByCityNameBeadByIdUpdate(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameBeadByIdUpdateWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameBeadByIdUpdateParams, body PostV0CityByCityNameBeadByIdUpdateJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameBeadByIdUpdateResponse, error) {
+	rsp, err := c.PostV0CityByCityNameBeadByIdUpdate(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18580,8 +20160,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameConfigValidateWithResponse(ctx 
 }
 
 // DeleteV0CityByCityNameConvoyByIdWithResponse request returning *DeleteV0CityByCityNameConvoyByIdResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameConvoyById(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameConvoyByIdWithResponse(ctx context.Context, cityName string, id string, params *DeleteV0CityByCityNameConvoyByIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameConvoyByIdResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameConvoyById(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18598,16 +20178,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoyByIdWithResponse(ctx cont
 }
 
 // PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameConvoyByIdAddResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdAddWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdAddWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameConvoyByIdAddResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdAdd(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdAddWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdAddParams, body PostV0CityByCityNameConvoyByIdAddJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdAddResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdAdd(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18624,8 +20204,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoyByIdCheckWithResponse(ctx
 }
 
 // PostV0CityByCityNameConvoyByIdCloseWithResponse request returning *PostV0CityByCityNameConvoyByIdCloseResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdClose(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdCloseParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdCloseResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdClose(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18633,16 +20213,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdCloseWithResponse(ct
 }
 
 // PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameConvoyByIdRemoveResponse
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdRemoveWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameConvoyByIdRemoveResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
-	rsp, err := c.PostV0CityByCityNameConvoyByIdRemove(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameConvoyByIdRemoveWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameConvoyByIdRemoveParams, body PostV0CityByCityNameConvoyByIdRemoveJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameConvoyByIdRemoveResponse, error) {
+	rsp, err := c.PostV0CityByCityNameConvoyByIdRemove(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18659,16 +20239,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameConvoysWithResponse(ctx context
 }
 
 // CreateConvoyWithBodyWithResponse request with arbitrary body returning *CreateConvoyResponse
-func (c *ClientWithResponses) CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
-	rsp, err := c.CreateConvoyWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateConvoyWithBodyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
+	rsp, err := c.CreateConvoyWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateConvoyResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateConvoyWithResponse(ctx context.Context, cityName string, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
-	rsp, err := c.CreateConvoy(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateConvoyWithResponse(ctx context.Context, cityName string, params *CreateConvoyParams, body CreateConvoyJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateConvoyResponse, error) {
+	rsp, err := c.CreateConvoy(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18685,16 +20265,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameEventsWithResponse(ctx context.
 }
 
 // EmitEventWithBodyWithResponse request with arbitrary body returning *EmitEventResponse
-func (c *ClientWithResponses) EmitEventWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
-	rsp, err := c.EmitEventWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) EmitEventWithBodyWithResponse(ctx context.Context, cityName string, params *EmitEventParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
+	rsp, err := c.EmitEventWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseEmitEventResponse(rsp)
 }
 
-func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityName string, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
-	rsp, err := c.EmitEvent(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) EmitEventWithResponse(ctx context.Context, cityName string, params *EmitEventParams, body EmitEventJSONRequestBody, reqEditors ...RequestEditorFn) (*EmitEventResponse, error) {
+	rsp, err := c.EmitEvent(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18711,16 +20291,16 @@ func (c *ClientWithResponses) StreamEventsWithResponse(ctx context.Context, city
 }
 
 // DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgAdaptersResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdaptersWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseDeleteV0CityByCityNameExtmsgAdaptersResponse(rsp)
 }
 
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgAdapters(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgAdaptersWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgAdaptersParams, body DeleteV0CityByCityNameExtmsgAdaptersJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgAdaptersResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgAdapters(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18737,16 +20317,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgAdaptersWithResponse(ctx 
 }
 
 // RegisterExtmsgAdapterWithBodyWithResponse request with arbitrary body returning *RegisterExtmsgAdapterResponse
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithBodyWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapterWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseRegisterExtmsgAdapterResponse(rsp)
 }
 
-func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
-	rsp, err := c.RegisterExtmsgAdapter(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Context, cityName string, params *RegisterExtmsgAdapterParams, body RegisterExtmsgAdapterJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterExtmsgAdapterResponse, error) {
+	rsp, err := c.RegisterExtmsgAdapter(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18754,16 +20334,16 @@ func (c *ClientWithResponses) RegisterExtmsgAdapterWithResponse(ctx context.Cont
 }
 
 // PostV0CityByCityNameExtmsgBindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgBindResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgBindWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBindWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgBindResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgBind(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgBindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgBindParams, body PostV0CityByCityNameExtmsgBindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgBindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgBind(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18789,16 +20369,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgGroupsWithResponse(ctx co
 }
 
 // EnsureExtmsgGroupWithBodyWithResponse request with arbitrary body returning *EnsureExtmsgGroupResponse
-func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) EnsureExtmsgGroupWithBodyWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroupWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseEnsureExtmsgGroupResponse(rsp)
 }
 
-func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
-	rsp, err := c.EnsureExtmsgGroup(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context, cityName string, params *EnsureExtmsgGroupParams, body EnsureExtmsgGroupJSONRequestBody, reqEditors ...RequestEditorFn) (*EnsureExtmsgGroupResponse, error) {
+	rsp, err := c.EnsureExtmsgGroup(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18806,16 +20386,16 @@ func (c *ClientWithResponses) EnsureExtmsgGroupWithResponse(ctx context.Context,
 }
 
 // PostV0CityByCityNameExtmsgInboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgInboundResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgInboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInboundWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgInboundResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgInbound(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgInboundParams, body PostV0CityByCityNameExtmsgInboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgInboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgInbound(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18823,16 +20403,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgInboundWithResponse(ctx 
 }
 
 // PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgOutboundResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgOutboundWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutboundWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgOutboundResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgOutbound(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgOutboundParams, body PostV0CityByCityNameExtmsgOutboundJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgOutboundResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgOutbound(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18840,16 +20420,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgOutboundWithResponse(ctx
 }
 
 // DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *DeleteV0CityByCityNameExtmsgParticipantsResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseDeleteV0CityByCityNameExtmsgParticipantsResponse(rsp)
 }
 
-func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *DeleteV0CityByCityNameExtmsgParticipantsParams, body DeleteV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameExtmsgParticipants(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18857,16 +20437,16 @@ func (c *ClientWithResponses) DeleteV0CityByCityNameExtmsgParticipantsWithRespon
 }
 
 // PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgParticipantsResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipantsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgParticipantsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgParticipants(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgParticipantsWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgParticipantsParams, body PostV0CityByCityNameExtmsgParticipantsJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgParticipantsResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgParticipants(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18883,16 +20463,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameExtmsgTranscriptWithResponse(ct
 }
 
 // PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgTranscriptAckResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAckWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgTranscriptAckResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAck(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgTranscriptAckParams, body PostV0CityByCityNameExtmsgTranscriptAckJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgTranscriptAckResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgTranscriptAck(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18900,16 +20480,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameExtmsgTranscriptAckWithRespons
 }
 
 // PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameExtmsgUnbindResponse
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgUnbindWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbindWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameExtmsgUnbindResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
-	rsp, err := c.PostV0CityByCityNameExtmsgUnbind(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameExtmsgUnbindWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameExtmsgUnbindParams, body PostV0CityByCityNameExtmsgUnbindJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameExtmsgUnbindResponse, error) {
+	rsp, err := c.PostV0CityByCityNameExtmsgUnbind(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -18953,16 +20533,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameFormulasByNameWithResponse(ctx 
 }
 
 // PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameFormulasByNamePreviewResponse
-func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
-	rsp, err := c.PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
+	rsp, err := c.PostV0CityByCityNameFormulasByNamePreviewWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameFormulasByNamePreviewResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
-	rsp, err := c.PostV0CityByCityNameFormulasByNamePreview(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameFormulasByNamePreviewWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameFormulasByNamePreviewParams, body PostV0CityByCityNameFormulasByNamePreviewJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameFormulasByNamePreviewResponse, error) {
+	rsp, err := c.PostV0CityByCityNameFormulasByNamePreview(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19112,8 +20692,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameOrderByNameWithResponse(ctx con
 }
 
 // PostV0CityByCityNameOrderByNameDisableWithResponse request returning *PostV0CityByCityNameOrderByNameDisableResponse
-func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error) {
-	rsp, err := c.PostV0CityByCityNameOrderByNameDisable(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameDisableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameDisableResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameDisable(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19121,8 +20701,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameDisableWithResponse
 }
 
 // PostV0CityByCityNameOrderByNameEnableWithResponse request returning *PostV0CityByCityNameOrderByNameEnableResponse
-func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error) {
-	rsp, err := c.PostV0CityByCityNameOrderByNameEnable(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameOrderByNameEnableWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameOrderByNameEnableParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameOrderByNameEnableResponse, error) {
+	rsp, err := c.PostV0CityByCityNameOrderByNameEnable(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19175,8 +20755,8 @@ func (c *ClientWithResponses) GetV0CityByCityNamePacksWithResponse(ctx context.C
 }
 
 // DeleteV0CityByCityNamePatchesAgentByBaseWithResponse request returning *DeleteV0CityByCityNamePatchesAgentByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByBase(ctx, cityName, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByBaseWithResponse(ctx context.Context, cityName string, base string, params *DeleteV0CityByCityNamePatchesAgentByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByBase(ctx, cityName, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19193,8 +20773,8 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesAgentByBaseWithResponse(
 }
 
 // DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse request returning *DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx, cityName, dir, base, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesAgentByDirByBaseWithResponse(ctx context.Context, cityName string, dir string, base string, params *DeleteV0CityByCityNamePatchesAgentByDirByBaseParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesAgentByDirByBaseResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesAgentByDirByBase(ctx, cityName, dir, base, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19220,16 +20800,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesAgentsWithResponse(ctx c
 }
 
 // PutV0CityByCityNamePatchesAgentsWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesAgentsResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesAgentsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesAgentsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesAgentsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesAgents(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesAgentsParams, body PutV0CityByCityNamePatchesAgentsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesAgentsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesAgents(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19237,8 +20817,8 @@ func (c *ClientWithResponses) PutV0CityByCityNamePatchesAgentsWithResponse(ctx c
 }
 
 // DeleteV0CityByCityNamePatchesProviderByNameWithResponse request returning *DeleteV0CityByCityNamePatchesProviderByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesProviderByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesProviderByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesProviderByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19264,16 +20844,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesProvidersWithResponse(ct
 }
 
 // PutV0CityByCityNamePatchesProvidersWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesProvidersResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesProvidersWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesProvidersWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesProvidersResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesProviders(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesProvidersParams, body PutV0CityByCityNamePatchesProvidersJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesProvidersResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesProviders(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19281,8 +20861,8 @@ func (c *ClientWithResponses) PutV0CityByCityNamePatchesProvidersWithResponse(ct
 }
 
 // DeleteV0CityByCityNamePatchesRigByNameWithResponse request returning *DeleteV0CityByCityNamePatchesRigByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNamePatchesRigByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNamePatchesRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNamePatchesRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNamePatchesRigByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNamePatchesRigByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19308,16 +20888,16 @@ func (c *ClientWithResponses) GetV0CityByCityNamePatchesRigsWithResponse(ctx con
 }
 
 // PutV0CityByCityNamePatchesRigsWithBodyWithResponse request with arbitrary body returning *PutV0CityByCityNamePatchesRigsResponse
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesRigsWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithBodyWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesRigsWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePutV0CityByCityNamePatchesRigsResponse(rsp)
 }
 
-func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
-	rsp, err := c.PutV0CityByCityNamePatchesRigs(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PutV0CityByCityNamePatchesRigsWithResponse(ctx context.Context, cityName string, params *PutV0CityByCityNamePatchesRigsParams, body PutV0CityByCityNamePatchesRigsJSONRequestBody, reqEditors ...RequestEditorFn) (*PutV0CityByCityNamePatchesRigsResponse, error) {
+	rsp, err := c.PutV0CityByCityNamePatchesRigs(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19334,8 +20914,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameProviderReadinessWithResponse(c
 }
 
 // DeleteV0CityByCityNameProviderByNameWithResponse request returning *DeleteV0CityByCityNameProviderByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameProviderByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameProviderByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameProviderByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19352,16 +20932,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameProviderByNameWithResponse(ctx 
 }
 
 // PatchV0CityByCityNameProviderByNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameProviderByNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameProviderByNameWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameProviderByNameWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameProviderByNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameProviderByName(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameProviderByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameProviderByNameParams, body PatchV0CityByCityNameProviderByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameProviderByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameProviderByName(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19378,16 +20958,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameProvidersWithResponse(ctx conte
 }
 
 // CreateProviderWithBodyWithResponse request with arbitrary body returning *CreateProviderResponse
-func (c *ClientWithResponses) CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
-	rsp, err := c.CreateProviderWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateProviderWithBodyWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
+	rsp, err := c.CreateProviderWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateProviderResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, cityName string, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
-	rsp, err := c.CreateProvider(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateProviderWithResponse(ctx context.Context, cityName string, params *CreateProviderParams, body CreateProviderJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateProviderResponse, error) {
+	rsp, err := c.CreateProvider(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19413,8 +20993,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameReadinessWithResponse(ctx conte
 }
 
 // DeleteV0CityByCityNameRigByNameWithResponse request returning *DeleteV0CityByCityNameRigByNameResponse
-func (c *ClientWithResponses) DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.DeleteV0CityByCityNameRigByName(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.DeleteV0CityByCityNameRigByName(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19431,16 +21011,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameRigByNameWithResponse(ctx conte
 }
 
 // PatchV0CityByCityNameRigByNameWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameRigByNameResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameRigByNameWithBody(ctx, cityName, name, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithBodyWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameRigByNameWithBody(ctx, cityName, name, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameRigByNameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameRigByName(ctx, cityName, name, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *PatchV0CityByCityNameRigByNameParams, body PatchV0CityByCityNameRigByNameJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameRigByNameResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameRigByName(ctx, cityName, name, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19448,8 +21028,8 @@ func (c *ClientWithResponses) PatchV0CityByCityNameRigByNameWithResponse(ctx con
 }
 
 // PostV0CityByCityNameRigByNameByActionWithResponse request returning *PostV0CityByCityNameRigByNameByActionResponse
-func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
-	rsp, err := c.PostV0CityByCityNameRigByNameByAction(ctx, cityName, name, action, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameRigByNameByActionWithResponse(ctx context.Context, cityName string, name string, action string, params *PostV0CityByCityNameRigByNameByActionParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameRigByNameByActionResponse, error) {
+	rsp, err := c.PostV0CityByCityNameRigByNameByAction(ctx, cityName, name, action, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19466,16 +21046,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameRigsWithResponse(ctx context.Co
 }
 
 // CreateRigWithBodyWithResponse request with arbitrary body returning *CreateRigResponse
-func (c *ClientWithResponses) CreateRigWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
-	rsp, err := c.CreateRigWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateRigWithBodyWithResponse(ctx context.Context, cityName string, params *CreateRigParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
+	rsp, err := c.CreateRigWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateRigResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityName string, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
-	rsp, err := c.CreateRig(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateRigWithResponse(ctx context.Context, cityName string, params *CreateRigParams, body CreateRigJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateRigResponse, error) {
+	rsp, err := c.CreateRig(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19492,8 +21072,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameServiceByNameWithResponse(ctx c
 }
 
 // PostV0CityByCityNameServiceByNameRestartWithResponse request returning *PostV0CityByCityNameServiceByNameRestartResponse
-func (c *ClientWithResponses) PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error) {
-	rsp, err := c.PostV0CityByCityNameServiceByNameRestart(ctx, cityName, name, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameServiceByNameRestartWithResponse(ctx context.Context, cityName string, name string, params *PostV0CityByCityNameServiceByNameRestartParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameServiceByNameRestartResponse, error) {
+	rsp, err := c.PostV0CityByCityNameServiceByNameRestart(ctx, cityName, name, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19519,16 +21099,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdWithResponse(ctx con
 }
 
 // PatchV0CityByCityNameSessionByIdWithBodyWithResponse request with arbitrary body returning *PatchV0CityByCityNameSessionByIdResponse
-func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameSessionByIdWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameSessionByIdWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePatchV0CityByCityNameSessionByIdResponse(rsp)
 }
 
-func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
-	rsp, err := c.PatchV0CityByCityNameSessionById(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PatchV0CityByCityNameSessionByIdWithResponse(ctx context.Context, cityName string, id string, params *PatchV0CityByCityNameSessionByIdParams, body PatchV0CityByCityNameSessionByIdJSONRequestBody, reqEditors ...RequestEditorFn) (*PatchV0CityByCityNameSessionByIdResponse, error) {
+	rsp, err := c.PatchV0CityByCityNameSessionById(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19563,8 +21143,8 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdCloseWithResponse(c
 }
 
 // PostV0CityByCityNameSessionByIdKillWithResponse request returning *PostV0CityByCityNameSessionByIdKillResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdKill(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdKillParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdKillResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdKill(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19572,16 +21152,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdKillWithResponse(ct
 }
 
 // SendSessionMessageWithBodyWithResponse request with arbitrary body returning *SendSessionMessageResponse
-func (c *ClientWithResponses) SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
-	rsp, err := c.SendSessionMessageWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
+	rsp, err := c.SendSessionMessageWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseSendSessionMessageResponse(rsp)
 }
 
-func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
-	rsp, err := c.SendSessionMessage(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error) {
+	rsp, err := c.SendSessionMessage(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19598,16 +21178,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdPendingWithResponse(
 }
 
 // PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdRenameResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRenameWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSessionByIdRenameResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdRename(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdRenameParams, body PostV0CityByCityNameSessionByIdRenameJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdRenameResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdRename(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19615,16 +21195,16 @@ func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdRenameWithResponse(
 }
 
 // RespondSessionWithBodyWithResponse request with arbitrary body returning *RespondSessionResponse
-func (c *ClientWithResponses) RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
-	rsp, err := c.RespondSessionWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) RespondSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
+	rsp, err := c.RespondSessionWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseRespondSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, cityName string, id string, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
-	rsp, err := c.RespondSession(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error) {
+	rsp, err := c.RespondSession(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19632,8 +21212,8 @@ func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, ci
 }
 
 // PostV0CityByCityNameSessionByIdStopWithResponse request returning *PostV0CityByCityNameSessionByIdStopResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19650,16 +21230,16 @@ func (c *ClientWithResponses) StreamSessionWithResponse(ctx context.Context, cit
 }
 
 // SubmitSessionWithBodyWithResponse request with arbitrary body returning *SubmitSessionResponse
-func (c *ClientWithResponses) SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
-	rsp, err := c.SubmitSessionWithBody(ctx, cityName, id, contentType, body, reqEditors...)
+func (c *ClientWithResponses) SubmitSessionWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
+	rsp, err := c.SubmitSessionWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseSubmitSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cityName string, id string, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
-	rsp, err := c.SubmitSession(ctx, cityName, id, body, reqEditors...)
+func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cityName string, id string, params *SubmitSessionParams, body SubmitSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitSessionResponse, error) {
+	rsp, err := c.SubmitSession(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19667,8 +21247,8 @@ func (c *ClientWithResponses) SubmitSessionWithResponse(ctx context.Context, cit
 }
 
 // PostV0CityByCityNameSessionByIdSuspendWithResponse request returning *PostV0CityByCityNameSessionByIdSuspendResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdSuspend(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdSuspendWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdSuspendParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdSuspendResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdSuspend(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19685,8 +21265,8 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 }
 
 // PostV0CityByCityNameSessionByIdWakeWithResponse request returning *PostV0CityByCityNameSessionByIdWakeResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdWake(ctx, cityName, id, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdWakeWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdWakeParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdWakeResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdWake(ctx, cityName, id, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19703,16 +21283,16 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionsWithResponse(ctx contex
 }
 
 // CreateSessionWithBodyWithResponse request with arbitrary body returning *CreateSessionResponse
-func (c *ClientWithResponses) CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
-	rsp, err := c.CreateSessionWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) CreateSessionWithBodyWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
+	rsp, err := c.CreateSessionWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParseCreateSessionResponse(rsp)
 }
 
-func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cityName string, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
-	rsp, err := c.CreateSession(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cityName string, params *CreateSessionParams, body CreateSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSessionResponse, error) {
+	rsp, err := c.CreateSession(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19720,16 +21300,16 @@ func (c *ClientWithResponses) CreateSessionWithResponse(ctx context.Context, cit
 }
 
 // PostV0CityByCityNameSlingWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSlingResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSlingWithBody(ctx, cityName, contentType, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSlingWithBodyWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSlingWithBody(ctx, cityName, params, contentType, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
 	return ParsePostV0CityByCityNameSlingResponse(rsp)
 }
 
-func (c *ClientWithResponses) PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSling(ctx, cityName, body, reqEditors...)
+func (c *ClientWithResponses) PostV0CityByCityNameSlingWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameSlingParams, body PostV0CityByCityNameSlingJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSlingResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSling(ctx, cityName, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -19743,6 +21323,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameStatusWithResponse(ctx context.
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameStatusResponse(rsp)
+}
+
+// PostV0CityByCityNameUnregisterWithResponse request returning *PostV0CityByCityNameUnregisterResponse
+func (c *ClientWithResponses) PostV0CityByCityNameUnregisterWithResponse(ctx context.Context, cityName string, params *PostV0CityByCityNameUnregisterParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameUnregisterResponse, error) {
+	rsp, err := c.PostV0CityByCityNameUnregister(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameUnregisterResponse(rsp)
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request returning *DeleteV0CityByCityNameWorkflowByWorkflowIdResponse
@@ -19879,12 +21468,12 @@ func ParsePostV0CityResponse(rsp *http.Response) (*PostV0CityResponse, error) {
 	}
 
 	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
 		var dest CityCreateResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
-		response.JSON200 = &dest
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel
@@ -24246,6 +25835,39 @@ func ParseGetV0CityByCityNameStatusResponse(rsp *http.Response) (*GetV0CityByCit
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostV0CityByCityNameUnregisterResponse parses an HTTP response from a PostV0CityByCityNameUnregisterWithResponse call
+func ParsePostV0CityByCityNameUnregisterResponse(rsp *http.Response) (*PostV0CityByCityNameUnregisterResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostV0CityByCityNameUnregisterResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 202:
+		var dest CityUnregisterResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON202 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
 		var dest ErrorModel

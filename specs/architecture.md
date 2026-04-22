@@ -20,9 +20,25 @@ Two architectural themes run through everything below:
 ## 1. The object model
 
 `internal/{beads, mail, convoy, formula, agent, events, session,
-sling, graphroute, agentutil, pathutil, ...}` is the canonical
-domain. All business logic lives there. The two surfaces below call
-into it; neither re-implements validation, routing, or invariants.
+sling, graphroute, agentutil, pathutil, cityinit, ...}` is the
+canonical domain. All business logic lives there. The two surfaces
+below call into it; neither re-implements validation, routing, or
+invariants.
+
+City initialization is a worked example: the HTTP handler for
+`POST /v0/city` does **not** shell out to `gc init`; it calls
+`cityinit.Initializer.Scaffold` in-process, which is the same
+entry point the CLI drives. The scaffolded city registers with
+the supervisor synchronously before `202 Accepted` returns; the
+reconciler runs the slow finalize later and publishes `city.ready`
+/ `city.init_failed` events. Both projections live on the same
+typed contract and error sentinels
+(`cityinit.ErrAlreadyInitialized`, `ErrInvalidProvider`,
+`ErrMissingDependency`, `ErrProviderNotReady`,
+`ErrInvalidBootstrapProfile`). Long-running mutations in general
+follow this shape: scaffold synchronously, return 202, publish
+completion events — subscribers watch the event stream instead of
+polling.
 
 ```
 cmd/gc/cmd_*.go               internal/api/handler_*.go
@@ -145,6 +161,17 @@ schema-describes it. There is no second description of the endpoint
 anywhere — not in a router table, not in an OpenAPI YAML, not in a
 client stub.
 
+Framework-level cross-cutting wire contract (CSRF header, request-ID
+response header, per-stream status headers) does not live on
+per-endpoint struct annotations; it lives on the registration
+helpers (`cityPost`, `cityRegister`, `registerSSE`) or on a
+post-registration spec walker (`registerFrameworkHeaders`). That is
+not a second description — it is the same mechanism applied
+at one layer up, and the OpenAPI spec that results still describes
+every operation's full contract. See §3.5.2. Patterns and Huma
+quirks that inform these helpers are documented in
+[`specs/huma-usage.md`](./huma-usage.md).
+
 ### 3.2 Spec is generated, never hand-written
 
 `internal/api/openapi.json` and `docs/schema/openapi.json` are
@@ -260,11 +287,25 @@ Three anti-patterns are specifically forbidden:
   but may not read keys off `ctx.URL().Query()` or `ctx.Header()`
   that aren't present on the input struct. If a resolver needs a
   value, that value is a declared field — no exceptions.
-- **Presence-vs-empty semantics not expressible in JSONSchema.**
-  If a handler behaves differently for "parameter absent" vs
-  "parameter present with empty value", the input field must be a
-  pointer type (`*string`) so the distinction appears on the wire
-  contract. Resolver-based presence flags hide the semantics.
+- **Presence-vs-empty semantics via raw-URL inspection.** If a
+  handler behaves differently for "parameter absent" vs "parameter
+  present with empty value", the presence flag must come from
+  Huma's parameter binder — not from peeking at `ctx.URL().Query()`
+  inside a Resolver. Use the `huma.OptionalParam[T]`-style wrapper
+  (see `internal/api/huma_optional_param.go`): a custom type with
+  `Schema()`, `Receiver()`, and `OnParamSet(isSet bool, ...)` that
+  emits the underlying `T`'s schema on the wire and exposes an
+  `IsSet` flag to the handler. Huma v2 does not support pointer
+  query parameters (they panic at registration, see
+  `github.com/danielgtaylor/huma` issue #288); `OptionalParam` is
+  the framework-sanctioned idiom.
+
+  Practical corollary: Huma's parameter binder treats `?cursor=`
+  (empty value) identically to an absent parameter
+  (`huma.go:881-882: isSet = value != ""`). A three-state contract
+  (absent / present-empty / present-nonempty) is therefore not
+  expressible against Huma; the wire contract collapses to
+  two states. Design APIs around that.
 
 The test a reviewer applies: does running an undeclared query
 parameter or an undeclared body field through the handler change
@@ -278,6 +319,56 @@ them — silent acceptance of undeclared parameters is a property
 of the framework, not a blessing of hidden contract. Callers that
 send undeclared parameters are sending noise; handlers that read
 them are violating this principle.
+
+### 3.5.2 Framework-level headers declared once, not per-operation
+
+Wire contract that applies uniformly across every operation —
+CSRF request headers, request-ID response headers, the custom
+response headers SSE streams emit for runtime status — is still
+real wire contract and must appear in the spec. OpenAPI 3.1 has
+no mechanism to declare headers "globally" for all operations
+(see
+[speakeasy.com/openapi/responses/headers](https://www.speakeasy.com/openapi/responses/headers));
+the canonical pattern is:
+
+1. Define the header once. Request headers live as operation
+   parameters; response headers get a named entry in
+   `components.headers`.
+2. Reference it from every operation it applies to (request
+   params go on the Operation's `Parameters`; response headers
+   use `{"$ref": "#/components/headers/NAME"}`).
+
+Rather than embedding the reference in 50+ input/output structs,
+attach it at the single function every operation already flows
+through:
+
+- **Request headers (e.g. `X-GC-Request`)** — `cityPost`,
+  `cityPut`, `cityPatch`, `cityDelete`, and `cityRegister` in
+  `internal/api/city_scope.go` pass `addMutationCSRFParam` as a
+  Huma operation handler. One line at the route helper covers
+  every current and future mutation endpoint.
+- **Response headers (e.g. `X-GC-Request-Id`)** —
+  `registerFrameworkHeaders` in
+  `internal/api/huma_spec_framework.go` runs once after all
+  routes are registered. It populates `components.headers` and
+  walks every operation's responses to inject a `$ref` pointing
+  at the named component.
+- **Per-stream custom response headers (e.g. `GC-Agent-Status`,
+  `GC-Session-State`, `GC-Session-Status`)** — catalogued in
+  `sseStatusHeaders` (`internal/api/sse.go`) and referenced by
+  name at each `registerSSE` call site via
+  `sseResponseHeaders("GC-Agent-Status")`. Colocated with the
+  operation where the handler emits the header, one catalog
+  entry per header.
+
+These patterns are not exceptions to §3.5.1; they are the
+§3.5.1-compliant mechanism for cross-cutting concerns. The spec
+still fully describes the contract — every operation's parameters
+and response headers list the header explicitly — but the
+declaration happens at one function call, not fifty struct
+definitions. Middleware remains the single source of enforcement;
+the spec remains the single source of description; the helpers
+keep the two aligned.
 
 ### 3.6 Raw pass-through for provider-native session frames
 
@@ -546,9 +637,21 @@ type guard in the SPA.
 Every file-path citation in this spec is load-bearing. If you
 rename or remove a cited symbol (`events.KnownEventTypes`,
 `EventPayloadUnion`, `TestEveryKnownEventTypeHasRegisteredPayload`,
-`cmd/gc/apiroute.go:apiClient()`, etc.), **update this spec in the
-same commit**. A stale spec is worse than no spec — it misleads
-future agents about what invariants hold.
+`cmd/gc/apiroute.go:apiClient()`, `addMutationCSRFParam`,
+`registerFrameworkHeaders`, `sseResponseHeaders`,
+`OptionalParam`, `cityinit.Initializer`, `cityinit.InitRequest`,
+`cityinit.InitResult`, `cityinit.UnregisterRequest`,
+`cityinit.UnregisterResult`, `cityinit.ErrNotRegistered`,
+`TransientCityEventSource`, etc.), **update this spec in the same
+commit**. A stale spec is worse than no spec — it misleads future
+agents about what invariants hold.
+
+Framework-specific patterns and Huma quirks are captured in
+[`specs/huma-usage.md`](./huma-usage.md); update that file in the
+same commit when you touch any of: `OptionalParam`,
+`addMutationCSRFParam`, `registerFrameworkHeaders`,
+`sseResponseHeaders`, the SSE hand-writing zone, or the
+`cityPost`/`cityRegister` helper family.
 
 Line numbers are deliberately omitted so the spec survives
 refactors. Package names, type names, and test names are stable

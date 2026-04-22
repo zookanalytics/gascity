@@ -28,6 +28,91 @@ type MailEventPayload struct {
 // IsEventPayload marks MailEventPayload as an events.Payload variant.
 func (MailEventPayload) IsEventPayload() {}
 
+// CityCreatedPayload is emitted on city.created when the supervisor's
+// POST /v0/city handler has scaffolded and registered a new city.
+// Consumers subscribed to /v0/events/stream use this event to learn
+// about newly-created cities before they are fully initialized. The
+// matching city.ready / city.init_failed event follows once the
+// supervisor reconciler finishes preparing the city (or gives up).
+type CityCreatedPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// IsEventPayload marks CityCreatedPayload as an events.Payload variant.
+func (CityCreatedPayload) IsEventPayload() {}
+
+// CityReadyPayload is emitted on city.ready when the supervisor
+// reconciler has finished preparing a city (bead store started,
+// formulas resolved, agents validated). The city is now in the
+// running inventory and ready to accept work.
+type CityReadyPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// IsEventPayload marks CityReadyPayload as an events.Payload variant.
+func (CityReadyPayload) IsEventPayload() {}
+
+// CityInitFailedPayload is emitted on city.init_failed when the
+// supervisor reconciler fails to bring up a city. The payload carries
+// a human-readable error string sourced from the reconciler step that
+// failed (validate rigs, startBeadsLifecycle, etc.) plus the phases
+// the reconciler completed before the failure.
+type CityInitFailedPayload struct {
+	Name            string   `json:"name"`
+	Path            string   `json:"path"`
+	Error           string   `json:"error"`
+	PhasesCompleted []string `json:"phases_completed,omitempty"`
+}
+
+// IsEventPayload marks CityInitFailedPayload as an events.Payload variant.
+func (CityInitFailedPayload) IsEventPayload() {}
+
+// CityUnregisterRequestedPayload is emitted on
+// city.unregister_requested when a client POSTs
+// /v0/city/{cityName}/unregister. Subscribers see this event before
+// the supervisor reconciler stops the city's controller, then see
+// city.unregistered (success) or city.unregister_failed (stop
+// failure) once the reconciler completes.
+type CityUnregisterRequestedPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// IsEventPayload marks CityUnregisterRequestedPayload as an
+// events.Payload variant.
+func (CityUnregisterRequestedPayload) IsEventPayload() {}
+
+// CityUnregisteredPayload is emitted on city.unregistered when the
+// supervisor reconciler has removed a city from its running set
+// after the city was removed from the registry. The controller is
+// stopped; the city directory is untouched on disk.
+type CityUnregisteredPayload struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// IsEventPayload marks CityUnregisteredPayload as an events.Payload
+// variant.
+func (CityUnregisteredPayload) IsEventPayload() {}
+
+// CityUnregisterFailedPayload is emitted on city.unregister_failed
+// when the supervisor reconciler cannot stop a city's controller
+// after its registry entry was removed. The Error field carries a
+// human-readable description of what failed (e.g. "controller did
+// not stop within timeout"). Operators can inspect the city's
+// controller process and retry.
+type CityUnregisterFailedPayload struct {
+	Name  string `json:"name"`
+	Path  string `json:"path"`
+	Error string `json:"error"`
+}
+
+// IsEventPayload marks CityUnregisterFailedPayload as an
+// events.Payload variant.
+func (CityUnregisterFailedPayload) IsEventPayload() {}
+
 // BeadEventPayload is the shape of every bead.* event payload
 // (BeadCreated, BeadUpdated, BeadClosed). The payload carries a full
 // snapshot of the bead as of the event; it is emitted by the beads
@@ -97,9 +182,15 @@ func init() {
 	events.RegisterPayload(events.ControllerStopped, events.NoPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
+	events.RegisterPayload(events.CityCreated, CityCreatedPayload{})
+	events.RegisterPayload(events.CityReady, CityReadyPayload{})
+	events.RegisterPayload(events.CityInitFailed, CityInitFailedPayload{})
 	events.RegisterPayload(events.OrderFired, events.NoPayload{})
 	events.RegisterPayload(events.OrderCompleted, events.NoPayload{})
 	events.RegisterPayload(events.OrderFailed, events.NoPayload{})
 	events.RegisterPayload(events.ProviderSwapped, events.NoPayload{})
 	events.RegisterPayload(events.WorkerOperation, WorkerOperationEventPayload{})
+	events.RegisterPayload(events.CityUnregisterRequested, CityUnregisterRequestedPayload{})
+	events.RegisterPayload(events.CityUnregistered, CityUnregisteredPayload{})
+	events.RegisterPayload(events.CityUnregisterFailed, CityUnregisterFailedPayload{})
 }

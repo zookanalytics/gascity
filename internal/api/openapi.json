@@ -1,5 +1,14 @@
 {
   "components": {
+    "headers": {
+      "X-GC-Request-Id": {
+        "description": "Opaque per-response identifier assigned by the server for log correlation. Every response carries this header.",
+        "schema": {
+          "description": "Opaque per-response identifier assigned by the server for log correlation. Every response carries this header.",
+          "type": "string"
+        }
+      }
+    },
     "schemas": {
       "AdapterCapabilities": {
         "additionalProperties": false,
@@ -1023,17 +1032,38 @@
       "CityCreateResponse": {
         "additionalProperties": false,
         "properties": {
+          "name": {
+            "description": "Resolved city name as persisted in city.toml. Use this to filter the event stream for completion.",
+            "type": "string"
+          },
           "ok": {
-            "description": "True on success.",
+            "description": "True when scaffolding + registration succeeded. Does not imply the city is ready yet; watch /v0/events/stream for city.ready.",
             "type": "boolean"
           },
           "path": {
-            "description": "Resolved absolute path of the created city.",
+            "description": "Resolved absolute path of the created city directory.",
             "type": "string"
           }
         },
         "required": [
           "ok",
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "CityCreatedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
           "path"
         ],
         "type": "object"
@@ -1117,6 +1147,35 @@
         ],
         "type": "object"
       },
+      "CityInitFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "phases_completed": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "error"
+        ],
+        "type": "object"
+      },
       "CityPatchInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1125,6 +1184,97 @@
             "type": "boolean"
           }
         },
+        "type": "object"
+      },
+      "CityReadyPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "CityUnregisterFailedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path",
+          "error"
+        ],
+        "type": "object"
+      },
+      "CityUnregisterRequestedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "CityUnregisterResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "Resolved registry name. Filter the event stream by this to observe completion.",
+            "type": "string"
+          },
+          "ok": {
+            "description": "True when the registry entry was removed and the supervisor was signaled. Does not imply the city's controller has stopped yet; watch /v0/events/stream for city.unregistered.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Resolved absolute city directory. The directory itself is not modified; unregister only affects the supervisor's registry.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "name",
+          "path"
+        ],
+        "type": "object"
+      },
+      "CityUnregisteredPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "path"
+        ],
         "type": "object"
       },
       "ConfigAgentResponse": {
@@ -1858,6 +2008,24 @@
           },
           {
             "$ref": "#/components/schemas/BoundEventPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityCreatedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityInitFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityReadyPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityUnregisterFailedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityUnregisterRequestedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/CityUnregisteredPayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
@@ -6852,7 +7020,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -6862,7 +7035,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get health"
@@ -6880,7 +7058,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -6890,7 +7073,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 cities"
@@ -6899,6 +7087,19 @@
     "/v0/city": {
       "post": {
         "operationId": "post-v0-city",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
@@ -6910,7 +7111,7 @@
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
                 "schema": {
@@ -6918,7 +7119,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -6928,7 +7134,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city"
@@ -6960,7 +7171,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -6970,7 +7186,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name"
@@ -6978,6 +7199,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7010,7 +7242,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7020,7 +7257,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name"
@@ -7030,6 +7272,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-agent-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7062,7 +7315,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7072,7 +7330,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name agent by base"
@@ -7121,6 +7384,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -7132,7 +7398,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name agent by base"
@@ -7140,6 +7411,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-agent-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7182,7 +7464,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7192,7 +7479,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name agent by base"
@@ -7254,7 +7546,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7264,7 +7561,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name agent by base output"
@@ -7365,7 +7667,19 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "GC-Agent-Status": {
+                "description": "Agent runtime status at the time streaming began. Emitted as \"stopped\" when the agent is not running (the stream then serves replayed transcript from the session log).",
+                "schema": {
+                  "description": "Agent runtime status at the time streaming began. Emitted as \"stopped\" when the agent is not running (the stream then serves replayed transcript from the session log).",
+                  "type": "string"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7375,7 +7689,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Stream agent output in real time"
@@ -7385,6 +7704,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-agent-by-base-by-action",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7431,7 +7761,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7441,7 +7776,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name agent by base by action"
@@ -7451,6 +7791,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-agent-by-dir-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7493,7 +7844,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7503,7 +7859,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name agent by dir by base"
@@ -7562,6 +7923,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -7573,7 +7937,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name agent by dir by base"
@@ -7581,6 +7950,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-agent-by-dir-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7633,7 +8013,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7643,7 +8028,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name agent by dir by base"
@@ -7715,7 +8105,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7725,7 +8120,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name agent by dir by base output"
@@ -7836,7 +8236,19 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "GC-Agent-Status": {
+                "description": "Agent runtime status at the time streaming began. Emitted as \"stopped\" when the agent is not running (the stream then serves replayed transcript from the session log).",
+                "schema": {
+                  "description": "Agent runtime status at the time streaming began. Emitted as \"stopped\" when the agent is not running (the stream then serves replayed transcript from the session log).",
+                  "type": "string"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7846,7 +8258,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Stream agent output in real time (qualified name)"
@@ -7856,6 +8273,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-agent-by-dir-by-base-by-action",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -7912,7 +8340,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -7922,7 +8355,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name agent by dir by base by action"
@@ -8027,6 +8465,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8038,7 +8479,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name agents"
@@ -8046,6 +8492,17 @@
       "post": {
         "operationId": "create-agent",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8078,7 +8535,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8088,7 +8550,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create an agent"
@@ -8098,6 +8565,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-bead-by-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8130,7 +8608,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8140,7 +8623,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name bead by ID"
@@ -8189,6 +8677,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8200,7 +8691,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name bead by ID"
@@ -8208,6 +8704,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-bead-by-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8250,7 +8757,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8260,7 +8772,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name bead by ID"
@@ -8270,6 +8787,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-assign",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8324,6 +8852,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8335,7 +8866,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name bead by ID assign"
@@ -8345,6 +8881,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-close",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8377,7 +8924,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8387,7 +8939,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name bead by ID close"
@@ -8438,6 +8995,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8449,7 +9009,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name bead by ID deps"
@@ -8459,6 +9024,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-reopen",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8491,7 +9067,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8501,7 +9082,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name bead by ID reopen"
@@ -8511,6 +9097,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-bead-by-id-update",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8553,7 +9150,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -8563,7 +9165,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name bead by ID update"
@@ -8696,6 +9303,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8707,7 +9317,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name beads"
@@ -8715,6 +9330,17 @@
       "post": {
         "operationId": "create-bead",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -8765,6 +9391,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8776,7 +9405,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create a bead"
@@ -8827,6 +9461,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8838,7 +9475,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name beads graph by root ID"
@@ -8899,6 +9541,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8910,7 +9555,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name beads ready"
@@ -8951,6 +9601,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -8962,7 +9615,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name config"
@@ -9003,6 +9661,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9014,7 +9675,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name config explain"
@@ -9046,7 +9712,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9056,7 +9727,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name config validate"
@@ -9066,6 +9742,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-convoy-by-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9098,7 +9785,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9108,7 +9800,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name convoy by ID"
@@ -9157,6 +9854,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9168,7 +9868,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name convoy by ID"
@@ -9178,6 +9883,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-convoy-by-id-add",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9220,7 +9936,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9230,7 +9951,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name convoy by ID add"
@@ -9281,6 +10007,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9292,7 +10021,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name convoy by ID check"
@@ -9302,6 +10036,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-convoy-by-id-close",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9334,7 +10079,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9344,7 +10094,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name convoy by ID close"
@@ -9354,6 +10109,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-convoy-by-id-remove",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9396,7 +10162,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9406,7 +10177,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name convoy by ID remove"
@@ -9489,6 +10265,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9500,7 +10279,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name convoys"
@@ -9508,6 +10292,17 @@
       "post": {
         "operationId": "create-convoy",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9549,6 +10344,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9560,7 +10358,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create a convoy"
@@ -9673,6 +10476,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9684,7 +10490,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name events"
@@ -9692,6 +10503,17 @@
       "post": {
         "operationId": "emit-event",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9724,7 +10546,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9734,7 +10561,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Emit an event"
@@ -9844,7 +10676,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9854,7 +10691,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Stream city events in real time"
@@ -9864,6 +10706,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-extmsg-adapters",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9896,7 +10749,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -9906,7 +10764,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name extmsg adapters"
@@ -9945,6 +10808,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -9956,7 +10822,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name extmsg adapters"
@@ -9964,6 +10835,17 @@
       "post": {
         "operationId": "register-extmsg-adapter",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -9996,7 +10878,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10006,7 +10893,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Register an external messaging adapter"
@@ -10016,6 +10908,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-bind",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10048,7 +10951,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10058,7 +10966,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg bind"
@@ -10109,6 +11022,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -10120,7 +11036,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name extmsg bindings"
@@ -10202,7 +11123,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10212,7 +11138,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name extmsg groups"
@@ -10220,6 +11151,17 @@
       "post": {
         "operationId": "ensure-extmsg-group",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10252,7 +11194,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10262,7 +11209,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Ensure an external messaging group exists"
@@ -10272,6 +11224,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-inbound",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10304,7 +11267,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10314,7 +11282,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg inbound"
@@ -10324,6 +11297,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-outbound",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10356,7 +11340,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10366,7 +11355,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg outbound"
@@ -10376,6 +11370,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-extmsg-participants",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10408,7 +11413,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10418,7 +11428,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name extmsg participants"
@@ -10426,6 +11441,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-participants",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10458,7 +11484,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10468,7 +11499,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg participants"
@@ -10569,6 +11605,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -10580,7 +11619,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name extmsg transcript"
@@ -10590,6 +11634,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-transcript-ack",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10622,7 +11677,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10632,7 +11692,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg transcript ack"
@@ -10642,6 +11707,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-extmsg-unbind",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -10674,7 +11750,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10684,7 +11765,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name extmsg unbind"
@@ -10757,7 +11843,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10767,7 +11858,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name formula by name"
@@ -10819,7 +11915,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10829,7 +11930,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name formulas"
@@ -10893,7 +11999,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10903,7 +12014,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name formulas feed"
@@ -10976,7 +12092,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -10986,7 +12107,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name formulas by name"
@@ -10996,6 +12122,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-formulas-by-name-preview",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -11038,7 +12175,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11048,7 +12190,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name formulas by name preview"
@@ -11124,7 +12271,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11134,7 +12286,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name formulas by name runs"
@@ -11166,7 +12323,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11176,7 +12338,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name health"
@@ -11289,6 +12456,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -11300,7 +12470,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name mail"
@@ -11308,6 +12483,17 @@
       "post": {
         "operationId": "send-mail",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -11358,6 +12544,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -11369,7 +12558,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Send a mail message"
@@ -11421,7 +12615,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11431,7 +12630,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name mail count"
@@ -11492,6 +12696,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -11503,7 +12710,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name mail thread by ID"
@@ -11513,6 +12725,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-mail-by-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -11555,7 +12778,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11565,7 +12793,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name mail by ID"
@@ -11624,6 +12857,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -11635,7 +12871,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name mail by ID"
@@ -11646,6 +12887,17 @@
         "operationId": "post-v0-city-by-city-name-mail-by-id-archive",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -11687,7 +12939,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11697,7 +12954,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name mail by ID archive"
@@ -11708,6 +12970,17 @@
         "operationId": "post-v0-city-by-city-name-mail-by-id-mark-unread",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -11749,7 +13022,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11759,7 +13037,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name mail by ID mark unread"
@@ -11770,6 +13053,17 @@
         "operationId": "post-v0-city-by-city-name-mail-by-id-read",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -11811,7 +13105,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11821,7 +13120,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name mail by ID read"
@@ -11831,6 +13135,17 @@
       "post": {
         "operationId": "reply-mail",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -11892,6 +13207,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -11903,7 +13221,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Reply to a mail message"
@@ -11955,7 +13278,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -11965,7 +13293,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name order history by bead ID"
@@ -12007,7 +13340,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12017,7 +13355,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name order by name"
@@ -12028,6 +13371,17 @@
         "operationId": "post-v0-city-by-city-name-order-by-name-disable",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -12059,7 +13413,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12069,7 +13428,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name order by name disable"
@@ -12080,6 +13444,17 @@
         "operationId": "post-v0-city-by-city-name-order-by-name-enable",
         "parameters": [
           {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
             "description": "City name.",
             "in": "path",
             "name": "cityName",
@@ -12111,7 +13486,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12121,7 +13501,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name order by name enable"
@@ -12153,7 +13538,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12163,7 +13553,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name orders"
@@ -12195,7 +13590,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12205,7 +13605,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name orders check"
@@ -12269,7 +13674,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12279,7 +13689,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name orders feed"
@@ -12345,7 +13760,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12355,7 +13775,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name orders history"
@@ -12387,7 +13812,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12397,7 +13827,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name packs"
@@ -12407,6 +13842,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-patches-agent-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12439,7 +13885,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12449,7 +13900,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name patches agent by base"
@@ -12498,6 +13954,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -12509,7 +13968,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches agent by base"
@@ -12519,6 +13983,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-patches-agent-by-dir-by-base",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12561,7 +14036,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12571,7 +14051,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name patches agent by dir by base"
@@ -12630,6 +14115,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -12641,7 +14129,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches agent by dir by base"
@@ -12682,6 +14175,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -12693,7 +14189,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches agents"
@@ -12701,6 +14202,17 @@
       "put": {
         "operationId": "put-v0-city-by-city-name-patches-agents",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12733,7 +14245,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12743,7 +14260,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Put v0 city by city name patches agents"
@@ -12753,6 +14275,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-patches-provider-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12785,7 +14318,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12795,7 +14333,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name patches provider by name"
@@ -12844,6 +14387,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -12855,7 +14401,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches provider by name"
@@ -12896,6 +14447,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -12907,7 +14461,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches providers"
@@ -12915,6 +14474,17 @@
       "put": {
         "operationId": "put-v0-city-by-city-name-patches-providers",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12947,7 +14517,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -12957,7 +14532,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Put v0 city by city name patches providers"
@@ -12967,6 +14547,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-patches-rig-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -12999,7 +14590,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13009,7 +14605,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name patches rig by name"
@@ -13058,6 +14659,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13069,7 +14673,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches rig by name"
@@ -13110,6 +14719,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13121,7 +14733,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name patches rigs"
@@ -13129,6 +14746,17 @@
       "put": {
         "operationId": "put-v0-city-by-city-name-patches-rigs",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13161,7 +14789,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13171,7 +14804,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Put v0 city by city name patches rigs"
@@ -13223,7 +14861,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13233,7 +14876,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name provider readiness"
@@ -13243,6 +14891,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-provider-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13275,7 +14934,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13285,7 +14949,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name provider by name"
@@ -13334,6 +15003,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13345,7 +15017,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name provider by name"
@@ -13353,6 +15030,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-provider-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13395,7 +15083,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13405,7 +15098,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name provider by name"
@@ -13446,6 +15144,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13457,7 +15158,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name providers"
@@ -13465,6 +15171,17 @@
       "post": {
         "operationId": "create-provider",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13497,7 +15214,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13507,7 +15229,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create a provider"
@@ -13548,6 +15275,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13559,7 +15289,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name providers public"
@@ -13611,7 +15346,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13621,7 +15361,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name readiness"
@@ -13631,6 +15376,17 @@
       "delete": {
         "operationId": "delete-v0-city-by-city-name-rig-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13663,7 +15419,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13673,7 +15434,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name rig by name"
@@ -13732,6 +15498,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13743,7 +15512,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name rig by name"
@@ -13751,6 +15525,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-rig-by-name",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13793,7 +15578,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13803,7 +15593,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name rig by name"
@@ -13813,6 +15608,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-rig-by-name-by-action",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13855,7 +15661,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13865,7 +15676,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name rig by name by action"
@@ -13936,6 +15752,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -13947,7 +15766,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name rigs"
@@ -13955,6 +15779,17 @@
       "post": {
         "operationId": "create-rig",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -13987,7 +15822,12 @@
                 }
               }
             },
-            "description": "Created"
+            "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -13997,7 +15837,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create a rig"
@@ -14048,6 +15893,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14059,7 +15907,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name service by name"
@@ -14069,6 +15922,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-service-by-name-restart",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14101,7 +15965,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14111,7 +15980,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name service by name restart"
@@ -14152,6 +16026,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14163,7 +16040,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name services"
@@ -14224,6 +16106,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14235,7 +16120,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name session by ID"
@@ -14243,6 +16133,17 @@
       "patch": {
         "operationId": "patch-v0-city-by-city-name-session-by-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14294,6 +16195,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14305,7 +16209,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Patch v0 city by city name session by ID"
@@ -14356,6 +16265,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14367,7 +16279,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name session by ID agents"
@@ -14428,6 +16345,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14439,7 +16359,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name session by ID agents by agent ID"
@@ -14449,6 +16374,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-close",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14491,7 +16427,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14501,7 +16442,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID close"
@@ -14511,6 +16457,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-kill",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14543,7 +16500,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14553,7 +16515,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID kill"
@@ -14563,6 +16530,17 @@
       "post": {
         "operationId": "send-session-message",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14605,7 +16583,12 @@
                 }
               }
             },
-            "description": "Accepted"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14615,7 +16598,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Send a message to a session"
@@ -14666,6 +16654,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14677,7 +16668,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name session by ID pending"
@@ -14687,6 +16683,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-rename",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14738,6 +16745,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -14749,7 +16759,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID rename"
@@ -14759,6 +16774,17 @@
       "post": {
         "operationId": "respond-session",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14801,7 +16827,12 @@
                 }
               }
             },
-            "description": "Accepted"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14811,7 +16842,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Respond to a pending interaction"
@@ -14821,6 +16857,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-stop",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -14853,7 +16900,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -14863,7 +16915,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID stop"
@@ -15051,7 +17108,26 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "GC-Session-State": {
+                "description": "Session state at the time streaming began (e.g. active, closed).",
+                "schema": {
+                  "description": "Session state at the time streaming began (e.g. active, closed).",
+                  "type": "string"
+                }
+              },
+              "GC-Session-Status": {
+                "description": "Runtime status at the time streaming began. Emitted as \"stopped\" when the session's underlying process is not running.",
+                "schema": {
+                  "description": "Runtime status at the time streaming began. Emitted as \"stopped\" when the session's underlying process is not running.",
+                  "type": "string"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15061,7 +17137,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Stream session output in real time"
@@ -15071,6 +17152,17 @@
       "post": {
         "operationId": "submit-session",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15113,7 +17205,12 @@
                 }
               }
             },
-            "description": "Accepted"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15123,7 +17220,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Submit a message to a session"
@@ -15133,6 +17235,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-suspend",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15165,7 +17278,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15175,7 +17293,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID suspend"
@@ -15256,6 +17379,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -15267,7 +17393,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name session by ID transcript"
@@ -15277,6 +17408,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-session-by-id-wake",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15309,7 +17451,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15319,7 +17466,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name session by ID wake"
@@ -15412,6 +17564,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -15423,7 +17578,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name sessions"
@@ -15431,6 +17591,17 @@
       "post": {
         "operationId": "create-session",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15463,7 +17634,12 @@
                 }
               }
             },
-            "description": "Accepted"
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15473,7 +17649,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Create a session"
@@ -15483,6 +17664,17 @@
       "post": {
         "operationId": "post-v0-city-by-city-name-sling",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15515,7 +17707,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15525,7 +17722,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Post v0 city by city name sling"
@@ -15586,6 +17788,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -15597,16 +17802,93 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name status"
+      }
+    },
+    "/v0/city/{cityName}/unregister": {
+      "post": {
+        "operationId": "post-v0-city-by-city-name-unregister",
+        "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          {
+            "description": "Supervisor-registered city name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "Supervisor-registered city name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CityUnregisterResponse"
+                }
+              }
+            },
+            "description": "Accepted",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Post v0 city by city name unregister"
       }
     },
     "/v0/city/{cityName}/workflow/{workflow_id}": {
       "delete": {
         "operationId": "delete-v0-city-by-city-name-workflow-by-workflow-id",
         "parameters": [
+          {
+            "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+            "in": "header",
+            "name": "X-GC-Request",
+            "required": true,
+            "schema": {
+              "description": "Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.",
+              "minLength": 1,
+              "type": "string"
+            }
+          },
           {
             "description": "City name.",
             "in": "path",
@@ -15669,7 +17951,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15679,7 +17966,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Delete v0 city by city name workflow by workflow ID"
@@ -15748,6 +18040,9 @@
                   "minimum": 0,
                   "type": "integer"
                 }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
               }
             }
           },
@@ -15759,7 +18054,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 city by city name workflow by workflow ID"
@@ -15821,7 +18121,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15831,7 +18136,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 events"
@@ -15928,7 +18238,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15938,7 +18253,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Stream tagged events from all running cities."
@@ -15978,7 +18298,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -15988,7 +18313,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 provider readiness"
@@ -16028,7 +18358,12 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           },
           "default": {
             "content": {
@@ -16038,7 +18373,12 @@
                 }
               }
             },
-            "description": "Error"
+            "description": "Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
           }
         },
         "summary": "Get v0 readiness"
