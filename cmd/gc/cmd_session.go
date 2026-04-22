@@ -573,10 +573,15 @@ func cmdSessionList(stateFilter, templateFilter string, jsonOutput bool, stdout,
 	cfg := providerCtx.cfg
 	poolDesired := cliPoolDesired(cfg)
 
-	// Build attachment cache from worker observations so reason evaluation
-	// does not bypass the worker boundary for attachment checks.
+	// Build attachment cache. Active sessions already have Info.Attached
+	// populated by ListFullFromBeads; for inactive sessions, query the
+	// provider directly. Going through workerSessionTargetAttachedWithConfig
+	// here triggered 2-3 extra bd show subprocess lookups per session.
 	attachedSet := buildAttachmentCache(sessions, func(info session.Info) (bool, error) {
-		return workerSessionTargetAttachedWithConfig("", store, sp, cfg, info.ID)
+		if info.State == session.StateActive || sp == nil {
+			return info.Attached, nil
+		}
+		return sp.IsAttached(info.SessionName), nil
 	})
 
 	if len(sessions) == 0 {
