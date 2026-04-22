@@ -555,10 +555,7 @@ func shouldPreserveStoredRuntimeCommandForTransport(storedCommand, resolvedComma
 	if shouldPreserveStoredRuntimeCommand(storedCommand, resolvedCommand) {
 		return true
 	}
-	if transport == "acp" || len(optionOverrides) != 0 {
-		return false
-	}
-	return sameRuntimeCommandExecutable(storedCommand, resolvedCommand)
+	return false
 }
 
 func sameRuntimeCommandExecutable(storedCommand, resolvedCommand string) bool {

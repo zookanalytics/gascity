@@ -48,10 +48,7 @@ func PersistRuntimeMCPServersSnapshot(cityPath, sessionID string, servers []runt
 		return nil
 	}
 	if len(servers) == 0 {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove runtime MCP snapshot: %w", err)
-		}
-		return nil
+		return clearRuntimeMCPServersSnapshot(cityPath, sessionID)
 	}
 	data, err := json.Marshal(runtime.NormalizeMCPServerConfigs(servers))
 	if err != nil {
@@ -112,4 +109,15 @@ func runtimeMCPServersSnapshotPath(cityPath, sessionID string) string {
 		return ""
 	}
 	return citylayout.RuntimePath(cityPath, "session-mcp", sessionID+".json")
+}
+
+func clearRuntimeMCPServersSnapshot(cityPath, sessionID string) error {
+	path := runtimeMCPServersSnapshotPath(cityPath, sessionID)
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove runtime MCP snapshot: %w", err)
+	}
+	return nil
 }

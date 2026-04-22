@@ -761,6 +761,7 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 		if b.Status == "closed" {
+			_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 			return nil // idempotent: already closed
 		}
 		// CmdClose is legal from any non-none state; this is effectively a
@@ -790,7 +791,11 @@ func (m *Manager) Close(id string) error {
 			return err
 		}
 
-		return m.store.Close(id)
+		if err := m.store.Close(id); err != nil {
+			return err
+		}
+		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+		return nil
 	})
 }
 

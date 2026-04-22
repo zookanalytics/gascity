@@ -183,11 +183,14 @@ func TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags(t *testing.
 	// worker-boundary refactor when the API created the bead with
 	// sessionCreateAgentCommand(resolved) before the reconciler synced
 	// the full tp.Command.
-	runtimeCfg := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template: "perspective_planner",
 		Command:  "claude",
 		WorkDir:  cityDir,
 	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if runtimeCfg == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -199,6 +202,17 @@ func TestResolvedWorkerRuntimeResumesPoolSessionPreservesLaunchFlags(t *testing.
 	}
 	if !strings.Contains(runtimeCfg.Command, "--settings") {
 		t.Fatalf("resumed pool Command = %q, want --settings arg", runtimeCfg.Command)
+	}
+}
+
+func TestShouldPreserveStoredRuntimeCommandForTransportRejectsExecutableOnlyMatch(t *testing.T) {
+	if shouldPreserveStoredRuntimeCommandForTransport(
+		"claude",
+		"claude --settings /tmp/settings.json",
+		"",
+		nil,
+	) {
+		t.Fatal("shouldPreserveStoredRuntimeCommandForTransport() = true, want false")
 	}
 }
 

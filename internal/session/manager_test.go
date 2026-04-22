@@ -642,6 +642,35 @@ func TestClose(t *testing.T) {
 	}
 }
 
+func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cityPath := t.TempDir()
+	mgr := NewManagerWithCityPath(store, sp, cityPath)
+
+	info, err := mgr.Create(context.Background(), "helper", "", "claude", "/tmp", "claude", nil, ProviderResume{}, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := PersistRuntimeMCPServersSnapshot(cityPath, info.ID, []runtime.MCPServerConfig{{
+		Name:      "identity",
+		Transport: runtime.MCPTransportHTTP,
+		URL:       "https://example.invalid/mcp",
+	}}); err != nil {
+		t.Fatalf("PersistRuntimeMCPServersSnapshot: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); err != nil {
+		t.Fatalf("Stat(runtime snapshot): %v", err)
+	}
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(runtimeMCPServersSnapshotPath(cityPath, info.ID)); !os.IsNotExist(err) {
+		t.Fatalf("runtime snapshot still exists after close, stat err = %v", err)
+	}
+}
+
 func TestClose_ConfiguredNamedSessionRetiresIdentifiers(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

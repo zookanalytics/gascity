@@ -196,3 +196,14 @@ func TestResolvedSessionRuntimeCommandReplaysTemplateOverrides(t *testing.T) {
 		t.Fatalf("command = %q, want %q", command, "/bin/echo --effort high")
 	}
 }
+
+func TestShouldPreserveStoredRuntimeCommandForTransportRejectsExecutableOnlyMatch(t *testing.T) {
+	if shouldPreserveStoredRuntimeCommandForTransport(
+		"claude",
+		"claude --settings /tmp/settings.json",
+		"",
+		nil,
+	) {
+		t.Fatal("shouldPreserveStoredRuntimeCommandForTransport() = true, want false")
+	}
+}
