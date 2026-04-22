@@ -827,6 +827,17 @@
               "null"
             ]
           },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Metadata key-value pairs to set at create time.",
+            "type": "object"
+          },
+          "parent": {
+            "description": "Parent bead ID.",
+            "type": "string"
+          },
           "priority": {
             "description": "Bead priority.",
             "format": "int64",
@@ -941,6 +952,13 @@
             "description": "Metadata key-value pairs to set.",
             "type": "object"
           },
+          "parent": {
+            "description": "Parent bead ID. Use null or an empty string to clear.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "priority": {
             "description": "Bead priority.",
             "format": "int64",
@@ -1052,22 +1070,6 @@
         ],
         "type": "object"
       },
-      "CityCreatedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "path"
-        ],
-        "type": "object"
-      },
       "CityGetResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1147,7 +1149,7 @@
         ],
         "type": "object"
       },
-      "CityInitFailedPayload": {
+      "CityLifecyclePayload": {
         "additionalProperties": false,
         "properties": {
           "error": {
@@ -1171,8 +1173,7 @@
         },
         "required": [
           "name",
-          "path",
-          "error"
+          "path"
         ],
         "type": "object"
       },
@@ -1184,58 +1185,6 @@
             "type": "boolean"
           }
         },
-        "type": "object"
-      },
-      "CityReadyPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "path"
-        ],
-        "type": "object"
-      },
-      "CityUnregisterFailedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "error": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "path",
-          "error"
-        ],
-        "type": "object"
-      },
-      "CityUnregisterRequestedPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "path"
-        ],
         "type": "object"
       },
       "CityUnregisterResponse": {
@@ -1256,22 +1205,6 @@
         },
         "required": [
           "ok",
-          "name",
-          "path"
-        ],
-        "type": "object"
-      },
-      "CityUnregisteredPayload": {
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          }
-        },
-        "required": [
           "name",
           "path"
         ],
@@ -2010,22 +1943,7 @@
             "$ref": "#/components/schemas/BoundEventPayload"
           },
           {
-            "$ref": "#/components/schemas/CityCreatedPayload"
-          },
-          {
-            "$ref": "#/components/schemas/CityInitFailedPayload"
-          },
-          {
-            "$ref": "#/components/schemas/CityReadyPayload"
-          },
-          {
-            "$ref": "#/components/schemas/CityUnregisterFailedPayload"
-          },
-          {
-            "$ref": "#/components/schemas/CityUnregisterRequestedPayload"
-          },
-          {
-            "$ref": "#/components/schemas/CityUnregisteredPayload"
+            "$ref": "#/components/schemas/CityLifecyclePayload"
           },
           {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"

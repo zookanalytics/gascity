@@ -30,6 +30,7 @@ type CachingStore struct {
 	dirty       map[string]struct{}
 	state       cacheState
 	lastFreshAt time.Time
+	mutationSeq uint64
 
 	reconciling  atomic.Bool
 	syncFailures int
@@ -109,6 +110,10 @@ func newCachingStore(backing Store, onChange func(eventType, beadID string, payl
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
+	c.mu.RLock()
+	startSeq := c.mutationSeq
+	c.mu.RUnlock()
+
 	var all []Bead
 	for _, status := range []string{"open", "in_progress"} {
 		beads, err := c.backing.List(ListQuery{Status: status})
@@ -121,6 +126,11 @@ func (c *CachingStore) PrimeActive() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, b := range all {
+		if c.mutationSeq != startSeq {
+			if _, exists := c.beads[b.ID]; exists {
+				continue
+			}
+		}
 		c.beads[b.ID] = cloneBead(b)
 	}
 	if c.state == cacheUninitialized {
@@ -135,6 +145,10 @@ func (c *CachingStore) PrimeActive() error {
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
 func (c *CachingStore) Prime(_ context.Context) error {
+	c.mu.RLock()
+	startSeq := c.mutationSeq
+	c.mu.RUnlock()
+
 	var all []Bead
 	var err error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -164,9 +178,21 @@ func (c *CachingStore) Prime(_ context.Context) error {
 	now := time.Now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.beads = beadMap
-	c.deps = depMap
-	c.dirty = make(map[string]struct{})
+	if c.mutationSeq == startSeq {
+		c.beads = beadMap
+		c.deps = depMap
+		c.dirty = make(map[string]struct{})
+	} else {
+		for id, b := range beadMap {
+			if _, exists := c.beads[id]; exists {
+				continue
+			}
+			c.beads[id] = b
+			if deps, ok := depMap[id]; ok {
+				c.deps[id] = deps
+			}
+		}
+	}
 	c.state = cacheLive
 	c.syncFailures = 0
 	c.stats.SyncFailures = 0

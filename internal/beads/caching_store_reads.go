@@ -14,7 +14,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	if query.Live {
+	if query.Live || query.ParentID != "" {
 		return c.backing.List(query)
 	}
 
@@ -89,26 +89,24 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 func (c *CachingStore) Get(id string) (Bead, error) {
 	c.mu.RLock()
 	if c.state == cacheLive || c.state == cachePartial {
-		if _, ok := c.dirty[id]; ok {
-			c.mu.RUnlock()
-			fresh, err := c.backing.Get(id)
-			if err != nil {
-				return Bead{}, err
-			}
-			c.mu.Lock()
-			c.beads[id] = cloneBead(fresh)
-			delete(c.dirty, id)
-			c.markFreshLocked(time.Now())
-			c.updateStatsLocked()
-			c.mu.Unlock()
-			return fresh, nil
-		}
-		if b, ok := c.beads[id]; ok {
-			c.mu.RUnlock()
-			return cloneBead(b), nil
-		}
+		cached, cachedOK := c.beads[id]
 		c.mu.RUnlock()
-		return c.backing.Get(id)
+
+		fresh, err := c.backing.Get(id)
+		if err != nil {
+			if cachedOK && !errors.Is(err, ErrNotFound) {
+				c.recordProblem("refresh bead during get", fmt.Errorf("%s: %w", id, err))
+				return cloneBead(cached), nil
+			}
+			return Bead{}, err
+		}
+		c.mu.Lock()
+		c.beads[id] = cloneBead(fresh)
+		delete(c.dirty, id)
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+		c.mu.Unlock()
+		return fresh, nil
 	}
 	c.mu.RUnlock()
 	return c.backing.Get(id)

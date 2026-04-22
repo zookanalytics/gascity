@@ -14,6 +14,7 @@ func (c *CachingStore) Create(b Bead) (Bead, error) {
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	c.beads[created.ID] = cloneBead(created)
 	delete(c.dirty, created.ID)
 	c.markFreshLocked(time.Now())
@@ -40,7 +41,10 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 		return nil
 	}
 
+	fresh = applyUpdateOptsToBead(fresh, opts)
+
 	c.mu.Lock()
+	c.mutationSeq++
 	c.beads[id] = cloneBead(fresh)
 	delete(c.dirty, id)
 	c.markFreshLocked(time.Now())
@@ -51,6 +55,56 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	return nil
 }
 
+func applyUpdateOptsToBead(b Bead, opts UpdateOpts) Bead {
+	b = cloneBead(b)
+	if opts.Title != nil {
+		b.Title = *opts.Title
+	}
+	if opts.Status != nil {
+		b.Status = *opts.Status
+	}
+	if opts.Type != nil {
+		b.Type = *opts.Type
+	}
+	if opts.Priority != nil {
+		b.Priority = cloneIntPtr(opts.Priority)
+	}
+	if opts.Description != nil {
+		b.Description = *opts.Description
+	}
+	if opts.ParentID != nil {
+		b.ParentID = *opts.ParentID
+	}
+	if opts.Assignee != nil {
+		b.Assignee = *opts.Assignee
+	}
+	if len(opts.Metadata) > 0 {
+		if b.Metadata == nil {
+			b.Metadata = make(map[string]string, len(opts.Metadata))
+		}
+		for k, v := range opts.Metadata {
+			b.Metadata[k] = v
+		}
+	}
+	if len(opts.Labels) > 0 {
+		b.Labels = append(b.Labels, opts.Labels...)
+	}
+	if len(opts.RemoveLabels) > 0 {
+		remove := make(map[string]bool, len(opts.RemoveLabels))
+		for _, label := range opts.RemoveLabels {
+			remove[label] = true
+		}
+		kept := b.Labels[:0]
+		for _, label := range b.Labels {
+			if !remove[label] {
+				kept = append(kept, label)
+			}
+		}
+		b.Labels = kept
+	}
+	return b
+}
+
 // Close marks a bead as closed in the backing store and cache.
 func (c *CachingStore) Close(id string) error {
 	if err := c.backing.Close(id); err != nil {
@@ -59,13 +113,27 @@ func (c *CachingStore) Close(id string) error {
 
 	var closed Bead
 	var found bool
+	if fresh, err := c.backing.Get(id); err == nil {
+		closed = fresh
+		closed.Status = "closed"
+		found = true
+	} else if !errors.Is(err, ErrNotFound) {
+		c.recordProblem("refresh bead after close", fmt.Errorf("%s: %w", id, err))
+	}
+
 	c.mu.Lock()
+	c.mutationSeq++
 	if b, ok := c.beads[id]; ok {
 		b.Status = "closed"
 		c.beads[id] = b
 		delete(c.dirty, id)
 		closed = cloneBead(b)
 		found = true
+		c.markFreshLocked(time.Now())
+		c.updateStatsLocked()
+	} else if found {
+		c.beads[id] = cloneBead(closed)
+		delete(c.dirty, id)
 		c.markFreshLocked(time.Now())
 		c.updateStatsLocked()
 	}
@@ -103,6 +171,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
 	c.mu.Lock()
+	c.mutationSeq++
 	if refreshErr != nil {
 		c.recordProblemLocked("close-all refresh", refreshErr)
 	}
@@ -137,6 +206,7 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string)
@@ -158,6 +228,7 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	if b, ok := c.beads[id]; ok {
 		if b.Metadata == nil {
 			b.Metadata = make(map[string]string, len(kvs))
@@ -181,6 +252,7 @@ func (c *CachingStore) DepAdd(issueID, dependsOnID, depType string) error {
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	deps := c.deps[issueID]
 	for i, d := range deps {
 		if d.DependsOnID == dependsOnID {
@@ -208,6 +280,7 @@ func (c *CachingStore) DepRemove(issueID, dependsOnID string) error {
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	deps := c.deps[issueID]
 	for i, d := range deps {
 		if d.DependsOnID == dependsOnID {
@@ -229,6 +302,7 @@ func (c *CachingStore) Delete(id string) error {
 	}
 
 	c.mu.Lock()
+	c.mutationSeq++
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)

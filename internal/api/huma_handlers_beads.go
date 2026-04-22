@@ -310,6 +310,8 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 		Assignee:    assignee,
 		Description: input.Body.Description,
 		Labels:      input.Body.Labels,
+		ParentID:    input.Body.Parent,
+		Metadata:    input.Body.Metadata,
 	})
 	if err != nil {
 		s.idem.unreserve(idemKey)
@@ -421,6 +423,14 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		Description:  body.Description,
 		Labels:       body.Labels,
 		RemoveLabels: body.RemoveLabels,
+		Metadata:     body.Metadata,
+	}
+	if body.parentSet {
+		parent := ""
+		if body.Parent != nil {
+			parent = *body.Parent
+		}
+		opts.ParentID = &parent
 	}
 
 	for _, store := range s.beadStoresForID(id) {
@@ -446,12 +456,6 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 				return nil, huma.Error409Conflict("conflict: bead " + id + " was deleted concurrently")
 			}
 			return nil, huma.Error500InternalServerError(err.Error())
-		}
-		// Apply metadata key-value pairs if provided.
-		if len(body.Metadata) > 0 {
-			if err := store.SetMetadataBatch(id, body.Metadata); err != nil {
-				return nil, huma.Error500InternalServerError(err.Error())
-			}
 		}
 		resp := &OKResponse{}
 		resp.Body.Status = "updated"

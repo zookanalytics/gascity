@@ -134,6 +134,71 @@ func TestControllerStateUpdate(t *testing.T) {
 	}
 }
 
+func TestControllerStateCreateRigPokesReconciler(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"city1\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city1"},
+	}
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "city1", cityDir)
+	cs.pokeCh = make(chan struct{}, 1)
+
+	if err := cs.CreateRig(config.Rig{Name: "rig1", Path: t.TempDir()}); err != nil {
+		t.Fatalf("CreateRig: %v", err)
+	}
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("CreateRig did not poke the reconciler")
+	}
+}
+
+func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
+	backing := beads.NewMemStore()
+	created, err := backing.Create(beads.Bead{Title: "root"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cached := beads.NewCachingStoreForTest(backing, nil)
+	if err := cached.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	updated := created
+	updated.Status = "in_progress"
+	payload, err := json.Marshal(updated)
+	if err != nil {
+		t.Fatalf("marshal updated bead: %v", err)
+	}
+	cs := &controllerState{
+		beadStores: map[string]beads.Store{"alpha": cached},
+		pokeCh:     make(chan struct{}, 1),
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "cache-reconcile",
+		Subject: created.ID,
+		Payload: payload,
+	})
+
+	items, err := cached.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != created.ID {
+		t.Fatalf("cached items = %+v, want only %s", items, created.ID)
+	}
+	if items[0].Status != "in_progress" {
+		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
+	}
+}
+
 func TestControllerStateBuildStoresUsesScopeLocalFileStores(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 

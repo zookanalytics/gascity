@@ -582,6 +582,56 @@ func TestBeadUpdate(t *testing.T) {
 	}
 }
 
+func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	body := `{
+		"rig":"myrig",
+		"title":"Child",
+		"type":"feature",
+		"parent":"` + parent.ID + `",
+		"metadata":{
+			"mc.contract.role":"child",
+			"mc.contract.run_id":"run-1"
+		}
+	}`
+	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want %d, body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var created beads.Bead
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode created bead: %v", err)
+	}
+	if created.ParentID != parent.ID {
+		t.Fatalf("response parent = %q, want %q", created.ParentID, parent.ID)
+	}
+	if created.Metadata["mc.contract.run_id"] != "run-1" {
+		t.Fatalf("response metadata = %#v, want mc.contract.run_id=run-1", created.Metadata)
+	}
+
+	got, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get(created): %v", err)
+	}
+	if got.ParentID != parent.ID {
+		t.Fatalf("stored parent = %q, want %q", got.ParentID, parent.ID)
+	}
+	if got.Metadata["mc.contract.role"] != "child" || got.Metadata["mc.contract.run_id"] != "run-1" {
+		t.Fatalf("stored metadata = %#v, want MC metadata", got.Metadata)
+	}
+}
+
 func TestBeadUpdateUsesRoutePrefixStore(t *testing.T) {
 	state, alphaStore, betaStore := configureBeadRouteState(t)
 	created, err := betaStore.Create(beads.Bead{Title: "Routed beta bead"})
@@ -611,6 +661,51 @@ func TestBeadUpdateUsesRoutePrefixStore(t *testing.T) {
 	}
 	if betaStore.updateCalls != 1 {
 		t.Fatalf("betaStore.updateCalls = %d, want 1", betaStore.updateCalls)
+	}
+}
+
+func TestBeadUpdateSetsAndClearsParent(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	parent, err := store.Create(beads.Bead{Title: "Parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := store.Create(beads.Bead{Title: "Child"})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	body := `{"parent":"` + parent.ID + `"}`
+	req := newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set parent status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, err := store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child): %v", err)
+	}
+	if got.ParentID != parent.ID {
+		t.Fatalf("parent after set = %q, want %q", got.ParentID, parent.ID)
+	}
+
+	req = newPostRequest(cityURL(state, "/bead/")+child.ID+"/update", bytes.NewBufferString(`{"parent":null}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear parent status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got, err = store.Get(child.ID)
+	if err != nil {
+		t.Fatalf("Get(child after clear): %v", err)
+	}
+	if got.ParentID != "" {
+		t.Fatalf("parent after clear = %q, want empty", got.ParentID)
 	}
 }
 
@@ -1166,6 +1261,50 @@ func TestBeadCreateValidation(t *testing.T) {
 
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+	}
+}
+
+func TestBeadUpdateParentOpenAPISchemaAllowsNull(t *testing.T) {
+	data, err := os.ReadFile("openapi.json")
+	if err != nil {
+		t.Fatalf("read openapi.json: %v", err)
+	}
+	var spec map[string]any
+	if err := json.Unmarshal(data, &spec); err != nil {
+		t.Fatalf("parse openapi.json: %v", err)
+	}
+	components, ok := spec["components"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi components missing")
+	}
+	schemas, ok := components["schemas"].(map[string]any)
+	if !ok {
+		t.Fatal("openapi schemas missing")
+	}
+	beadUpdate, ok := schemas["BeadUpdateBody"].(map[string]any)
+	if !ok {
+		t.Fatal("BeadUpdateBody schema missing")
+	}
+	properties, ok := beadUpdate["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("BeadUpdateBody properties missing")
+	}
+	parent, ok := properties["parent"].(map[string]any)
+	if !ok {
+		t.Fatal("BeadUpdateBody parent property missing")
+	}
+	typeValues, ok := parent["type"].([]any)
+	if !ok {
+		t.Fatalf("parent type = %#v, want [\"string\", \"null\"]", parent["type"])
+	}
+	seen := map[string]bool{}
+	for _, value := range typeValues {
+		if s, ok := value.(string); ok {
+			seen[s] = true
+		}
+	}
+	if !seen["string"] || !seen["null"] {
+		t.Fatalf("parent type = %#v, want string and null", parent["type"])
 	}
 }
 

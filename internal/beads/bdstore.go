@@ -456,8 +456,28 @@ func (s *BdStore) Create(b Bead) (Bead, error) {
 	if created.Priority == nil && b.Priority != nil {
 		created.Priority = cloneIntPtr(b.Priority)
 	}
-	if created.Metadata == nil && len(metadata) > 0 {
-		created.Metadata = metadata
+	if created.ParentID == "" {
+		created.ParentID = b.ParentID
+	}
+	if created.Description == "" {
+		created.Description = b.Description
+	}
+	if len(created.Labels) == 0 && len(b.Labels) > 0 {
+		created.Labels = append([]string(nil), b.Labels...)
+	}
+	if len(created.Needs) == 0 && len(b.Needs) > 0 {
+		created.Needs = append([]string(nil), b.Needs...)
+	}
+	if len(metadata) > 0 {
+		if created.Metadata == nil {
+			created.Metadata = maps.Clone(metadata)
+		} else {
+			for key, value := range metadata {
+				if _, ok := created.Metadata[key]; !ok {
+					created.Metadata[key] = value
+				}
+			}
+		}
 	}
 	return created, nil
 }

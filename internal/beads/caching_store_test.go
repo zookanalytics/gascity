@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,6 +63,189 @@ func TestCachingStoreReadThrough(t *testing.T) {
 	if len(ready) != 1 || ready[0].ID != b1.ID {
 		t.Fatalf("Ready = %v, want only %s", ready, b1.ID)
 	}
+}
+
+func TestCachingStorePrimePreservesConcurrentUpdate(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{Title: "before prime"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	backing := &primeRaceStore{
+		Store:   mem,
+		started: started,
+		release: release,
+		stale:   []beads.Bead{original},
+	}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cs.Prime(context.Background())
+	}()
+
+	<-started
+	title := "after update"
+	if err := cs.Update(original.ID, beads.UpdateOpts{Title: &title}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Title != title {
+		t.Fatalf("title after concurrent prime = %q, want %q", got.Title, title)
+	}
+}
+
+func TestCachingStoreGetRefreshesStaleCachedBead(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{Title: "before update"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := mem.Update(original.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("backing Update: %v", err)
+	}
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+}
+
+func TestCachingStoreParentListUsesBackingStore(t *testing.T) {
+	mem := beads.NewMemStore()
+	parent, err := mem.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	child, err := mem.Create(beads.Bead{Title: "child", ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+
+	got, err := cs.List(beads.ListQuery{ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("List(parent): %v", err)
+	}
+	if len(got) != 1 || got[0].ID != child.ID {
+		t.Fatalf("children = %#v, want child %s", got, child.ID)
+	}
+}
+
+func TestCachingStoreUpdateReflectsWriteIntentWhenImmediateReadIsStale(t *testing.T) {
+	mem := beads.NewMemStore()
+	original, err := mem.Create(beads.Bead{
+		Title:    "root",
+		Labels:   []string{"root", "needs-update"},
+		Metadata: map[string]string{"mc.contract.run_id": "r1"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	backing := &staleReadAfterUpdateStore{
+		Store: mem,
+		stale: original,
+	}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	status := "in_progress"
+	if err := cs.Update(original.ID, beads.UpdateOpts{
+		Status:       &status,
+		Labels:       []string{"verified"},
+		RemoveLabels: []string{"needs-update"},
+		Metadata: map[string]string{
+			"mc.contract.metadata_update": "true",
+		},
+	}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := cs.Get(original.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Metadata["mc.contract.metadata_update"] != "true" || got.Metadata["mc.contract.run_id"] != "r1" {
+		t.Fatalf("metadata = %#v, want original plus update", got.Metadata)
+	}
+	if !containsString(got.Labels, "verified") || containsString(got.Labels, "needs-update") {
+		t.Fatalf("labels = %#v, want verified without needs-update", got.Labels)
+	}
+}
+
+type staleReadAfterUpdateStore struct {
+	beads.Store
+	mu        sync.Mutex
+	stale     beads.Bead
+	returnOld bool
+}
+
+func (s *staleReadAfterUpdateStore) Update(id string, opts beads.UpdateOpts) error {
+	if err := s.Store.Update(id, opts); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.returnOld = true
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *staleReadAfterUpdateStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	if s.returnOld && id == s.stale.ID {
+		s.returnOld = false
+		stale := s.stale
+		s.mu.Unlock()
+		return stale, nil
+	}
+	s.mu.Unlock()
+	return s.Store.Get(id)
+}
+
+type primeRaceStore struct {
+	beads.Store
+	started chan struct{}
+	release chan struct{}
+	stale   []beads.Bead
+	once    sync.Once
+}
+
+func (s *primeRaceStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if !query.AllowScan {
+		return s.Store.List(query)
+	}
+	s.once.Do(func() {
+		close(s.started)
+	})
+	<-s.release
+	return append([]beads.Bead(nil), s.stale...), nil
 }
 
 func TestCachingStoreGetFallsBackForClosedBeadsAfterPrime(t *testing.T) {
@@ -255,6 +439,45 @@ func TestCachingStoreWriteThrough(t *testing.T) {
 	}
 }
 
+func TestCachingStoreCloseNotifiesWhenBeadIsMissingFromCache(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	created, err := mem.Create(beads.Bead{Title: "external"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	var events []string
+	cs = beads.NewCachingStoreForTest(mem, func(eventType, beadID string, payload json.RawMessage) {
+		var b beads.Bead
+		if err := json.Unmarshal(payload, &b); err != nil {
+			t.Fatalf("unmarshal callback payload: %v", err)
+		}
+		events = append(events, eventType+":"+beadID+":"+b.Status)
+	})
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime after callback install: %v", err)
+	}
+	if err := cs.Delete(created.ID); err != nil {
+		t.Fatalf("Delete setup: %v", err)
+	}
+	created, err = mem.Create(beads.Bead{Title: "external"})
+	if err != nil {
+		t.Fatalf("Create second: %v", err)
+	}
+
+	if err := cs.Close(created.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(events) != 1 || events[0] != "bead.closed:"+created.ID+":closed" {
+		t.Fatalf("events = %#v, want bead.closed for missing cached bead", events)
+	}
+}
+
 func TestCachingStoreApplyEvent(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
@@ -270,10 +493,7 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	payload, _ := json.Marshal(newBead)
 	cs.ApplyEvent("bead.created", payload)
 
-	got, err := cs.Get("ext-1")
-	if err != nil {
-		t.Fatalf("Get after ApplyEvent create: %v", err)
-	}
+	got := requireCachedBead(t, cs, "ext-1", false)
 	if got.Title != "External" {
 		t.Fatalf("title = %q, want External", got.Title)
 	}
@@ -283,7 +503,7 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	payload, _ = json.Marshal(updated)
 	cs.ApplyEvent("bead.updated", payload)
 
-	got, _ = cs.Get(b1.ID)
+	got = requireCachedBead(t, cs, b1.ID, false)
 	if got.Title != "Modified by agent" {
 		t.Fatalf("title after update event = %q, want Modified by agent", got.Title)
 	}
@@ -302,7 +522,7 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	payload, _ = json.Marshal(closed)
 	cs.ApplyEvent("bead.closed", payload)
 
-	got, _ = cs.Get(b1.ID)
+	got = requireCachedBead(t, cs, b1.ID, true)
 	if got.Status != "closed" {
 		t.Fatalf("status after close event = %q, want closed", got.Status)
 	}
@@ -356,10 +576,7 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
 	}
 
-	got, err := cs.Get(b1.ID)
-	if err != nil {
-		t.Fatalf("Get after ApplyEvent update: %v", err)
-	}
+	got := requireCachedBead(t, cs, b1.ID, false)
 	if got.Type != "session" {
 		t.Fatalf("Type = %q, want session", got.Type)
 	}
@@ -372,6 +589,21 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 	if got.Metadata["wake_attempts"] != "0" {
 		t.Fatalf("wake_attempts = %q, want 0; metadata=%v", got.Metadata["wake_attempts"], got.Metadata)
 	}
+}
+
+func requireCachedBead(t *testing.T, cs *beads.CachingStore, id string, includeClosed bool) beads.Bead {
+	t.Helper()
+	items, err := cs.List(beads.ListQuery{AllowScan: true, IncludeClosed: includeClosed})
+	if err != nil {
+		t.Fatalf("List cached beads: %v", err)
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("cached bead %q missing from %#v", id, items)
+	return beads.Bead{}
 }
 
 func TestCachingStoreApplyEventIgnoredWhenDegraded(t *testing.T) {
@@ -512,3 +744,12 @@ func (s *failingIncludeClosedMetadataStore) List(query beads.ListQuery) ([]beads
 }
 
 func strPtr(s string) *string { return &s }
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}

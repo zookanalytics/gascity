@@ -969,16 +969,19 @@ func TestBdStoreCreateWithLabels(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {
 		gotArgs = args
-		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z","labels":["owned"]}`), nil
+		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"convoy","created_at":"2025-01-15T10:30:00Z"}`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	_, err := s.Create(beads.Bead{Title: "test", Type: "convoy", Labels: []string{"owned"}})
+	created, err := s.Create(beads.Bead{Title: "test", Type: "convoy", Labels: []string{"owned"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--labels owned") {
 		t.Errorf("args = %q, want to contain '--labels owned'", args)
+	}
+	if len(created.Labels) != 1 || created.Labels[0] != "owned" {
+		t.Errorf("created.Labels = %#v, want [owned]", created.Labels)
 	}
 }
 
@@ -1009,13 +1012,16 @@ func TestBdStoreCreateWithParentID(t *testing.T) {
 		return []byte(`{"id":"bd-x","title":"test","status":"open","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}`), nil
 	}
 	s := beads.NewBdStore("/city", runner)
-	_, err := s.Create(beads.Bead{Title: "test", ParentID: "bd-parent-1"})
+	created, err := s.Create(beads.Bead{Title: "test", ParentID: "bd-parent-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
 	if !strings.Contains(args, "--parent bd-parent-1") {
 		t.Errorf("args = %q, want to contain '--parent bd-parent-1'", args)
+	}
+	if created.ParentID != "bd-parent-1" {
+		t.Errorf("created.ParentID = %q, want bd-parent-1", created.ParentID)
 	}
 }
 
