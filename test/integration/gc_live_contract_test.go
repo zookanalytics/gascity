@@ -238,10 +238,22 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 		t.Fatalf("deps children = %#v, want child %s", deps.Children, childBead.ID)
 	}
 	graph := liveContractJSON[struct {
-		Beads []beads.Bead `json:"beads"`
+		Beads []beads.Bead       `json:"beads"`
+		Deps  []contractGraphDep `json:"deps"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads/graph/"+url.PathEscape(rootBead.ID), nil, http.StatusOK)
 	if !beadListContains(graph.Beads, rootBead.ID) {
 		t.Fatalf("graph beads = %#v, want root %s", graph.Beads, rootBead.ID)
+	}
+	if !beadListContains(graph.Beads, childBead.ID) {
+		t.Fatalf("graph beads = %#v, want child %s", graph.Beads, childBead.ID)
+	}
+	if !beadListContains(graph.Beads, siblingBead.ID) {
+		t.Fatalf("graph beads = %#v, want sibling %s", graph.Beads, siblingBead.ID)
+	}
+	for _, childID := range []string{childBead.ID, siblingBead.ID} {
+		if !liveContractGraphHasEdge(graph.Deps, rootBead.ID, childID, "parent-child") {
+			t.Fatalf("graph deps = %#v, want parent-child edge %s -> %s", graph.Deps, rootBead.ID, childID)
+		}
 	}
 	list := liveContractJSON[struct {
 		Items []beads.Bead `json:"items"`
@@ -249,6 +261,9 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/beads?label=mc-live-contract&limit=50&rig="+url.QueryEscape(rigName), nil, http.StatusOK)
 	if list.Total < 3 || !beadListContains(list.Items, rootBead.ID) || !beadListContains(list.Items, siblingBead.ID) {
 		t.Fatalf("filtered beads = %+v, want root and sibling", list)
+	}
+	if listedSibling, ok := findLiveContractBead(list.Items, siblingBead.ID); ok && listedSibling.ParentID != rootBead.ID {
+		t.Fatalf("filtered sibling parent = %q, want %q", listedSibling.ParentID, rootBead.ID)
 	}
 
 	waitForLiveContractEvent(t, baseURL, validator, cityBase+"/events", cityName, "city.ready", 10*time.Second)
@@ -305,6 +320,12 @@ type contractRigList struct {
 type contractRig struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
+}
+
+type contractGraphDep struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+	Kind string `json:"kind"`
 }
 
 func liveContractValidator(t *testing.T, specBytes []byte) openapivalidator.Validator {
@@ -688,6 +709,24 @@ func containsString(items []string, want string) bool {
 func beadListContains(items []beads.Bead, id string) bool {
 	for _, item := range items {
 		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func findLiveContractBead(items []beads.Bead, id string) (beads.Bead, bool) {
+	for _, item := range items {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return beads.Bead{}, false
+}
+
+func liveContractGraphHasEdge(items []contractGraphDep, from, to, kind string) bool {
+	for _, item := range items {
+		if item.From == from && item.To == to && item.Kind == kind {
 			return true
 		}
 	}

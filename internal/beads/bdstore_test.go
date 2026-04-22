@@ -1047,6 +1047,92 @@ func TestBdStoreDepAddParentChildAlreadyParentedIsNoop(t *testing.T) {
 	}
 }
 
+func TestBdStoreGetNormalizesShowStyleDependencies(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-child`: {
+			out: []byte(`[
+				{
+					"id":"bd-child",
+					"title":"child",
+					"status":"open",
+					"issue_type":"task",
+					"created_at":"2025-01-15T10:30:00Z",
+					"dependencies":[
+						{
+							"id":"bd-parent",
+							"title":"parent",
+							"status":"open",
+							"issue_type":"task",
+							"dependency_type":"parent-child"
+						},
+						{
+							"issue_id":"",
+							"depends_on_id":"",
+							"type":""
+						}
+					],
+					"parent":"bd-parent"
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-child")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(got.Dependencies) != 1 {
+		t.Fatalf("Dependencies = %#v, want one normalized dependency", got.Dependencies)
+	}
+	dep := got.Dependencies[0]
+	if dep.IssueID != "bd-child" || dep.DependsOnID != "bd-parent" || dep.Type != "parent-child" {
+		t.Fatalf("dependency = %+v, want child -> parent parent-child", dep)
+	}
+}
+
+func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd list --json --label=mc-live-contract --include-infra --include-gates --limit 50`: {
+			out: []byte(`[
+				{
+					"id":"bd-child",
+					"title":"child",
+					"status":"open",
+					"issue_type":"task",
+					"created_at":"2025-01-15T10:30:00Z",
+					"labels":["mc-live-contract"],
+					"dependencies":[
+						{
+							"issue_id":"bd-child",
+							"depends_on_id":"bd-parent",
+							"type":"parent-child"
+						}
+					]
+				}
+			]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.List(beads.ListQuery{Label: "mc-live-contract", Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1", len(got))
+	}
+	if got[0].ParentID != "bd-parent" {
+		t.Fatalf("ParentID = %q, want bd-parent", got[0].ParentID)
+	}
+}
+
 func TestBdStoreCreateNoLabelsNoParent(t *testing.T) {
 	var gotArgs []string
 	runner := func(_, _ string, args ...string) ([]byte, error) {

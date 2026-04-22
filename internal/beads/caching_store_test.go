@@ -154,6 +154,41 @@ func TestCachingStoreParentListUsesBackingStore(t *testing.T) {
 	}
 }
 
+func TestCachingStoreParentListRefreshesCachedChildren(t *testing.T) {
+	mem := beads.NewMemStore()
+	parent, err := mem.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create(parent): %v", err)
+	}
+	child, err := mem.Create(beads.Bead{Title: "child", Labels: []string{"mc-live-contract"}})
+	if err != nil {
+		t.Fatalf("Create(child): %v", err)
+	}
+	cs := beads.NewCachingStoreForTest(mem, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	if err := mem.Update(child.ID, beads.UpdateOpts{ParentID: &parent.ID}); err != nil {
+		t.Fatalf("backing Update(parent): %v", err)
+	}
+
+	children, err := cs.List(beads.ListQuery{ParentID: parent.ID})
+	if err != nil {
+		t.Fatalf("List(parent): %v", err)
+	}
+	if len(children) != 1 || children[0].ParentID != parent.ID {
+		t.Fatalf("children = %#v, want refreshed parent %s", children, parent.ID)
+	}
+
+	labeled, err := cs.List(beads.ListQuery{Label: "mc-live-contract"})
+	if err != nil {
+		t.Fatalf("List(label): %v", err)
+	}
+	if len(labeled) != 1 || labeled[0].ParentID != parent.ID {
+		t.Fatalf("cached label result = %#v, want parent %s", labeled, parent.ID)
+	}
+}
+
 func TestCachingStoreUpdateReflectsWriteIntentWhenImmediateReadIsStale(t *testing.T) {
 	mem := beads.NewMemStore()
 	original, err := mem.Create(beads.Bead{

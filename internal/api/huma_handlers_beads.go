@@ -181,25 +181,20 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 		return nil, huma.Error404NotFound("bead " + rootID + " not found")
 	}
 
-	all, err := foundStore.List(beads.ListQuery{
-		Metadata:      map[string]string{"gc.root_bead_id": rootID},
-		IncludeClosed: true,
-	})
+	graphBeads, parentEdges, err := collectBeadGraph(foundStore, root)
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-
-	graphBeads := []beads.Bead{root}
-	beadIndex := map[string]beads.Bead{root.ID: root}
-	for _, b := range all {
-		if b.ID == root.ID {
-			continue
-		}
-		graphBeads = append(graphBeads, b)
+	beadIndex := make(map[string]beads.Bead, len(graphBeads))
+	for _, b := range graphBeads {
 		beadIndex[b.ID] = b
 	}
 
-	deps, _ := collectWorkflowDeps(foundStore, beadIndex)
+	deps, depPartial := collectWorkflowDeps(foundStore, beadIndex)
+	if depPartial {
+		return nil, huma.Error500InternalServerError("listing bead graph dependencies failed")
+	}
+	deps = mergeWorkflowDeps(deps, parentEdges)
 
 	return &IndexOutput[BeadGraphResponse]{
 		Index: s.latestIndex(),

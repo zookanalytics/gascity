@@ -15,7 +15,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	if query.Live || query.ParentID != "" {
-		return c.backing.List(query)
+		items, err := c.backing.List(query)
+		if err == nil {
+			c.refreshCachedBeads(items)
+		}
+		return items, err
 	}
 
 	c.mu.RLock()
@@ -74,6 +78,23 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	}
 	c.mu.RUnlock()
 	return c.backing.List(query)
+}
+
+func (c *CachingStore) refreshCachedBeads(items []Bead) {
+	if len(items) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.state != cacheLive && c.state != cachePartial {
+		return
+	}
+	for _, item := range items {
+		c.beads[item.ID] = cloneBead(item)
+		delete(c.dirty, item.ID)
+	}
+	c.markFreshLocked(time.Now())
+	c.updateStatsLocked()
 }
 
 // ListOpen returns all cached beads, optionally filtered by status.
