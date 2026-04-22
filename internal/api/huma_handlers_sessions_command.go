@@ -234,7 +234,10 @@ func (s *Server) humaCreateProviderSession(ctx context.Context, store beads.Stor
 		return nil, humaSessionManagerError(err)
 	}
 
-	transport := providerSessionTransport(resolved, s.state.SessionProvider())
+	transport, err := providerSessionTransport(resolved, s.state.SessionProvider())
+	if err != nil {
+		return nil, huma.Error503ServiceUnavailable(err.Error())
+	}
 	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options, transport)
 	if err != nil {
 		return nil, huma.Error400BadRequest(err.Error())

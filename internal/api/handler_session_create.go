@@ -274,7 +274,12 @@ func (s *Server) createProviderSession(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	transport := providerSessionTransport(resolved, s.state.SessionProvider())
+	transport, err := providerSessionTransport(resolved, s.state.SessionProvider())
+	if err != nil {
+		s.idem.unreserve(idemKey)
+		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", err.Error())
+		return
+	}
 	launchCommand, err := config.BuildProviderLaunchCommand(s.state.CityPath(), resolved, body.Options, transport)
 	if err != nil {
 		s.idem.unreserve(idemKey)

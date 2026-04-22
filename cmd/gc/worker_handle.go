@@ -54,7 +54,10 @@ func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) w
 		return nil
 	}
 	return func(info session.Info, sessionKind string) (*worker.ResolvedRuntime, error) {
-		runtimeCfg := resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind)
+		runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityPath, cfg, info, sessionKind)
+		if err != nil {
+			return nil, err
+		}
 		if runtimeCfg == nil {
 			return nil, nil
 		}
@@ -362,13 +365,13 @@ func workerRespondSessionTargetWithConfig(cityPath string, store beads.Store, sp
 	return handle.Respond(context.Background(), response)
 }
 
-func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string) *worker.ResolvedRuntime {
+func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info session.Info, sessionKind string) (*worker.ResolvedRuntime, error) {
 	if cfg == nil {
-		return nil
+		return nil, nil
 	}
 	resolved, transport := resolveWorkerRuntimeProviderWithConfig(cfg, info, sessionKind)
 	if resolved == nil {
-		return nil
+		return nil, nil
 	}
 
 	command := strings.TrimSpace(info.Command)
@@ -389,7 +392,7 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 	if workDir == "" {
 		workDir = cityPath
 	}
-	mcpServers, _ := resolvedRuntimeMCPServersWithConfig(
+	mcpServers, err := resolvedRuntimeMCPServersWithConfig(
 		cityPath,
 		cfg,
 		info.Alias,
@@ -398,6 +401,9 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 		workDir,
 		nil,
 	)
+	if err != nil {
+		return nil, err
+	}
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,
@@ -417,7 +423,7 @@ func resolvedWorkerRuntimeWithConfig(cityPath string, cfg *config.City, info ses
 			ResumeCommand: firstNonEmptyGCString(resolved.ResumeCommand, info.ResumeCommand),
 			SessionIDFlag: resolved.SessionIDFlag,
 		},
-	}
+	}, nil
 }
 
 func shouldPreserveStoredRuntimeCommand(storedCommand, resolvedCommand string) bool {

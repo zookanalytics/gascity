@@ -1531,7 +1531,7 @@ func TestHumaCreateProviderSessionUsesACPTransportCommand(t *testing.T) {
 	}
 }
 
-func TestHandleProviderSessionCreateKeepsDefaultTransportWithoutACPProvider(t *testing.T) {
+func TestHandleProviderSessionCreateRejectsACPProviderWithoutACPRouting(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)
 	fs.cfg.Providers["opencode"] = config.ProviderSpec{
@@ -1549,27 +1549,32 @@ func TestHandleProviderSessionCreateKeepsDefaultTransportWithoutACPProvider(t *t
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "requires ACP transport") {
+		t.Fatalf("body = %q, want ACP transport error", rec.Body.String())
+	}
+}
 
-	var resp sessionResponse
-	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
+func TestHumaCreateProviderSessionRejectsACPProviderWithoutACPRouting(t *testing.T) {
+	supportsACP := true
+	fs := newSessionFakeState(t)
+	fs.cfg.Providers["opencode"] = config.ProviderSpec{
+		DisplayName: "OpenCode",
+		Command:     "/bin/echo",
+		PathCheck:   "true",
+		SupportsACP: &supportsACP,
+		ACPCommand:  "/bin/echo",
+		ACPArgs:     []string{"acp"},
 	}
-	start := fs.sp.LastStartConfig(resp.SessionName)
-	if start == nil {
-		t.Fatalf("LastStartConfig(%q) = nil", resp.SessionName)
-	}
-	if got, want := start.Command, "/bin/echo"; got != want {
-		t.Fatalf("start command = %q, want %q", got, want)
-	}
-	bead, err := fs.cityBeadStore.Get(resp.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", resp.ID, err)
-	}
-	if got := bead.Metadata["transport"]; got != "" {
-		t.Fatalf("transport metadata = %q, want empty", got)
+	srv := New(fs)
+
+	if _, err := srv.humaCreateProviderSession(context.Background(), fs.cityBeadStore, sessionCreateBody{
+		Kind: "provider",
+		Name: "opencode",
+	}, "opencode"); err == nil {
+		t.Fatal("humaCreateProviderSession() error = nil, want ACP routing error")
 	}
 }
 

@@ -125,10 +125,13 @@ func TestResolvedWorkerRuntimeWithConfigUsesProviderLaunchCommand(t *testing.T) 
 		},
 	}
 
-	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template: "worker",
 		WorkDir:  cityDir,
 	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -232,12 +235,15 @@ TOKEN = "abc"
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template:  "worker",
 		Command:   "/bin/echo",
 		Transport: "acp",
 		WorkDir:   cityDir,
 	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -277,11 +283,14 @@ acp_args = ["acp"]
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template: "worker",
 		Command:  "/bin/echo",
 		WorkDir:  cityDir,
 	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -311,12 +320,15 @@ acp_args = ["acp"]
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template:  "opencode",
 		Command:   "/bin/echo",
 		Transport: "acp",
 		WorkDir:   cityDir,
 	}, "provider")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -346,11 +358,14 @@ acp_args = ["acp"]
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	resolved := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	resolved, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template: "opencode",
 		Command:  "/bin/echo",
 		WorkDir:  cityDir,
 	}, "provider")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -700,9 +715,12 @@ ready_delay_ms = 250
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	runtimeCfg := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+	runtimeCfg, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
 		Template: "worker",
 	}, "")
+	if err != nil {
+		t.Fatalf("resolvedWorkerRuntimeWithConfig: %v", err)
+	}
 	if runtimeCfg == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
@@ -717,6 +735,44 @@ ready_delay_ms = 250
 	}
 	if got, want := runtimeCfg.Command, "/bin/echo"; got != want {
 		t.Fatalf("Command = %q, want %q", got, want)
+	}
+}
+
+func TestResolvedWorkerRuntimeWithConfigPropagatesMCPResolutionError(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+session = "acp"
+
+[providers.stub]
+command = "/bin/echo"
+supports_acp = true
+acp_command = "/bin/echo"
+acp_args = ["acp"]
+`)
+	writeCatalogFile(t, cityDir, "mcp/filesystem.toml", `
+name = "filesystem"
+command = [broken
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	if _, err := resolvedWorkerRuntimeWithConfig(cityDir, cfg, session.Info{
+		Template:  "worker",
+		Transport: "acp",
+		WorkDir:   cityDir,
+	}, ""); err == nil {
+		t.Fatal("resolvedWorkerRuntimeWithConfig() error = nil, want MCP resolution error")
 	}
 }
 
