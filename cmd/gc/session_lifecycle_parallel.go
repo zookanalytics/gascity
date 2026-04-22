@@ -882,7 +882,7 @@ func recoverRunningPendingCreate(
 		expectedProvider = expectedProviderFamilyForTemplate(session, tp)
 	}
 	liveProvider := liveSessionProviderFamily(sp, sessionName)
-	if expectedProvider != "" && liveProvider != "" && liveProvider != expectedProvider {
+	if liveProvider != "" && liveProvider != expectedProvider {
 		batch := map[string]string{
 			"restart_requested": "true",
 		}

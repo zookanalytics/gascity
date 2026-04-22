@@ -112,6 +112,16 @@ func queueResolvedProviderSessionMetadataKeys(existing map[string]string, queue 
 	}
 }
 
+func resolvedProviderSessionMetadataDiffers(existing map[string]string, resolved *config.ResolvedProvider, keys []string) bool {
+	desired := resolvedProviderSessionMetadata(resolved)
+	for _, key := range keys {
+		if strings.TrimSpace(existing[key]) != desired[key] {
+			return true
+		}
+	}
+	return false
+}
+
 func shouldSyncResolvedProviderMetadata(b beads.Bead, tp TemplateParams, alive bool) bool {
 	if !alive {
 		return true
@@ -121,6 +131,19 @@ func shouldSyncResolvedProviderMetadata(b beads.Bead, tp TemplateParams, alive b
 		return false
 	}
 	return match.providerMetadataSync
+}
+
+func shouldSyncCommandMetadata(b beads.Bead, tp TemplateParams, alive bool) bool {
+	if !alive {
+		return true
+	}
+	if tp.ResolvedProvider == nil {
+		return true
+	}
+	if shouldSyncResolvedProviderMetadata(b, tp, alive) {
+		return true
+	}
+	return !resolvedProviderSessionMetadataDiffers(b.Metadata, tp.ResolvedProvider, resolvedProviderConfigMetadataKeys)
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
@@ -917,8 +940,11 @@ func syncSessionBeadsWithSnapshot(
 		// session_key / continuation_epoch it is not lifecycle state. Keep that
 		// bundle pinned to the runtime's started_config_hash while the session is
 		// live so attach/resume/submit paths do not observe metadata from a
-		// provider config the running session never actually started with.
-		if tp.Command != "" && b.Metadata["command"] != tp.Command {
+		// provider config the running session never actually started with. When
+		// that provider/resume bundle is pinned, pin command with it if the
+		// provider bundle itself changed; otherwise readers can observe a hybrid
+		// command/provider pair that no runtime actually started with.
+		if tp.Command != "" && b.Metadata["command"] != tp.Command && shouldSyncCommandMetadata(b, tp, alive) {
 			queueMeta("command", tp.Command)
 		}
 		if shouldSyncResolvedProviderMetadata(b, tp, alive) {
