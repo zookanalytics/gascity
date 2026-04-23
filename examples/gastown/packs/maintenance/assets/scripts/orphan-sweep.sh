@@ -32,15 +32,21 @@ while IFS= read -r agent; do
 done <<< "$AGENTS"
 
 # Step 3: Find orphaned beads (assigned to non-existent agents).
-# Pool instances use names like "worker-3"; strip the -N suffix to match
-# the template name from config.
+# Handles three forms of assignee names:
+#   1. Bare template name (e.g. "deacon")
+#   2. PackV2 binding-qualified (e.g. "gastown.deacon", "gascity/refinery")
+#   3. Pool instance with -N suffix, possibly combined with (2)
+#      (e.g. "polecat-3", "signal-loom/polecat-3")
 is_known_agent() {
     local name="$1"
     # Direct match.
     if [ -n "${KNOWN_AGENTS[$name]+x}" ]; then return 0; fi
+    # PackV2 qualified: "binding.template" or "rig/template" — strip prefix.
+    local tmpl="${name##*[./]}"
+    if [ "$tmpl" != "$name" ] && [ -n "${KNOWN_AGENTS[$tmpl]+x}" ]; then return 0; fi
     # Pool instance: strip trailing -<digits> and check template name.
-    local base="${name%-[0-9]*}"
-    if [ "$base" != "$name" ] && [ -n "${KNOWN_AGENTS[$base]+x}" ]; then return 0; fi
+    local base="${tmpl%-[0-9]*}"
+    if [ "$base" != "$tmpl" ] && [ -n "${KNOWN_AGENTS[$base]+x}" ]; then return 0; fi
     return 1
 }
 
