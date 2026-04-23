@@ -18,9 +18,12 @@ This is infrastructure work. You:
 
 | Variable | Source | Description |
 |----------|--------|-------------|
-| port | config | Dolt server port (default 3307) |
 | latency_threshold | config | Latency warning threshold (default 1s) |
 | conn_max | config | Maximum connection count (default 50) |
+
+The Dolt server port is taken from the `GC_DOLT_PORT` environment variable.
+There is no default — if `GC_DOLT_PORT` is unset in the dog session, the
+doctor escalates a configuration error rather than probing a bogus port.
 
 ## Safety
 
@@ -32,10 +35,6 @@ formula = "mol-dog-doctor"
 version = 1
 
 [vars]
-[vars.port]
-description = "Dolt server port"
-default = "3307"
-
 [vars.latency_threshold]
 description = "Latency warning threshold"
 default = "1s"
@@ -50,11 +49,23 @@ title = "Probe Dolt server connectivity"
 description = """
 Check basic server health and measure latency.
 
-**1. Connectivity check:**
+**1. Check port is configured:**
+If `GC_DOLT_PORT` is unset, the dog session's env does not carry the city's
+Dolt port — probing any default value is just guessing. Escalate a config
+error and stop; do not attempt the probe.
+```bash
+if [ -z "${GC_DOLT_PORT:-}" ]; then
+  gc mail send mayor/ -s "ESCALATION: GC_DOLT_PORT not set in dog session env [HIGH]" \\
+    -m "Doctor cannot probe Dolt: GC_DOLT_PORT is unset. Dog pool session env is missing the configured port. No probe attempted."
+  exit 1
+fi
+```
+
+**2. Connectivity check:**
 ```bash
 DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
   --host "${GC_DOLT_HOST:-127.0.0.1}" \
-  --port "${GC_DOLT_PORT:-{{port}}}" \
+  --port "${GC_DOLT_PORT}" \
   --user "${GC_DOLT_USER:-root}" \
   --no-tls \
   sql -q "SELECT active_branch()"
@@ -62,18 +73,19 @@ DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt \
 Use active_branch() — lightweight probe that won't block behind queued queries
 (per Dolt CEO recommendation).
 
-**2. Measure latency:**
+**3. Measure latency:**
 Time the probe query. Warn if > {{latency_threshold}}.
 
-**3. Record results:**
+**4. Record results:**
 - Server reachable: yes/no
 - Latency: <duration>
 - Warning: if latency exceeds threshold
 
 **If server unreachable:**
-This is a critical failure. Escalate immediately:
+This is a critical failure. Escalate immediately, and cite the actual
+configured port (not a default):
 ```bash
-gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port {{port}} [CRITICAL]" \\
+gc mail send mayor/ -s "ESCALATION: Dolt server unreachable on port ${GC_DOLT_PORT} [CRITICAL]" \\
   -m "Doctor probe failed: server did not respond to active_branch() query."
 ```
 
