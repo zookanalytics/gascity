@@ -52,8 +52,11 @@ agent_exists() {
 }
 
 # Step 3: Find orphaned beads (assigned to non-existent agents).
-# Pool instances use names like "worker-3"; strip the -N suffix to match
-# the template name from config.
+# Handles three forms of assignee names:
+#   1. Bare template name (e.g. "deacon")
+#   2. PackV2 binding-qualified (e.g. "gastown.deacon", "gascity/refinery")
+#   3. Pool instance with -N suffix, possibly combined with (2)
+#      (e.g. "polecat-3", "signal-loom/polecat-3")
 is_known_agent() {
     local name="$1"
     # Direct match.
@@ -61,12 +64,13 @@ is_known_agent() {
     # Pool instance: strip trailing -<digits> and check template name.
     local base="${name%-[0-9]*}"
     if [ "$base" != "$name" ] && agent_exists "$base"; then return 0; fi
-    # City-qualified assignee (gastown.deacon): strip everything through the
-    # last dot and re-check. This relies on flattened pack binding chains.
-    # Defense-in-depth for older binaries that fall through to `gc config show`
-    # and emit unqualified names. Also covers pool patterns like
-    # "gastown.dog-3" by re-stripping the -N suffix.
-    local short="${name##*.}"
+    # PackV2 binding-qualified (gastown.deacon, gascity/refinery): strip
+    # everything through the last dot or slash and re-check. Defense-in-
+    # depth for older binaries that fall through to `gc config show` and
+    # emit unqualified names. Also covers pool patterns like
+    # "gastown.dog-3" or "signal-loom/polecat-3" by re-stripping the
+    # -N suffix.
+    local short="${name##*[./]}"
     if [ "$short" != "$name" ]; then
         if agent_exists "$short"; then return 0; fi
         local short_base="${short%-[0-9]*}"
