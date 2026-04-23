@@ -151,6 +151,21 @@ func (e *reconcilerTestEnv) addRunningWorkerDesiredWithNewConfig() {
 	_ = e.sp.Start(context.Background(), "worker", runtime.Config{Command: "new-cmd"})
 }
 
+// addDesiredWithConfig registers a session with an explicit command and optionally
+// starts it in the provider. Useful for drift-deferral tests that need the session
+// name to differ from the template name.
+func (e *reconcilerTestEnv) addDesiredWithConfig(name, template string, running bool, command string) {
+	tp := TemplateParams{
+		Command:      command,
+		SessionName:  name,
+		TemplateName: template,
+	}
+	e.desiredState[name] = tp
+	if running {
+		_ = e.sp.Start(context.Background(), name, runtime.Config{Command: command})
+	}
+}
+
 // addDesiredLive registers a session with custom session_live config.
 func (e *reconcilerTestEnv) addDesiredLive(name, template string, running bool, live []string) {
 	tp := TemplateParams{

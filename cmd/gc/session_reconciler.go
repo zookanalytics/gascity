@@ -52,6 +52,27 @@ func assignedWorkAssigneeMap(assignedWorkBeads []beads.Bead) map[string]bool {
 	return assigneeHasWork
 }
 
+// sessionHasAssignedWork reports whether any open/in_progress work in the
+// tick's snapshot is assigned to this session under any of its identifiers
+// (ID, session_name, configured_named_identity). Used only by the config-drift
+// defer path; close-gate decisions use the cross-store live query helper
+// sessionHasOpenAssignedWork instead.
+func sessionHasAssignedWork(sb beads.Bead, assigneeHasWork map[string]bool) bool {
+	if len(assigneeHasWork) == 0 {
+		return false
+	}
+	if assigneeHasWork[sb.ID] {
+		return true
+	}
+	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" && assigneeHasWork[sn] {
+		return true
+	}
+	if ni := strings.TrimSpace(sb.Metadata["configured_named_identity"]); ni != "" && assigneeHasWork[ni] {
+		return true
+	}
+	return false
+}
+
 func poolSessionHasActiveDemand(session beads.Bead, template string, poolDesired map[string]int) bool {
 	if strings.TrimSpace(session.Metadata[poolManagedMetadataKey]) != "true" {
 		return false
