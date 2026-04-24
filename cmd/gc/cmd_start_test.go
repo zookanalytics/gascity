@@ -586,8 +586,12 @@ func TestResolveTemplateFPExtra_StableAcrossBaseAndInstance(t *testing.T) {
 // catalog discovery fails from a transient filesystem error → without
 // the cache, FPExtra drops skills and the CoreFingerprint flips. Asserts
 // that newAgentBuildParams' last-good cache keeps params.skillCatalog
-// populated so resolveTemplate produces a byte-identical FPExtra on both
-// ticks.
+// populated so resolveTemplate produces a byte-identical FPExtra, a
+// byte-identical Hints.PreStart, and a byte-identical CoreFingerprint on
+// both ticks. The PreStart and CoreFingerprint assertions close a gap
+// identified during gc-e9g triage: in the live mayor symptom, the stored
+// PreStart hash was non-empty while the recomputed hash was the empty
+// byte string — the FPExtra-only check would not have caught it.
 func TestAgentBuildParams_FPExtraStableAcrossCatalogTransients(t *testing.T) {
 	resetSkillCatalogCache()
 	cityPath := t.TempDir()
@@ -667,6 +671,36 @@ func TestAgentBuildParams_FPExtraStableAcrossCatalogTransients(t *testing.T) {
 		if bv != iv {
 			t.Errorf("FPExtra[%q] differs across ticks: tickN=%q tickN+1=%q", k, bv, iv)
 		}
+	}
+
+	// Hints.PreStart must also be byte-identical across ticks. The mayor
+	// symptom in gc-e9g had stored PreStart hash 82f37f0e54233bc4 and
+	// current PreStart hash e3b0c44298fc1c14 (SHA256 prefix of the empty
+	// byte string) — i.e. tick N captured a non-empty PreStart while tick
+	// N+1 recomputed it as empty because the skills catalog had dropped.
+	// An FPExtra-only check would not catch that divergence since
+	// appendMaterializeSkillsPreStart mutates Hints.PreStart, not FPExtra.
+	if len(tpN.Hints.PreStart) != len(tpN1.Hints.PreStart) {
+		t.Fatalf("Hints.PreStart length differs across catalog-transient ticks: tickN=%d tickN+1=%d (tickN=%v tickN+1=%v) — config-drift drain-storm reproducer",
+			len(tpN.Hints.PreStart), len(tpN1.Hints.PreStart), tpN.Hints.PreStart, tpN1.Hints.PreStart)
+	}
+	for i, want := range tpN.Hints.PreStart {
+		if tpN1.Hints.PreStart[i] != want {
+			t.Errorf("Hints.PreStart[%d] differs across ticks: tickN=%q tickN+1=%q", i, want, tpN1.Hints.PreStart[i])
+		}
+	}
+
+	// The end-to-end production invariant: templateParamsToConfig →
+	// runtime.CoreFingerprint must return the same hash on both ticks.
+	// This catches any drift field (PreStart, FPExtra, CopyFiles, etc.)
+	// that the per-field assertions above miss.
+	hashN := runtime.CoreFingerprint(templateParamsToConfig(tpN))
+	hashN1 := runtime.CoreFingerprint(templateParamsToConfig(tpN1))
+	if hashN != hashN1 {
+		breakdownN := runtime.CoreFingerprintBreakdown(templateParamsToConfig(tpN))
+		breakdownN1 := runtime.CoreFingerprintBreakdown(templateParamsToConfig(tpN1))
+		t.Fatalf("CoreFingerprint drifts across catalog-transient ticks: tickN=%q tickN+1=%q\n  breakdown N=%v\n  breakdown N+1=%v",
+			hashN, hashN1, breakdownN, breakdownN1)
 	}
 }
 
