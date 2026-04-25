@@ -902,7 +902,14 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}
 
 	// Apply an update event.
-	updated := beads.Bead{ID: b1.ID, Title: "Modified by agent", Status: "open", Metadata: map[string]string{"gc.step_ref": "mol.review"}}
+	updatedTitle := "Modified by agent"
+	if err := mem.Update(b1.ID, beads.UpdateOpts{
+		Title:    &updatedTitle,
+		Metadata: map[string]string{"gc.step_ref": "mol.review"},
+	}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+	updated := beads.Bead{ID: b1.ID, Title: updatedTitle, Status: "open", Metadata: map[string]string{"gc.step_ref": "mol.review"}}
 	payload, _ = json.Marshal(updated)
 	cs.ApplyEvent("bead.updated", payload)
 
@@ -915,9 +922,20 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}
 
 	// Apply a close event with the full closed bead payload.
+	closedTitle := "Closed by agent"
+	if err := mem.Update(b1.ID, beads.UpdateOpts{
+		Title:    &closedTitle,
+		Labels:   []string{"done"},
+		Metadata: map[string]string{"gc.outcome": "pass"},
+	}); err != nil {
+		t.Fatalf("Update backing before close: %v", err)
+	}
+	if err := mem.Close(b1.ID); err != nil {
+		t.Fatalf("Close backing: %v", err)
+	}
 	closed := beads.Bead{
 		ID:       b1.ID,
-		Title:    "Closed by agent",
+		Title:    closedTitle,
 		Status:   "closed",
 		Labels:   []string{"done"},
 		Metadata: map[string]string{"gc.outcome": "pass"},
@@ -943,13 +961,80 @@ func TestCachingStoreApplyEvent(t *testing.T) {
 	}
 }
 
+func TestCachingStoreApplyEventRefreshesPartialHookPayload(t *testing.T) {
+	t.Parallel()
+	mem := beads.NewMemStore()
+	parent, err := mem.Create(beads.Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	child, err := mem.Create(beads.Bead{
+		Title:    "child",
+		ParentID: parent.ID,
+		Labels:   []string{"mc-live-contract"},
+	})
+	if err != nil {
+		t.Fatalf("Create child: %v", err)
+	}
+
+	backing := &eventGetFailStore{Store: mem}
+	cs := beads.NewCachingStoreForTest(backing, nil)
+	if err := cs.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	backing.failGet = true
+
+	updatedTitle := "child updated externally"
+	if err := mem.Update(child.ID, beads.UpdateOpts{Title: &updatedTitle}); err != nil {
+		t.Fatalf("Update backing: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{
+		"id":         child.ID,
+		"title":      updatedTitle,
+		"status":     "open",
+		"issue_type": "task",
+		"owner":      "agent@example.com",
+		"updated_at": "2026-04-25T04:45:55Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	cs.ApplyEvent("bead.updated", payload)
+	if stats := cs.Stats(); stats.ProblemCount != 0 {
+		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
+	}
+
+	labeled, err := cs.List(beads.ListQuery{Label: "mc-live-contract"})
+	if err != nil {
+		t.Fatalf("List(label): %v", err)
+	}
+	if len(labeled) != 1 || labeled[0].ID != child.ID {
+		t.Fatalf("labeled = %#v, want child %s", labeled, child.ID)
+	}
+	if labeled[0].ParentID != parent.ID {
+		t.Fatalf("ParentID = %q, want %q", labeled[0].ParentID, parent.ID)
+	}
+	if labeled[0].Title != updatedTitle {
+		t.Fatalf("Title = %q, want %q", labeled[0].Title, updatedTitle)
+	}
+}
+
+type eventGetFailStore struct {
+	beads.Store
+	failGet bool
+}
+
+func (s *eventGetFailStore) Get(id string) (beads.Bead, error) {
+	if s.failGet {
+		return beads.Bead{}, errors.New("unexpected event backing get")
+	}
+	return s.Store.Get(id)
+}
+
 func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 	t.Parallel()
 	mem := beads.NewMemStore()
-	b1, err := mem.Create(beads.Bead{Title: "Existing"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
 
 	cs := beads.NewCachingStoreForTest(mem, nil)
 	if err := cs.Prime(context.Background()); err != nil {
@@ -957,7 +1042,7 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 	}
 
 	payload, err := json.Marshal(map[string]any{
-		"id":         b1.ID,
+		"id":         "ext-1",
 		"title":      "mayor",
 		"status":     "open",
 		"issue_type": "session",
@@ -979,7 +1064,7 @@ func TestCachingStoreApplyEventCoercesNonStringMetadata(t *testing.T) {
 		t.Fatalf("ProblemCount = %d, want 0 (last problem: %s)", stats.ProblemCount, stats.LastProblem)
 	}
 
-	got := requireCachedBead(t, cs, b1.ID, false)
+	got := requireCachedBead(t, cs, "ext-1", false)
 	if got.Type != "session" {
 		t.Fatalf("Type = %q, want session", got.Type)
 	}
