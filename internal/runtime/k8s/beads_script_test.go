@@ -131,6 +131,24 @@ func TestBeadsScriptListUsesScopedWorkdir(t *testing.T) {
 	}
 	assertCallContains(t, result.callLog, "/workspace/frontend")
 	assertCallContains(t, result.callLog, "list --json --limit 0 --all")
+	assertCallNotContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
+}
+
+func TestBeadsScriptConfigSetDoesNotExportBEADSDIR(t *testing.T) {
+	result := runBeadsScript(t, beadsScriptOptions{
+		Op:   "config-set",
+		Args: []string{"issue_prefix", "fe"},
+		Env: map[string]string{
+			"GC_CITY_PATH":  "/city",
+			"GC_STORE_ROOT": "/city/frontend",
+		},
+	})
+	if result.err != nil {
+		t.Fatalf("gc-beads-k8s config-set error = %v\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, "/workspace/frontend")
+	assertCallContains(t, result.callLog, "config set issue_prefix fe")
+	assertCallNotContains(t, result.callLog, `export BEADS_DIR="$workdir/.beads"`)
 }
 
 type beadsScriptOptions struct {

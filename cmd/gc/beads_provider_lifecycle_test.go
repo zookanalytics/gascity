@@ -2153,6 +2153,87 @@ func TestInitBeadsForDirExecSetsBEADSDIR(t *testing.T) {
 	}
 }
 
+func TestInitBeadsForDirExecPreventsStrayGitInit(t *testing.T) {
+	configureTestDoltIdentityEnv(t)
+
+	findRealBD := func() string {
+		t.Helper()
+		for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+			if strings.TrimSpace(dir) == "" {
+				continue
+			}
+			candidate := filepath.Join(dir, "bd")
+			info, err := os.Stat(candidate)
+			if err != nil || info.Mode()&0o111 == 0 {
+				continue
+			}
+			helpCmd := exec.Command(candidate, "--help")
+			helpCmd.Env = sanitizedBaseEnv()
+			out, err := helpCmd.CombinedOutput()
+			if err == nil && strings.Contains(string(out), "Initialize bd in the current directory") {
+				return candidate
+			}
+		}
+		t.Skip("real bd with init support not found in PATH")
+		return ""
+	}
+	bdPath := findRealBD()
+
+	rawDir := t.TempDir()
+	rawCmd := exec.Command(bdPath, "init", "--quiet", "--server", "--prefix", "raw", "--skip-hooks", "--skip-agents", ".")
+	rawCmd.Dir = rawDir
+	rawCmd.Env = sanitizedBaseEnv()
+	rawOut, err := rawCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("direct bd init failed: %v\n%s", err, rawOut)
+	}
+	if _, err := os.Stat(filepath.Join(rawDir, ".beads")); err != nil {
+		t.Fatalf("direct bd init did not create .beads: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rawDir, ".git")); err != nil {
+		t.Fatalf("direct bd init should create .git when BEADS_DIR is unset: %v", err)
+	}
+
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	content := fmt.Sprintf(`#!/bin/sh
+set -eu
+op="$1"
+shift
+case "$op" in
+  init)
+    dir="$1"
+    prefix="$2"
+    cd "$dir"
+    exec %q init --quiet --server --prefix "$prefix" --skip-hooks --skip-agents .
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+`, bdPath)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	if err := initBeadsForDir(cityDir, rigDir, "fe", "frontend-db"); err != nil {
+		t.Fatalf("initBeadsForDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".beads")); err != nil {
+		t.Fatalf("initBeadsForDir did not create .beads: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".git")); !os.IsNotExist(err) {
+		t.Fatalf("initBeadsForDir should prevent stray .git creation, stat err = %v", err)
+	}
+}
+
 func TestRunProviderOpStripsAmbientGCDoltSkip(t *testing.T) {
 	cityDir := t.TempDir()
 	writeMinimalCityToml(t, cityDir)
