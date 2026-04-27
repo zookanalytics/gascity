@@ -934,6 +934,158 @@ func TestExecutePlannedStarts_RevalidatesDependenciesBetweenWaveBatches(t *testi
 	}
 }
 
+func TestExecutePlannedStartsTraced_AsyncReturnsBeforeProviderStartCompletes(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "1",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := newGatedStartProvider()
+	t.Cleanup(func() { sp.release("worker") })
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{
+		Command:      "worker",
+		SessionName:  "worker",
+		TemplateName: "worker",
+	}
+	desired := map[string]TemplateParams{"worker": tp}
+
+	done := make(chan int, 1)
+	go func() {
+		done <- executePlannedStartsTraced(
+			context.Background(),
+			[]startCandidate{{session: &session, tp: tp}},
+			cfg,
+			desired,
+			sp,
+			store,
+			"test-city",
+			"",
+			clk,
+			events.Discard,
+			time.Minute,
+			ioDiscard{},
+			ioDiscard{},
+			nil,
+			withAsyncStartExecution(),
+		)
+	}()
+
+	select {
+	case woken := <-done:
+		if woken != 1 {
+			t.Fatalf("woken = %d, want 1", woken)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("async planned start blocked waiting for provider Start to finish")
+	}
+	sp.waitForStarts(t, 1)
+
+	inFlight, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inFlight.Metadata["pending_create_claim"] != "true" {
+		t.Fatalf("pending_create_claim = %q, want true until async start commits", inFlight.Metadata["pending_create_claim"])
+	}
+	if inFlight.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at was not stamped before async start")
+	}
+
+	sp.release("worker")
+	deadline := time.After(2 * time.Second)
+	for {
+		updated, err := store.Get(session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Metadata["state"] == "active" && updated.Metadata["pending_create_claim"] == "" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("async start did not commit active state; metadata=%v", updated.Metadata)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func TestReconcileSessionBeads_SkipsPendingCreateStartAlreadyInFlight(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 0, 30, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-worker",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Add(-10 * time.Second).UTC().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := newGatedStartProvider()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	tp := TemplateParams{
+		Command:      "worker",
+		SessionName:  "worker",
+		TemplateName: "worker",
+	}
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		map[string]TemplateParams{"worker": tp},
+		configuredSessionNames(cfg, "", store),
+		cfg,
+		sp,
+		store,
+		nil,
+		nil,
+		nil,
+		newDrainTracker(),
+		map[string]int{"worker": 1},
+		false,
+		map[string]bool{"worker": true},
+		"test-city",
+		nil,
+		clk,
+		events.Discard,
+		time.Minute,
+		0,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0 while start is already in flight", woken)
+	}
+	sp.ensureNoFurtherStart(t, 100*time.Millisecond)
+}
+
 // When the atomic start batch fails, NO state change lands: state stays
 // "creating", pending_create_claim stays "true", and the post-create marker
 // is absent. The reconciler's next tick retries via recoverRunningPendingCreate.

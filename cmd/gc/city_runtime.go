@@ -1329,6 +1329,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, result DesiredStat
 		cr.it, clock.Real{}, cr.rec, cr.cfg.Session.StartupTimeoutDuration(),
 		cr.cfg.Daemon.DriftDrainTimeoutDuration(),
 		cr.stdout, cr.stderr, trace,
+		withAsyncStartExecution(),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 	if trace != nil {

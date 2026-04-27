@@ -137,6 +137,28 @@ func pendingCreateSessionStillLeased(session beads.Bead, cfg *config.City, clk c
 	return agent != nil && !agent.Suspended
 }
 
+func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTimeout time.Duration) bool {
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
+		return false
+	}
+	lastWoke := strings.TrimSpace(session.Metadata["last_woke_at"])
+	if lastWoke == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	if startupTimeout <= 0 {
+		startupTimeout = time.Minute
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
+}
+
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
 // semantics. For each session bead, it determines if the session should be
 // awake (has a matching entry in the desired state) and manages lifecycle
@@ -249,6 +271,7 @@ func reconcileSessionBeadsTraced(
 	driftDrainTimeout time.Duration,
 	stdout, stderr io.Writer,
 	trace *sessionReconcilerTraceCycle,
+	startOptions ...startExecutionOption,
 ) int {
 	deps := buildDepsMap(cfg)
 	if cityName == "" {
@@ -991,6 +1014,15 @@ func reconcileSessionBeadsTraced(
 			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
 			}
+			if pendingCreateStartInFlight(*target.session, clk, startupTimeout) {
+				if trace != nil {
+					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_in_flight", traceRecordPayload{
+						"pending_create_claim": strings.TrimSpace(target.session.Metadata["pending_create_claim"]),
+						"last_woke_at":         target.session.Metadata["last_woke_at"],
+					}, nil, "")
+				}
+				continue
+			}
 			if trace != nil {
 				trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "start_candidate", traceRecordPayload{
 					"should_wake": shouldWake,
@@ -1098,6 +1130,7 @@ func reconcileSessionBeadsTraced(
 		ctx, startCandidates, cfg, desiredState, sp, store, cityName,
 		cityPath,
 		clk, rec, startupTimeout, stdout, stderr, trace,
+		startOptions...,
 	)
 
 	// Phase 2: Advance all in-flight drains.
