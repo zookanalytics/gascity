@@ -241,13 +241,19 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 }
 
 // resolveAgentIdentity resolves an agent input string to a config.Agent using
-// 3-step resolution:
+// 4-step resolution:
 //  1. Literal: try the input as-is (e.g., "mayor" or "hello-world/polecat").
 //  2. Contextual: if input has no "/" and currentRigDir is set, try
 //     "{currentRigDir}/{input}" to resolve rig-scoped agents from context.
 //  3. Unambiguous bare name: scan all agents by Name (ignoring Dir).
 //     Succeeds only when exactly one configured agent matches. Pool
 //     members are synthesized when the input uses {name}-{N}.
+//  4. Binding-aware "rig/name": for inputs of the form "rig/name" with no
+//     literal match, scan agents in that rig by Name (ignoring binding
+//     namespace). Succeeds only when exactly one agent matches. This lets
+//     callers address binding-imported agents by the rig + bare name
+//     ("gascity/polecat" → "gascity/gastown.polecat") without knowing the
+//     binding prefix.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
@@ -285,6 +291,25 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 		}
 		if len(matches) == 1 {
 			return matches[0], true
+		}
+	}
+	// Step 4: binding-aware "rig/name" fallback — for "rig/name" inputs with
+	// no literal match, find agents in that rig with Name == name (ignoring
+	// any binding namespace). Succeeds only when unambiguous so two packs
+	// shipping the same bare name in one rig fail loudly instead of silently
+	// resolving to one.
+	if strings.Contains(input, "/") {
+		rig, baseName, _ := strings.Cut(input, "/")
+		if rig != "" && baseName != "" && !strings.Contains(baseName, "/") {
+			var matches []config.Agent
+			for _, a := range cfg.Agents {
+				if a.Dir == rig && a.Name == baseName {
+					matches = append(matches, a)
+				}
+			}
+			if len(matches) == 1 {
+				return matches[0], true
+			}
 		}
 	}
 	return config.Agent{}, false

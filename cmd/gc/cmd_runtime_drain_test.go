@@ -1163,6 +1163,79 @@ func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 	}
 }
 
+// TestResolveAgentIdentityV2BindingBareForm verifies that resolveAgentIdentity
+// resolves the "rig/name" bare form to a binding-imported agent when
+// unambiguous. This is the fix for the gc-z4rl pool routing form mismatch:
+// the documented playbook syntax (e.g. "gascity/polecat") now resolves to
+// the canonical V2 qualified agent (e.g. "gascity/gastown.polecat") so that
+// gc sling stamps the same target string the agent's hook query uses.
+func TestResolveAgentIdentityV2BindingBareForm(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity", BindingName: "gastown"},
+			{Name: "refinery", Dir: "gascity", BindingName: "gastown"},
+			{Name: "polecat", Dir: "other", BindingName: "toolkit"},
+		},
+	}
+
+	tests := []struct {
+		name      string
+		input     string
+		wantFound bool
+		wantQName string
+	}{
+		// Canonical V2 qualified — exact literal match.
+		{"qualified polecat", "gascity/gastown.polecat", true, "gascity/gastown.polecat"},
+		// Bare playbook form — binding-aware fallback.
+		{"bare gascity/polecat", "gascity/polecat", true, "gascity/gastown.polecat"},
+		{"bare gascity/refinery", "gascity/refinery", true, "gascity/gastown.refinery"},
+		{"bare other/polecat", "other/polecat", true, "other/toolkit.polecat"},
+		// Unknown bare name in known rig.
+		{"bare gascity/missing", "gascity/missing", false, ""},
+		// Unknown rig.
+		{"bare nowhere/polecat", "nowhere/polecat", false, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found := resolveAgentIdentity(cfg, tt.input, "")
+			if found != tt.wantFound {
+				t.Fatalf("resolveAgentIdentity(%q) found = %v, want %v", tt.input, found, tt.wantFound)
+			}
+			if !found {
+				return
+			}
+			if got.QualifiedName() != tt.wantQName {
+				t.Errorf("QualifiedName = %q, want %q", got.QualifiedName(), tt.wantQName)
+			}
+		})
+	}
+}
+
+// TestResolveAgentIdentityV2BindingAmbiguous verifies that when two
+// binding-imported agents share the same bare name in the same rig, the
+// "rig/name" bare form is rejected as ambiguous. The canonical V2 qualified
+// form continues to resolve unambiguously.
+func TestResolveAgentIdentityV2BindingAmbiguous(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "gascity", BindingName: "gastown"},
+			{Name: "polecat", Dir: "gascity", BindingName: "toolkit"},
+		},
+	}
+	if _, found := resolveAgentIdentity(cfg, "gascity/polecat", ""); found {
+		t.Fatal("resolveAgentIdentity(gascity/polecat) should be ambiguous; got found")
+	}
+	a, found := resolveAgentIdentity(cfg, "gascity/gastown.polecat", "")
+	if !found || a.BindingName != "gastown" {
+		t.Fatalf("resolveAgentIdentity(gascity/gastown.polecat) = (%+v, %v); want gastown agent", a, found)
+	}
+	b, found := resolveAgentIdentity(cfg, "gascity/toolkit.polecat", "")
+	if !found || b.BindingName != "toolkit" {
+		t.Fatalf("resolveAgentIdentity(gascity/toolkit.polecat) = (%+v, %v); want toolkit agent", b, found)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // findAgentByName unit tests (pool suffix stripping for gc prime)
 // ---------------------------------------------------------------------------
