@@ -21,8 +21,14 @@ When you file a bead, default to immediately dispatching it to a polecat:
 
 ```bash
 gc bd create "Fix the auth timeout bug" -t task --json   # file it
-gc bd update <bead-id> --set-metadata gc.routed_to=<rig>/polecat  # dispatch to polecat pool (pool reconciler picks up routed metadata)
+gc sling <rig>/polecat <bead-id>                          # dispatch via gc sling (auto-stamps the canonical routed_to)
 ```
+
+`gc sling` resolves `<rig>/polecat` to the polecat agent in that rig (even
+when imported via a pack binding like `gastown.polecat`) and stamps the
+canonical `gc.routed_to` metadata that the polecat's hook query reads.
+Stamping `gc.routed_to` by hand is the historical anti-pattern that left
+beads unrouted when the polecat agent was binding-imported.
 
 **Why this is the default:**
 - Every polecat completion is a ledger entry — transparent, auditable work
