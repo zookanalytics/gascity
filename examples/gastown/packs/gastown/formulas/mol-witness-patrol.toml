@@ -78,8 +78,8 @@ gc runtime request-restart
 ```
 This sets `GC_RESTART_REQUESTED` metadata on the session and blocks
 forever. The controller will kill and restart the session on the next
-reconcile tick. The current wisp stays assigned and the new session
-the new session re-reads formula steps and resumes from context.
+reconcile tick. The current wisp stays assigned. The new session
+re-reads formula steps and resumes from context.
 
 **2. Check mail:**
 ```bash
@@ -433,7 +433,21 @@ On timeout: double the timeout (cap 300s) and proceed anyway.
 gc bd mol burn <this-wisp-id> --force
 ```
 
-The new wisp is ready. Re-read formula steps to start
-the next patrol cycle.
+**5. Re-engage on the next wisp (do NOT end your turn):**
 
-**Exit criteria:** Next wisp poured, this wisp burned."""
+The next wisp is already on your hook. Surface it and continue:
+```bash
+gc hook
+```
+
+This prints the new wisp. Now read this formula description from
+the top and execute it starting at step `check-inbox`. The new wisp
+IS your next patrol cycle — execute it in this same session.
+
+The session must NOT sit idle after burning. If you end your turn
+here, the witness stalls until an external nudge arrives — that is
+the bug this step exists to prevent.
+
+**Exit criteria:** Next wisp poured, this wisp burned, AND the next
+patrol cycle is in progress (you have re-read the formula and begun
+the new check-inbox step)."""
