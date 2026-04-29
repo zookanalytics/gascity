@@ -495,11 +495,8 @@ func TestAgentCommandDir_RigScopedAgentReturnsRigRoot(t *testing.T) {
 
 	got := agentCommandDir(cityPath, agent, rigs)
 	if got != rigRoot {
-		t.Fatalf("agentCommandDir() = %q, want rigRoot %q", got, rigRoot)
-	}
-	if got == cityPath {
-		t.Fatalf("agentCommandDir() returned cityPath %q for rig-scoped agent; "+
-			"controller commands would be HQ-scoped and miss rig-routed work", cityPath)
+		t.Fatalf("agentCommandDir() = %q, want rigRoot %q (returning cityPath would "+
+			"HQ-scope bd in the default scale_check and miss rig-routed work)", got, rigRoot)
 	}
 }
 
