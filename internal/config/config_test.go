@@ -1386,6 +1386,48 @@ func TestEffectiveWorkQueryPoolNoPoolName(t *testing.T) {
 	}
 }
 
+// TestPoolRoutingFormConsistencyV2 locks in the invariant that
+// EffectiveWorkQuery, EffectiveSlingQuery, and EffectiveScaleCheck all use
+// the same canonical routing target string for a binding-imported agent.
+// Disagreement caused the gc-z4rl pool routing form mismatch: sling stamped
+// one form while the agent's hook query searched for another, so routed
+// work sat unrouted. The invariant: if you can stamp it, you can find it.
+func TestPoolRoutingFormConsistencyV2(t *testing.T) {
+	a := Agent{
+		Name:              "polecat",
+		Dir:               "gascity",
+		BindingName:       "gastown",
+		MinActiveSessions: ptrInt(1),
+		MaxActiveSessions: ptrInt(3),
+	}
+	canonical := "gascity/gastown.polecat"
+	if a.QualifiedName() != canonical {
+		t.Fatalf("QualifiedName() = %q, want %q", a.QualifiedName(), canonical)
+	}
+
+	workQuery := a.EffectiveWorkQuery()
+	if !strings.Contains(workQuery, "bd ready --metadata-field gc.routed_to="+canonical+" --unassigned --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing canonical routed_to=%q: %q", canonical, workQuery)
+	}
+	if !strings.Contains(workQuery, "bd list --metadata-field gc.routed_to="+canonical+" --status=open --type=molecule --no-assignee --json --limit=1") {
+		t.Errorf("EffectiveWorkQuery() missing canonical molecule route gc.routed_to=%q: %q", canonical, workQuery)
+	}
+
+	slingQuery := a.EffectiveSlingQuery()
+	wantSling := "bd update {} --set-metadata gc.routed_to=" + canonical
+	if slingQuery != wantSling {
+		t.Errorf("EffectiveSlingQuery() = %q, want %q", slingQuery, wantSling)
+	}
+
+	scaleCheck := a.EffectiveScaleCheck()
+	if !strings.Contains(scaleCheck, "bd ready --metadata-field gc.routed_to="+canonical+" --unassigned --json") {
+		t.Errorf("EffectiveScaleCheck() missing canonical routed_to=%q: %q", canonical, scaleCheck)
+	}
+	if !strings.Contains(scaleCheck, "bd list --metadata-field gc.routed_to="+canonical+" --status=open --type=molecule --no-assignee --json") {
+		t.Errorf("EffectiveScaleCheck() missing canonical molecule route gc.routed_to=%q: %q", canonical, scaleCheck)
+	}
+}
+
 func TestEffectiveWorkQueryControlDispatcherIncludesLegacyWorkflowControlRoute(t *testing.T) {
 	a := Agent{Name: ControlDispatcherAgentName, Dir: "gascity"}
 	got := a.EffectiveWorkQuery()
@@ -3109,6 +3151,19 @@ func TestEffectiveMethodsQualifyConsistently(t *testing.T) {
 				Name:              "worker",
 				Dir:               "rigs/deep-project",
 				MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(5),
+			},
+		},
+		{
+			// V2 binding-imported pool agent — the gc-z4rl regression case.
+			// QualifiedName is "rig/binding.name"; all three Effective methods
+			// must use that exact form so sling-stamped metadata matches what
+			// hook queries search for.
+			name: "binding-imported pool agent",
+			agent: Agent{
+				Name:              "polecat",
+				Dir:               "gascity",
+				BindingName:       "gastown",
+				MinActiveSessions: ptrInt(1), MaxActiveSessions: ptrInt(3),
 			},
 		},
 	}
