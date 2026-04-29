@@ -480,6 +480,38 @@ func TestConfiguredRigNameUnmatchedPathReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestAgentCommandDir_RigScopedAgentReturnsRigRoot locks the load-bearing
+// invariant that controller-side shell commands (scale_check, work_query,
+// on_boot, on_death) for rig-scoped agents run from the rig root, not the
+// city path. If this regresses, bd resolves to the HQ database from city
+// cwd, scale_check returns 0 for every rig-scoped pool agent, and the
+// reconciler keeps the pool stuck at min_active_sessions regardless of
+// routed work in the rig's beads DB. See gc-f486.
+func TestAgentCommandDir_RigScopedAgentReturnsRigRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(cityPath, "rigs", "demo")
+	agent := &config.Agent{Name: "polecat", Dir: filepath.Join("rigs", "demo")}
+	rigs := []config.Rig{{Name: "demo", Path: rigRoot}}
+
+	got := agentCommandDir(cityPath, agent, rigs)
+	if got != rigRoot {
+		t.Fatalf("agentCommandDir() = %q, want rigRoot %q", got, rigRoot)
+	}
+	if got == cityPath {
+		t.Fatalf("agentCommandDir() returned cityPath %q for rig-scoped agent; "+
+			"controller commands would be HQ-scoped and miss rig-routed work", cityPath)
+	}
+}
+
+// TestAgentCommandDir_NilAgentReturnsCityPath verifies the documented
+// fallback for a nil agent.
+func TestAgentCommandDir_NilAgentReturnsCityPath(t *testing.T) {
+	cityPath := t.TempDir()
+	if got := agentCommandDir(cityPath, nil, nil); got != cityPath {
+		t.Fatalf("agentCommandDir(nil) = %q, want cityPath %q", got, cityPath)
+	}
+}
+
 // TestBuildFingerprintExtra_StableAcrossBaseAndInstance is a regression test
 // for the config-drift oscillation that was reaping live pool and named
 // sessions "minutes into work". Different code paths in buildDesiredState
