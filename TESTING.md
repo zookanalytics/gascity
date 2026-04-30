@@ -158,6 +158,21 @@ listener bootstrap, socket paths — wires end-to-end through a real
 binary. Run with `make test-integration-huma` or
 `go test -tags integration -run TestHumaBinary ./test/integration/`.
 
+#### Live worker inference tests (`//go:build acceptance_c`)
+
+`test/acceptance/worker_inference` runs live Claude/Codex/Gemini CLI
+sessions through tmux and requires local or CI-provided provider auth. It is
+not part of PR CI. Run it deliberately when validating provider behavior:
+
+```bash
+make setup-worker-inference PROFILE=claude/tmux-cli
+make test-worker-inference PROFILE=claude/tmux-cli
+```
+
+Supported profiles are `claude/tmux-cli`, `codex/tmux-cli`, and
+`gemini/tmux-cli`. Nightly CI runs these with its configured credentials and
+uploads worker report artifacts.
+
 ### 4. Documentation sync tests (`test/docsync`)
 
 These tests keep the public docs surface honest.
