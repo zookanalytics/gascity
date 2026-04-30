@@ -1,6 +1,9 @@
 # Replaces deacon patrol step: town-orphan-sweep
 #
-# Cross-references in-progress beads against live agents. Beads assigned
+# Per-scope orphan reset: cross-references in-progress beads against live
+# agents in the current scope. Pack imports register one instance per
+# non-HQ rig plus one for HQ, so each invocation's bd scope is bounded by
+# its cwd — no shell fan-out, no temp file, no jq -s union. Beads assigned
 # to non-existent agents get reset to open/unassigned so the rig's witness
 # can pick them up on its next patrol. No worktree salvage — that's the
 # witness's job.
