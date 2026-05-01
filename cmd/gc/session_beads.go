@@ -1011,15 +1011,18 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if managedAlias != "" {
 				lockFn := func() error {
 					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, managedAlias, "", managedAlias); err != nil {
+						// Block creation when the alias is already held by a live
+						// session bead. Previously only configured-named sessions
+						// blocked here; pool sessions silently proceeded without
+						// the alias, leaving phantom beads (gc-53fv) that the
+						// witness later observed sharing alias+work_dir with the
+						// real session.
 						fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable: %v\n", managedAlias, agentName, err) //nolint:errcheck
-						if isConfiguredNamed {
-							createErr = err
-							blocked = true
-							return nil
-						}
-					} else {
-						meta["alias"] = managedAlias
+						createErr = err
+						blocked = true
+						return nil
 					}
+					meta["alias"] = managedAlias
 					if isConfiguredNamed {
 						if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sn, "", managedAlias); err != nil {
 							fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable: %v\n", sn, agentName, err) //nolint:errcheck
