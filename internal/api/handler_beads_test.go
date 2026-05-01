@@ -22,6 +22,7 @@ type prefixedAliasStore struct {
 	getCalls      int
 	updateCalls   int
 	closeCalls    int
+	reopenCalls   int
 	childrenCalls int
 }
 
@@ -138,6 +139,11 @@ func (s *prefixedAliasStore) Update(id string, opts beads.UpdateOpts) error {
 func (s *prefixedAliasStore) Close(id string) error {
 	s.closeCalls++
 	return s.base.Close(s.aliasToBase(id))
+}
+
+func (s *prefixedAliasStore) Reopen(id string) error {
+	s.reopenCalls++
+	return s.base.Reopen(s.aliasToBase(id))
 }
 
 func (s *prefixedAliasStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
@@ -316,6 +322,86 @@ func configureBeadRouteState(t *testing.T) (*fakeState, *prefixedAliasStore, *pr
 	}
 
 	return state, alphaStore, betaStore
+}
+
+func TestBeadPrefixAllowsAlphanumericPrefixes(t *testing.T) {
+	if got := beadPrefix("mcdi3bsyeryols-yyn"); got != "mcdi3bsyeryols" {
+		t.Fatalf("beadPrefix() = %q, want alphanumeric prefix", got)
+	}
+}
+
+func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	created, err := rigStore.Create(beads.Bead{Title: "close me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := "in_progress"
+	if err := rigStore.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	misrouted := &closeSucceedsWithoutBeadStore{Store: beads.NewMemStore()}
+	state := newFakeState(t)
+	state.cityBeadStore = misrouted
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+
+	s := New(state)
+	if _, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: created.ID}); err != nil {
+		t.Fatalf("humaHandleBeadClose: %v", err)
+	}
+
+	if misrouted.closeCalls != 0 {
+		t.Fatalf("misrouted close calls = %d, want 0", misrouted.closeCalls)
+	}
+	got, err := rigStore.Get(created.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("rig status = %q, want closed", got.Status)
+	}
+}
+
+func TestBeadStoresForIDUsesConfiguredRigPrefixBeforeFallback(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cfg.Workspace.Prefix = "ct"
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(state.cityPath, "rigs", "myrig"), Prefix: "rw"}}
+
+	s := New(state)
+	stores := s.beadStoresForID("rw-1")
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("beadStoresForID(rw-1) = %#v, want only configured rig store", stores)
+	}
+}
+
+func TestBeadStoresForIDUsesConfiguredHyphenatedRigPrefix(t *testing.T) {
+	state := newFakeState(t)
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	state.cityBeadStore = cityStore
+	state.stores = map[string]beads.Store{"myrig": rigStore}
+	state.cfg.Workspace.Prefix = "mlcm"
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: filepath.Join(state.cityPath, "rigs", "myrig"), Prefix: "mc-mogbzvrs"}}
+
+	s := New(state)
+	stores := s.beadStoresForID("mc-mogbzvrs-hiv.1")
+	if len(stores) != 1 || stores[0] != rigStore {
+		t.Fatalf("beadStoresForID(hyphenated prefix) = %#v, want only configured rig store", stores)
+	}
+}
+
+type closeSucceedsWithoutBeadStore struct {
+	beads.Store
+	closeCalls int
+}
+
+func (s *closeSucceedsWithoutBeadStore) Close(string) error {
+	s.closeCalls++
+	return nil
 }
 
 func TestBeadCRUD(t *testing.T) {
@@ -604,6 +690,27 @@ func TestBeadUpdate(t *testing.T) {
 	}
 }
 
+func TestBeadUpdateStatusAndMetadata(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	b, _ := store.Create(beads.Bead{Title: "Test"})
+	h := newTestCityHandler(t, state)
+
+	body := `{"status":"in_progress","metadata":{"verified":"true"}}`
+	req := newPostRequest(cityURL(state, "/bead/")+b.ID+"/update", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	got, _ := store.Get(b.ID)
+	if got.Status != "in_progress" || got.Metadata["verified"] != "true" {
+		t.Fatalf("bead = %+v, want in_progress plus metadata", got)
+	}
+}
+
 func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -619,8 +726,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 		"type":"feature",
 		"parent":"` + parent.ID + `",
 		"metadata":{
-			"mc.contract.role":"child",
-			"mc.contract.run_id":"run-1"
+			"real_world_app.contract.role":"child",
+			"real_world_app.contract.run_id":"run-1"
 		}
 	}`
 	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
@@ -638,8 +745,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	if created.ParentID != parent.ID {
 		t.Fatalf("response parent = %q, want %q", created.ParentID, parent.ID)
 	}
-	if created.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("response metadata = %#v, want mc.contract.run_id=run-1", created.Metadata)
+	if created.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("response metadata = %#v, want real_world_app.contract.run_id=run-1", created.Metadata)
 	}
 
 	got, err := store.Get(created.ID)
@@ -649,8 +756,8 @@ func TestBeadCreatePersistsMetadataAndParent(t *testing.T) {
 	if got.ParentID != parent.ID {
 		t.Fatalf("stored parent = %q, want %q", got.ParentID, parent.ID)
 	}
-	if got.Metadata["mc.contract.role"] != "child" || got.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("stored metadata = %#v, want MC metadata", got.Metadata)
+	if got.Metadata["real_world_app.contract.role"] != "child" || got.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("stored metadata = %#v, want real-world app metadata", got.Metadata)
 	}
 }
 
@@ -670,7 +777,7 @@ func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 		"type":"feature",
 		"parent":"` + parent.ID + `",
 		"labels":["urgent"],
-		"metadata":{"mc.contract.run_id":"run-1"}
+		"metadata":{"real_world_app.contract.run_id":"run-1"}
 	}`
 	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
@@ -690,8 +797,8 @@ func TestBeadCreateResponseUsesAuthoritativeStoredBead(t *testing.T) {
 	if len(created.Labels) != 1 || created.Labels[0] != "urgent" {
 		t.Fatalf("response labels = %#v, want [urgent]", created.Labels)
 	}
-	if created.Metadata["mc.contract.run_id"] != "run-1" {
-		t.Fatalf("response metadata = %#v, want mc.contract.run_id=run-1", created.Metadata)
+	if created.Metadata["real_world_app.contract.run_id"] != "run-1" {
+		t.Fatalf("response metadata = %#v, want real_world_app.contract.run_id=run-1", created.Metadata)
 	}
 }
 
@@ -942,7 +1049,8 @@ func TestBeadUpdateNullPriorityRejected(t *testing.T) {
 
 func TestBeadReopen(t *testing.T) {
 	state := newFakeState(t)
-	store := state.stores["myrig"]
+	store := newPrefixedAliasStore("myrig-")
+	state.stores["myrig"] = store
 	b, _ := store.Create(beads.Bead{Title: "Closed task"})
 	store.Close(b.ID) //nolint:errcheck
 	h := newTestCityHandler(t, state)
@@ -960,6 +1068,12 @@ func TestBeadReopen(t *testing.T) {
 	got, _ := store.Get(b.ID)
 	if got.Status != "open" {
 		t.Errorf("Status = %q, want %q", got.Status, "open")
+	}
+	if store.reopenCalls != 1 {
+		t.Fatalf("reopen calls = %d, want 1", store.reopenCalls)
+	}
+	if store.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0; reopen must not use generic update", store.updateCalls)
 	}
 }
 

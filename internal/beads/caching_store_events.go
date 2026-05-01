@@ -32,8 +32,13 @@ func (c *CachingStore) ApplyEvent(eventType string, payload json.RawMessage) {
 		c.mu.RUnlock()
 		return
 	}
-	_, cached := c.beads[patch.ID]
+	current, cached := c.beads[patch.ID]
+	_, locallyMutated := c.beadSeq[patch.ID]
 	c.mu.RUnlock()
+
+	if eventType != "bead.closed" && cached && locallyMutated && cacheEventConflictsCurrent(current, patch, fields) {
+		return
+	}
 
 	b := patch
 	if !cached {
@@ -151,14 +156,59 @@ func mergeCacheEventPatch(base, patch Bead, fields map[string]json.RawMessage) B
 	return merged
 }
 
+func cacheEventConflictsCurrent(current, patch Bead, fields map[string]json.RawMessage) bool {
+	if hasCacheEventField(fields, "title") && current.Title != patch.Title {
+		return true
+	}
+	if hasCacheEventField(fields, "status") && current.Status != patch.Status {
+		return true
+	}
+	if (hasCacheEventField(fields, "issue_type") || hasCacheEventField(fields, "type")) && current.Type != patch.Type {
+		return true
+	}
+	if hasCacheEventField(fields, "priority") {
+		if (current.Priority == nil) != (patch.Priority == nil) {
+			return true
+		}
+		if current.Priority != nil && patch.Priority != nil && *current.Priority != *patch.Priority {
+			return true
+		}
+	}
+	if hasCacheEventField(fields, "assignee") && current.Assignee != patch.Assignee {
+		return true
+	}
+	if hasCacheEventField(fields, "description") && current.Description != patch.Description {
+		return true
+	}
+	if hasCacheEventField(fields, "parent") && current.ParentID != patch.ParentID {
+		return true
+	}
+	if hasCacheEventField(fields, "parent_id") && current.ParentID != patch.ParentID {
+		return true
+	}
+	if hasCacheEventField(fields, "metadata") && !maps.Equal(current.Metadata, patch.Metadata) {
+		return true
+	}
+	return false
+}
+
 func hasCacheEventField(fields map[string]json.RawMessage, name string) bool {
 	_, ok := fields[name]
 	return ok
 }
 
 func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage, error) {
+	eventPayload := payload
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return Bead{}, nil, err
+	}
+	if beadPayload, ok := envelope["bead"]; ok {
+		eventPayload = beadPayload
+	}
+
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(payload, &fields); err != nil {
+	if err := json.Unmarshal(eventPayload, &fields); err != nil {
 		return Bead{}, nil, err
 	}
 	var wire struct {
@@ -166,7 +216,7 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 		Metadata   StringMap `json:"metadata,omitempty"`
 		TypeCompat string    `json:"type,omitempty"`
 	}
-	if err := json.Unmarshal(payload, &wire); err != nil {
+	if err := json.Unmarshal(eventPayload, &wire); err != nil {
 		return Bead{}, nil, err
 	}
 	b := wire.Bead

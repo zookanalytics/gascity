@@ -19,7 +19,9 @@ import (
 
 // fakeCityResolver implements CityResolver for testing.
 type fakeCityResolver struct {
-	cities map[string]*fakeState // keyed by city name
+	cities             map[string]*fakeState // keyed by city name
+	pending            map[string]string
+	supervisorRecorder events.Recorder
 }
 
 func (f *fakeCityResolver) ListCities() []CityInfo {
@@ -40,6 +42,27 @@ func (f *fakeCityResolver) CityState(name string) State {
 		return s
 	}
 	return nil
+}
+
+func (f *fakeCityResolver) StorePendingRequestID(cityPath, requestID string) error {
+	if f.pending == nil {
+		f.pending = make(map[string]string)
+	}
+	if _, exists := f.pending[cityPath]; exists {
+		return ErrPendingRequestExists
+	}
+	f.pending[cityPath] = requestID
+	return nil
+}
+
+func (f *fakeCityResolver) ConsumePendingRequestID(cityPath string) (string, bool, error) {
+	id, ok := f.pending[cityPath]
+	delete(f.pending, cityPath)
+	return id, ok, nil
+}
+
+func (f *fakeCityResolver) SupervisorEventRecorder() events.Recorder {
+	return f.supervisorRecorder
 }
 
 func newTestSupervisorMux(t *testing.T, cities map[string]*fakeState) *SupervisorMux {
@@ -574,6 +597,42 @@ func TestSupervisorEventListsEmitTypedPayloadObjects(t *testing.T) {
 				t.Fatalf("session.woke payload = %v, want empty object", noPayload)
 			}
 		})
+	}
+}
+
+func TestSupervisorEventListsIncludeCustomEventTypes(t *testing.T) {
+	s := newFakeState(t)
+	s.cityName = "alpha"
+	s.eventProv.(*events.Fake).Record(events.Event{Type: "custom.untyped", Actor: "tester", Payload: json.RawMessage(`{"source":"test"}`)})
+	s.eventProv.(*events.Fake).Record(events.Event{Type: events.SessionWoke, Actor: "tester"})
+
+	sm := newTestSupervisorMux(t, map[string]*fakeState{"alpha": s})
+
+	req := httptest.NewRequest("GET", "/v0/events", nil)
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp struct {
+		Items []map[string]any `json:"items"`
+		Total int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 2 || len(resp.Items) != 2 {
+		t.Fatalf("response = %+v, want custom and registered events", resp)
+	}
+	custom := eventListItemByType(t, resp.Items, "custom.untyped")
+	if custom["city"] != "alpha" {
+		t.Fatalf("custom city = %v, want alpha; item=%v", custom["city"], custom)
+	}
+	payload := assertJSONPayloadObject(t, custom["payload"])
+	if payload["source"] != "test" {
+		t.Fatalf("custom payload = %v, want source=test", payload)
 	}
 }
 
