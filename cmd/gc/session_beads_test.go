@@ -5137,3 +5137,76 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncSessionBeads_DoesNotCreateDuplicatePoolAlias guards against the
+// gc-53fv duplicate session registration: a second pool bead must not be
+// created for an alias already held by an open pool bead. Previously the
+// non-configured-named branch in syncSessionBeadsWithSnapshotAndRigStores
+// silently logged the alias-unavailable error and proceeded to create a
+// "ghost" bead without the alias, which the witness later observed as a
+// duplicate session-registry entry sharing alias+work_dir with the live
+// session.
+func TestSyncSessionBeads_DoesNotCreateDuplicatePoolAlias(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 5, 1, 23, 56, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "myrig"},
+		},
+	}
+
+	owner, err := store.Create(beads.Bead{
+		Title:  "polecat-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:myrig/polecat-1"},
+		Metadata: map[string]string{
+			"session_name":         "polecat-existing",
+			"agent_name":           "myrig/polecat-1",
+			"alias":                "myrig/polecat-1",
+			"template":             "myrig/polecat",
+			"state":                "active",
+			"session_origin":       "ephemeral",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating live owner bead: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		"polecat-new": {
+			TemplateName: "myrig/polecat",
+			InstanceName: "myrig/polecat-1",
+			Alias:        "myrig/polecat-1",
+			Command:      "claude",
+			PoolSlot:     1,
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		for i, b := range all {
+			t.Logf("bead[%d]: id=%s status=%q session_name=%q alias=%q agent_name=%q pool_slot=%q state=%q",
+				i, b.ID, b.Status,
+				b.Metadata["session_name"], b.Metadata["alias"],
+				b.Metadata["agent_name"], b.Metadata["pool_slot"],
+				b.Metadata["state"])
+		}
+		t.Fatalf("expected only the live owner bead, got %d beads — duplicate pool alias accepted (gc-53fv)", len(all))
+	}
+	if all[0].ID != owner.ID {
+		t.Fatalf("remaining bead = %s, want owner %s", all[0].ID, owner.ID)
+	}
+	if got := all[0].Metadata["alias"]; got != "myrig/polecat-1" {
+		t.Fatalf("owner alias after sync = %q, want %q", got, "myrig/polecat-1")
+	}
+	if !strings.Contains(stderr.String(), `alias "myrig/polecat-1"`) {
+		t.Fatalf("stderr = %q, want alias unavailable warning for duplicate pool alias", stderr.String())
+	}
+}
