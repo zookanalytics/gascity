@@ -255,6 +255,19 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	if len(evt.Payload) == 0 {
 		return
 	}
+	// Skip events we emitted ourselves (reconciler-detected changes).
+	// The originating CachingStore already updated its own cache during
+	// reconcile; redelivering through ApplyEvent risks a self-feedback
+	// loop because mergeCacheEventPatch is field-aware (driven by which
+	// JSON keys are present) while notifyChange marshals the full bead
+	// with omitempty — fields that became empty are dropped from the
+	// payload and the merge silently keeps the prior cache value, so
+	// the next reconcile cycle still sees a diff and re-fires.
+	// Other stores filter by ownsBeadID, so the only meaningful
+	// delivery was back to the originating store anyway.
+	if evt.Actor == "cache-reconcile" {
+		return
+	}
 	cs.mu.RLock()
 	stores := make([]beads.Store, 0, len(cs.beadStores)+1)
 	for _, s := range cs.beadStores {
@@ -270,9 +283,7 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 			cached.ApplyEvent(evt.Type, evt.Payload)
 		}
 	}
-	if evt.Actor != "cache-reconcile" {
-		cs.Poke()
-	}
+	cs.Poke()
 }
 
 // update replaces the config, session provider, and reopens stores.
