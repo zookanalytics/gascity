@@ -110,22 +110,52 @@ managed_runtime_listener_pid() (
       ;;
   esac
 
-  if ! command -v lsof >/dev/null 2>&1; then
+  _emit_first_running_holder() {
+    while IFS= read -r holder_pid; do
+      case "$holder_pid" in
+        ''|*[!0-9]*)
+          continue
+          ;;
+      esac
+      if pid_is_running "$holder_pid"; then
+        printf '%s\n' "$holder_pid"
+        return 0
+      fi
+    done
+  }
+
+  # ss (iproute2) is preferred on Linux: it reads via netlink and correctly
+  # reports MPTCP listening sockets, which lsof 4.99.6 misclassifies as
+  # protocol "MPTCPv6" and thus excludes from `-iTCP:PORT` results. Modern
+  # Go's net package on Linux kernels with MPTCP enabled by default
+  # (Ubuntu 24.04+, recent Debian/Fedora) creates these sockets, so an
+  # lsof-only probe fails to discover the listener and the managed runtime
+  # gets misreported as zombie. Extraction is done in shell rather than
+  # piping through sed/awk, both of which fully-buffer when stdout is a
+  # pipe and would delay holder-pid emission until ss exits — by which
+  # time test fakes that synthesize a transient process have already gone.
+  if command -v ss >/dev/null 2>&1; then
+    ss -Hltnp "sport = :$port" 2>/dev/null \
+      | while IFS= read -r line; do
+          case "$line" in
+            *pid=*)
+              rest=${line#*pid=}
+              pid_candidate=${rest%%[!0-9]*}
+              [ -n "$pid_candidate" ] && printf '%s\n' "$pid_candidate"
+              ;;
+          esac
+        done \
+      | _emit_first_running_holder
     return 0
   fi
 
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
-    | while IFS= read -r holder_pid; do
-        case "$holder_pid" in
-          ''|*[!0-9]*)
-            continue
-            ;;
-        esac
-        if pid_is_running "$holder_pid"; then
-          printf '%s\n' "$holder_pid"
-          break
-        fi
-      done
+  # macOS lacks ss; lsof is correct there because Go on Darwin does not
+  # create MPTCP sockets, so the lsof MPTCP-blind-spot does not apply.
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+      | _emit_first_running_holder
+    return 0
+  fi
 )
 
 managed_runtime_tcp_reachable() (
