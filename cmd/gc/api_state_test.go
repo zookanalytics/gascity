@@ -575,7 +575,11 @@ func TestControllerStateMutationRollsBackAgentOverrideWhenRefreshFails(t *testin
 	}
 }
 
-func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
+func TestControllerStateSkipsCacheReconcileBeadEventDelivery(t *testing.T) {
+	// cache-reconcile events on the bus must NOT be re-applied to caching
+	// stores via ApplyEvent. The originating store already wrote its cache
+	// during reconcile; redelivering risks the omitempty + mergeCacheEventPatch
+	// self-feedback loop documented in applyBeadEventToStores.
 	backing := beads.NewMemStore()
 	created, err := backing.Create(beads.Bead{Title: "root"})
 	if err != nil {
@@ -586,6 +590,8 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 		t.Fatalf("Prime: %v", err)
 	}
 
+	// Cache is primed with status="open". Construct a payload claiming
+	// status="in_progress" and deliver it via the cache-reconcile path.
 	updated := created
 	updated.Status = "in_progress"
 	payload, err := json.Marshal(updated)
@@ -611,8 +617,8 @@ func TestControllerStateAppliesCacheReconcileBeadEventsToStores(t *testing.T) {
 	if len(items) != 1 || items[0].ID != created.ID {
 		t.Fatalf("cached items = %+v, want only %s", items, created.ID)
 	}
-	if items[0].Status != "in_progress" {
-		t.Fatalf("status after cache-reconcile event = %q, want in_progress", items[0].Status)
+	if items[0].Status != "open" {
+		t.Fatalf("status after cache-reconcile bus event = %q, want unchanged %q (cache-reconcile events must not be redelivered via ApplyEvent)", items[0].Status, "open")
 	}
 }
 
