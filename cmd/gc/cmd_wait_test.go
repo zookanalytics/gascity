@@ -145,6 +145,7 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template city): %w", err)
 			return
 		}
+		registerProcessCleanup(func() { _ = os.RemoveAll(cityPath) })
 		rigPath, err := writeManagedBdWaitTestCityScaffold(cityPath)
 		if err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("write template scaffold: %w", err)
@@ -160,6 +161,7 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
+		registerProcessCleanup(func() { _ = os.RemoveAll(homeDir) })
 		if err := writeWaitTestDoltIdentity(homeDir); err != nil {
 			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
 			return

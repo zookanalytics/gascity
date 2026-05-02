@@ -141,6 +141,14 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 }
 
 func TestMain(m *testing.M) {
+	// Skip the heavy TestMain setup when this binary is being re-exec'd
+	// as a helper subprocess. Helper tests typically call os.Exit
+	// directly (bypassing any cleanup), so any temp dirs allocated here
+	// would leak. The helper test runs in its own process and exits;
+	// it does not need the shared gcHome / runtimeDir / provider stubs.
+	if helperProcessTestEnvActive() {
+		os.Exit(m.Run())
+	}
 	if err := scrubInheritedGCEnvForTests(); err != nil {
 		panic(err)
 	}
@@ -148,10 +156,12 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	registerProcessCleanup(func() { _ = os.RemoveAll(gcHome) })
 	runtimeDir, err := os.MkdirTemp("", "gascity-runtime-*")
 	if err != nil {
 		panic(err)
 	}
+	registerProcessCleanup(func() { _ = os.RemoveAll(runtimeDir) })
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {
 		panic(err)
 	}
@@ -162,7 +172,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer func() { _ = os.RemoveAll(providerStubDir) }()
+	registerProcessCleanup(func() { _ = os.RemoveAll(providerStubDir) })
 	pathValue := providerStubDir
 	if existingPath := os.Getenv("PATH"); existingPath != "" {
 		pathValue += string(os.PathListSeparator) + existingPath
@@ -171,12 +181,12 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	configureSupervisorHooksForTests()
-	testscript.Main(m, map[string]func(){
-		"gc": func() {
+	testscript.Main(&processCleanupM{M: m}, map[string]func(){
+		"gc": runTestscriptSubcommand(func() int {
 			configureTestscriptEnvDefaults()
-			os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
-		},
-		"bd": bdTestCmd,
+			return run(os.Args[1:], os.Stdout, os.Stderr)
+		}),
+		"bd": runTestscriptSubcommand(bdTestCmd),
 	})
 }
 
