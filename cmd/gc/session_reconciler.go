@@ -544,7 +544,32 @@ func reconcileSessionBeadsTraced(
 						}
 						continue
 					}
-					_, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					ackReason, reconcilerOwnedAck := reconcilerDrainAckMatchesSession(*session, sp, name)
+					if reconcilerOwnedAck && ackReason == "config-drift" {
+						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
+						if attachErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+						}
+						if attached {
+							if isNamedSessionBead(*session) {
+								if driftKey := sessionConfigDriftKey(*session, cfg, tp); driftKey != "" {
+									if err := recordNamedSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
+										fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+									}
+								}
+							}
+							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							if !drainCancelled {
+								clearReconcilerDrainAckMetadata(sp, name)
+							}
+							if trace != nil {
+								trace.recordDecision("reconciler.session.drain_ack", tp.TemplateName, name, "config_drift_attached", "cancel_reconciler_ack", traceRecordPayload{
+									"drain_canceled": drainCancelled,
+								}, nil, "")
+							}
+							continue
+						}
+					}
 					if pendingInteractionKeepsAwake(*session, sp, name, clk) &&
 						(cancelReconcilerAckedDrain(*session, sp, dt) || cancelRecoveredReconcilerAckedDrain(*session, sp, name)) {
 						if trace != nil {
@@ -730,26 +755,7 @@ func reconcileSessionBeadsTraced(
 					// Apply template_overrides using the same resolution as
 					// prepareSessionStart: merge defaults + overrides, then
 					// replaceSchemaFlags to strip and re-add all schema flags.
-					if rawOvr := session.Metadata["template_overrides"]; rawOvr != "" {
-						if tp.ResolvedProvider != nil && len(tp.ResolvedProvider.OptionsSchema) > 0 {
-							var ovr map[string]string
-							if err := json.Unmarshal([]byte(rawOvr), &ovr); err == nil && len(ovr) > 0 {
-								fullOptions := make(map[string]string)
-								for k, v := range tp.ResolvedProvider.EffectiveDefaults {
-									fullOptions[k] = v
-								}
-								for k, v := range ovr {
-									if k == "initial_message" {
-										continue
-									}
-									fullOptions[k] = v
-								}
-								if extra, rErr := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions); rErr == nil && len(extra) > 0 {
-									agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, extra)
-								}
-							}
-						}
-					}
+					applyTemplateOverridesToConfig(&agentCfg, *session, tp)
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
 						fmt.Fprintf(stderr, "config-drift %s: stored=%s current=%s cmd=%q\n", name, storedHash[:12], currentHash[:12], agentCfg.Command) //nolint:errcheck
@@ -760,13 +766,51 @@ func reconcileSessionBeadsTraced(
 						}
 						runtime.LogCoreFingerprintDrift(stderr, name, storedBreakdown, agentCfg)
 						restartedInPlace := false
+						// Attached sessions never get config-drift restarts.
+						// The human will restart when ready; drift applies
+						// after detach. Checked before named/non-named paths
+						// because named session config drift is an immediate
+						// kill; a single transient IsAttached false negative
+						// would destroy conversation context irreversibly.
+						driftKey := storedHash + ":" + currentHash
+						attached, attachErr := sessionAttachedForConfigDrift(*session, sp, cityPath, store, cfg, name)
+						if attachErr != nil {
+							fmt.Fprintf(stderr, "session reconciler: observing config-drift attachment for %s: %v\n", name, attachErr) //nolint:errcheck
+						}
+						if attached {
+							if isNamedSessionBead(*session) {
+								if err := recordNamedSessionAttachedConfigDriftDeferral(*session, store, clk, driftKey); err != nil {
+									fmt.Fprintf(stderr, "session reconciler: recording attached config-drift deferral for %s: %v\n", name, err) //nolint:errcheck
+								}
+							}
+							drainCancelled := cancelSessionConfigDriftDrain(*session, sp, dt)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
+									"stored_hash":    storedHash,
+									"current_hash":   currentHash,
+									"active_reason":  "attached",
+									"drain_canceled": drainCancelled,
+								}, nil, "")
+							}
+							continue
+						}
 						if isNamedSessionBead(*session) {
+							if recentlyDeferredNamedSessionAttachedConfigDrift(*session, clk, driftKey) {
+								if trace != nil {
+									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredAttached), traceRecordPayload{
+										"stored_hash":   storedHash,
+										"current_hash":  currentHash,
+										"active_reason": "attached_recently",
+									}, nil, "")
+								}
+								continue
+							}
 							// Defer config-drift restart for named sessions
 							// that are actively in use (pending interaction,
 							// tmux-attached, or recent activity). This prevents
 							// draining a working agent mid-task without graceful
 							// handoff. See gastownhall/gascity#119.
-							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, store, sp, name, clk, storedHash+":"+currentHash)
+							activeReason, active, deferErr := shouldDeferNamedSessionConfigDrift(*session, store, sp, name, clk, driftKey)
 							if deferErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", name, deferErr) //nolint:errcheck
 							}
@@ -810,28 +854,6 @@ func reconcileSessionBeadsTraced(
 										"stored_hash":    storedHash,
 										"current_hash":   currentHash,
 										"drain_canceled": drainCancelled,
-									}, nil, "")
-								}
-								continue
-							}
-							attached, err := workerSessionTargetAttachedWithConfig(cityPath, store, sp, cfg, session.ID)
-							if err == nil && attached {
-								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
-										"stored_hash":  storedHash,
-										"current_hash": currentHash,
-									}, nil, "")
-								}
-								continue
-							}
-							// Defer ordinary-session config-drift drain while a
-							// user is attached. Named-session config drift is
-							// non-deferrable and is handled above.
-							if sp.IsAttached(name) {
-								if trace != nil {
-									trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", "deferred_attached", traceRecordPayload{
-										"stored_hash":  storedHash,
-										"current_hash": currentHash,
 									}, nil, "")
 								}
 								continue
@@ -1266,8 +1288,11 @@ func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (b
 const (
 	namedSessionActivityThreshold                      = 2 * time.Minute
 	namedSessionRecentActivityConfigDriftDeferralLimit = 30 * time.Second
+	namedSessionAttachedConfigDriftFalseNegativeLimit  = 30 * time.Second
 	namedSessionConfigDriftDeferredAtMetadata          = "config_drift_deferred_at"
 	namedSessionConfigDriftDeferredKeyMetadata         = "config_drift_deferred_key"
+	namedSessionAttachedConfigDriftDeferredAtMetadata  = "attached_config_drift_deferred_at"
+	namedSessionAttachedConfigDriftDeferredKeyMetadata = "attached_config_drift_deferred_key"
 )
 
 // namedSessionActivelyInUse returns true if a named session is currently
@@ -1352,13 +1377,123 @@ func clearNamedSessionConfigDriftDeferral(session beads.Bead, store beads.Store)
 		return nil
 	}
 	if session.Metadata[namedSessionConfigDriftDeferredAtMetadata] == "" &&
-		session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" {
+		session.Metadata[namedSessionConfigDriftDeferredKeyMetadata] == "" &&
+		session.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata] == "" &&
+		session.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] == "" {
 		return nil
 	}
 	return store.SetMetadataBatch(session.ID, map[string]string{
-		namedSessionConfigDriftDeferredAtMetadata:  "",
-		namedSessionConfigDriftDeferredKeyMetadata: "",
+		namedSessionConfigDriftDeferredAtMetadata:          "",
+		namedSessionConfigDriftDeferredKeyMetadata:         "",
+		namedSessionAttachedConfigDriftDeferredAtMetadata:  "",
+		namedSessionAttachedConfigDriftDeferredKeyMetadata: "",
 	})
+}
+
+func recordNamedSessionAttachedConfigDriftDeferral(session beads.Bead, store beads.Store, clk clock.Clock, driftKey string) error {
+	if store == nil || session.ID == "" {
+		return nil
+	}
+	now := time.Now().UTC()
+	if clk != nil {
+		now = clk.Now().UTC()
+	}
+	return store.SetMetadataBatch(session.ID, map[string]string{
+		namedSessionAttachedConfigDriftDeferredAtMetadata:  now.Format(time.RFC3339),
+		namedSessionAttachedConfigDriftDeferredKeyMetadata: driftKey,
+	})
+}
+
+func recentlyDeferredNamedSessionAttachedConfigDrift(session beads.Bead, clk clock.Clock, driftKey string) bool {
+	if driftKey == "" || session.Metadata[namedSessionAttachedConfigDriftDeferredKeyMetadata] != driftKey {
+		return false
+	}
+	raw := session.Metadata[namedSessionAttachedConfigDriftDeferredAtMetadata]
+	if raw == "" {
+		return false
+	}
+	deferredAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	now := time.Now().UTC()
+	if clk != nil {
+		now = clk.Now().UTC()
+	}
+	if now.Before(deferredAt) {
+		return true
+	}
+	return now.Sub(deferredAt) < namedSessionAttachedConfigDriftFalseNegativeLimit
+}
+
+// sessionAttachedForConfigDrift reports whether a session is currently
+// attached (a user terminal is connected) and should skip config-drift
+// handling. It checks worker-handle observation first and falls back to the
+// provider's direct attachment probe.
+func sessionAttachedForConfigDrift(session beads.Bead, sp runtime.Provider, cityPath string, store beads.Store, cfg *config.City, name string) (bool, error) {
+	if sp == nil {
+		return false, nil
+	}
+	var observeErr error
+	if attached, err := workerSessionTargetAttachedWithConfig(cityPath, store, sp, cfg, session.ID); err != nil {
+		observeErr = err
+	} else if attached {
+		return true, nil
+	}
+	if sp.IsAttached(name) {
+		return true, observeErr
+	}
+	return false, observeErr
+}
+
+func sessionConfigDriftKey(session beads.Bead, cfg *config.City, tp TemplateParams) string {
+	template := tp.TemplateName
+	if template == "" {
+		template = normalizedSessionTemplate(session, cfg)
+	}
+	storedHash := session.Metadata["started_config_hash"]
+	if template == "" || storedHash == "" {
+		return ""
+	}
+	if findAgentByTemplate(cfg, template) == nil {
+		return ""
+	}
+	agentCfg := templateParamsToConfig(tp)
+	applyTemplateOverridesToConfig(&agentCfg, session, tp)
+	currentHash := runtime.CoreFingerprint(agentCfg)
+	if storedHash == currentHash {
+		return ""
+	}
+	return storedHash + ":" + currentHash
+}
+
+func applyTemplateOverridesToConfig(agentCfg *runtime.Config, session beads.Bead, tp TemplateParams) {
+	if agentCfg == nil {
+		return
+	}
+	rawOvr := session.Metadata["template_overrides"]
+	if rawOvr == "" || tp.ResolvedProvider == nil || len(tp.ResolvedProvider.OptionsSchema) == 0 {
+		return
+	}
+	var ovr map[string]string
+	if err := json.Unmarshal([]byte(rawOvr), &ovr); err != nil || len(ovr) == 0 {
+		return
+	}
+	fullOptions := make(map[string]string)
+	for k, v := range tp.ResolvedProvider.EffectiveDefaults {
+		fullOptions[k] = v
+	}
+	for k, v := range ovr {
+		if k == "initial_message" {
+			continue
+		}
+		fullOptions[k] = v
+	}
+	extra, err := config.ResolveExplicitOptions(tp.ResolvedProvider.OptionsSchema, fullOptions)
+	if err != nil || len(extra) == 0 {
+		return
+	}
+	agentCfg.Command = replaceSchemaFlags(agentCfg.Command, tp.ResolvedProvider.OptionsSchema, extra)
 }
 
 func namedSessionActiveUseReason(session beads.Bead, sp runtime.Provider, name string, clk clock.Clock) (string, bool) {
@@ -1417,6 +1552,8 @@ func resetConfiguredNamedSessionForConfigDrift(
 	batch := sessionpkg.ConfigDriftResetPatch(sessionpkg.State(nextState), newSessionKey)
 	batch[namedSessionConfigDriftDeferredAtMetadata] = ""
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
+	batch[namedSessionAttachedConfigDriftDeferredAtMetadata] = ""
+	batch[namedSessionAttachedConfigDriftDeferredKeyMetadata] = ""
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return

@@ -1276,7 +1276,9 @@ func TestCollectReparentedGroupMembers(t *testing.T) {
 		if rpid == pid {
 			t.Errorf("collectReparentedGroupMembers returned known PID %s", pid)
 		}
-		// Each reparented PID should have PPID == 1
+		// Each reparented PID should have PPID == 1.
+		// The process may have exited between collection and this check
+		// (TOCTOU race), so skip verification if getParentPID returns empty.
 		ppid := getParentPID(rpid)
 		if ppid == "" && runtime.GOOS != "windows" {
 			if err := exec.Command("kill", "-0", rpid).Run(); err != nil {

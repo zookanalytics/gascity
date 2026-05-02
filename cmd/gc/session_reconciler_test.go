@@ -220,10 +220,14 @@ func (e *reconcilerTestEnv) reconcile(sessions []beads.Bead) int {
 }
 
 func (e *reconcilerTestEnv) reconcileWithPoolDesired(sessions []beads.Bead, poolDesired map[string]int) int {
+	return e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, nil)
+}
+
+func (e *reconcilerTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) int {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
 	return reconcileSessionBeads(
 		context.Background(), sessions, e.desiredState, cfgNames, e.cfg, e.sp,
-		e.store, nil, nil, nil, e.dt, poolDesired, false, nil, "",
+		e.store, dops, nil, nil, e.dt, poolDesired, false, nil, "",
 		nil, e.clk, e.rec, 0, 0, &e.stdout, &e.stderr,
 	)
 }
@@ -3049,6 +3053,161 @@ func TestReconcileSessionBeads_DriftDrainUsesConfigTimeout(t *testing.T) {
 	expected := env.clk.Now().Add(7 * time.Minute)
 	if ds.deadline != expected {
 		t.Errorf("drain deadline = %v, want %v (7m from now)", ds.deadline, expected)
+	}
+}
+
+// --- attached-session config-drift suppression tests ---
+
+// An attached session must NEVER be restarted due to config drift.
+// The sessionAttachedForConfigDrift guard fires before any named/non-named
+// path, so the session stays running with no drain initiated.
+func TestReconcileSessionBeads_AttachedSessionNeverRestartedOnConfigDrift(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	// Mark the session as attached — a user terminal is connected.
+	env.sp.SetAttached("worker", true)
+
+	env.reconcile([]beads.Bead{session})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Errorf("attached session should never be drained for config drift, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Error("attached session should still be running after config-drift check")
+	}
+}
+
+// The deferred_attached outcome must persist across reconciler cycles:
+// as long as the session stays attached, each cycle skips config-drift restart.
+func TestReconcileSessionBeads_AttachedDeferralPersistsAcrossCycles(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	env.sp.SetAttached("worker", true)
+
+	// Run multiple reconciler cycles while attached.
+	for i := 0; i < 3; i++ {
+		env.reconcile([]beads.Bead{session})
+		if ds := env.dt.get(session.ID); ds != nil {
+			t.Fatalf("cycle %d: attached session should not be drained, got reason=%q", i, ds.reason)
+		}
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Error("worker should still be running after 3 attached reconciler cycles")
+	}
+}
+
+// After detach, normal config-drift restart logic applies:
+// the session should be drained when it is no longer attached.
+func TestReconcileSessionBeads_ConfigDriftAppliesAfterDetach(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+
+	// Cycle 1: attached — no drain.
+	env.sp.SetAttached("worker", true)
+	env.reconcile([]beads.Bead{session})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("while attached: expected no drain, got reason=%q", ds.reason)
+	}
+
+	// Cycle 2: detached — drift should trigger drain.
+	env.sp.SetAttached("worker", false)
+	env.reconcile([]beads.Bead{session})
+	ds := env.dt.get(session.ID)
+	if ds == nil {
+		t.Fatal("after detach: expected drain for config drift")
+	}
+	if ds.reason != "config-drift" {
+		t.Errorf("drain reason = %q, want %q", ds.reason, "config-drift")
+	}
+}
+
+func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrain(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+
+	env.reconcile([]beads.Bead{session})
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	}
+
+	env.sp.SetAttached("worker", true)
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Second)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcile([]beads.Bead{got})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attached session should cancel queued config-drift drain, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK after attach cancellation = %q, want empty", ack)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attached session should remain running after queued drain advances")
+	}
+}
+
+func TestReconcileSessionBeads_AttachedSessionCancelsQueuedConfigDriftDrainBeforeDrainAckStop(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addRunningWorkerDesiredWithNewConfig()
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(runtime.Config{Command: "test-cmd"}),
+	})
+	dops := newDrainOps(env.sp)
+
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 1}, dops)
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "config-drift" {
+		t.Fatalf("detached config drift should queue a config-drift drain, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "1" {
+		t.Fatalf("GC_DRAIN_ACK after queued drain = %q, want 1", ack)
+	}
+
+	env.sp.SetAttached("worker", true)
+	env.clk.Time = env.clk.Now().Add(defaultDrainTimeout + time.Second)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{got}, map[string]int{"worker": 1}, dops)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("attached session should cancel queued config-drift drain before drain-ack stop, got %+v", ds)
+	}
+	if ack, _ := env.sp.GetMeta("worker", "GC_DRAIN_ACK"); ack != "" {
+		t.Fatalf("GC_DRAIN_ACK after attach cancellation = %q, want empty", ack)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attached session should remain running after reconciler-owned drain ack is canceled")
 	}
 }
 
