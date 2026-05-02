@@ -27,11 +27,18 @@ const labelOrderTracking = "order-tracking"
 // orders as wisps or exec scripts. Follows the nil-guard tracker pattern:
 // nil means no auto-dispatchable orders exist.
 //
-// dispatch is fire-and-forget: trigger evaluation is synchronous, but each due
-// order's dispatch action runs in its own goroutine. The tracking bead
-// is created before the goroutine launches to prevent re-fire on the next tick.
+// dispatch runs trigger evaluation synchronously, then spawns a goroutine
+// per due order's dispatch action. The tracking bead is created before the
+// goroutine launches to prevent re-fire on the next tick.
+//
+// drain waits for all in-flight dispatch goroutines spawned by prior
+// dispatch calls to complete, bounded by ctx. It returns true when all
+// tracked dispatches completed. Callers use this on controller exit and
+// config reload to ensure tracking bead outcome metadata is persisted
+// before the dispatcher is replaced or discarded.
 type orderDispatcher interface {
 	dispatch(ctx context.Context, cityPath string, now time.Time)
+	drain(ctx context.Context) bool
 }
 
 // ExecRunner runs a shell command with context, working directory, and
@@ -68,19 +75,28 @@ func logDispatchError(stderr io.Writer, format string, args ...any) {
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
 // memoryOrderDispatcher is the production implementation.
+//
+// inflightN + inflightDone together track dispatchOne goroutines so
+// drain can select on either completion or ctx.Done without spawning an
+// orphaned waiter goroutine. dispatch is only ever called from the tick
+// goroutine, so addInflight's check-and-create happens-before any
+// concurrent drain call on the same instance.
 type memoryOrderDispatcher struct {
-	aa         []orders.Order
-	storeFn    orderStoreFunc
-	ep         events.Provider
-	execRun    ExecRunner
-	rec        events.Recorder
-	stderr     io.Writer
-	maxTimeout time.Duration
-	cfg        *config.City
-	cityName   string
-
+	aa           []orders.Order
+	storeFn      orderStoreFunc
+	ep           events.Provider
+	execRun      ExecRunner
+	rec          events.Recorder
+	stderr       io.Writer
+	maxTimeout   time.Duration
+	cfg          *config.City
+	cityName     string
 	cacheMu      sync.Mutex
 	lastRunCache map[string]time.Time
+
+	inflightMu   sync.Mutex
+	inflightN    int
+	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 }
 
 // buildOrderDispatcher scans formula layers for orders and returns a
@@ -249,9 +265,57 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
-		// Fire and forget with timeout.
+		// Fire with timeout; inflight tracks the spawned goroutine so
+		// drain can wait for tracking-bead outcome persistence before
+		// controller exit or config reload.
 		a := a // capture loop variable
+		m.addInflight()
 		go m.dispatchOne(ctx, store, target, a, cityPath, trackingBead.ID)
+	}
+}
+
+// addInflight increments the in-flight count and lazily creates the done
+// signal. Called synchronously from dispatch on the tick goroutine.
+func (m *memoryOrderDispatcher) addInflight() {
+	m.inflightMu.Lock()
+	m.inflightN++
+	if m.inflightN == 1 {
+		m.inflightDone = make(chan struct{})
+	}
+	m.inflightMu.Unlock()
+}
+
+// doneInflight decrements the count and signals completion when the last
+// goroutine finishes. Called from dispatchOne's deferred cleanup.
+func (m *memoryOrderDispatcher) doneInflight() {
+	m.inflightMu.Lock()
+	m.inflightN--
+	if m.inflightN == 0 && m.inflightDone != nil {
+		close(m.inflightDone)
+		m.inflightDone = nil
+	}
+	m.inflightMu.Unlock()
+}
+
+// drain blocks until all in-flight dispatchOne goroutines complete or ctx
+// expires. It returns true when no work remains and returns immediately if
+// nothing is in flight. When ctx expires, any still-running dispatches keep
+// running (they will still write tracking-bead outcomes via ctx-unaware store
+// calls); the startup sweep closes orphaned tracking beads on the next boot if
+// drain did not have enough time to let them finish. The channel-signal design
+// spawns no waiter goroutine and cannot leak state past return.
+func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
+	m.inflightMu.Lock()
+	done := m.inflightDone
+	m.inflightMu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -316,6 +380,9 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
 func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
+	// Defer order matters: doneInflight runs last, after Close makes the
+	// tracking bead outcome observable to a waiting drain.
+	defer m.doneInflight()
 	defer store.Close(trackingID) //nolint:errcheck // best-effort close
 
 	timeout := effectiveTimeout(a, m.maxTimeout)
