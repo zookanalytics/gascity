@@ -18,11 +18,15 @@ import (
 //
 // Mutation commands (create, close) emit events to .gc/events.jsonl
 // so tests that verify event recording continue to pass.
-func bdTestCmd() {
+//
+// Returns the exit code rather than calling os.Exit so the testscript
+// command wrapper in TestMain can drain the global cleanup registry
+// before the process terminates.
+func bdTestCmd() int {
 	args := os.Args[1:]
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "bd: missing subcommand")
-		os.Exit(1)
+		return 1
 	}
 
 	subcmd := args[0]
@@ -33,14 +37,14 @@ func bdTestCmd() {
 	cwd, err := os.Getwd()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bd: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	cityPath := cityForStoreDir(cwd)
 
 	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityPath, ".gc", "beads.json"))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bd: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
 	var rec events.Recorder
@@ -51,29 +55,27 @@ func bdTestCmd() {
 		rec = events.Discard
 	}
 
-	var code int
 	switch subcmd {
 	case "create":
-		code = doBdCreate(store, rec, rest)
+		return doBdCreate(store, rec, rest)
 	case "close":
-		code = doBdClose(store, rec, rest)
+		return doBdClose(store, rec, rest)
 	case "list":
-		code = doBdList(store, rest)
+		return doBdList(store, rest)
 	case "show":
-		code = doBdShow(store, rest)
+		return doBdShow(store, rest)
 	case "ready":
-		code = doBdReady(store, rest)
+		return doBdReady(store, rest)
 	case "init", "config", "migrate":
 		// No-op stubs used by gc-beads-bd.sh during finalize. The
 		// file-backed store does not need schema seeding, so accept
 		// these and exit 0 to keep finalize green for tests that
 		// exercise the real localInitializer + finalizeInit path.
-		code = 0
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "bd: unknown subcommand %q\n", subcmd)
-		code = 1
+		return 1
 	}
-	os.Exit(code)
 }
 
 func doBdCreate(store beads.Store, rec events.Recorder, args []string) int {
