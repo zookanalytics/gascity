@@ -141,6 +141,9 @@ func explicitAgents(agents []config.Agent) []config.Agent {
 }
 
 func TestMain(m *testing.M) {
+	if err := scrubInheritedGCEnvForTests(); err != nil {
+		panic(err)
+	}
 	gcHome, err := os.MkdirTemp("", "gascity-gc-home-*")
 	if err != nil {
 		panic(err)
