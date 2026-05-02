@@ -173,6 +173,21 @@ func init() {
 	sharedTestCityDir = cityDir
 }
 
+// TestMain removes the package-level fixture directories created in
+// init(). Without this, every `go test ./internal/sling` invocation
+// leaks one gc-sling-test-formulas-* and one gc-sling-test-city-*
+// directory, which fills /tmp's inode quota under repeated CI/local runs.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedTestFormulaDir != "" {
+		_ = os.RemoveAll(sharedTestFormulaDir)
+	}
+	if sharedTestCityDir != "" {
+		_ = os.RemoveAll(sharedTestCityDir)
+	}
+	os.Exit(code)
+}
+
 // --- Pure helper tests ---
 
 func TestBuildSlingCommandSling(t *testing.T) {
