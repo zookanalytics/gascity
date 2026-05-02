@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,73 @@ var gcEnvVars = []string{
 	"GC_SHARED_SKILL_CATALOG_SNAPSHOT",
 	"GC_TMUX_SESSION",
 	"GC_CITY",
+}
+
+// inheritedEnvTestKeepPrefixes lists GC_*/BEADS_* env-var prefixes that are
+// legitimate test-mode opt-ins from the host environment and must survive
+// the TestMain scrub. Examples: GC_FAST_UNIT (gates slow process tests),
+// GC_DOLT_REAL_BINARY (overrides the dolt binary path), GC_LIVE_*
+// (live-test opt-in), GC_SESSION_CHAOS_* (chaos-test seeds and budgets).
+var inheritedEnvTestKeepPrefixes = []string{
+	"GC_FAST_UNIT",
+	"GC_DOLT_REAL_BINARY",
+	"GC_LIVE_",
+	"GC_SESSION_CHAOS_",
+}
+
+// shouldKeepInheritedEnvForTests reports whether name names a GC_* or BEADS_*
+// env var that the TestMain scrub must preserve (a test-mode opt-in toggle).
+// Only GC_*/BEADS_* names are classified; callers should not invoke this for
+// unrelated names.
+func shouldKeepInheritedEnvForTests(name string) bool {
+	for _, prefix := range inheritedEnvTestKeepPrefixes {
+		if name == prefix || strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// scrubInheritedGCEnvForTests removes all GC_*/BEADS_* environment variables
+// inherited from the parent shell, except for opt-in test-mode toggles
+// (see inheritedEnvTestKeepPrefixes). Polecat sessions and other gc-managed
+// shells inject vars like GC_BEADS=bd, GC_CITY_PATH, and GC_BEADS_SCOPE_ROOT
+// that take precedence over per-test city.toml settings — without scrubbing,
+// a test that writes [beads] provider = "file" in city.toml ends up running
+// the bd lifecycle and leaking dolt sql-server processes when its t.TempDir()
+// is cleaned up.
+//
+// It also points GIT_CONFIG_GLOBAL/SYSTEM at /dev/null so child git
+// processes do not inherit the developer's signing config (commit.gpgsign,
+// gpg.format=ssh) — `make test` already strips SSH_AUTH_SOCK via env -i,
+// so signed commits would otherwise fail with "Couldn't get agent socket"
+// in tests that exec `git commit` for setup.
+//
+// Called from TestMain before any test runs.
+func scrubInheritedGCEnvForTests() error {
+	for _, kv := range os.Environ() {
+		idx := strings.IndexByte(kv, '=')
+		if idx <= 0 {
+			continue
+		}
+		name := kv[:idx]
+		if !strings.HasPrefix(name, "GC_") && !strings.HasPrefix(name, "BEADS_") {
+			continue
+		}
+		if shouldKeepInheritedEnvForTests(name) {
+			continue
+		}
+		if err := os.Unsetenv(name); err != nil {
+			return fmt.Errorf("unset %q: %w", name, err)
+		}
+	}
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull); err != nil {
+		return fmt.Errorf("set GIT_CONFIG_GLOBAL: %w", err)
+	}
+	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
+		return fmt.Errorf("set GIT_CONFIG_SYSTEM: %w", err)
+	}
+	return nil
 }
 
 // clearGCEnv clears GC_* identity and session-routing variables for the
