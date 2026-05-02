@@ -332,10 +332,18 @@ var (
 )
 
 func init() {
+	if helperProcessTestEnvActive() {
+		// Helper subprocesses re-exec this binary and call os.Exit
+		// directly, bypassing the cleanup registry. Skip the fixture
+		// setup so we don't leak gc-sling-test-*-* directories per
+		// helper invocation.
+		return
+	}
 	dir, err := os.MkdirTemp("", "gc-sling-test-formulas-*")
 	if err != nil {
 		panic(err)
 	}
+	registerProcessCleanup(func() { _ = os.RemoveAll(dir) })
 	for _, name := range []string{
 		"code-review", "mol-feature", "mol-polecat-work", "mol-do-work",
 		"mol-refinery-patrol", "review", "build", "test-formula",
@@ -352,6 +360,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	registerProcessCleanup(func() { _ = os.RemoveAll(cityDir) })
 	sharedTestCityDir = cityDir
 }
 
