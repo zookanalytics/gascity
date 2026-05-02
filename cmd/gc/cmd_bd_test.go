@@ -145,6 +145,12 @@ func TestResolveBdScopeTarget(t *testing.T) {
 		return beadID == "projectwrenunity-0xk" || beadID == "projectwrenunity-abc"
 	}
 	cityDir := filepath.Join(t.TempDir(), "city")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Pin cwd inside the test city so bdRigFromCwd does not find an
+	// unrelated .beads/redirect (e.g. when running from a polecat worktree).
+	setCwd(t, cityDir)
 	cfgForTest := func() *config.City {
 		return &config.City{
 			Workspace: config.Workspace{Name: "gascity"},
@@ -552,6 +558,9 @@ func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Pin cwd inside the test city so bdRigFromCwd does not find an
+	// unrelated .beads/redirect (e.g. when running from a polecat worktree).
+	setCwd(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 
@@ -635,6 +644,9 @@ name = "demo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Pin cwd inside the test city so bdRigFromCwd does not find an
+	// unrelated .beads/redirect (e.g. when running from a polecat worktree).
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
 
@@ -666,6 +678,9 @@ provider = "file"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// Pin cwd inside the test city so bdRigFromCwd does not find an
+	// unrelated .beads/redirect (e.g. when running from a polecat worktree).
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
