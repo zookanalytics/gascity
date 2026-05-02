@@ -23,6 +23,7 @@ func currentGCBinaryForTests(t *testing.T) string {
 			testGCBinaryErr = fmt.Errorf("mktemp gc binary dir: %w", err)
 			return
 		}
+		registerProcessCleanup(func() { _ = os.RemoveAll(buildDir) })
 		binPath := filepath.Join(buildDir, "gc")
 		wd, err := os.Getwd()
 		if err != nil {
