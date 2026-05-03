@@ -103,8 +103,10 @@ func TestGCLiveContract_BeadsAndEvents(t *testing.T) {
 	liveContractJSON[struct {
 		Status string `json:"status"`
 	}](t, baseURL, validator, http.MethodGet, cityBase+"/health", nil, http.StatusOK)
-	assertLiveContractStreamOpens(t, baseURL, "/v0/events/stream")
-	assertLiveContractStreamOpens(t, baseURL, cityBase+"/events/stream")
+	// Use replay cursors so the open check verifies the SSE route without
+	// waiting for a fresh event or the 15s idle heartbeat.
+	assertLiveContractStreamOpens(t, baseURL, "/v0/events/stream?after_cursor=0")
+	assertLiveContractStreamOpens(t, baseURL, cityBase+"/events/stream?after_seq=0")
 
 	cityScopedBead := liveContractJSON[beads.Bead](t, baseURL, validator, http.MethodPost, cityBase+"/beads", map[string]any{
 		"description": "City-scoped fixture created immediately after async city.create completion.",
