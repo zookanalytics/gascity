@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -424,7 +425,30 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 		c.recordProblem(fmt.Sprintf("marshal %s notification", eventType), err)
 		return
 	}
+	if !c.shouldEmit(eventType, b.ID, payload) {
+		return
+	}
 	c.onChange(eventType, b.ID, payload)
+}
+
+// shouldEmit returns true when (eventType, beadID, payload) is a fresh
+// emission distinct from the previous one for the same (eventType,
+// beadID). It suppresses byte-identical re-emissions so callers that
+// produce no-op notifications — direct writes that don't change the
+// wire payload, reconciler diffs that flag a change but marshal to the
+// same bytes after omitempty — don't pump duplicates onto the event
+// bus. Keys are scoped by eventType so a bead.updated never suppresses
+// a later bead.closed for the same bead.
+func (c *CachingStore) shouldEmit(eventType, beadID string, payload []byte) bool {
+	hash := sha256.Sum256(payload)
+	key := eventType + "|" + beadID
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	if prev, ok := c.lastEmittedHash[key]; ok && prev == hash {
+		return false
+	}
+	c.lastEmittedHash[key] = hash
+	return true
 }
 
 type cacheNotification struct {
