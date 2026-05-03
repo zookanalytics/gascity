@@ -2197,6 +2197,228 @@ func TestCommitAsyncStartResult_StopsMatchingRuntimeForStaleSnapshot(t *testing.
 	}
 }
 
+func TestAsyncStartIdentityMatches(t *testing.T) {
+	cases := []struct {
+		name     string
+		prepared map[string]string
+		current  map[string]string
+		want     bool
+	}{
+		{
+			name:     "matching token wins over generation drift",
+			prepared: map[string]string{"generation": "2", "instance_token": "tok-X"},
+			current:  map[string]string{"generation": "5", "instance_token": "tok-X"},
+			want:     true,
+		},
+		{
+			name:     "token mismatch is stale",
+			prepared: map[string]string{"generation": "2", "instance_token": "tok-old"},
+			current:  map[string]string{"generation": "2", "instance_token": "tok-new"},
+			want:     false,
+		},
+		{
+			name:     "matching tokens with no generation",
+			prepared: map[string]string{"instance_token": "tok-X"},
+			current:  map[string]string{"instance_token": "tok-X"},
+			want:     true,
+		},
+		{
+			name:     "missing current token with prepared token is stale",
+			prepared: map[string]string{"instance_token": "tok-X"},
+			current:  map[string]string{},
+			want:     false,
+		},
+		{
+			name:     "no prepared token falls back to generation match",
+			prepared: map[string]string{"generation": "2"},
+			current:  map[string]string{"generation": "2"},
+			want:     true,
+		},
+		{
+			name:     "no prepared token falls back to generation mismatch",
+			prepared: map[string]string{"generation": "2"},
+			current:  map[string]string{"generation": "3"},
+			want:     false,
+		},
+		{
+			name:     "no prepared metadata at all matches anything",
+			prepared: map[string]string{},
+			current:  map[string]string{"generation": "9", "instance_token": "tok-Z"},
+			want:     true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prepared := beads.Bead{Metadata: tc.prepared}
+			current := beads.Bead{Metadata: tc.current}
+			if got := asyncStartIdentityMatches(prepared, current); got != tc.want {
+				t.Fatalf("asyncStartIdentityMatches = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_GenerationDriftWithMatchingToken(t *testing.T) {
+	// Regression test: a wave that runs longer than concurrent reconciler
+	// phases will see the bead's generation bumped (e.g. healing writes)
+	// before the async result returns. Generation drift alone must not
+	// invalidate the result — the instance_token is the authoritative
+	// session identity. Without this guarantee, pool sessions stay stuck
+	// in state=creating with pending_create_claim=true forever.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"generation":     "2",
+		"instance_token": "tok-X",
+		"state":          "creating",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"generation":     "7",
+		"instance_token": "tok-X",
+		"state":          "creating",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("generation drift with matching instance_token must not be considered stale")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("matching instance_token must protect the runtime from cleanup despite generation drift")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_TokenMismatchIsStale(t *testing.T) {
+	prepared := beads.Bead{Metadata: map[string]string{
+		"generation":     "2",
+		"instance_token": "tok-old",
+		"state":          "creating",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"generation":     "3",
+		"instance_token": "tok-new",
+		"state":          "creating",
+	}}
+	if asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("instance_token mismatch must be detected as stale")
+	}
+	if !asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("instance_token mismatch must allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_PendingCreateClearedAfterAttachIsNotStale(t *testing.T) {
+	// Regression test: confirmLiveSessionState (called by ensureRunning when
+	// an attach finds the session already running) advances state to "active"
+	// and clears pending_create_claim. If that race wins against the async
+	// start result commit, the prepared bead still carries pcc="true" but
+	// current has pcc="" and state="active". The previous logic rejected the
+	// commit on the rollback drift check. The result was a stuck bead missing
+	// creation_complete_at and other start metadata, even though the spawn
+	// had succeeded.
+	//
+	// Fix: when current state has advanced to active or awake, the spawn
+	// already succeeded; commit the start result regardless of pcc drift.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Z",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token": "tok-Z",
+		"generation":     "3",
+		"state":          "active",
+		// pending_create_claim cleared by confirmLiveSessionState
+		"pending_create_claim": "",
+	}}
+	if !asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("session that advanced to active mid-flight must not be considered stale even when pcc was cleared")
+	}
+	if asyncStartStaleRuntimeCleanupAllowed(prepared, current) {
+		t.Fatal("session that advanced to active must not allow runtime cleanup")
+	}
+}
+
+func TestAsyncStartSessionStillCurrent_RollbackPendingCreateStillWorksWhenNotActive(t *testing.T) {
+	// Defensive: if pcc was cleared but state has NOT advanced to active/awake
+	// (still creating/asleep), the original rollback drift check still fires.
+	// This protects the prior intent: another phase decided to roll back the
+	// spawn, our result must not stomp on that decision.
+	prepared := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "2",
+		"state":                "creating",
+		"pending_create_claim": "true",
+	}}
+	current := beads.Bead{Metadata: map[string]string{
+		"instance_token":       "tok-Y",
+		"generation":           "3",
+		"state":                "creating",
+		"pending_create_claim": "",
+	}}
+	if asyncStartSessionStillCurrent(prepared, current) {
+		t.Fatal("pcc cleared while state still creating must be treated as rollback (stale)")
+	}
+}
+
+func TestCommitAsyncStartResult_GenerationDriftWithMatchingTokenCommits(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: creatingMeta(map[string]string{
+			"session_name":         "worker",
+			"template":             "worker",
+			"generation":           "2",
+			"continuation_epoch":   "1",
+			"instance_token":       "tok-X",
+			"pending_create_claim": "true",
+			"last_woke_at":         clk.Now().Format(time.RFC3339),
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Concurrent reconciler phase bumps the generation while the async
+	// start is in flight. Token does not change.
+	if err := store.SetMetadata(session.ID, "generation", "5"); err != nil {
+		t.Fatal(err)
+	}
+	result := startResult{
+		prepared: preparedStart{
+			candidate: startCandidate{
+				session: &session,
+				tp: TemplateParams{
+					Command:      "worker",
+					SessionName:  "worker",
+					TemplateName: "worker",
+				},
+			},
+			coreHash: "core-abc",
+			liveHash: "live-xyz",
+		},
+		outcome:  "success",
+		started:  clk.Now(),
+		finished: clk.Now(),
+	}
+
+	if !commitAsyncStartResultWithContext(context.Background(), result, nil, store, clk, events.Discard, 0, ioDiscard{}, ioDiscard{}, nil) {
+		t.Fatal("generation drift with matching instance_token must commit; otherwise pool sessions stay stuck in creating")
+	}
+	updated, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := updated.Metadata["state"]; got != "active" {
+		t.Fatalf("state = %q, want active (creating→active transition)", got)
+	}
+	if got := updated.Metadata["pending_create_claim"]; got != "" {
+		t.Fatalf("pending_create_claim = %q, want cleared after successful start", got)
+	}
+	if got := updated.Metadata["instance_token"]; got != "tok-X" {
+		t.Fatalf("instance_token = %q, want preserved", got)
+	}
+}
+
 func TestCommitAsyncStartResult_IgnoresCommandChangedDuringStartup(t *testing.T) {
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 28, 13, 6, 0, 0, time.UTC)}
