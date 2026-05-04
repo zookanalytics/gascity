@@ -92,6 +92,22 @@ the deadline to the orchestration layer rather than flatten or
 surgical internals, and the Phase 2 step 10 consistency-test
 scope was clarified accordingly.
 
+PRD-alignment round 3 closed the last cluster of remaining gaps,
+all surfaced by walking the user stories end to end and the open
+questions one by one: (1) a §Step-execution contract subsection
+binds the per-cycle CLI invocation rule (CLI runs once per cycle,
+the `compact` step is the trigger, the `inspect` / `verify` /
+`report` steps are bookkeeping anchors closed from the cached
+envelope), discharging PRD Story 2's dog-cycle path against the
+formula's preserved 4-step structure; (2) OQ-1 is bound to a
+free-form `executor` string for PR1 (structured-tag form deferred
+to v2); (3) OQ-4 is bound to CLI-only `--per-db-timeout` for v1
+with an explicit promotion trigger; (4) OQ-5 is bound to a 3-value
+exit-code table with a no-op-as-`0` rule per cleanup parity; (5)
+OQ-7's ZFC expansion is moved from "open" to "resolved" since it is
+already pinned in TD-9, the PR1 step 1 spec, and the `ZfcExempt`
+doc-comment.
+
 Confidence is high. The cleanup pattern provides a tested template;
 the algorithmic content is already specified in the formula. The
 durable win is the regression test in PR1 — it makes the orphan-
@@ -154,6 +170,56 @@ ported verbatim from the formula's prose into Go. No semantic
 divergence. The formula remains the executable contract; the CLI
 is the executor.
 
+### Step-execution contract
+
+The CLI is invoked **exactly once per dispatched cycle**, not once
+per formula step. Three forces require this:
+
+1. **Lock contention.** All four phases share the city-wide advisory
+   lock acquired inside the algorithm body (TD-4). A second
+   invocation in the same cycle would either block on the held lock
+   or, if the first invocation has already released, return
+   `database-locked` once the next cycle's contender re-acquires.
+   Either path turns the formula's 4-step structure into a serialised
+   queue with no payoff.
+2. **Algorithm re-entrancy.** Flatten and surgical are not re-entrant
+   within a cycle. A second flatten invocation against an already-
+   flattened DB would no-op (commit count below threshold) but still
+   pay the lock acquire, the rig-list parse, and `dolt_gc` overhead;
+   surgical's `compact-*` branch creation would race with leftover-
+   branch cleanup.
+3. **Envelope-driven step closure.** The `phases` block (Per-step
+   bead mapping, below) is designed to drive all four step closures
+   from one envelope. Multiple invocations would produce multiple
+   envelopes, requiring a tiebreak rule the design has not specified.
+
+**Designated trigger step.** The mol-dog-compactor formula's
+`compact` step is the trigger. When the dog claims the `compact` step
+bead, it invokes `gc dolt-compact --json` with the formula-bound
+flags substituted from the formula vars; the dog parses the resulting
+envelope and uses it to close `compact` immediately and the other
+three step beads as they are claimed (or atomically, depending on the
+dog's formula-execution model — the design constrains the outcome,
+not the dispatch order).
+
+**Bookkeeping steps.** The `inspect`, `verify`, and `report` steps
+remain in the formula as bookkeeping anchors for the four phases of
+the JSON envelope. They retain `executor = "gc dolt-compact"`
+(declares the underlying binding for the executor-binding regression
+test, Component 8) **and `zfc_exempt = true`** (declares that the dog
+does not re-invoke the executor for these steps; closure happens via
+dog-runtime logic that consumes the envelope produced by the
+`compact` step). The `executor` + `zfc_exempt` pair on the
+bookkeeping steps is the same shape the regression test accepts —
+the contract is unchanged, only the per-step binding posture
+differs.
+
+The dog-runtime mechanism that propagates the envelope across step
+beads in the same cycle is a small implementation concern (cache the
+envelope keyed by molecule id; consume from cache when a non-`compact`
+step bead is claimed). This is a PR2 implementation detail bounded by
+the contract above; the design doc does not specify the cache shape.
+
 ### Two-PR Shipping Order
 
 The work is split into two PRs. **PR1 is a hard prerequisite of
@@ -167,7 +233,11 @@ PR2.**
    semantics ("`executor` names the binding; `zfc_exempt = true`
    declares the step as Zero Framework Cognition exempt and pairs
    with `executor` to point at the human/external executor when an
-   agent cannot execute the step alone").
+   agent cannot execute the step alone"). The `Executor` field is
+   typed as `string` (a free-form binding identifier, e.g.,
+   `"gc dolt-compact"`) per OQ-1's resolution; the structured-tag
+   form (`{ kind, command }`) is deferred to v2 and is additive
+   when needed.
 2. Wire the new fields through `internal/formula/recipe.go` and
    `compile.go` so cooked beads carry them in metadata under the
    reserved `gc.formula.executor` and `gc.formula.zfc_exempt` keys
@@ -216,12 +286,18 @@ new executor lands.
     `gc dolt sql` regression that motivated #1485 cannot recur on
     the new wrapper.
 11. `examples/dolt/formulas/mol-dog-compactor.toml`:
-    - Drop `zfc_exempt = true` from compactor steps.
-    - Set `executor = "gc dolt-compact"` on every executable step.
-    - Update step descriptions to reference CLI flags using
-      formula variable substitution
+    - Set `executor = "gc dolt-compact"` on every step (declares the
+      binding for the executor-binding regression test).
+    - Set `zfc_exempt = true` on the `inspect`, `verify`, and
+      `report` bookkeeping steps; **only the `compact` step drops
+      `zfc_exempt` and runs the CLI** (per Step-execution contract).
+    - Update the `compact` step's description to reference CLI flags
+      using formula variable substitution
       (`gc dolt-compact --mode={{mode}} --threshold={{commit_threshold}}
       --keep-recent={{keep_recent}} --databases={{databases}} --json`).
+    - Update `inspect` / `verify` / `report` step descriptions to
+      reference the cached-envelope closure path produced by
+      `compact` (the dog-runtime detail per Step-execution contract).
 12. `examples/dolt/orders/mol-dog-compactor.toml` — unchanged
     (24h cooldown, dog pool).
 13. `engdocs/contributors/dolt-compact.md` — operator + dog guide:
@@ -336,11 +412,23 @@ envelope:
 | `database-deadline-exceeded` | per-DB timeout hit | escalate to mayor (suspect hang) |
 | `internal-error` | unexpected SQL or Go-side error | escalate to mayor |
 
-The CLI exit code is `0` on full success, `1` if any DB hit an
-escalate-class outcome (`concurrent-write-fatal`, `integrity-mismatch`,
-`internal-error`, `database-deadline-exceeded`), and `2` on
-invocation errors (bad flag, port unresolved, no DBs to compact
-when explicit list given).
+The CLI exit code is bound at three values per OQ-5's resolution:
+
+- `0` — full success **or** no-op (zero candidates from auto-discovery;
+  every named DB below `--threshold`; every per-DB outcome in
+  {`ok`, `below-threshold`, `database-locked` (skipped)}).
+- `1` — at least one per-DB outcome in the escalate set
+  ({`concurrent-write-fatal`, `integrity-mismatch`, `internal-error`,
+  `database-deadline-exceeded`}).
+- `2` — invocation error before per-DB execution begins (bad flag, port
+  unresolved, identifier failed charset check, explicit DB list with
+  zero matches in rig-registry).
+
+Cleanup parity (cleanup's `0` covers no-op runs); the dog's
+step-closure code reads the exit code only as a coarse signal
+alongside the envelope's `phases` and per-DB outcomes (which carry
+the precise breakdown), so finer-grained exit codes would duplicate
+envelope fields without informing dog action.
 
 ### Threshold Semantics (resolves PRD Q14)
 
@@ -597,7 +685,11 @@ Aggregation rules (CLI-side, deterministic):
 The dog's step-closure code reads `phases.<step>` and maps to the
 table above. The escalate-class set used by the dog matches the
 "escalate to mayor" rows in the Error Class Taxonomy table — so the
-`phases` block is a faithful aggregate, not a new contract.
+`phases` block is a faithful aggregate, not a new contract. The
+envelope itself is produced by the `compact` step's CLI invocation
+per Step-execution contract; the dog reads the cached envelope when
+it claims the `inspect`, `verify`, and `report` bookkeeping step
+beads.
 
 ### Default human output
 
@@ -868,10 +960,14 @@ If it doesn't (still safely-skipping) the formula update missed a
 spot. Mitigation: the executor-binding test in PR1 would have
 caught a disconnect; the **formula→CLI→envelope→step-close
 integration test** in PR2 (Implementation Plan Phase 2 step 11)
-exercises the executor binding without waiting on the 24h cooldown;
-manual smoke after PR2 ("trigger a cycle on loomington, watch the
-report bead") covers the remaining 24h-cooldown surface that's
-operator-gated.
+exercises the executor binding without waiting on the 24h cooldown.
+That same integration test loads `mol-dog-compactor.toml`, resolves
+the `compact` step's executor, invokes the CLI exactly once, and
+asserts all four `phases.<step>` values plus per-DB outcomes drive
+correct step-closure decisions — directly exercising the per-cycle
+invocation rule from Step-execution contract. Manual smoke after PR2
+("trigger a cycle on loomington, watch the report bead") covers the
+remaining 24h-cooldown surface that's operator-gated.
 
 ### R-10. In-CLI rollback fails on integrity-mismatch
 
@@ -1045,9 +1141,13 @@ holding process to exit, then verify.
     decisions. This last test discharges Acceptance 2's
     formula→CLI→envelope→step-close path; the 24h-cooldown leg
     remains operator-gated post-deploy verification (R-9).
-12. **Formula update.** `mol-dog-compactor.toml` drops `zfc_exempt`,
-    adds `executor = "gc dolt-compact"`, references CLI flags in
-    step descriptions.
+12. **Formula update.** `mol-dog-compactor.toml` adds
+    `executor = "gc dolt-compact"` on every step; drops `zfc_exempt`
+    on the `compact` step (the trigger) and retains `zfc_exempt = true`
+    on the `inspect` / `verify` / `report` bookkeeping steps. Only the
+    `compact` step's description carries the full CLI invocation
+    (formula-var-substituted flags); the bookkeeping steps reference
+    the cached-envelope closure path. Per Step-execution contract.
 13. **Operator/dev guide.** `engdocs/contributors/dolt-compact.md`.
 14. **Open PR2.** Quality gates as PR1 plus integration shard
     (`make test-integration-shards-parallel`).
@@ -1063,19 +1163,70 @@ holding process to exit, then verify.
 
 ## Open Questions
 
-These remain for the plan-review rounds. PRD Open Question Q14
-("threshold semantics on explicit DBs") was resolved in prd-align
-round 1 — see "Threshold Semantics" above. Design-level OQ-1 through
-OQ-7 below are unchanged from the design-exploration baseline.
+PRD Open Question Q14 ("threshold semantics on explicit DBs") was
+resolved in prd-align round 1 — see "Threshold Semantics" above.
+PRD-alignment round 3 promoted OQ-1, OQ-4, OQ-5, and OQ-7 from
+recommendations to bound resolutions (consolidated under
+"Resolutions" below). OQ-2, OQ-3, and OQ-6 remain appropriately
+deferred to the next phase that resolves them naturally.
 
-### OQ-1. Free-form vs structured `executor` field shape (Leg 2)
+### Resolutions
 
-Currently designed as a free-form string (e.g., `"gc dolt-compact"`).
-A structured tag (`{ kind = "cobra", command = "dolt-compact" }`)
-would support future binding kinds. Recommend free-form for PR1;
-revisit if a non-CLI binding emerges.
+#### OQ-1 (resolved). Free-form `executor` field for PR1
 
-### OQ-2. Regression-test resolution heuristic (Risk R-2)
+The `executor` field is a **free-form string** in PR1 (e.g.,
+`"gc dolt-compact"`). Rationale: every binding the design
+contemplates today (Cobra commands, pack scripts) is identifiable by
+a single string token, and the executor-binding regression test
+(Component 8) consumes the string directly. A future structured-tag
+form (`{ kind, command }`) is additive — a new optional field on the
+same `Step` struct can carry the structured form without breaking
+PR1's schema. The structured form is deferred to v2 and will be
+revisited only if a non-CLI binding emerges (e.g., a Go-internal
+callback registry). PR1 step 1 in the Implementation Plan reflects
+this binding in the field-type spec.
+
+#### OQ-4 (resolved). `--per-db-timeout` lives on the CLI surface only for v1
+
+`--per-db-timeout` defaults to `1h` and lives on the CLI surface
+only; **the formula does not expose a `per_db_timeout` var in v1.**
+Per TD-5, `--per-db-timeout` is a wrapper-level execution budget,
+not a formula-bound algorithm parameter; binding it into the formula
+requires either a corresponding consistency-test extension (Phase 2
+step 10) or a deliberate exclusion. **Trigger for promotion to a
+formula var:** at least one city's `database-deadline-exceeded`
+outcomes become a recurring patrol signal (a single timeout is
+operator-tunable from the CLI; persistent timeouts across cycles
+indicate the default is wrong for that city). When promoted, the
+consistency test (Phase 2 step 10) extends to cover the new var;
+TD-5's "additive evolution" paragraph already describes the
+migration path.
+
+#### OQ-5 (resolved). Exit code precision
+
+Exit codes are bound at three values (table inlined into the Error
+Class Taxonomy paragraph above). Cleanup parity drives the no-op-as-`0`
+choice (cleanup's `0` covers no-op runs). Story-2 corollary: when
+auto-discovery returns empty (`--databases` empty and rig-registry
+returns no candidates), the CLI emits a well-formed envelope with
+`summary.databases_inspected = 0` and exits `0`; the dog closes all
+four step beads `closed`. The dog's step-closure code reads the exit
+code only as a coarse signal alongside the envelope's `phases` and
+per-DB outcomes — finer-grained exit codes would duplicate envelope
+fields without informing dog action.
+
+#### OQ-7 (resolved). ZFC expansion is "Zero Framework Cognition"
+
+"ZFC" expands to **Zero Framework Cognition** per AGENTS.md. The
+expansion is pinned in three places: (1) the `ZfcExempt` field's
+doc-comment in Data Model / Formula schema additions; (2) the PR1
+step 1 implementation spec; (3) the engdocs operator guide
+(`engdocs/contributors/dolt-compact.md`, Phase 2 step 13). No further
+action required for the design contract.
+
+### Remaining open questions
+
+#### OQ-2. Regression-test resolution heuristic (Risk R-2)
 
 The exact rule for "this step is resolvable to an executable
 without annotation" is the most consequential PR1 detail. Drafted
@@ -1084,30 +1235,13 @@ or standard-Unix command." Plan-review-1 should pressure-test this
 heuristic against the actual embedded formulas to ensure it
 accepts well-formed steps and rejects orphans.
 
-### OQ-3. Where the regression test lives
+#### OQ-3. Where the regression test lives
 
 `cmd/gc/embedded_formula_executor_test.go` (recommended for ergonomic
 access to the Cobra command tree) vs `internal/formula/`
 (formula-package access ergonomics). Chooseable in PR1.
 
-### OQ-4. Per-DB timeout default placement
-
-Currently `1h` hard-coded as the CLI default. Should the formula
-expose a `per_db_timeout` var? Recommend no until a city hits the
-limit.
-
-### OQ-5. Exit code precision
-
-Currently `0` / `1` / `2`. Should we add a class for "skipped
-because below threshold" (no work done)? Cleanup uses `0` for a
-no-op dry-run, so consistency says `0` here too.
-
-### OQ-6. Pack-delegate flag-passing for `--port`
+#### OQ-6. Pack-delegate flag-passing for `--port`
 
 Cleanup's `run.sh` reads `GC_DOLT_PORT` and forwards as a flag if
 set. Compact should do the same. Confirm in PR2 review.
-
-### OQ-7. ZFC expansion in user-facing docs (Q16)
-
-"Zero Framework Cognition" per `AGENTS.md`. Pin in the schema
-field's doc-comment and in `engdocs/contributors/dolt-compact.md`.
