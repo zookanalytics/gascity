@@ -2997,6 +2997,225 @@ func TestReconcileSessionBeads_PreservesPendingCreateWhenLeaseRecentNoRuntime(t 
 	}
 }
 
+func TestPendingCreateRecentlyDeferred(t *testing.T) {
+	now := time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)
+	clk := &clock.Fake{Time: now}
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     bool
+	}{
+		{
+			name:     "no deferred_at field",
+			metadata: map[string]string{"pending_create_claim": "true"},
+			want:     false,
+		},
+		{
+			name: "fresh deferred_at within window",
+			metadata: map[string]string{
+				"pending_create_claim":       "true",
+				"pending_create_deferred_at": now.Add(-10 * time.Second).Format(time.RFC3339),
+			},
+			want: true,
+		},
+		{
+			name: "deferred_at on the boundary",
+			metadata: map[string]string{
+				"pending_create_claim":       "true",
+				"pending_create_deferred_at": now.Add(-staleCreatingStateTimeout).Format(time.RFC3339),
+			},
+			want: false,
+		},
+		{
+			name: "stale deferred_at outside window",
+			metadata: map[string]string{
+				"pending_create_claim":       "true",
+				"pending_create_deferred_at": now.Add(-5 * time.Minute).Format(time.RFC3339),
+			},
+			want: false,
+		},
+		{
+			name: "unparseable deferred_at",
+			metadata: map[string]string{
+				"pending_create_claim":       "true",
+				"pending_create_deferred_at": "not-a-timestamp",
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			bead := beads.Bead{Metadata: tt.metadata}
+			if got := pendingCreateRecentlyDeferred(bead, clk); got != tt.want {
+				t.Fatalf("pendingCreateRecentlyDeferred = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReconcileSessionBeads_PreservesPendingCreateWhenRecentlyDeferredByWakeBudget(t *testing.T) {
+	// Regression test for gc-9mleg: when the wake budget defers a start, the
+	// session bead must NOT be rolled back as "lease expired" even after
+	// staleCreatingStateTimeout has elapsed since CreatedAt. The deferral
+	// signal (pending_create_deferred_at) means "we tried to dispatch the
+	// start but were rate-limited" — rolling back creates a tight churn
+	// loop where each tick rolls back, the pool re-claims, and the cycle
+	// repeats until wake budget catches up.
+	//
+	// Setup uses two desired beads with maxWakes=1 so the second bead
+	// always loses the wake-budget race. This mirrors the production
+	// failure mode: one slot starts, others queue indefinitely.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	one := 1
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &one},
+		Agents: []config.Agent{{Name: "first"}, {Name: "helper"}},
+	}
+	desired := map[string]TemplateParams{
+		"first":  {Command: "first-cmd", SessionName: "first", TemplateName: "first"},
+		"helper": {Command: "helper-cmd", SessionName: "helper", TemplateName: "helper"},
+	}
+
+	first, err := store.Create(beads.Bead{
+		Title:  "first",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:first"},
+		Metadata: map[string]string{
+			"session_name":          "first",
+			"session_name_explicit": "true",
+			"pending_create_claim":  "true",
+			"template":              "first",
+			"state":                 "creating",
+			"generation":            "1",
+			"continuation_epoch":    "1",
+			"instance_token":        "first-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(first): %v", err)
+	}
+
+	helper, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":               "helper",
+			"session_name_explicit":      "true",
+			"pending_create_claim":       "true",
+			"template":                   "helper",
+			"state":                      "creating",
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "helper-token",
+			"pending_create_deferred_at": clk.Now().Add(-10 * time.Second).Format(time.RFC3339),
+			// last_woke_at deliberately empty — preWakeCommit was deferred.
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(helper): %v", err)
+	}
+	// Force helper.CreatedAt past the staleCreatingState window. Without
+	// the deferral check, this would trigger the lease-expired rollback.
+	helper.CreatedAt = clk.Now().Add(-5 * time.Minute)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{first, helper}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(helper.ID)
+	if err != nil {
+		t.Fatalf("Get(helper): %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("helper status = closed, want preserved (recently deferred by wake budget): stderr=%q", stderr.String())
+	}
+	if strings.TrimSpace(got.Metadata["pending_create_claim"]) != "true" {
+		t.Fatalf("helper pending_create_claim = %q, want still 'true' (start should have been deferred): stderr=%q", got.Metadata["pending_create_claim"], stderr.String())
+	}
+	if got.Metadata["close_reason"] == "failed-create" {
+		t.Fatalf("helper close_reason = failed-create, want bead preserved")
+	}
+	// The deferred_at field should be refreshed to "now" since the wake
+	// budget deferred this start attempt too. Without the refresh, a
+	// single missed tick of writes would let staleCreatingState fire.
+	deferredAt := strings.TrimSpace(got.Metadata["pending_create_deferred_at"])
+	if deferredAt == "" {
+		t.Fatalf("helper pending_create_deferred_at = empty, want refreshed timestamp: stderr=%q", stderr.String())
+	}
+	parsed, err := time.Parse(time.RFC3339, deferredAt)
+	if err != nil {
+		t.Fatalf("parsing pending_create_deferred_at %q: %v", deferredAt, err)
+	}
+	if parsed.Before(clk.Now().Add(-1 * time.Second)) {
+		t.Fatalf("helper pending_create_deferred_at = %v, want refreshed to ~now (%v)", parsed, clk.Now())
+	}
+}
+
+func TestReconcileSessionBeads_RollsBackWhenDeferredAtIsStale(t *testing.T) {
+	// Defensive: a stale pending_create_deferred_at (older than the lease
+	// window) must NOT preserve the bead forever. If both the creation and
+	// the last deferral were long ago, the bead is genuinely stuck and the
+	// rollback path should fire.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	cfg := &config.City{Agents: []config.Agent{{Name: "helper"}}}
+	desired := map[string]TemplateParams{
+		"helper": {
+			Command:      "test-cmd",
+			SessionName:  "helper",
+			TemplateName: "helper",
+		},
+	}
+
+	bead, err := store.Create(beads.Bead{
+		Title:  "helper",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "template:helper"},
+		Metadata: map[string]string{
+			"session_name":               "helper",
+			"session_name_explicit":      "true",
+			"pending_create_claim":       "true",
+			"template":                   "helper",
+			"state":                      "creating",
+			"generation":                 "1",
+			"continuation_epoch":         "1",
+			"instance_token":             "test-token",
+			"pending_create_deferred_at": clk.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(bead): %v", err)
+	}
+	bead.CreatedAt = clk.Now().Add(-10 * time.Minute)
+
+	var stdout, stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), []beads.Bead{bead}, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	got, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(bead): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed (stale deferred_at + stale CreatedAt should rollback)", got.Status)
+	}
+	if got.Metadata["close_reason"] != "failed-create" {
+		t.Fatalf("close_reason = %q, want failed-create", got.Metadata["close_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlreadyRunning(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
