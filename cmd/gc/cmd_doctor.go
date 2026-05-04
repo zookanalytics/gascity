@@ -315,6 +315,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
+		register(doctor.NewBdConfigParseCheck(cityPath))
 		if storeOK {
 			register(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
 			register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
@@ -384,6 +385,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigGitCheck(rig))
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
+			register(doctor.NewRigBdConfigParseCheck(rig))
 			if storeOK {
 				register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			}
