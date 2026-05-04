@@ -40,6 +40,8 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		return r
 	}
 
+	knownPrefixes := knownBeadPrefixes(c.cfg)
+
 	sessionByID := make(map[string]beads.Bead)
 	openSessionAlias := make(map[string][]beads.Bead)
 	openSessionAliasHistory := make(map[string][]beads.Bead)
@@ -76,7 +78,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				} else if isRetiredSessionModelOwner(owner) {
 					findings = append(findings, fmt.Sprintf("retired-bead-owner: %s is assigned to retired session bead %s", b.ID, assignee))
 				}
-			} else if looksLikeSessionBeadID(assignee) {
+			} else if looksLikeSessionBeadID(assignee, knownPrefixes) {
 				findings = append(findings, fmt.Sprintf("missing-bead-owner: %s is assigned to missing session bead %s", b.ID, assignee))
 			} else {
 				matches := legacySessionTokenMatches(assignee, openSessionAlias, openSessionName)
@@ -165,16 +167,49 @@ func isRetiredSessionModelOwner(b beads.Bead) bool {
 }
 
 // looksLikeSessionBeadID reports whether s is shaped like a bead ID we
-// should resolve through sessionByID. Bead IDs never contain "/", so any
-// rig-qualified or role-qualified session name (e.g. "gc-toolkit/gastown.witness")
-// is rejected here even when its leading segment matches a known bead-ID
-// prefix. This guards against false-positive "missing-bead-owner" findings
-// for assignees that are session names rather than bead IDs.
-func looksLikeSessionBeadID(s string) bool {
-	if strings.ContainsRune(s, '/') {
+// should resolve through sessionByID. Classification is closed-set: only
+// strings of the form "<prefix>-<suffix>" where <prefix> appears in
+// knownPrefixes are treated as bead IDs. Strings containing "/" or "."
+// are rejected up front as session-name shapes that no bead ID would
+// ever exhibit. This guards against false-positive "missing-bead-owner"
+// findings for rig-qualified session names like
+// "gc-toolkit/gastown.witness" or "gc-toolkit.mechanik" even when the
+// leading segment matches a historical bead-ID prefix.
+func looksLikeSessionBeadID(s string, knownPrefixes map[string]bool) bool {
+	if s == "" {
 		return false
 	}
-	return strings.HasPrefix(s, "gc-") || strings.HasPrefix(s, "bd-") || strings.HasPrefix(s, "mc-")
+	if strings.ContainsRune(s, '/') || strings.ContainsRune(s, '.') {
+		return false
+	}
+	for prefix := range knownPrefixes {
+		if prefix == "" {
+			continue
+		}
+		if strings.HasPrefix(s, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+// knownBeadPrefixes returns the set of bead-ID prefixes the city and its
+// rigs use, suitable for closed-set classification by
+// looksLikeSessionBeadID. Empty prefixes are skipped.
+func knownBeadPrefixes(cfg *config.City) map[string]bool {
+	prefixes := make(map[string]bool)
+	if hq := strings.TrimSpace(config.EffectiveHQPrefix(cfg)); hq != "" {
+		prefixes[hq] = true
+	}
+	if cfg == nil {
+		return prefixes
+	}
+	for i := range cfg.Rigs {
+		if p := strings.TrimSpace(cfg.Rigs[i].EffectivePrefix()); p != "" {
+			prefixes[p] = true
+		}
+	}
+	return prefixes
 }
 
 func legacySessionTokenMatches(token string, byAlias, bySessionName map[string][]beads.Bead) []beads.Bead {
