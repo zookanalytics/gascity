@@ -1030,6 +1030,33 @@ func clearPendingStartInFlightLease(session *beads.Bead, store beads.Store, stde
 	}
 }
 
+// markPendingCreateDeferredByWakeBudget records that the per-tick wake
+// budget rate-limited this start attempt. The reconciler reads
+// pending_create_deferred_at to skip the lease-expired rollback while the
+// bead is still in the start queue (see pendingCreateRecentlyDeferred).
+// Only beads in the pending-create state carry the field — beads whose
+// start has already been dispatched live or are unrelated to wake-budget
+// gating are unaffected.
+func markPendingCreateDeferredByWakeBudget(session *beads.Bead, store beads.Store, clk clock.Clock, stderr io.Writer) {
+	if session == nil || store == nil {
+		return
+	}
+	if strings.TrimSpace(session.Metadata["pending_create_claim"]) != "true" {
+		return
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	deferredAt := now.UTC().Format(time.RFC3339)
+	if setMeta(store, session.ID, pendingCreateDeferredAtKey, deferredAt, stderr) == nil {
+		if session.Metadata == nil {
+			session.Metadata = make(map[string]string)
+		}
+		session.Metadata[pendingCreateDeferredAtKey] = deferredAt
+	}
+}
+
 func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr io.Writer) {
 	if sp == nil || result.prepared.candidate.session == nil {
 		return
@@ -1526,6 +1553,7 @@ func executePlannedStartsTraced(
 		if wakeCount >= maxWakes {
 			for _, candidate := range waveCandidates {
 				logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+				markPendingCreateDeferredByWakeBudget(candidate.session, store, clk, stderr)
 			}
 			continue
 		}
@@ -1541,6 +1569,7 @@ func executePlannedStartsTraced(
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
 					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "deferred_by_wake_budget", time.Time{}, time.Time{}, nil)
+					markPendingCreateDeferredByWakeBudget(candidate.session, store, clk, stderr)
 				}
 				break
 			}
@@ -1569,6 +1598,9 @@ func executePlannedStartsTraced(
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
+						if outcome == "deferred_by_async_start_limit" {
+							markPendingCreateDeferredByWakeBudget(candidate.session, store, clk, stderr)
+						}
 						continue
 					}
 				}

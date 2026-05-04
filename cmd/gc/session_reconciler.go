@@ -182,6 +182,37 @@ func pendingCreateStartInFlight(session beads.Bead, clk clock.Clock, startupTime
 	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
+// pendingCreateDeferredAtKey records the wall-clock time the wake-budget
+// pipeline most recently rejected a start attempt for this pending-create
+// bead. The reconciler treats a recent value as "still queued, retry next
+// tick" so the rollback path does not race the wake-budget refill window.
+const pendingCreateDeferredAtKey = "pending_create_deferred_at"
+
+// pendingCreateRecentlyDeferred reports whether the bead was rate-limited
+// by the wake budget within the last staleCreatingStateTimeout. When true,
+// the lease-expired rollback must be skipped: rolling back here causes a
+// tight churn loop where the pool keeps re-claiming a slot that the wake
+// budget keeps deferring, emitting a fresh failed-create cycle every tick.
+//
+// The freshness window matches staleCreatingStateTimeout so a single
+// missed tick does not cause a false positive — the deferral signal must
+// be at least as recent as the staleness anchor it counteracts.
+func pendingCreateRecentlyDeferred(session beads.Bead, clk clock.Clock) bool {
+	raw := strings.TrimSpace(session.Metadata[pendingCreateDeferredAtKey])
+	if raw == "" {
+		return false
+	}
+	deferredAt, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return false
+	}
+	now := time.Now()
+	if clk != nil {
+		now = clk.Now()
+	}
+	return now.Before(deferredAt.Add(staleCreatingStateTimeout))
+}
+
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
 // semantics. For each session bead, it determines if the session should be
 // awake (has a matching entry in the desired state) and manages lifecycle
@@ -594,12 +625,20 @@ func reconcileSessionBeadsTraced(
 		// attempts ("alias already belongs to gm-XXXX") for any session whose
 		// template still has demand. Rolling back closes the dead bead so the
 		// next reconciler tick can allocate a fresh slot under the same alias.
+		//
+		// Wake-budget exception: a bead whose start was just deferred by the
+		// per-tick wake budget has pending_create_deferred_at set instead of
+		// last_woke_at. Treating that as "lease expired" causes the failed-
+		// create churn loop documented in gc-9mleg — preserve the bead so
+		// the next tick can dispatch the start once the budget refills.
 		if !alive && shouldRollbackPendingCreate(session) {
 			var startupTimeout time.Duration
 			if cfg != nil {
 				startupTimeout = cfg.Session.StartupTimeoutDuration()
 			}
-			if !pendingCreateStartInFlight(*session, clk, startupTimeout) && staleCreatingState(*session, clk) {
+			if !pendingCreateStartInFlight(*session, clk, startupTimeout) &&
+				!pendingCreateRecentlyDeferred(*session, clk) &&
+				staleCreatingState(*session, clk) {
 				fmt.Fprintf(stderr, "session reconciler: rolling back pending create %s: lease expired and no live runtime\n", name) //nolint:errcheck
 				if trace != nil {
 					trace.recordDecision("reconciler.session.pending_create", tp.TemplateName, name, "pending_create_lease_expired", "rollback", nil, nil, "")

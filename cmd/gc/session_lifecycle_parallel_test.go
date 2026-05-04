@@ -2028,6 +2028,135 @@ func TestDependencySessionStartInFlightFailsClosedOnMetadataListError(t *testing
 	}
 }
 
+func TestMarkPendingCreateDeferredByWakeBudget(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+
+	t.Run("writes timestamp on pending-create bead", func(t *testing.T) {
+		bead, err := store.Create(beads.Bead{
+			Title: "helper",
+			Type:  sessionBeadType,
+			Metadata: map[string]string{
+				"pending_create_claim": "true",
+				"state":                "creating",
+				"session_name":         "helper-1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		var stderr bytes.Buffer
+		markPendingCreateDeferredByWakeBudget(&bead, store, clk, &stderr)
+		got := strings.TrimSpace(bead.Metadata["pending_create_deferred_at"])
+		if got == "" {
+			t.Fatalf("in-memory bead pending_create_deferred_at = empty, want timestamp")
+		}
+		stored, err := store.Get(bead.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if stored.Metadata["pending_create_deferred_at"] != got {
+			t.Fatalf("stored = %q, in-memory = %q (must match)", stored.Metadata["pending_create_deferred_at"], got)
+		}
+		parsed, err := time.Parse(time.RFC3339, got)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", got, err)
+		}
+		if !parsed.Equal(clk.Now().UTC()) {
+			t.Fatalf("timestamp = %v, want %v", parsed, clk.Now().UTC())
+		}
+	})
+
+	t.Run("ignores bead without pending_create_claim", func(t *testing.T) {
+		bead, err := store.Create(beads.Bead{
+			Title: "settled",
+			Type:  sessionBeadType,
+			Metadata: map[string]string{
+				"state":        "awake",
+				"session_name": "settled-1",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		var stderr bytes.Buffer
+		markPendingCreateDeferredByWakeBudget(&bead, store, clk, &stderr)
+		if got := strings.TrimSpace(bead.Metadata["pending_create_deferred_at"]); got != "" {
+			t.Fatalf("settled bead pending_create_deferred_at = %q, want empty", got)
+		}
+	})
+
+	t.Run("nil session is a no-op", func(_ *testing.T) {
+		var stderr bytes.Buffer
+		markPendingCreateDeferredByWakeBudget(nil, store, clk, &stderr) // must not panic
+	})
+}
+
+func TestExecutePlannedStarts_DeferredByWakeBudgetWritesDeferredAt(t *testing.T) {
+	// Regression test for gc-9mleg: the wake-budget defer path must mark the
+	// bead so the rollback logic does not treat its empty last_woke_at as
+	// lease-expired.
+	one := 1
+	cfg := &config.City{
+		Daemon: config.DaemonConfig{MaxWakesPerTick: &one},
+		Agents: []config.Agent{{Name: "first"}, {Name: "deferred"}},
+	}
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 30, 12, 0, 0, 0, time.UTC)}
+	desired := map[string]TemplateParams{
+		"first":    {Command: "first-cmd", SessionName: "first", TemplateName: "first"},
+		"deferred": {Command: "deferred-cmd", SessionName: "deferred", TemplateName: "deferred"},
+	}
+	var sessions []beads.Bead
+	for _, name := range []string{"first", "deferred"} {
+		bead, err := store.Create(beads.Bead{
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: creatingMeta(map[string]string{
+				"session_name":         name,
+				"template":             name,
+				"generation":           "1",
+				"instance_token":       "tok-" + name,
+				"pending_create_claim": "true",
+			}),
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		sessions = append(sessions, bead)
+	}
+
+	var stderr bytes.Buffer
+	cfgNames := configuredSessionNames(cfg, "", store)
+	_ = reconcileSessionBeads(
+		context.Background(), sessions, desired, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), map[string]int{}, false, nil, "",
+		nil, clk, events.Discard, 0, 0, ioDiscard{}, &stderr,
+	)
+
+	if !strings.Contains(stderr.String(), "outcome=deferred_by_wake_budget") {
+		t.Fatalf("expected deferred_by_wake_budget in stderr, got: %q", stderr.String())
+	}
+
+	var deferredBeadID string
+	for _, s := range sessions {
+		if s.Metadata["session_name"] == "deferred" {
+			deferredBeadID = s.ID
+			break
+		}
+	}
+	got, err := store.Get(deferredBeadID)
+	if err != nil {
+		t.Fatalf("Get(deferred): %v", err)
+	}
+	deferredAt := strings.TrimSpace(got.Metadata["pending_create_deferred_at"])
+	if deferredAt == "" {
+		t.Fatalf("deferred bead pending_create_deferred_at = empty, want timestamp from wake-budget defer; metadata=%v", got.Metadata)
+	}
+}
+
 func TestPendingCreateStartInFlight_ZeroStartupTimeoutUsesRecoveryLease(t *testing.T) {
 	now := time.Date(2026, 4, 26, 12, 1, 40, 0, time.UTC)
 	recent := beads.Bead{
