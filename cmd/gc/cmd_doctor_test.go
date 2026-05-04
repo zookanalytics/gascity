@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -172,7 +173,7 @@ prefix = "fe"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 
 	if citySkip == nil || *citySkip {
 		t.Fatalf("city dolt check skip = %v, want false when a bd-backed rig inherits the city endpoint", citySkip)
@@ -235,7 +236,7 @@ dolt_port = "3308"
 	})
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 
 	if !strings.Contains(stdout.String(), "canonical/compat Dolt drift") {
 		t.Fatalf("doctor output missing Dolt topology drift:\nstdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
@@ -266,7 +267,7 @@ func TestDoDoctorReportsLegacyBDSplitStore(t *testing.T) {
 	t.Cleanup(func() { cityFlag = origCityFlag })
 
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, false, &stdout, &stderr)
+	_ = doDoctor(false, false, false, &stdout, &stderr)
 	out := stdout.String() + stderr.String()
 	if !strings.Contains(out, "bd-split-store") {
 		t.Fatalf("doctor output missing bd-split-store check:\n%s", out)
@@ -581,5 +582,115 @@ dolt_port = "3307"
 	res := newDoltTopologyCheck(cityDir, cfg).Run(&doctor.CheckContext{CityPath: cityDir})
 	if res.Status != doctor.StatusOK {
 		t.Fatalf("status = %v, want ok; message = %q", res.Status, res.Message)
+	}
+}
+
+// TestDoDoctor_JSONShape exercises the --json flag end-to-end on a
+// minimal city. It confirms stdout is a single well-formed JSON
+// document with the documented shape (checks[] + summary), and that
+// the human-readable banner does not leak in (no Unicode icons,
+// no "passed/failed" trailer line). Automated agents (deacon-patrol)
+// rely on this shape; the contract is in engdocs/contributors/doctor-json.md.
+func TestDoDoctor_JSONShape(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	origCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = origCityFlag })
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, true, &stdout, &stderr)
+
+	out := stdout.String()
+	if strings.ContainsAny(out, "✓⚠✗") {
+		t.Errorf("--json stdout leaked human output icons: %q", out)
+	}
+	if strings.Contains(out, " passed") || strings.Contains(out, " failed") {
+		t.Errorf("--json stdout leaked human summary trailer: %q", out)
+	}
+
+	var got doctor.JSONOutput
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal --json stdout: %v\n%s", err, out)
+	}
+	if got.Summary == nil {
+		t.Fatal("--json output missing summary")
+	}
+	if len(got.Checks) == 0 {
+		t.Fatal("--json output missing checks (a minimal city always runs core checks)")
+	}
+
+	// Spot-check the contract: every entry has name + status + message
+	// regardless of outcome. Required fields must never be empty.
+	for i, c := range got.Checks {
+		if c.Name == "" {
+			t.Errorf("checks[%d].name is empty: %+v", i, c)
+		}
+		if c.Message == "" {
+			t.Errorf("checks[%d].message is empty: %+v", i, c)
+		}
+	}
+
+	// Re-decode into a generic map to assert the wire field names exist
+	// and status is the lowercase string token (not an integer).
+	var raw map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &raw); err != nil {
+		t.Fatalf("re-unmarshal: %v", err)
+	}
+	checks, ok := raw["checks"].([]any)
+	if !ok {
+		t.Fatalf("checks not a JSON array: %T", raw["checks"])
+	}
+	first, ok := checks[0].(map[string]any)
+	if !ok {
+		t.Fatalf("checks[0] not a JSON object: %T", checks[0])
+	}
+	if _, isString := first["status"].(string); !isString {
+		t.Errorf("checks[0].status must be a string token, got %T (%v)", first["status"], first["status"])
+	}
+	for _, key := range []string{"name", "status", "message", "fix_attempted", "fixed"} {
+		if _, present := first[key]; !present {
+			t.Errorf("checks[0] missing required key %q", key)
+		}
+	}
+	summary, ok := raw["summary"].(map[string]any)
+	if !ok {
+		t.Fatalf("summary not a JSON object: %T", raw["summary"])
+	}
+	for _, key := range []string{"passed", "warned", "failed", "fixed"} {
+		if _, present := summary[key]; !present {
+			t.Errorf("summary missing required key %q", key)
+		}
+	}
+}
+
+// TestDoDoctor_HumanOutputUnchanged confirms the default (non-JSON)
+// output keeps emitting the human-readable contract — Unicode status
+// icons and the trailing summary line. The bead's acceptance criteria
+// require that absence of --json must not regress existing output.
+func TestDoDoctor_HumanOutputUnchanged(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	origCityFlag := cityFlag
+	cityFlag = cityDir
+	t.Cleanup(func() { cityFlag = origCityFlag })
+
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(false, false, false, &stdout, &stderr)
+
+	out := stdout.String()
+	if !strings.ContainsAny(out, "✓⚠✗") {
+		t.Errorf("human-mode stdout missing status icons: %q", out)
+	}
+	if !strings.Contains(out, "passed") {
+		t.Errorf("human-mode stdout missing summary trailer (\"passed\"): %q", out)
+	}
+	// Must not emit a JSON document.
+	if strings.HasPrefix(strings.TrimSpace(out), "{") {
+		t.Errorf("human-mode stdout looks like JSON: %q", out)
 	}
 }

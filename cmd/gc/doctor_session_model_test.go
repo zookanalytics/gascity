@@ -68,7 +68,7 @@ func TestPhase0DoctorDoesNotFalsePositiveOnRigQualifiedSessionName(t *testing.T)
 
 	t.Setenv("GC_CITY", cityPath)
 	var stdout, stderr bytes.Buffer
-	_ = doDoctor(false, true, &stdout, &stderr)
+	_ = doDoctor(false, true, false, &stdout, &stderr)
 
 	out := stdout.String() + stderr.String()
 	if strings.Contains(out, "missing-bead-owner") {
