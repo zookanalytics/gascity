@@ -43,6 +43,7 @@ agent-sessions
 zombie-sessions
 orphan-sessions
 bd-split-store
+bd-config-parse
 beads-store
 v2-routed-to-namespace
 session-model
