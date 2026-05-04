@@ -64,6 +64,19 @@ a binding decision on lock granularity (city-wide flock for MVP,
 per-DB lock as a future enhancement). It also pins the resolutions
 of PRD Open Questions 5, 10, 12, 13, 14, 15, and 16.
 
+PRD-alignment round 1 added three contract-discharge mechanisms:
+(1) the rollback path on integrity-mismatch (flatten captures
+`pre_hash` and `DOLT_RESET --hard`s; surgical halts before the
+branch swap) discharges the PRD constraint "leave db in
+pre-compaction state"; (2) the `phases` block on the JSON envelope
+plus the per-DB `pre_hash` field discharge Goal 6's "close
+inspect/compact/verify/report step beads independently" without
+forcing the dog to derive aggregate status from the per-DB array;
+(3) a formula/CLI defaults consistency unit test plus a
+formula-driven integration test discharge Goal 2's "no hardcoded
+values that could drift from the formula" and Acceptance 2's
+end-to-end formula→CLI→envelope→step-close path.
+
 Confidence is high. The cleanup pattern provides a tested template;
 the algorithmic content is already specified in the formula. The
 durable win is the regression test in PR1 — it makes the orphan-
@@ -214,18 +227,31 @@ Both algorithms are ports of the formula's existing prose.
 for each candidate database:
   acquire advisory lock (city-wide flock for MVP)
   USE <db>
+  pre_hash := SELECT @@<db>_head     # captured for rollback path
   pre_row_counts := SELECT COUNT(*) for every user table
   root_hash := earliest commit hash from dolt_log
   CALL DOLT_RESET('--soft', root_hash)        # parent pointer moves
   CALL DOLT_COMMIT('-Am', 'compaction: flatten history')
   post_row_counts := SELECT COUNT(*) for every user table
-  if pre != post: outcome = integrity-mismatch (escalate)
+  if pre != post:
+    CALL DOLT_RESET('--hard', pre_hash)       # rollback to pre-compaction
+    outcome = integrity-mismatch (escalate)
+    skip dolt_gc; release lock; continue
   CALL dolt_gc()
   release lock
 ```
 
 Flatten is concurrent-write safe — the merge base shifts but data
-is preserved.
+is preserved. The `pre_hash` capture-and-revert is the rollback path
+that discharges the PRD constraint "mismatch → leave db in
+pre-compaction state": the new flatten commit is reachable until
+`dolt_gc` runs, so `DOLT_RESET --hard pre_hash` restores the original
+HEAD without losing data. `dolt_gc` is intentionally skipped on
+mismatch so an operator can re-inspect both states; the next
+successful cycle reclaims chunks. The captured `pre_hash` is also
+surfaced in the envelope (`pre_hash` field on each per-DB record)
+so an operator can recover manually if the in-CLI rollback itself
+fails.
 
 #### Surgical
 
@@ -234,7 +260,7 @@ for each candidate database:
   acquire advisory lock
   USE <db>
   (Q5) drop leftover compact-base / compact-work branches
-  pre_row_counts, head_hash := pre-flight snapshot
+  pre_hash, pre_row_counts := pre-flight snapshot (HEAD on main + counts)
   root_hash := earliest commit
   CALL DOLT_BRANCH('compact-base', root_hash)
   CALL DOLT_BRANCH('compact-work', 'main')
@@ -244,17 +270,30 @@ for each candidate database:
   CALL DOLT_REBASE('--continue')
   if rebase failed with graph-change error:
     pause 2s; retry once
-    if retry failed: outcome = concurrent-write-fatal (escalate)
-  post_row_counts := re-count tables
-  if pre != post: outcome = integrity-mismatch
-  if HEAD moved on main during rebase: outcome = concurrent-write-fatal
+    if retry failed:
+      outcome = concurrent-write-fatal (escalate)
+      drop compact-* branches; release lock; continue   # main untouched
+  post_row_counts := re-count tables on compact-work
+  if pre != post:
+    outcome = integrity-mismatch (escalate)
+    drop compact-* branches; release lock; continue     # main untouched
+  if HEAD on main moved since pre_hash:
+    outcome = concurrent-write-fatal (escalate)
+    drop compact-* branches; release lock; continue     # main untouched
+  # only reached when verify and concurrency checks passed
   delete main, rename compact-work → main
   delete compact-base
   CALL dolt_gc()
   release lock
 ```
 
-Surgical retries once with a 2s pause on graph-change errors.
+Surgical retries once with a 2s pause on graph-change errors. The
+**halt-before-swap** rule discharges the PRD constraint "mismatch →
+leave db in pre-compaction state": on any escalate-class outcome, the
+working branches are dropped and `main` is never touched, so the
+database remains exactly as it was on entry. The captured `pre_hash`
+is also surfaced in the envelope for the same operator-recovery
+reasons as flatten.
 
 #### Per-DB soft timeout
 
@@ -287,6 +326,30 @@ escalate-class outcome (`concurrent-write-fatal`, `integrity-mismatch`,
 `internal-error`, `database-deadline-exceeded`), and `2` on
 invocation errors (bad flag, port unresolved, no DBs to compact
 when explicit list given).
+
+### Threshold Semantics (resolves PRD Q14)
+
+`--threshold` gates **every** candidate database, regardless of
+discovery source. A database named explicitly (positional or
+`--databases` list) that does not exceed the threshold is reported
+with `outcome = below-threshold` and skipped, identical to an
+auto-discovered DB below threshold. Operators wanting unconditional
+compaction of a named database pass `--threshold=0`.
+
+Rationale: the formula's `commit_threshold` variable is a single rule
+that applies uniformly; per-DB exceptions would split the rule along
+discovery-source lines and complicate dog-side per-step closure
+(both an explicit-named and auto-discovered DB hitting `--threshold`
+must close the `compact` step the same way, namely "skipped"). The
+human output line is identical for both:
+
+```
+gascity: 234 commits → below threshold, skip
+```
+
+A future v2 may expose `--force-named` or per-DB threshold overrides
+if a concrete operator workflow demands them; v1 keeps the rule
+uniform.
 
 ### Trust and Discovery
 
@@ -332,7 +395,11 @@ collision (with `2s` pause), and the branch-cleanup ordering
 
 Pre/post row count snapshot + comparison. Surfaces a typed result
 that the executors consume to decide `ok` vs `integrity-mismatch`.
-Excludes `dolt_*` system tables.
+Excludes `dolt_*` system tables. On `integrity-mismatch`, returns
+both the comparison detail and the `pre_hash` captured at entry so
+the calling executor can issue `DOLT_RESET --hard pre_hash` (flatten)
+or drop the working branches without swapping (surgical) to leave
+the database in its pre-compaction state.
 
 ### 6. Envelope — `cmd/gc/dolt_compact_envelope.go`
 
@@ -428,10 +495,17 @@ Forwards `"$@"` to `gc dolt-compact`.
     "source": "city-config",
     "fallback": false
   },
+  "phases": {
+    "inspect": "ok",
+    "compact": "ok",
+    "verify": "ok",
+    "report": "ok"
+  },
   "databases": [
     {
       "name": "hq",
       "discovery_source": "rig-registry",
+      "pre_hash": "abc123…",
       "pre_commits": 1611,
       "post_commits": 1,
       "outcome": "ok",
@@ -457,7 +531,45 @@ Forwards `"$@"` to `gc dolt-compact`.
 
 The `errors` array carries invocation-level errors (port unresolved,
 rig-list failure). Per-database errors live on the database record's
-`outcome` and an optional `error_message` field.
+`outcome` and an optional `error_message` field. The `pre_hash` field
+captures the DB's HEAD commit hash on entry so an operator can
+manually recover (`DOLT_RESET --hard pre_hash`) if the in-CLI
+rollback path ever fails.
+
+#### Per-step bead mapping (resolves Goal 6)
+
+The `phases` block exists so the dog can close
+`inspect` / `compact` / `verify` / `report` step beads from a single
+envelope read without re-deriving status from per-DB outcomes. Each
+phase value is one of:
+
+| Phase value | Meaning | Dog action |
+|---|---|---|
+| `ok` | every DB cleared this phase | close step `closed` |
+| `partial` | some DBs cleared, others reported `below-threshold` / `database-locked` (skipped) but no escalations | close step `closed` (the per-DB array carries the detail) |
+| `escalate` | at least one DB ended in `concurrent-write-fatal`, `integrity-mismatch`, `database-deadline-exceeded`, or `internal-error` | close step `escalated`; escalate to mayor with the offending DB names |
+| `failed` | a phase-level prerequisite failed (e.g., rig-list error blocked `inspect`; invocation-level error blocked everything) | close step `failed`; deacon nudge |
+
+Aggregation rules (CLI-side, deterministic):
+
+- `inspect.value`: `ok` if every candidate's commit-count probe
+  succeeded; `partial` if all DBs were `below-threshold` (no
+  candidates); `failed` if rig-list / port resolution / the probe
+  itself errored before any per-DB outcome could be recorded.
+- `compact.value`: `ok` if every candidate compacted; `partial` if
+  any was `below-threshold` / `database-locked` (skipped) but none
+  escalated; `escalate` if any per-DB outcome is in the escalate
+  set; `failed` if invocation-level errors prevented compaction.
+- `verify.value`: `ok` if every compacted DB's verifier passed;
+  `escalate` on any `integrity-mismatch`; `partial` only when no DB
+  was eligible to verify (all skipped); `failed` mirrors `compact`.
+- `report.value`: always `ok` if the envelope was emitted (the dog's
+  ability to read the envelope is itself the report).
+
+The dog's step-closure code reads `phases.<step>` and maps to the
+table above. The escalate-class set used by the dog matches the
+"escalate to mayor" rows in the Error Class Taxonomy table — so the
+`phases` block is a faithful aggregate, not a new contract.
 
 ### Default human output
 
@@ -473,6 +585,18 @@ compact: hq → flatten in progress…
 verify: hq integrity OK
 gc:     reclaimed 1.2 GB
 report: 1 db inspected, 1 compacted, 0 skipped, 0 failed
+```
+
+Auto-discovery and explicit DBs receive the same threshold treatment
+(see "Threshold Semantics" — Q14):
+
+```
+$ gc dolt compact hq gascity --threshold=500
+inspect: hq @ 1611 commits (threshold 500) → candidate
+inspect: gascity @ 234 commits → below threshold, skip
+compact: hq → flatten in progress…
+  …
+report: 2 dbs inspected, 1 compacted, 1 skipped, 0 failed
 ```
 
 Glyphs (`✓ ⚠ ✖`) for terminal-agnostic status indication, matching
@@ -514,8 +638,12 @@ Defined in `cmd/gc/dolt_compact_envelope.go`. Pinned at
 `gc.dolt.compact.v1` from day 1, additive evolution only. The shape
 is forwards-compatible — empty arrays render as `[]`, omitempty
 fields don't appear when zero. Field order mirrors cleanup's
-ordering convention (`schema`, then per-step results, `summary`
-last, `errors` last).
+ordering convention (`schema`, then `invocation` / `port`, then the
+top-level `phases` aggregate, then per-database results, `summary`,
+`errors`). The two PRD-discharge-driven fields are explicit:
+`phases.{inspect,compact,verify,report}` (per-step closure aggregate
+for the dog) and `databases[].pre_hash` (operator-recovery handle
+when in-CLI rollback fails).
 
 ### Storage and migrations
 
@@ -610,6 +738,15 @@ PRD review's Important-But-Non-Blocking section. None are needed
 for the silent-failure recovery. Adding any of them now is gold-
 plating. v2 backlog if and when consumers emerge.
 
+PRD Story 3 (operator debugging via `gc dolt compact --inspect-only`)
+is partially deferred along with this trade-off: v1 operators inspect
+by running the full CLI with `--json` and reading the per-DB
+`outcome`/`pre_commits` fields, or by running the human-readable mode
+and reading the `inspect:` lines (which already preview `→ candidate`
+vs `→ below threshold, skip` per DB without compacting yet at that
+point in the pipeline). When a real `--inspect-only` consumer
+emerges in v2, it composes onto the existing inspector phase.
+
 ## Risks and Mitigations
 
 ### R-1. Migration sweep (PR1) misses an exemption-needing formula
@@ -635,8 +772,12 @@ must declare `executor` + `zfc_exempt = true`.
 
 Surgical mode is documented as not-safe with concurrent writes.
 Mitigation: 2s retry on graph-change errors (matches formula).
-On retry failure, escalate as `concurrent-write-fatal`. Operators
-are told to use `--mode=flatten` if writes are continuously busy.
+On retry failure, escalate as `concurrent-write-fatal` **and halt
+before the branch swap so `main` stays at `pre_hash`** — the
+`compact-*` working branches are dropped and the database is left
+exactly as it was on entry (pre-compaction state, per the PRD
+constraint). Operators are told to use `--mode=flatten` if writes
+are continuously busy.
 
 ### R-4. `dolt_gc` runs longer than `--per-db-timeout`
 
@@ -681,8 +822,36 @@ stays fast.
 Post-PR2, the next cycle should compact something on a busy city.
 If it doesn't (still safely-skipping) the formula update missed a
 spot. Mitigation: the executor-binding test in PR1 would have
-caught a disconnect; manual smoke after PR2 ("trigger a cycle on
-loomington, watch the report bead") seals the deal.
+caught a disconnect; the **formula→CLI→envelope→step-close
+integration test** in PR2 (Implementation Plan Phase 2 step 11)
+exercises the executor binding without waiting on the 24h cooldown;
+manual smoke after PR2 ("trigger a cycle on loomington, watch the
+report bead") covers the remaining 24h-cooldown surface that's
+operator-gated.
+
+### R-10. In-CLI rollback fails on integrity-mismatch
+
+The flatten path's `DOLT_RESET --hard pre_hash` could itself fail
+(connection lost mid-rollback, Dolt server crash). The rolled-forward
+flatten commit would then remain reachable until the next
+`dolt_gc` runs. Mitigation: (1) the per-DB envelope record carries
+`pre_hash` so an operator can manually re-issue
+`DOLT_RESET --hard <pre_hash>` from `gc dolt sql`; (2) `dolt_gc` is
+deliberately skipped on the mismatch path so the chunks remain on
+disk; (3) the engdocs recovery section documents the manual
+procedure. The surgical path has no equivalent risk: nothing is
+swapped on mismatch, so there is no rollback to fail.
+
+### R-11. Formula vars drift from CLI defaults
+
+A future PR could change `commit_threshold` in the formula or the
+`--threshold` default in the CLI without touching the other side,
+silently breaking Goal 2's "single source of truth." Mitigation:
+the formula/CLI defaults consistency unit test in Phase 2 step 10
+loads the formula and asserts every default matches; CI fails on
+drift. The test must be updated whenever a new formula var is
+introduced; the test name and failure message tell the developer
+exactly which side is stale.
 
 ## Implementation Plan
 
@@ -721,13 +890,30 @@ loomington, watch the report bead") seals the deal.
    iterate candidates, dispatch to flatten/surgical, render output.
 9. **Pack delegate.** `command.toml` + `run.sh`. Arg-forwarding
    regression test.
-10. **Unit tests.** Charset validator, envelope shape, mode
-    selection, error-class mapping, retry semantics (mocked SQL).
+10. **Unit tests.** Charset validator, envelope shape (including the
+    `phases` aggregation rules), mode selection, error-class mapping,
+    retry semantics (mocked SQL), threshold-on-explicit-DB skip
+    (Q14), and a **formula/CLI defaults consistency test** that
+    loads `examples/dolt/formulas/mol-dog-compactor.toml`, extracts
+    the `commit_threshold`, `keep_recent`, `mode`, and `databases`
+    formula vars, and asserts the CLI flag defaults match. This
+    test discharges Goal 2's "no hardcoded values that could drift
+    from the formula" without relying on review vigilance.
 11. **Integration tests.** Real Dolt sql-server. Populate, flatten,
     verify post-state. Populate, surgical, verify post-state. Inject
     concurrent write between pre-flight and rebase, verify retry.
     Run two CLIs back-to-back, verify lock works. Verify no `SHOW
-    DATABASES` is issued.
+    DATABASES` is issued. **Inject a row-count divergence between
+    pre and post snapshots and assert flatten rolls back to
+    `pre_hash` (HEAD restored, no orphaned commit visible) and
+    surgical halts before swap (main untouched, `compact-*`
+    branches dropped).** **Drive the executor binding via the
+    formula:** load `mol-dog-compactor.toml`, resolve the step's
+    `executor`, exec it with `--json`, and assert the parsed
+    `phases` block plus per-DB outcomes drive correct step-closure
+    decisions. This last test discharges Acceptance 2's
+    formula→CLI→envelope→step-close path; the 24h-cooldown leg
+    remains operator-gated post-deploy verification (R-9).
 12. **Formula update.** `mol-dog-compactor.toml` drops `zfc_exempt`,
     adds `executor = "gc dolt-compact"`, references CLI flags in
     step descriptions.
@@ -746,7 +932,10 @@ loomington, watch the report bead") seals the deal.
 
 ## Open Questions
 
-These remain for the prd-align and plan-review rounds.
+These remain for the plan-review rounds. PRD Open Question Q14
+("threshold semantics on explicit DBs") was resolved in prd-align
+round 1 — see "Threshold Semantics" above. Design-level OQ-1 through
+OQ-7 below are unchanged from the design-exploration baseline.
 
 ### OQ-1. Free-form vs structured `executor` field shape (Leg 2)
 
