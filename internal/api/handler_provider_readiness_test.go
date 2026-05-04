@@ -1036,7 +1036,10 @@ func TestHandleReadinessReturnsNotInstalledForGitHubCLIWithoutBinary(t *testing.
 		providerProbePathEnv = originalPathEnv
 		providerProbeGOOS = originalGOOS
 	}()
-	providerProbeGOOS = "linux"
+	// "test" — not "linux" — so searchpath.Expand skips the unconditional
+	// /snap/bin and /home/linuxbrew/.linuxbrew/bin extras that would otherwise
+	// resolve a host-installed gh and turn this assertion into "needs_auth".
+	providerProbeGOOS = "test"
 
 	state := newFakeState(t)
 	h := newTestCityHandler(t, state)
