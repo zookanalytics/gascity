@@ -164,7 +164,16 @@ func isRetiredSessionModelOwner(b beads.Bead) bool {
 	return session.LifecycleIdentityReleased(b.Status, b.Metadata)
 }
 
+// looksLikeSessionBeadID reports whether s is shaped like a bead ID we
+// should resolve through sessionByID. Bead IDs never contain "/", so any
+// rig-qualified or role-qualified session name (e.g. "gc-toolkit/gastown.witness")
+// is rejected here even when its leading segment matches a known bead-ID
+// prefix. This guards against false-positive "missing-bead-owner" findings
+// for assignees that are session names rather than bead IDs.
 func looksLikeSessionBeadID(s string) bool {
+	if strings.ContainsRune(s, '/') {
+		return false
+	}
 	return strings.HasPrefix(s, "gc-") || strings.HasPrefix(s, "bd-") || strings.HasPrefix(s, "mc-")
 }
 
