@@ -77,6 +77,21 @@ formula-driven integration test discharge Goal 2's "no hardcoded
 values that could drift from the formula" and Acceptance 2's
 end-to-end formula→CLI→envelope→step-close path.
 
+PRD-alignment round 2 closed three remaining alignment gaps:
+(1) a §Operations / Manual Recovery subsection consolidates the
+operator-facing recovery procedures (flatten failed rollback,
+surgical mid-rebase crash, stuck advisory lock), discharging
+PRD Q5/Q11's "document the manual recovery procedure for operators
+in the design doc"; (2) Component 6 (Validator) was added to Key
+Components alongside its R-6 drift mitigation, surfacing the
+SQL-injection / charset-validation discharge that was previously
+only described in prose; (3) TD-5 was extended with an explicit
+algorithm-vs-wrapper framing for `--per-db-timeout`, defending
+against Non-Goal 7's "no parameter tuning" reading by anchoring
+the deadline to the orchestration layer rather than flatten or
+surgical internals, and the Phase 2 step 10 consistency-test
+scope was clarified accordingly.
+
 Confidence is high. The cleanup pattern provides a tested template;
 the algorithmic content is already specified in the formula. The
 durable win is the regression test in PR1 — it makes the orphan-
@@ -163,7 +178,7 @@ PR2.**
    whether it resolves to a Cobra command / pack script today, or
    if it's intended to be agent-executed (the bulk), or if it
    needs an exemption tag. Apply the tags as found.
-4. Land the executor-binding regression test (see Component 7
+4. Land the executor-binding regression test (see Component 8
    below). The test walks every embedded formula and asserts every
    step either resolves to a real Cobra command / pack script or
    carries `executor = "..."` plus `zfc_exempt = true`.
@@ -401,14 +416,27 @@ the calling executor can issue `DOLT_RESET --hard pre_hash` (flatten)
 or drop the working branches without swapping (surgical) to leave
 the database in its pre-compaction state.
 
-### 6. Envelope — `cmd/gc/dolt_compact_envelope.go`
+### 6. Validator — `cmd/gc/dolt_compact_validate.go`
+
+Identifier charset validation discharging PRD Constraint 8 ("no SQL
+injection"). Charset matches the existing pack-script rule:
+`[A-Za-z0-9_-]` body, leading char `[A-Za-z0-9_]`. Runs before any
+SQL is issued for a given database identifier; failures surface as
+`outcome = invalid-identifier` (Error Class Taxonomy). Per R-6, the
+validator is factored as a single shared helper with `gc dolt-cleanup`
+to prevent drift; if cleanup's validator hasn't been exported the
+factoring happens in PR2 against both call sites at once. Unit test
+covers the boundary cases (empty, leading-digit, hyphen-leading,
+non-ASCII).
+
+### 7. Envelope — `cmd/gc/dolt_compact_envelope.go`
 
 Defines `CompactReport`, `CompactDatabaseResult`,
 `CompactRowCountSnapshot`, `CompactSummary`, `CompactError`. Pins
 `schema = "gc.dolt.compact.v1"`. Marshals in the human path's
 final-line print and in the `--json` path's `json.Marshal` call.
 
-### 7. Executor-binding regression test (PR1) — `cmd/gc/embedded_formula_executor_test.go`
+### 8. Executor-binding regression test (PR1) — `cmd/gc/embedded_formula_executor_test.go`
 
 Walks every embedded formula. For each step:
 
@@ -435,13 +463,13 @@ in the Cobra tree, OR if a pack script exists at a documented path.
 Steps without a resolvable executor must declare `zfc_exempt = true`
 + `executor = "..."` to pass.
 
-### 8. Pack delegate — `examples/dolt/commands/compact/`
+### 9. Pack delegate — `examples/dolt/commands/compact/`
 
 `command.toml` describes the operator-facing command. `run.sh`
 sources `runtime.sh` and execs `gc dolt-compact "$@"`. Treats `$@`
 verbatim to avoid the `gc dolt sql` arg-drop bug (#1485).
 
-### 9. Formula update (PR2) — `examples/dolt/formulas/mol-dog-compactor.toml`
+### 10. Formula update (PR2) — `examples/dolt/formulas/mol-dog-compactor.toml`
 
 Drops `zfc_exempt`, adds `executor = "gc dolt-compact"`, updates
 each step's description to reference the CLI flags using formula
@@ -704,6 +732,22 @@ than the default gets cut off and reported as
 needs longer." Not exposed as a formula var until a city actually
 hits the limit.
 
+`--per-db-timeout` is a **wrapper-level execution budget** enforced
+by `context.WithTimeout` around each per-DB invocation; it is **not
+a parameter of the flatten or surgical algorithms**, which continue
+to consume the four formula-bound vars (`commit_threshold`,
+`keep_recent`, `mode`, `databases`) verbatim. PRD Non-Goal 7 ("no
+new modes, no parameter tuning") addresses algorithm internals; the
+deadline is orthogonal — it bounds wall-clock cost in the
+orchestration layer without changing flatten or surgical semantics.
+If a city later wants the deadline to live in the formula (e.g., to
+tune per-formula instead of per-binary), the addition is additive
+(new formula var, new CLI flag default sourced from the var, no
+algorithm change). This framing also explains why
+`--per-db-timeout` is intentionally absent from the formula/CLI
+defaults consistency test (Phase 2 step 10): it has no formula-bound
+counterpart.
+
 ### TD-6. Error class taxonomy — 9 classes (resolves PRD Q5)
 
 Fewer classes (3-4) lose useful operational distinctions; more
@@ -853,6 +897,89 @@ drift. The test must be updated whenever a new formula var is
 introduced; the test name and failure message tell the developer
 exactly which side is stale.
 
+## Operations
+
+### Manual Recovery (resolves PRD Q5 / Q11 clarification)
+
+The PRD Q5 clarification mandates that the design doc document the
+manual recovery procedure for operators. Auto-recovery is implicit in
+the lock-then-cleanup ordering (Algorithms / Surgical) and in flatten's
+in-CLI rollback (Algorithms / Flatten). The four sub-cases below
+consolidate operator-facing recovery for the failure modes the design
+admits. The longer-form operator guide lives in
+`engdocs/contributors/dolt-compact.md` (PR2 deliverable); this section
+is the auditable summary that plan-review can verify against.
+
+#### MR-1. Crash mid-flatten with successful in-CLI rollback
+
+No operator action required. Symptom: the last envelope contains a
+per-DB record with `outcome = integrity-mismatch`, `pre_hash` set,
+and `gc_reclaimed_bytes = 0` (because `dolt_gc` is intentionally
+skipped on the mismatch path). The DB's HEAD has been restored to
+`pre_hash` by `DOLT_RESET --hard`. The next cycle re-inspects the DB
+and, if commit count still exceeds threshold, retries; the next
+successful cycle's `dolt_gc` reclaims chunks.
+
+#### MR-2. Crash mid-flatten with failed in-CLI rollback (R-10)
+
+The flatten path's `DOLT_RESET --hard pre_hash` itself failed
+(connection lost mid-rollback, Dolt server crash). The new flatten
+commit is still reachable until the next `dolt_gc` runs.
+
+Operator procedure:
+
+1. Read `pre_hash` from the most recent envelope's per-DB record (or
+   from the run log).
+2. Connect to the affected DB:
+   `gc dolt sql --database <db>`.
+3. Re-issue the rollback:
+   `CALL DOLT_RESET('--hard', '<pre_hash>');`
+4. Verify HEAD: `SELECT @@<db>_head;` should equal `pre_hash`.
+5. Confirm row counts match the pre-compaction state.
+6. The next compactor cycle will re-attempt and on success run
+   `dolt_gc` to reclaim the abandoned flatten commit's chunks.
+
+#### MR-3. Crash mid-surgical (any phase before swap)
+
+`compact-base` and `compact-work` branches may be left behind; `main`
+is untouched (per the halt-before-swap rule). The next CLI invocation
+acquires the lock and drops the orphans automatically (Algorithms /
+Surgical line "(Q5) drop leftover compact-base / compact-work
+branches").
+
+If a manual cleanup is preferred (e.g., the operator wants to inspect
+the orphaned branches first), the procedure is:
+
+1. Acquire the lifecycle lock by running the CLI with no DBs to
+   compact (e.g., `gc dolt-compact --threshold=999999 <db>` to skip
+   real work while still going through the lock-then-cleanup path),
+   OR, for direct cleanup:
+2. `gc dolt sql --database <db>` and `CALL
+   DOLT_BRANCH('--delete', '--force', 'compact-base');` then the same
+   for `compact-work`. Note that without the lifecycle lock, this is
+   only safe when no other compactor is running on the same DB —
+   prefer the CLI-driven path above when available.
+
+#### MR-4. Stuck advisory lock (pathological)
+
+Standard flock semantics release the lock on process exit (kernel-
+enforced). If a stuck-lock case persists across compactor processes
+exiting, this represents a bug in `dolt_lifecycle_lock.go` that
+should be escalated, not worked around. The investigation step is:
+
+1. `gc dolt sql -q "SELECT IS_FREE_LOCK('dolt_lifecycle')"`.
+2. If `0` (held), identify the holding connection via
+   `SHOW FULL PROCESSLIST`.
+3. **Escalate to mayor before manually releasing.** The lock exists
+   to serialize compaction across all DBs; releasing it under a
+   running compactor is a recipe for the very integrity-mismatch the
+   design's other recovery paths handle.
+
+Operators should not need to release the lock manually under normal
+operation. Documenting the path is for completeness; the standard
+fix for an apparently stuck lock is to wait one cycle for the
+holding process to exit, then verify.
+
 ## Implementation Plan
 
 ### Phase 1 — PR1: schema + regression test (broad scope)
@@ -896,7 +1023,11 @@ exactly which side is stale.
     (Q14), and a **formula/CLI defaults consistency test** that
     loads `examples/dolt/formulas/mol-dog-compactor.toml`, extracts
     the `commit_threshold`, `keep_recent`, `mode`, and `databases`
-    formula vars, and asserts the CLI flag defaults match. This
+    formula vars, and asserts the CLI flag defaults match.
+    (`--per-db-timeout` is intentionally not in scope; per TD-5 it
+    is a wrapper-level execution budget, not a formula-bound
+    algorithm parameter — when a city later wires it into the
+    formula, the test should be extended at the same time.) This
     test discharges Goal 2's "no hardcoded values that could drift
     from the formula" without relying on review vigilance.
 11. **Integration tests.** Real Dolt sql-server. Populate, flatten,
