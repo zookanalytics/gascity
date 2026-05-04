@@ -501,12 +501,51 @@ ensure_types_custom_in_yaml() {
     local config_yaml="$dir/.beads/config.yaml"
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
+
+    # Self-heal: older versions of this function appended types.custom without
+    # ensuring a trailing newline, producing lines like
+    # "backup.enabled: falsetypes.custom: ..." that silently invalidate YAML.
+    # When bd's parser falls back to defaults the auto-backup heuristic kicks in
+    # and rewrites a backup_export remote on every git-remote-bearing database,
+    # which drove the 2026-05-03 dolt_backup hot-loop and disk-full incident
+    # (gc-0kuep). Detect the concatenation pattern and split it back into two
+    # lines, then dedupe any duplicate types.custom entries so a follow-up
+    # append (or the early-return below) leaves a valid file.
+    if grep -qE '[^[:space:]]types\.custom:' "$config_yaml" 2>/dev/null; then
+        local repair_tmp
+        repair_tmp=$(mktemp "$config_yaml.repair.XXXXXX") || return 0
+        awk '
+            {
+                line = $0
+                while (match(line, /[^[:space:]]types\.custom:/) > 0) {
+                    print substr(line, 1, RSTART)
+                    line = substr(line, RSTART + 1)
+                }
+                print line
+            }
+        ' "$config_yaml" > "$repair_tmp" 2>/dev/null || { rm -f "$repair_tmp"; return 0; }
+        local dedup_tmp
+        dedup_tmp=$(mktemp "$config_yaml.dedup.XXXXXX") || { rm -f "$repair_tmp"; return 0; }
+        awk '/^types\.custom:/ { if (seen) next; seen=1 } { print }' \
+            "$repair_tmp" > "$dedup_tmp" 2>/dev/null \
+            || { rm -f "$repair_tmp" "$dedup_tmp"; return 0; }
+        rm -f "$repair_tmp"
+        mv -f "$dedup_tmp" "$config_yaml" || rm -f "$dedup_tmp"
+    fi
+
     if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
         return 0
     fi
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
     cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # Ensure file ends with a newline before appending. Without this, the
+    # appended types.custom line concatenates onto the prior key's value
+    # (e.g. "backup.enabled: falsetypes.custom: ..."), which silently
+    # invalidates the YAML and disables every key after the corrupted line.
+    if [ -s "$tmp" ] && [ -n "$(tail -c1 "$tmp")" ]; then
+        printf '\n' >> "$tmp"
+    fi
     printf 'types.custom: %s\n' "$types" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
