@@ -1,20 +1,58 @@
 package doctor
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 )
 
-// Report summarizes the results of a doctor run.
+// Report summarizes the results of a doctor run. JSON tags define the
+// wire shape used by `gc doctor --json` (see engdocs/contributors/doctor-json.md).
 type Report struct {
 	// Passed is the number of checks with StatusOK.
-	Passed int
+	Passed int `json:"passed"`
 	// Warned is the number of checks with StatusWarning.
-	Warned int
+	Warned int `json:"warned"`
 	// Failed is the number of checks with StatusError.
-	Failed int
+	Failed int `json:"failed"`
 	// Fixed is the number of checks remediated by --fix.
-	Fixed int
+	Fixed int `json:"fixed"`
+}
+
+// MarshalJSON renders a CheckStatus as its lowercase string form so
+// JSON consumers receive "ok"/"warning"/"error" instead of an integer
+// whose meaning is not self-evident on the wire.
+func (s CheckStatus) MarshalJSON() ([]byte, error) {
+	return json.Marshal(s.String())
+}
+
+// UnmarshalJSON accepts the lowercase string form emitted by MarshalJSON
+// so doctor JSON output can round-trip through Go consumers. Unknown
+// values resolve to a sentinel that String() reports as "unknown".
+func (s *CheckStatus) UnmarshalJSON(data []byte) error {
+	var token string
+	if err := json.Unmarshal(data, &token); err != nil {
+		return fmt.Errorf("CheckStatus: %w", err)
+	}
+	switch token {
+	case "ok":
+		*s = StatusOK
+	case "warning":
+		*s = StatusWarning
+	case "error":
+		*s = StatusError
+	default:
+		return fmt.Errorf("CheckStatus: unknown status %q", token)
+	}
+	return nil
+}
+
+// JSONOutput is the top-level shape emitted by `gc doctor --json`. It pairs
+// the per-check results with the summary so consumers receive a single
+// document on stdout.
+type JSONOutput struct {
+	Checks  []*CheckResult `json:"checks"`
+	Summary *Report        `json:"summary"`
 }
 
 // Doctor runs registered health checks and reports results.
@@ -31,6 +69,20 @@ func (d *Doctor) Register(c Check) {
 // completes. When fix is true, fixable checks that fail are remediated
 // and re-run. Returns a summary report.
 func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
+	results, report := d.RunCollect(ctx, fix)
+	for _, result := range results {
+		printResult(w, result, ctx.Verbose)
+	}
+	return report
+}
+
+// RunCollect executes all registered checks and returns the per-check
+// results plus a summary report without writing anything. Callers that
+// want streaming human output should use Run; callers that want
+// machine-readable output (e.g. `gc doctor --json`) should use this and
+// then invoke RenderJSON.
+func (d *Doctor) RunCollect(ctx *CheckContext, fix bool) ([]*CheckResult, *Report) {
+	results := make([]*CheckResult, 0, len(d.checks))
 	r := &Report{}
 	for _, c := range d.checks {
 		result := c.Run(ctx)
@@ -51,7 +103,7 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 			}
 		}
 
-		printResult(w, result, ctx.Verbose)
+		results = append(results, result)
 
 		switch {
 		case result.Fixed:
@@ -65,7 +117,22 @@ func (d *Doctor) Run(ctx *CheckContext, w io.Writer, fix bool) *Report {
 			r.Failed++
 		}
 	}
-	return r
+	return results, r
+}
+
+// RenderJSON writes a single JSON document containing the per-check
+// results and the summary report. The output is indented for readability;
+// tooling should treat newlines and indentation as cosmetic and consume
+// the document as a whole. The schema is the wire contract for
+// `gc doctor --json`.
+func RenderJSON(w io.Writer, results []*CheckResult, report *Report) error {
+	if results == nil {
+		results = []*CheckResult{}
+	}
+	out := JSONOutput{Checks: results, Summary: report}
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
 
 // printResult writes a single check result line to w.
