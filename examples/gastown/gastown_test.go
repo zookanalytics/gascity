@@ -819,17 +819,20 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	}
 }
 
-// TestDeaconPatrolDoctorInvokesVerbose pins the deacon's gc doctor
-// invocation to --verbose. Many checks (session-model, agent-sessions,
+// TestDeaconPatrolDoctorInvokesJSON pins the deacon's gc doctor
+// invocation to --json. Many checks (session-model, agent-sessions,
 // zombie-sessions, orphan-sessions, pack-cache, worktrees) put their
 // actionable findings in CheckResult.Details, which the default
-// (non-verbose) printer suppresses. Without --verbose the deacon sees
-// only headline counts (e.g. "1 session model finding(s)") and is
-// structurally unable to act on findings or escalate them with
-// useful context. The default human-readable contract is preserved
-// for interactive operators; --verbose is the documented opt-in for
-// extra detail consumers, which fits the deacon.
-func TestDeaconPatrolDoctorInvokesVerbose(t *testing.T) {
+// human-readable printer suppresses unless --verbose is passed.
+// --json is the stable machine-readable contract (schema in
+// engdocs/contributors/doctor-json.md): it always emits per-check
+// details plus a typed status token, regardless of verbosity, so the
+// deacon can parse with jq and act on or escalate findings without
+// relying on the prose contract that was never promised to be stable.
+//
+// The previous incarnation of this test pinned --verbose as a
+// stopgap before the JSON mode existed (gc-2r50 -> gc-2f7sh).
+func TestDeaconPatrolDoctorInvokesJSON(t *testing.T) {
 	dir := exampleDir()
 	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
 	data, err := os.ReadFile(formulaPath)
@@ -837,15 +840,20 @@ func TestDeaconPatrolDoctorInvokesVerbose(t *testing.T) {
 		t.Fatalf("reading deacon patrol formula: %v", err)
 	}
 	body := string(data)
-	if !strings.Contains(body, "gc doctor --verbose") {
-		t.Errorf("deacon patrol formula must invoke `gc doctor --verbose` so Details (the actionable lines) are visible; got:\n%s", body)
+	if !strings.Contains(body, "gc doctor --json") {
+		t.Errorf("deacon patrol formula must invoke `gc doctor --json` so per-check details are visible to an LLM consumer; got:\n%s", body)
 	}
 	// Defend against accidentally re-introducing a bare invocation in
 	// a runnable code block: the formula uses backtick-fenced shell
 	// blocks, so a literal "\ngc doctor\n" inside the body indicates
-	// a non-verbose invocation.
+	// a non-JSON invocation.
 	if strings.Contains(body, "\ngc doctor\n") {
-		t.Errorf("deacon patrol formula contains a bare `gc doctor` invocation; use `gc doctor --verbose` instead")
+		t.Errorf("deacon patrol formula contains a bare `gc doctor` invocation; use `gc doctor --json` instead")
+	}
+	// --verbose is the legacy text-scraping path; the deacon should not
+	// fall back to it now that --json exists.
+	if strings.Contains(body, "gc doctor --verbose") {
+		t.Errorf("deacon patrol formula still uses `gc doctor --verbose`; switch to `gc doctor --json` (text contract is human-only):\n%s", body)
 	}
 
 	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "deacon", "prompt.template.md")
@@ -854,8 +862,11 @@ func TestDeaconPatrolDoctorInvokesVerbose(t *testing.T) {
 		t.Fatalf("reading deacon prompt: %v", err)
 	}
 	prompt := string(promptData)
-	if !strings.Contains(prompt, "gc doctor --verbose") {
-		t.Errorf("deacon prompt quick-reference must use `gc doctor --verbose` so findings Details are visible to an LLM consumer")
+	if !strings.Contains(prompt, "gc doctor --json") {
+		t.Errorf("deacon prompt quick-reference must use `gc doctor --json` so findings details are visible to an LLM consumer")
+	}
+	if strings.Contains(prompt, "gc doctor --verbose") {
+		t.Errorf("deacon prompt quick-reference still references `gc doctor --verbose`; switch to `--json`")
 	}
 }
 

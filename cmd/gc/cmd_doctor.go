@@ -22,7 +22,7 @@ var (
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
-	var fix, verbose bool
+	var fix, verbose, asJSON bool
 	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Check workspace health",
@@ -31,13 +31,20 @@ func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
 Checks city structure, config validity, binary dependencies (tmux, git,
 bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
-health. Use --fix to attempt automatic repairs.`,
+health. Use --fix to attempt automatic repairs.
+
+--json emits a single structured document on stdout for machine
+consumption. The schema (checks[] + summary) is documented in
+engdocs/contributors/doctor-json.md and is the stable wire contract
+for automated agents. The default human-readable output is unchanged
+when --json is absent.`,
 		Example: `  gc doctor
   gc doctor --fix
-  gc doctor --verbose`,
+  gc doctor --verbose
+  gc doctor --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(fix, verbose, stdout, stderr) != 0 {
+			if doDoctor(fix, verbose, asJSON, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -45,6 +52,7 @@ health. Use --fix to attempt automatic repairs.`,
 	}
 	cmd.Flags().BoolVar(&fix, "fix", false, "attempt to fix issues automatically")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "show extra diagnostic details")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "emit machine-readable JSON instead of human output")
 	return cmd
 }
 
@@ -117,7 +125,7 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
+func doDoctor(fix, verbose, asJSON bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -125,7 +133,9 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 	}
 
 	d := &doctor.Doctor{}
-	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose}
+	// JSON consumers always see Details (the actionable lines), so internally
+	// run as if --verbose. Human output still respects the flag.
+	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: verbose || asJSON}
 
 	// Core checks — always run.
 	d.Register(&doctor.CityStructureCheck{})
@@ -265,6 +275,18 @@ func doDoctor(fix, verbose bool, stdout, stderr io.Writer) int {
 				PackName:  entry.PackName,
 			})
 		}
+	}
+
+	if asJSON {
+		results, report := d.RunCollect(ctx, fix)
+		if err := doctor.RenderJSON(stdout, results, report); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: rendering JSON: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if report.Failed > 0 {
+			return 1
+		}
+		return 0
 	}
 
 	report := d.Run(ctx, stdout, fix)
