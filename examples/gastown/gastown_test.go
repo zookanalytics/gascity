@@ -36,6 +36,17 @@ func runCmd(t *testing.T, dir, name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// neutralizeUserGitConfig points GIT_CONFIG_GLOBAL/SYSTEM at os.DevNull so
+// child git processes don't inherit commit.gpgsign or gpg.format=ssh from
+// the developer's global config. `make test` runs under `env -i` and
+// strips SSH_AUTH_SOCK, so signed commits would otherwise fail with
+// "Couldn't get agent socket" when these tests exec `git commit`.
+func neutralizeUserGitConfig(t *testing.T) {
+	t.Helper()
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+}
+
 func currentBranch(t *testing.T, dir string) string {
 	t.Helper()
 	return runCmd(t, dir, "git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
@@ -430,6 +441,7 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -528,6 +540,7 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 }
 
 func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -562,6 +575,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 }
 
 func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -611,6 +625,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
 }
 
 func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -658,6 +673,7 @@ func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T)
 }
 
 func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -681,6 +697,7 @@ func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
 }
 
 func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -707,6 +724,7 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 }
 
 func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	cityA := filepath.Join(tmp, "city-a")
@@ -742,6 +760,7 @@ func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
 }
 
 func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
