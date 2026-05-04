@@ -894,6 +894,12 @@ bd, dolt), controller status, agent sessions, zombie/orphan sessions,
 bead stores, Dolt server health, event log integrity, and per-rig
 health. Use --fix to attempt automatic repairs.
 
+--json emits a single structured document on stdout for machine
+consumption. The schema (checks[] + summary) is documented in
+engdocs/contributors/doctor-json.md and is the stable wire contract
+for automated agents. The default human-readable output is unchanged
+when --json is absent.
+
 ```
 gc doctor [flags]
 ```
@@ -904,11 +910,13 @@ gc doctor [flags]
 gc doctor
   gc doctor --fix
   gc doctor --verbose
+  gc doctor --json
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--fix` | bool |  | attempt to fix issues automatically |
+| `--json` | bool |  | emit machine-readable JSON instead of human output |
 | `-v`, `--verbose` | bool |  | show extra diagnostic details |
 
 ## gc dolt-cleanup
