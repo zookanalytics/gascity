@@ -44,6 +44,25 @@ func setupCity(t *testing.T, tomlContent string) string {
 	return dir
 }
 
+// neutralizeBdScopeEnv clears env vars set by polecat sessions and
+// gc-driven shells that would otherwise leak into doctor tests:
+//
+//   - BEADS_DIR pins bd to a host beads dir, so any test that execs
+//     `bd` against a t.TempDir() resolves to the host store instead of
+//     the temp store.
+//   - GC_BEADS_SCOPE_ROOT pins the bd scope to a host path, which makes
+//     scopedDoctorBeadsProviderOverride reject GC_BEADS overrides whose
+//     scope doesn't match — defeating tests that assert GC_BEADS=file or
+//     GC_BEADS=exec:... behavior on a t.TempDir() city.
+//
+// Tests that exec bd or exercise check functions reading these env vars
+// against a t.TempDir() should call this to isolate from the host shell.
+func neutralizeBdScopeEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+}
+
 // --- CityStructureCheck ---
 
 func TestCityStructureCheck_OK(t *testing.T) {
@@ -1007,6 +1026,7 @@ func TestBDSplitStoreCheck_InvalidExternalCityConfigUsesNeutralGuidance(t *testi
 }
 
 func TestBDSplitStoreCheck_FileProviderUsesNeutralRecoveryGuidance(t *testing.T) {
+	neutralizeBdScopeEnv(t)
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 	fs := fsys.OSFS{}
@@ -1757,6 +1777,7 @@ provider = "exec:/tmp/gc-beads-bd"
 }
 
 func TestBeadsStoreCheck_GCBeadsExecOverrideExternalCityUnavailableFailsBeforePing(t *testing.T) {
+	neutralizeBdScopeEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 [beads]
@@ -1795,6 +1816,7 @@ provider = "file"
 }
 
 func TestBeadsStoreCheck_GCBeadsFileOverrideSkipsBdPreflight(t *testing.T) {
+	neutralizeBdScopeEnv(t)
 	dir := setupCity(t, `[workspace]
 name = "test"
 `)
