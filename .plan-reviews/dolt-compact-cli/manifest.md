@@ -45,10 +45,10 @@ Scope: a new `gc dolt compact [databases...]` subcommand that:
 ## Pipeline State
 
 - [x] init-run (bead: `gc-1piaau`, closed)
-- [ ] draft-prd (bead: `gc-k1gxux`, in_progress)
-- [ ] prd-review (bead: `gc-y1aztr`)
-- [ ] human-clarify (bead: `gc-oqzq9w`)
-- [ ] design-exploration (bead: `gc-oick69`)
+- [x] draft-prd (bead: `gc-k1gxux`, closed)
+- [x] prd-review (bead: `gc-y1aztr`, closed)
+- [x] human-clarify (bead: `gc-oqzq9w`, closed)
+- [x] design-exploration (bead: `gc-oick69`, in_progress -> handing off)
 - [ ] prd-align-1 (bead: `gc-qn5p3r`)
 - [ ] prd-align-2 (bead: `gc-fm7r62`)
 - [ ] prd-align-3 (bead: `gc-lygvkw`)
