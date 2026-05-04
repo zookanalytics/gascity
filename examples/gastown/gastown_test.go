@@ -800,6 +800,46 @@ func TestReviewLegFormulaPersistsReportAndNotifiesCoordinator(t *testing.T) {
 	}
 }
 
+// TestDeaconPatrolDoctorInvokesVerbose pins the deacon's gc doctor
+// invocation to --verbose. Many checks (session-model, agent-sessions,
+// zombie-sessions, orphan-sessions, pack-cache, worktrees) put their
+// actionable findings in CheckResult.Details, which the default
+// (non-verbose) printer suppresses. Without --verbose the deacon sees
+// only headline counts (e.g. "1 session model finding(s)") and is
+// structurally unable to act on findings or escalate them with
+// useful context. The default human-readable contract is preserved
+// for interactive operators; --verbose is the documented opt-in for
+// extra detail consumers, which fits the deacon.
+func TestDeaconPatrolDoctorInvokesVerbose(t *testing.T) {
+	dir := exampleDir()
+	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-deacon-patrol.toml")
+	data, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("reading deacon patrol formula: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "gc doctor --verbose") {
+		t.Errorf("deacon patrol formula must invoke `gc doctor --verbose` so Details (the actionable lines) are visible; got:\n%s", body)
+	}
+	// Defend against accidentally re-introducing a bare invocation in
+	// a runnable code block: the formula uses backtick-fenced shell
+	// blocks, so a literal "\ngc doctor\n" inside the body indicates
+	// a non-verbose invocation.
+	if strings.Contains(body, "\ngc doctor\n") {
+		t.Errorf("deacon patrol formula contains a bare `gc doctor` invocation; use `gc doctor --verbose` instead")
+	}
+
+	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "deacon", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading deacon prompt: %v", err)
+	}
+	prompt := string(promptData)
+	if !strings.Contains(prompt, "gc doctor --verbose") {
+		t.Errorf("deacon prompt quick-reference must use `gc doctor --verbose` so findings Details are visible to an LLM consumer")
+	}
+}
+
 type witnessSessionFixture struct {
 	ID          string
 	State       string
