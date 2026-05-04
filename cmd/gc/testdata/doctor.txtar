@@ -29,6 +29,16 @@ stdout 'passed'
 exec gc doctor -v
 stdout 'city-structure'
 
+# Doctor with --json emits a structured document instead of human output.
+# The wire shape is documented in engdocs/contributors/doctor-json.md.
+exec gc doctor --json
+stdout '"checks":'
+stdout '"summary":'
+stdout '"name":'
+stdout '"status":'
+! stdout '✓'
+! stdout '✗'
+
 # Broken config reports errors.
 cp $WORK/bad-toml $WORK/broken-city/city.toml
 cd $WORK/broken-city

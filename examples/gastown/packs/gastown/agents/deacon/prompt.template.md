@@ -164,7 +164,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 | Find cross-rig deps | `gc bd dep list <id> --direction=up --type=blocks --json` |
 | Convert dep type | `gc bd dep remove <id> <dep>` then `gc bd dep add <id> <dep> --type=related` |
 | File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
-| Run system diagnostics | `gc doctor --verbose` (Details are verbose-only) |
+| Run system diagnostics | `gc doctor --json` (parse with `jq`; details always present) |
 | Compact wisps (dry run) | `gc bd mol wisp gc --age 24h --dry-run` |
 | Compact wisps | `gc bd mol wisp gc --age 24h` |
 
