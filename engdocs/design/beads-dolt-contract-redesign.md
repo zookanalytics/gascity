@@ -1311,6 +1311,12 @@ design does not require scraping prose for automation; if machine-stable
 output is later added, it must ship behind an explicit structured mode
 such as `--json` rather than changing the human output contract.
 
+`gc doctor --json` is now implemented and is the supported automation
+path. Schema and stability promise:
+[engdocs/contributors/doctor-json.md](../contributors/doctor-json.md).
+Automated agents (deacon-patrol, watchdogs) parse `--json`; the
+human-readable contract above remains unchanged for interactive use.
+
 Finding ordering and suppression rules are part of the contract:
 
 1. incomplete journal findings
