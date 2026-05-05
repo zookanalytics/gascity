@@ -108,6 +108,28 @@ OQ-7's ZFC expansion is moved from "open" to "resolved" since it is
 already pinned in TD-9, the PR1 step 1 spec, and the `ZfcExempt`
 doc-comment.
 
+Plan-self-review round 1 closed the last seam between round 3's
+Step-execution contract and the on-disk formula by binding two
+implementation-level details that round 3 had deferred and four
+plan-completeness gaps the structural review surfaced: (1) the
+envelope cache lives on the molecule's (root bead's) metadata under
+the reserved key `gc.formula.envelope` (M1), giving PR2's formula
+description authors a concrete substrate to instruct the dog
+against; (2) the `mol-dog-compactor` `needs` chain is reordered in
+PR2 so `compact` has no dependencies and `inspect` / `verify` /
+`report` all `needs = ["compact"]` (M2), making the trigger model
+match the dog's claim order so `phases.<step>` values are all
+meaningfully consumed; (3) Phase 1's regression-test step now lands
+**before** the formula migration (S5) so the test goes red→green per
+AGENTS.md TDD discipline; (4) Phase 2's unit-test checklist is
+reframed as test-alongside-each-module (S6) rather than a trailing
+test-writing pass; (5) CHANGELOG entries land in both PR1 and PR2
+(S1); (6) PR-level rollback semantics, the auto-discovery error
+path, the `--help` text scope, the lock-helper factoring, and
+Phase 3 ownership are each pinned (S2/S3/S4/S7/S8). The design is
+now structurally implementable end-to-end; round-2's review pivots
+from completeness-and-sequencing to risk and scope-creep.
+
 Confidence is high. The cleanup pattern provides a tested template;
 the algorithmic content is already specified in the formula. The
 durable win is the regression test in PR1 — it makes the orphan-
@@ -202,6 +224,23 @@ three step beads as they are claimed (or atomically, depending on the
 dog's formula-execution model — the design constrains the outcome,
 not the dispatch order).
 
+**Formula `needs`-chain alignment.** The existing
+`mol-dog-compactor.toml` declares `inspect → compact → verify →
+report` via `needs = [...]` chains (compact `needs = ["inspect"]`,
+verify `needs = ["compact"]`, report `needs = ["verify"]`). Under
+that chain, the inspect step bead must close before compact is
+claimable, which means the inspect step closes **before** the CLI
+runs and produces the envelope. The Per-step bead mapping table's
+`phases.inspect` rows (`failed` → close `failed`; `escalate` →
+close `escalated`) are then unreachable — the dog has nothing to
+read. PR2 therefore reorders the chain so that `compact` is
+dependency-free and `inspect`, `verify`, `report` all
+`needs = ["compact"]`. The reorder makes `compact` claimable first,
+the CLI runs once and populates the molecule's envelope cache, and
+the three bookkeeping step beads then become claimable in any
+order (parallel-safe) and read from the cache. The reorder is
+captured in PR2 step 11 / Phase 2 step 12.
+
 **Bookkeeping steps.** The `inspect`, `verify`, and `report` steps
 remain in the formula as bookkeeping anchors for the four phases of
 the JSON envelope. They retain `executor = "gc dolt-compact"`
@@ -214,11 +253,29 @@ bookkeeping steps is the same shape the regression test accepts —
 the contract is unchanged, only the per-step binding posture
 differs.
 
-The dog-runtime mechanism that propagates the envelope across step
-beads in the same cycle is a small implementation concern (cache the
-envelope keyed by molecule id; consume from cache when a non-`compact`
-step bead is claimed). This is a PR2 implementation detail bounded by
-the contract above; the design doc does not specify the cache shape.
+**Dog-runtime mechanism (envelope cache).** The compact step's CLI
+invocation result is cached on the molecule's (root bead's) metadata
+under the reserved key `gc.formula.envelope`, JSON-encoded as text.
+The dog updates the molecule via `gc bd update <molecule-id>
+--set-metadata gc.formula.envelope='<json>'` immediately after parsing
+the CLI output and before closing the `compact` step bead. Each of
+the bookkeeping steps' formula descriptions instructs the dog to:
+(1) read the molecule metadata via `gc bd show <molecule-id>
+--json | jq -r '.[0].metadata."gc.formula.envelope"'`, (2) parse
+the JSON envelope, (3) consult `phases.<this-step>` per the
+Per-step bead mapping table, and (4) close the step bead with the
+mapped status (and, for `escalate`, send the prescribed
+`gc mail send mayor/` escalation with the offending DB names from
+the per-DB array). The cache is keyed by molecule id; bd is the
+design's persistence substrate and the same store the formula
+contract uses; the envelope is small (typical sub-kilobyte for 4-DB
+cycles) so metadata is appropriate; the cache survives session
+boundaries (dogs may rotate across step claims). Future-compat: a
+file-on-disk or per-step-bead-notes cache may be revisited if a
+multi-host dog pool emerges and metadata-blob size becomes a
+constraint; the migration is additive — bookkeeping step descriptions
+update independently of the CLI-side envelope shape (Phase 2
+step 10's cache-write unit test pins the contract).
 
 ### Two-PR Shipping Order
 
@@ -291,13 +348,29 @@ new executor lands.
     - Set `zfc_exempt = true` on the `inspect`, `verify`, and
       `report` bookkeeping steps; **only the `compact` step drops
       `zfc_exempt` and runs the CLI** (per Step-execution contract).
+    - **Reorder the `needs` chain.** Drop `needs = ["inspect"]` from
+      the `compact` step (compact becomes dependency-free); set
+      `needs = ["compact"]` on each of `inspect`, `verify`, `report`.
+      This aligns the formula with the trigger model — the CLI runs
+      once at the compact step's claim, populating the molecule's
+      envelope cache; the bookkeeping steps then become claimable in
+      any order and read from the cache. Reorder rationale anchored
+      in Step-execution contract / Formula `needs`-chain alignment.
     - Update the `compact` step's description to reference CLI flags
       using formula variable substitution
       (`gc dolt-compact --mode={{mode}} --threshold={{commit_threshold}}
-      --keep-recent={{keep_recent}} --databases={{databases}} --json`).
+      --keep-recent={{keep_recent}} --databases={{databases}} --json`)
+      and to **write the parsed envelope back to the molecule's
+      metadata** under `gc.formula.envelope` immediately after CLI
+      exit (`gc bd update <molecule-id> --set-metadata
+      gc.formula.envelope='<json>'`).
     - Update `inspect` / `verify` / `report` step descriptions to
       reference the cached-envelope closure path produced by
-      `compact` (the dog-runtime detail per Step-execution contract).
+      `compact`: read the envelope from the molecule via `gc bd show
+      <molecule-id> --json`, parse the JSON, and close the step bead
+      with the status mapped from `phases.<this-step>` per the
+      Per-step bead mapping table (escalations include the offending
+      DB names from the per-DB array).
 12. `examples/dolt/orders/mol-dog-compactor.toml` — unchanged
     (24h cooldown, dog pool).
 13. `engdocs/contributors/dolt-compact.md` — operator + dog guide:
@@ -422,7 +495,9 @@ The CLI exit code is bound at three values per OQ-5's resolution:
   `database-deadline-exceeded`}).
 - `2` — invocation error before per-DB execution begins (bad flag, port
   unresolved, identifier failed charset check, explicit DB list with
-  zero matches in rig-registry).
+  zero matches in rig-registry, `gc rig list --json` invocation
+  failure when auto-discovery is in scope — the registry file missing
+  or unparseable).
 
 Cleanup parity (cleanup's `0` covers no-op runs); the dog's
 step-closure code reads the exit code only as a coarse signal
@@ -965,7 +1040,9 @@ That same integration test loads `mol-dog-compactor.toml`, resolves
 the `compact` step's executor, invokes the CLI exactly once, and
 asserts all four `phases.<step>` values plus per-DB outcomes drive
 correct step-closure decisions — directly exercising the per-cycle
-invocation rule from Step-execution contract. Manual smoke after PR2
+invocation rule from Step-execution contract. Phase 3 step 5
+records the manual-smoke result on the PR2 work bead so the 48h
+verification window is auditable. Manual smoke after PR2
 ("trigger a cycle on loomington, watch the report bead") covers the
 remaining 24h-cooldown surface that's operator-gated.
 
@@ -992,6 +1069,41 @@ loads the formula and asserts every default matches; CI fails on
 drift. The test must be updated whenever a new formula var is
 introduced; the test name and failure message tell the developer
 exactly which side is stale.
+
+### R-12. Envelope cache write failure (bd unavailable mid-cycle)
+
+The compact step's `gc bd update --set-metadata
+gc.formula.envelope='<json>'` could fail if the bd substrate is
+unreachable or the molecule bead has been deleted under the dog's
+feet. The CLI itself succeeded; the cache write is the only failed
+step. Mitigation: the bookkeeping steps' formula descriptions
+instruct the dog to fall back to closing as `closed` when the
+molecule's `gc.formula.envelope` metadata is empty or unparseable —
+the same shape as the pre-PR2 safely-skip behavior. This trades
+phases.<step> visibility for the cycle (escalations would not fire
+for a cycle whose cache write failed) for forward progress; the
+cycle's underlying compaction is unaffected. Operator action:
+re-trigger the cycle if the lost visibility was a critical
+escalation signal (the per-DB state on disk is unchanged so the
+re-trigger sees the same candidates, sans those that compacted ok
+the first time). Additionally, the integration test asserts the
+cache write happens; CI catches a missing-write regression on the
+CLI side (independent of the bd-unavailable runtime case).
+
+### R-13. Formula `needs`-chain reorder surprises reviewers
+
+PR2 reorders the `mol-dog-compactor` formula's `needs` chain so
+`compact` is dependency-free and `inspect`, `verify`, `report` all
+`needs = ["compact"]`. A reviewer reading the formula linearly may
+expect inspect→compact→verify→report (the conceptual flow) and be
+surprised by the structural reorder. Mitigation: the formula's step
+`description` fields preserve the conceptual flow narratively (each
+description still describes the inspect → compact → verify → report
+phase responsibility); `needs` reflects only the dog's claim order.
+A comment block at the top of `mol-dog-compactor.toml` captures the
+rationale. The formula-driven integration test (Phase 2 step 11)
+exercises the actual claim order so a reorder regression surfaces
+in CI.
 
 ## Operations
 
@@ -1076,56 +1188,171 @@ operation. Documenting the path is for completeness; the standard
 fix for an apparently stuck lock is to wait one cycle for the
 holding process to exit, then verify.
 
+### PR Rollback
+
+This subsection covers PR-level rollback semantics for incident
+response. The Manual Recovery sub-cases above cover algorithmic and
+runtime failures within an executing cycle; PR rollback is the
+"the deploy itself is suspect" path.
+
+#### PR1 rollback
+
+PR1 is purely additive: new optional formula schema fields
+(`Executor`, `ZfcExempt` with `omitempty`), a new regression test,
+and tag annotations on existing embedded formulas. Reverting the PR
+(e.g., `git revert` of the PR's merge commit) removes:
+
+- The new struct fields. Existing formula TOML files lose their
+  `executor` / `zfc_exempt` tags but parse cleanly under the
+  pre-PR1 schema (the fields were optional with `omitempty` on
+  add — any TOML containing them is read as if the keys did not
+  exist).
+- The executor-binding regression test. The contract is no longer
+  enforced; the silent-failure regression class re-opens until PR1
+  is re-landed.
+
+No behavioral change at runtime — PR1 introduced none. Effects are
+confined to the schema and the test.
+
+#### PR2 rollback
+
+PR2 is behavioral. Reverting PR2 restores `zfc_exempt = true` on
+the `compact` step and drops `executor = "gc dolt-compact"` from
+all four steps; the formula `needs` chain returns to its
+pre-PR2 inspect → compact → verify → report ordering. The dog
+returns to safely-skip behavior — silent failure resumes, exactly
+as it stood pre-PR2. The `gc dolt-compact` CLI binary itself
+remains shipped (operators can still invoke ad-hoc); only the
+formula's bind to it is removed. The `mol-dog-compactor` order is
+unchanged. Acceptable degradation: silent failure is the
+pre-deploy baseline; the operator-facing CLI is preserved.
+
+#### Sequencing of reverts
+
+PR2 must be reverted **before** PR1 can be reverted. PR1 is the
+prerequisite of PR2 (it adds the schema fields PR2's formula
+update consumes). Reverting PR1 with PR2 still landed leaves the
+formula referencing fields the schema no longer supports — a
+parse-time validation failure on the next dog claim cycle. If both
+PRs need to be rolled back, do so in reverse merge order.
+
 ## Implementation Plan
 
 ### Phase 1 — PR1: schema + regression test (broad scope)
+
+Phase 1 follows the project's TDD principle (AGENTS.md: "Write the
+test first, watch it fail, make it pass"): the regression test lands
+before the formula migrations, so the test transitions red → green
+as each formula is annotated.
 
 1. **Add fields to `formula.Step`.** Doc-comment the field semantics
    inline; explicitly spell out "Zero Framework Cognition (ZFC)".
 2. **Wire fields through cooking.** Audit every `Step{}` literal
    in `internal/formula/` for forgot-to-copy paths; update.
-3. **Audit embedded formulas.** Walk `examples/*/formulas/*.toml`,
-   identify steps that need `zfc_exempt = true`. Apply tags.
-4. **Land the regression test.** Walk all embedded formulas; assert
-   each step is either resolvable or annotated. Test failure
-   names the exact formula+step.
+3. **Land the regression test (red).** Walk all embedded formulas;
+   assert each step is either resolvable to a concrete Cobra
+   command / pack script, or carries `executor = "..."` plus
+   `zfc_exempt = true`. **Initial run is expected to fail** on
+   every formula step that currently lacks annotation. Failure
+   messages name the exact formula+step so the green-pass in step 4
+   is mechanical.
+4. **Audit embedded formulas (green).** Walk
+   `examples/*/formulas/*.toml`; for each step flagged red by
+   step 3, either confirm it resolves to a Cobra command / pack
+   script today (no annotation needed) or apply `executor = "..."` /
+   `zfc_exempt = true` tags as appropriate. After every formula is
+   annotated, the regression test from step 3 goes green.
 5. **Migrate `mol-dog-compactor.toml`** to `zfc_exempt = true`
    matching its current prose. **No forward refs to
-   `gc dolt-compact`**.
-6. **Open PR1.** Quality gates: `make test-fast-parallel`,
+   `gc dolt-compact`** — the CLI doesn't exist yet.
+6. **Update CHANGELOG.md.** Add `### Added` entries to the
+   `## [Unreleased]` section: `executor` and `zfc_exempt` optional
+   fields on `formula.Step`; executor-binding regression test
+   covering all embedded formulas. Cite the PR1 issue / bead id
+   per repo convention.
+7. **Open PR1.** Quality gates: `make test-fast-parallel`,
    `go vet`, dashboard check (if API surface touched — likely
    not), `make test-cmd-gc-process-parallel`.
 
 ### Phase 2 — PR2: CLI + envelope + formula update (narrow scope)
 
+Phase 2 follows the project's TDD principle: each module's unit tests
+are written **alongside** the module (steps 2-7 each include their own
+unit-test landings). Step 10 below is a consolidated checklist of the
+unit-test coverage PR2 must contain by the time it opens — not a
+trailing test-writing pass.
+
 1. **Skeleton.** New files in `cmd/gc/`. Cobra registration in
-   `main.go`.
+   `main.go`. If `dolt_lifecycle_lock.go`'s acquire/release functions
+   are not currently exported in a way the new compact modules can
+   consume, factor them in this step. The factoring is mechanical
+   (rename to exported identifiers; move to a shared sub-package if
+   necessary); cleanup's existing call site is updated to the new
+   API in the same commit to avoid two-step churn.
 2. **Inspector.** Database discovery (rig-registry parse) +
-   commit-count probe.
+   commit-count probe. Includes unit tests for the rig-list parse
+   path (mocked `gc rig list --json`), commit-count probe (mocked
+   `*sql.DB`), and positional-merge logic.
 3. **Validator.** Identifier charset (factor or copy from cleanup).
+   Includes unit tests covering boundary cases: empty, leading-digit,
+   hyphen-leading, non-ASCII; happy-path identifier passes.
 4. **Flatten executor.** Algorithm port verbatim from formula
    prose. Per-DB context budgeting via `context.WithTimeout`.
+   Includes unit tests for the algorithm sequence (mocked `*sql.DB`):
+   `pre_hash` capture → `DOLT_RESET --soft` → `DOLT_COMMIT` → row
+   count compare → `dolt_gc` on success / `DOLT_RESET --hard
+   pre_hash` on mismatch → lock release.
 5. **Surgical executor.** Algorithm port. Lock-then-cleanup
-   ordering (Q5). Retry-on-collision semantics.
-6. **Verifier.** Pre/post row count snapshot + comparison.
-7. **Envelope.** Define structs; pin schema string.
+   ordering (Q5). Retry-on-collision semantics. Includes unit tests
+   covering: leftover-branch cleanup happens after lock acquire;
+   one retry on graph-change error with 2s pause; halt-before-swap
+   on retry failure / row-count mismatch / main-HEAD-moved.
+   Surgical's lock-then-cleanup ordering depends on the lock helper
+   from step 1 being callable from this module.
+6. **Verifier.** Pre/post row count snapshot + comparison. Includes
+   unit tests for table inclusion (excludes `dolt_*`), mismatch
+   detection, `pre_hash` propagation back to caller.
+7. **Envelope.** Define structs; pin schema string. Includes unit
+   tests for envelope-shape happy path, the `phases.<step>`
+   aggregation rules (`ok` / `partial` / `escalate` / `failed`), and
+   the empty/no-candidates exit-code-`0` envelope shape.
 8. **Cobra command body.** Parse flags, resolve port, run inspector,
    iterate candidates, dispatch to flatten/surgical, render output.
+   Includes the **`--help` text content**: Cobra `Long` strings must
+   cover (1) the dual-surface invocation pattern (Go-side
+   `gc dolt-compact` vs pack delegate `gc dolt compact`); (2) the
+   discovery rule (rig-registry-only; `gc dolt-compact` never issues
+   `SHOW DATABASES`); (3) threshold semantics (uniform across
+   explicit and auto-discovered DBs per Q14; `--threshold=0` is the
+   unconditional-compaction lever); (4) the 3-row exit-code summary
+   (per OQ-5); (5) a pointer to `engdocs/contributors/dolt-compact.md`
+   for full recovery procedures. Depth benchmark:
+   `cmd_dolt_cleanup.go`'s Cobra strings.
 9. **Pack delegate.** `command.toml` + `run.sh`. Arg-forwarding
    regression test.
-10. **Unit tests.** Charset validator, envelope shape (including the
-    `phases` aggregation rules), mode selection, error-class mapping,
-    retry semantics (mocked SQL), threshold-on-explicit-DB skip
-    (Q14), and a **formula/CLI defaults consistency test** that
-    loads `examples/dolt/formulas/mol-dog-compactor.toml`, extracts
+10. **Unit tests (consolidated checklist; written alongside
+    steps 2-7).** Charset validator (step 3), envelope shape including
+    the `phases` aggregation rules (step 7), mode selection,
+    error-class mapping, retry semantics (mocked SQL — step 5),
+    threshold-on-explicit-DB skip (Q14), the empty-rig-list /
+    no-candidates exit-code-`0` envelope shape (per OQ-5 Story-2
+    corollary), the **rig-list invocation failure path** (assert
+    exit code 2 and a well-formed envelope with
+    `errors[].kind = "rig-registry"`, `inspect.value = "failed"`,
+    `compact.value = "failed"`, no per-DB records), the **cache-write
+    happy path** (the compact-step orchestration writes
+    `gc.formula.envelope` to the molecule's metadata before exiting —
+    discharges M1's contract, R-12's CLI-side detection), and a
+    **formula/CLI defaults consistency test** that loads
+    `examples/dolt/formulas/mol-dog-compactor.toml`, extracts
     the `commit_threshold`, `keep_recent`, `mode`, and `databases`
     formula vars, and asserts the CLI flag defaults match.
     (`--per-db-timeout` is intentionally not in scope; per TD-5 it
     is a wrapper-level execution budget, not a formula-bound
     algorithm parameter — when a city later wires it into the
     formula, the test should be extended at the same time.) This
-    test discharges Goal 2's "no hardcoded values that could drift
-    from the formula" without relying on review vigilance.
+    last test discharges Goal 2's "no hardcoded values that could
+    drift from the formula" without relying on review vigilance.
 11. **Integration tests.** Real Dolt sql-server. Populate, flatten,
     verify post-state. Populate, surgical, verify post-state. Inject
     concurrent write between pre-flight and rebase, verify retry.
@@ -1141,25 +1368,65 @@ holding process to exit, then verify.
     decisions. This last test discharges Acceptance 2's
     formula→CLI→envelope→step-close path; the 24h-cooldown leg
     remains operator-gated post-deploy verification (R-9).
+    **Sequencing note.** The formula-driven integration test will
+    fail until step 12 (formula update) lands — this is the
+    expected red→green TDD rhythm, not a test-infrastructure bug.
+    The other integration tests (real-Dolt populate/flatten/surgical,
+    concurrent-write injection, lock back-to-back, no-`SHOW
+    DATABASES`, row-count divergence) are independent of the formula
+    update and pass against the new CLI alone.
 12. **Formula update.** `mol-dog-compactor.toml` adds
     `executor = "gc dolt-compact"` on every step; drops `zfc_exempt`
     on the `compact` step (the trigger) and retains `zfc_exempt = true`
-    on the `inspect` / `verify` / `report` bookkeeping steps. Only the
-    `compact` step's description carries the full CLI invocation
-    (formula-var-substituted flags); the bookkeeping steps reference
-    the cached-envelope closure path. Per Step-execution contract.
+    on the `inspect` / `verify` / `report` bookkeeping steps.
+    **Reorder the `needs` chain:** drop `needs = ["inspect"]` from
+    the `compact` step (compact becomes dependency-free); set
+    `needs = ["compact"]` on each of `inspect`, `verify`, `report`
+    (per Step-execution contract / Formula `needs`-chain alignment).
+    The `compact` step's description carries the full CLI invocation
+    (formula-var-substituted flags) and the molecule-metadata write
+    (`gc bd update <molecule-id> --set-metadata
+    gc.formula.envelope='<json>'`). The bookkeeping steps' descriptions
+    reference the cached-envelope closure path: read
+    `metadata.gc.formula.envelope` from the molecule via `gc bd show`,
+    parse, consult `phases.<this-step>` per the Per-step bead
+    mapping table, and close with the mapped status.
 13. **Operator/dev guide.** `engdocs/contributors/dolt-compact.md`.
-14. **Open PR2.** Quality gates as PR1 plus integration shard
+    Covers all four Manual Recovery sub-cases (MR-1..MR-4) at full
+    operator depth; cites the Operations §Manual Recovery section as
+    the auditable summary.
+14. **Update CHANGELOG.md.** Add `### Added` entries to the
+    `## [Unreleased]` section: `gc dolt-compact` Go-side command;
+    `gc dolt compact` pack delegate; `gc.dolt.compact.v1` JSON
+    envelope. Add a `### Changed` entry noting the migration of
+    `mol-dog-compactor` off safely-skip, with a pointer to PR1's
+    schema additions for context.
+15. **Open PR2.** Quality gates as PR1 plus integration shard
     (`make test-integration-shards-parallel`).
 
 ### Phase 3 — Post-deploy verification
 
-1. After PR2 lands, watch the next 24h cycle (or trigger via
-   operator-side dispatch).
+**Owner.** The PR2 author (or a designated operator) runs Phase 3
+within 48h of PR2 merging. Phase 3 results are recorded as comments
+on the PR2 work bead; no separate verification bead is created. The
+48h window matches the "next 24h cycle" wait plus operator-discovery
+slack.
+
+1. **Trigger a cycle.** Either wait for the next 24h cycle or
+   trigger immediately via `gc sling mol-dog-compactor` (operator-
+   side dispatch). **Recommended:** trigger immediately to compress
+   the verification window and reduce the operator's monitoring
+   burden.
 2. Verify the report bead shows non-zero compactions.
 3. Verify HQ commit count drops.
 4. Confirm the deacon report no longer flags compactor cycles as
    safely-skip.
+5. **Record verification result.** Comment on the PR2 work bead with
+   the report-bead ID, the post-cycle commit count delta (e.g.,
+   "HQ: 1611 → 1, gc reclaimed 1.2 GB"), and the deacon report
+   excerpt confirming non-skip. R-9's manual-smoke discharge is
+   audited by this comment; the formula-driven integration test
+   (Phase 2 step 11) covers the automated leg.
 
 ## Open Questions
 
