@@ -3905,6 +3905,21 @@ func TestWorkflowTracefWarnsOnceWhenTracePathCannotBeOpened(t *testing.T) {
 	}
 }
 
+func TestWorkflowTracefFallsBackToSlingTrace(t *testing.T) {
+	tracePath := filepath.Join(t.TempDir(), "workflow-trace.log")
+	t.Setenv("GC_SLING_TRACE", tracePath)
+
+	workflowTracef("fallback trace")
+
+	traceBytes, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	if !strings.Contains(string(traceBytes), "fallback trace") {
+		t.Fatalf("trace = %q, want fallback trace payload", traceBytes)
+	}
+}
+
 func TestFollowSleepDurationHandlesPathologicalInputs(t *testing.T) {
 	prevSweep := workflowServeWakeSweepInterval
 	prevMax := workflowServeMaxIdleSleep

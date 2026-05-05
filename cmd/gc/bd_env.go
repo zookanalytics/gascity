@@ -236,7 +236,7 @@ var beadsExecCommandRunnerWithEnv = beads.ExecCommandRunnerWithEnv
 
 var recoverManagedBDCommand = func(cityPath string) error {
 	script := gcBeadsBdScriptPath(cityPath)
-	overrides := citylayout.CityRuntimeEnvMap(cityPath)
+	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
 	environ := mergeRuntimeEnv(os.Environ(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)

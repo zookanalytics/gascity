@@ -160,6 +160,9 @@ func (m *hookBeadMetadata) UnmarshalJSON(data []byte) error {
 func workflowTracef(format string, args ...any) {
 	path := strings.TrimSpace(os.Getenv("GC_WORKFLOW_TRACE"))
 	if path == "" {
+		path = strings.TrimSpace(os.Getenv("GC_SLING_TRACE"))
+	}
+	if path == "" {
 		return
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
