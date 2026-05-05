@@ -2942,7 +2942,20 @@ exit 0
 }
 
 func mergeTestEnv(overrides map[string]string) []string {
+	// Strip GC_* and DOLT_* from the inherited environment. These tests run
+	// the maintenance shell scripts (which read GC_CITY_PATH, GC_DOLT_PORT,
+	// GC_DOLT_STATE_FILE, GC_CITY_RUNTIME_DIR, etc.) and a polecat session
+	// invoking `go test` would otherwise leak its own host paths into the
+	// scripts and bypass the test's hermetic temp dirs.
 	env := os.Environ()
+	filtered := env[:0]
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "GC_") || strings.HasPrefix(entry, "DOLT_") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	env = filtered
 	for key := range overrides {
 		prefix := key + "="
 		filtered := env[:0]
