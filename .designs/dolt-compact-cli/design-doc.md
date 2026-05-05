@@ -127,8 +127,30 @@ test-writing pass; (5) CHANGELOG entries land in both PR1 and PR2
 (S1); (6) PR-level rollback semantics, the auto-discovery error
 path, the `--help` text scope, the lock-helper factoring, and
 Phase 3 ownership are each pinned (S2/S3/S4/S7/S8). The design is
-now structurally implementable end-to-end; round-2's review pivots
-from completeness-and-sequencing to risk and scope-creep.
+now structurally implementable end-to-end.
+
+Plan-self-review round 2 closed one structural ambiguity surfaced
+by walking the design as risk and scope-creep pressure tests, plus
+four taxonomy/clarity gaps and one error-class redundancy: (1) the
+cache-write authority is bound dog-side (M1) — the CLI emits an
+envelope on stdout only, and the dog's prose-instructed shell
+pipeline is the writer; Phase 2 step 10's "cache-write happy path"
+unit test is reframed as an envelope-stdout shape test, and R-12's
+"CLI side" detection wording is rewritten to point at Phase 2
+step 11's formula-driven integration test (S4); (2) the compact
+step's formula description now leads with a **read-first
+idempotence guard** (R-14, S2) so a dog claiming the bead after a
+prior crash consumes the cached envelope instead of clobbering
+it via re-invocation; (3) the Error Class Taxonomy gains
+`database-not-found` (S3) for operator-typo and stale-rig-registry
+cases (distinct from server-unreachability), extends `internal-
+error` semantics to cover non-deadline `dolt_gc` failure (S1, R-4),
+and folds the placeholder `concurrent-write-collision` into the
+per-DB `attempts` field (S5) since the class had no terminal-
+state semantics. Net error-class count remains 9 (plus `ok` for
+success); TD-6 captures the adjustment. With round 2's edits the design is risk-mitigated and
+scope-disciplined; round-3's review pivots to testability and
+coherence (final pass).
 
 Confidence is high. The cleanup pattern provides a tested template;
 the algorithmic content is already specified in the formula. The
@@ -275,7 +297,38 @@ file-on-disk or per-step-bead-notes cache may be revisited if a
 multi-host dog pool emerges and metadata-blob size becomes a
 constraint; the migration is additive — bookkeeping step descriptions
 update independently of the CLI-side envelope shape (Phase 2
-step 10's cache-write unit test pins the contract).
+step 10's envelope-stdout shape unit test pins the CLI's
+contribution; Phase 2 step 11's formula-driven integration test
+pins the dog-side write).
+
+**Read-first idempotence guard.** The compact step's formula
+description leads with a **read-first guard** so a dog that claims
+the compact step bead after a prior dog crashed mid-cycle does not
+re-invoke the CLI. The guard sequence is:
+
+1. `gc bd show <molecule-id> --json | jq -r '.[0].metadata."gc.
+   formula.envelope" // empty'`.
+2. If the result is non-empty and parses as a `gc.dolt.compact.v1`
+   envelope: skip the CLI invocation and the metadata write;
+   proceed directly to closing the `compact` step bead from the
+   cached envelope per the Per-step bead mapping table.
+3. If the result is empty or unparseable: invoke the CLI as
+   currently described, parse the envelope from stdout, write back
+   to metadata, then close the step bead.
+
+This makes the compact step idempotent across dog restarts. The
+first dog's CLI invocation produces the canonical envelope; if a
+second dog (after a crash before metadata-write or before bead
+close) claims the same bead, it consumes the cache instead of
+re-invoking. Without the guard, the second invocation would clobber
+the first envelope with a mostly-no-op envelope (the DB's commit
+count is now below threshold so the second invocation skips), losing
+the canonical observability record. The flock prevents truly-
+concurrent re-invocation but does not by itself prevent the
+clobbering. R-14 captures the failure mode and mitigation; Phase 2
+step 11's formula-driven integration test exercises the cache-hit
+path explicitly (a second exec after a populated metadata returns
+the cached envelope without invoking the CLI again).
 
 ### Two-PR Shipping Order
 
@@ -356,11 +409,18 @@ new executor lands.
       envelope cache; the bookkeeping steps then become claimable in
       any order and read from the cache. Reorder rationale anchored
       in Step-execution contract / Formula `needs`-chain alignment.
-    - Update the `compact` step's description to reference CLI flags
-      using formula variable substitution
+    - Update the `compact` step's description to lead with a
+      **read-first idempotence guard** (`gc bd show <molecule-id>
+      --json | jq -r '.[0].metadata."gc.formula.envelope" // empty'`;
+      if non-empty and parseable as a `gc.dolt.compact.v1` envelope,
+      skip the CLI invocation and the metadata write and proceed to
+      closing the step bead from the cached envelope per the Per-step
+      bead mapping table — see Step-execution contract / Dog-runtime
+      mechanism / Read-first idempotence guard, mitigates R-14), then
+      reference CLI flags using formula variable substitution
       (`gc dolt-compact --mode={{mode}} --threshold={{commit_threshold}}
       --keep-recent={{keep_recent}} --databases={{databases}} --json`)
-      and to **write the parsed envelope back to the molecule's
+      and **write the parsed envelope back to the molecule's
       metadata** under `gc.formula.envelope` immediately after CLI
       exit (`gc bd update <molecule-id> --set-metadata
       gc.formula.envelope='<json>'`).
@@ -476,14 +536,53 @@ envelope:
 |-------|---------|------------|
 | `ok` | compaction succeeded | close compact step `closed` |
 | `below-threshold` | commit count under threshold | close compact step `closed` (skipped) |
-| `concurrent-write-collision` | surgical retried internally | observability only; final outcome may be `ok` |
 | `concurrent-write-fatal` | surgical failed after retry | escalate to mayor; close `escalated` |
 | `integrity-mismatch` | pre/post row counts differ | escalate to mayor; close `escalated` |
 | `database-locked` | advisory lock unavailable | close `skipped`; next cycle retries |
 | `database-unreachable` | Dolt server unreachable | close `failed`; deacon nudge |
+| `database-not-found` | Dolt server reachable; named DB does not exist (typo, stale rig-registry, manual DB drop) | close `failed` (operator error); deacon nudge |
 | `invalid-identifier` | DB name fails charset check | close `failed` (operator error) |
 | `database-deadline-exceeded` | per-DB timeout hit | escalate to mayor (suspect hang) |
-| `internal-error` | unexpected SQL or Go-side error | escalate to mayor |
+| `internal-error` | unexpected SQL or Go-side error, including non-deadline `dolt_gc` failure (compaction succeeded; only the disk-reclaim step failed) | escalate to mayor |
+
+The per-DB record's `error_message` field carries the underlying
+error verbatim. Two operational notes worth pinning:
+
+- **`internal-error` on `dolt_gc` failure.** When `dolt_gc` fails
+  after a successful compaction (out of disk, gc-internal error,
+  gc-aborted-by-another-connection, etc.), the per-DB outcome is
+  `internal-error` with `error_message` carrying the gc-failure
+  text. Compaction is healthy at this point — the commit was made,
+  pre/post row counts matched. The `internal-error` classification
+  reflects "operator action recommended, possibly disk-reclaim only";
+  the next cycle's `dolt_gc` will reclaim what this one missed
+  (R-4 already articulates this for the deadline case; R-4's
+  mitigation extends to non-deadline gc failure verbatim).
+- **`database-not-found` vs `database-unreachable`.** Reachable
+  server with a missing DB raises Dolt error 1049 ("Unknown
+  database"); this surfaces as `database-not-found`. Server
+  unreachable (connection refused, TCP timeout, port unresolved
+  before per-DB execution) surfaces as `database-unreachable`.
+  The split lets operators distinguish "fix my arg / rig-registry
+  entry" from "investigate the Dolt server."
+
+Retry observability for surgical's one-retry-on-graph-change
+behavior is captured by the envelope's per-DB `attempts` field,
+not a dedicated outcome class:
+
+- `attempts == 1` and `outcome == ok` — first try succeeded.
+- `attempts > 1` and `outcome == ok` — retry succeeded after a
+  graph-change collision (the `--mode=surgical` retry rule).
+- `attempts > 1` and `outcome == concurrent-write-fatal` — retry
+  failed; the escalate path applies. Per-DB `error_message`
+  carries the graph-change error verbatim.
+
+A standalone `concurrent-write-collision` outcome class would have
+no terminal-state semantics — the per-DB `outcome` field is set
+once at end of the algorithm body, never to a transient mid-retry
+value. Operators and dashboards query for "retry happened" via
+`attempts > 1`; query for "retry failed" via `attempts > 1 AND
+outcome = concurrent-write-fatal`.
 
 The CLI exit code is bound at three values per OQ-5's resolution:
 
@@ -922,6 +1021,17 @@ Fewer classes (3-4) lose useful operational distinctions; more
 classes that map to four dog actions (close-ok, close-skipped,
 escalate, deacon-nudge). Stable strings, additive evolution.
 
+Round-2 plan-review folded the original placeholder
+`concurrent-write-collision` into the per-DB `attempts` field
+(the class had no terminal-state semantics — `outcome` is set
+once at end of the algorithm body, and a successful retry's
+`outcome` is `ok` while a failed retry's `outcome` is
+`concurrent-write-fatal`; neither writes the collision class).
+Round-2 also added `database-not-found` (round-2 S3) so operator-
+typo and stale-rig-registry cases surface a precise dog action
+("close `failed` (operator error)") distinct from server-
+unreachability. Net class count is unchanged at 9.
+
 ### TD-7. Default output is human-readable; `--json` opts in
 
 Cleanup's pattern. Trade-off: dog scripts must remember to pass
@@ -990,7 +1100,7 @@ exactly as it was on entry (pre-compaction state, per the PRD
 constraint). Operators are told to use `--mode=flatten` if writes
 are continuously busy.
 
-### R-4. `dolt_gc` runs longer than `--per-db-timeout`
+### R-4. `dolt_gc` runs longer than `--per-db-timeout`, or fails for any other reason
 
 Soft timeout cuts off the gc; the CLI surfaces
 `database-deadline-exceeded`. Compaction itself is already
@@ -998,6 +1108,17 @@ committed at this point — the gc just didn't finish. Mitigation:
 the DB's commit graph is correct; only the disk reclaim is
 incomplete. Document that the next cycle's gc will reclaim what
 this one missed.
+
+Non-deadline `dolt_gc` failures (out of disk, gc-internal error,
+gc-aborted-by-another-connection) follow the same disk-reclaim-
+only-incomplete failure mode and the same mitigation: per-DB
+outcome is `internal-error` with `error_message` carrying the
+gc failure verbatim (per the Error Class Taxonomy paragraph),
+the next cycle's gc reclaims what this one missed, the per-DB
+state on disk is correct because compaction's commit phase
+preceded the gc invocation. The escalate path on `internal-error`
+gives operators visibility into a recurring gc-failure pattern;
+a one-off failure self-heals via the next cycle.
 
 ### R-5. Pack delegate `run.sh` drops args (#1485 regression class)
 
@@ -1086,9 +1207,15 @@ cycle's underlying compaction is unaffected. Operator action:
 re-trigger the cycle if the lost visibility was a critical
 escalation signal (the per-DB state on disk is unchanged so the
 re-trigger sees the same candidates, sans those that compacted ok
-the first time). Additionally, the integration test asserts the
-cache write happens; CI catches a missing-write regression on the
-CLI side (independent of the bd-unavailable runtime case).
+the first time). Additionally, the formula-driven integration test
+(Phase 2 step 11) loads `mol-dog-compactor.toml`, exercises the
+compact step's executor invocation, and asserts the molecule's
+`gc.formula.envelope` metadata is populated post-cycle. CI catches
+a missing-write regression in the formula step description prose
+(independent of the bd-unavailable runtime case); the CLI's own
+contribution (a parseable envelope on stdout that the dog's shell
+pipeline can consume) is independently exercised by Phase 2
+step 10's envelope-stdout shape unit test.
 
 ### R-13. Formula `needs`-chain reorder surprises reviewers
 
@@ -1104,6 +1231,33 @@ A comment block at the top of `mol-dog-compactor.toml` captures the
 rationale. The formula-driven integration test (Phase 2 step 11)
 exercises the actual claim order so a reorder regression surfaces
 in CI.
+
+### R-14. Dog crash between CLI exit and cache-write loses canonical envelope
+
+If a dog crashes after the compact step's CLI invocation has
+returned but before the dog issues `gc bd update --set-metadata
+gc.formula.envelope='<json>'`, the metadata is empty when the
+next dog claims the still-open compact step bead. Without a
+read-first guard, the next dog re-invokes the CLI; the flock
+prevents concurrent execution, but the second invocation sees a
+DB whose commit count is now below threshold (the prior CLI
+invocation already compacted it) and produces a mostly-no-op
+envelope. The metadata write of the no-op envelope clobbers the
+canonical first envelope, losing per-DB observability for the
+cycle. Compaction state on disk is correct (the DB is compacted)
+but the metadata record diverges from what actually happened.
+
+Mitigation: the **read-first idempotence guard** in the compact
+step's formula description (Step-execution contract / Dog-runtime
+mechanism subsection) checks `metadata.gc.formula.envelope` before
+invoking the CLI; on a non-empty parseable envelope, the dog
+skips the CLI invocation and the metadata write and proceeds
+directly to closing the compact step bead from the cached
+envelope. Phase 2 step 11's formula-driven integration test
+exercises the cache-hit path explicitly so a regression in the
+guard prose surfaces in CI. The guard is benign on the happy
+path (first claim's metadata is empty so the guard falls through
+to invocation) and load-bearing only on the dog-restart path.
 
 ## Operations
 
@@ -1339,10 +1493,21 @@ trailing test-writing pass.
     corollary), the **rig-list invocation failure path** (assert
     exit code 2 and a well-formed envelope with
     `errors[].kind = "rig-registry"`, `inspect.value = "failed"`,
-    `compact.value = "failed"`, no per-DB records), the **cache-write
-    happy path** (the compact-step orchestration writes
-    `gc.formula.envelope` to the molecule's metadata before exiting —
-    discharges M1's contract, R-12's CLI-side detection), and a
+    `compact.value = "failed"`, no per-DB records), the
+    **envelope-stdout shape and parseability** (the CLI emits a
+    well-formed `gc.dolt.compact.v1` envelope to stdout that the dog
+    can shell-pipe through `gc bd update --set-metadata
+    gc.formula.envelope='<json>'` without further transformation;
+    discharges round-1 M1's CLI-side contract — the dog-side write
+    itself is exercised by Phase 2 step 11's formula-driven
+    integration test, R-12), the **`internal-error` carries gc-failure
+    detail** (when `dolt_gc` itself fails post-compaction the per-DB
+    `outcome = internal-error` and `error_message` carries the gc
+    failure verbatim — discharges R-4's non-deadline gc-failure path
+    and round-2's S1), the **`database-not-found` path** (mocked
+    `*sql.DB` returning the Dolt server's "Unknown database" error
+    surfaces as `outcome = database-not-found` with `error_message`
+    carrying the Dolt error verbatim — discharges round-2's S3), and a
     **formula/CLI defaults consistency test** that loads
     `examples/dolt/formulas/mol-dog-compactor.toml`, extracts
     the `commit_threshold`, `keep_recent`, `mode`, and `databases`
@@ -1365,9 +1530,18 @@ trailing test-writing pass.
     formula:** load `mol-dog-compactor.toml`, resolve the step's
     `executor`, exec it with `--json`, and assert the parsed
     `phases` block plus per-DB outcomes drive correct step-closure
-    decisions. This last test discharges Acceptance 2's
-    formula→CLI→envelope→step-close path; the 24h-cooldown leg
-    remains operator-gated post-deploy verification (R-9).
+    decisions. **Cache-hit / read-first idempotence:** simulate a
+    populated `metadata.gc.formula.envelope` (write a canonical
+    envelope to the molecule under test, then drive the compact
+    step's prose-instructed flow); assert the CLI is **not** invoked
+    a second time and the cached envelope is used to close the step
+    bead. **Dog-side write:** assert that the happy-path flow
+    (empty initial metadata) populates `gc.formula.envelope` post-
+    cycle so the bookkeeping steps have a cache to consume.
+    These tests discharge Acceptance 2's
+    formula→CLI→envelope→step-close path and round-2's R-14
+    idempotence guard; the 24h-cooldown leg remains operator-gated
+    post-deploy verification (R-9).
     **Sequencing note.** The formula-driven integration test will
     fail until step 12 (formula update) lands — this is the
     expected red→green TDD rhythm, not a test-infrastructure bug.
@@ -1383,7 +1557,12 @@ trailing test-writing pass.
     the `compact` step (compact becomes dependency-free); set
     `needs = ["compact"]` on each of `inspect`, `verify`, `report`
     (per Step-execution contract / Formula `needs`-chain alignment).
-    The `compact` step's description carries the full CLI invocation
+    The `compact` step's description leads with a **read-first
+    idempotence guard** (`gc bd show <molecule-id> --json | jq -r
+    '.[0].metadata."gc.formula.envelope" // empty'`; if non-empty
+    and parseable, skip the CLI invocation and the metadata write —
+    proceed directly to closing the step bead from the cached
+    envelope, mitigates R-14), then carries the full CLI invocation
     (formula-var-substituted flags) and the molecule-metadata write
     (`gc bd update <molecule-id> --set-metadata
     gc.formula.envelope='<json>'`). The bookkeeping steps' descriptions
