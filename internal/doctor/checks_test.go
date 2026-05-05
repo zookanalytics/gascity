@@ -141,6 +141,47 @@ func TestCityConfigCheck_SiteBoundName(t *testing.T) {
 	}
 }
 
+// --- CitySuspendedCheck ---
+
+func TestCitySuspendedCheck_NotSuspended(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	c := NewCitySuspendedCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestCitySuspendedCheck_Suspended(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test", Suspended: true}}
+	c := NewCitySuspendedCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "suspended") {
+		t.Errorf("message = %q, expected to mention suspended", r.Message)
+	}
+	if !strings.Contains(r.FixHint, "gc resume") {
+		t.Errorf("FixHint = %q, expected to mention 'gc resume'", r.FixHint)
+	}
+}
+
+func TestCitySuspendedCheck_NilConfig(t *testing.T) {
+	c := NewCitySuspendedCheck(nil)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK on nil cfg; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestCitySuspendedCheck_CanFixFalse(t *testing.T) {
+	c := NewCitySuspendedCheck(&config.City{})
+	if c.CanFix() {
+		t.Error("CanFix() = true, want false")
+	}
+}
+
 // --- ConfigValidCheck ---
 
 func TestConfigValidCheck_OK(t *testing.T) {

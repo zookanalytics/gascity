@@ -99,6 +99,47 @@ func (c *CityConfigCheck) CanFix() bool { return false }
 // Fix is a no-op.
 func (c *CityConfigCheck) Fix(_ *CheckContext) error { return nil }
 
+// CitySuspendedCheck warns when workspace.suspended is true. A suspended
+// city is a real and useful state — agents stay drained even after
+// supervisor restart — but the only other surface that reports it is
+// city.toml itself, so without this check operators chasing
+// "session attaches and immediately disappears" have to log-dive to
+// find the cause.
+type CitySuspendedCheck struct {
+	cfg *config.City
+}
+
+// NewCitySuspendedCheck creates a check that warns when the city is
+// currently suspended. Returns OK when cfg is nil so doctor still emits
+// a single "skipped" result instead of crashing on the upstream parse
+// failure.
+func NewCitySuspendedCheck(cfg *config.City) *CitySuspendedCheck {
+	return &CitySuspendedCheck{cfg: cfg}
+}
+
+// Name returns the check identifier.
+func (c *CitySuspendedCheck) Name() string { return "city-suspended" }
+
+// Run reports a warning when workspace.suspended = true.
+func (c *CitySuspendedCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	if c.cfg == nil || !c.cfg.Workspace.Suspended {
+		r.Status = StatusOK
+		r.Message = "city is not suspended"
+		return r
+	}
+	r.Status = StatusWarning
+	r.Message = "city is suspended (workspace.suspended = true) — agents stay drained until 'gc resume' is run"
+	r.FixHint = "run 'gc resume' to allow agents to wake again, or remove workspace.suspended from city.toml"
+	return r
+}
+
+// CanFix returns false — resuming is an operator decision.
+func (c *CitySuspendedCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *CitySuspendedCheck) Fix(_ *CheckContext) error { return nil }
+
 // ConfigValidCheck runs ValidateAgents and ValidateRigs.
 type ConfigValidCheck struct {
 	cfg *config.City
