@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -161,11 +162,67 @@ func doCities(stdout, stderr io.Writer) int {
 		return 0
 	}
 
+	// stateByPath maps normalized registry paths to their runtime state
+	// label. Empty when the supervisor isn't running so the column degrades
+	// to "stopped" for every entry rather than misleading "running" output
+	// when the API is unreachable.
+	stateByPath := supervisorCityStates()
+
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tPATH") //nolint:errcheck
+	fmt.Fprintln(tw, "NAME\tSTATE\tPATH") //nolint:errcheck
 	for _, e := range entries {
-		fmt.Fprintf(tw, "%s\t%s\n", e.EffectiveName(), e.Path) //nolint:errcheck
+		state := "stopped"
+		if normalized, nErr := normalizeRegisteredCityPath(e.Path); nErr == nil {
+			if s, ok := stateByPath[normalized]; ok {
+				state = s
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\n", e.EffectiveName(), state, e.Path) //nolint:errcheck
 	}
 	tw.Flush() //nolint:errcheck
 	return 0
+}
+
+// supervisorCityStates returns a map from normalized city path to a
+// state label ("running", "suspended", or "stopped") sourced from the
+// supervisor API. Returns an empty map when the supervisor is not
+// reachable; doCities then treats every registered city as "stopped".
+func supervisorCityStates() map[string]string {
+	if supervisorAliveHook() == 0 {
+		return nil
+	}
+	baseURL, err := supervisorAPIBaseURL()
+	if err != nil {
+		return nil
+	}
+	client := api.NewClient(baseURL)
+	cities, err := client.ListCities()
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]string, len(cities))
+	for _, c := range cities {
+		normalized, err := normalizeRegisteredCityPath(c.Path)
+		if err != nil {
+			continue
+		}
+		out[normalized] = cityStateLabel(c)
+	}
+	return out
+}
+
+// cityStateLabel reduces the (Running, Suspended) pair to a single
+// label. Suspended takes precedence because operators chasing the
+// "session attaches and immediately disappears" symptom care more about
+// the suspended flag than about the supervisor's process management;
+// "running" alone hides the state that actually drives session drains.
+func cityStateLabel(c api.CityInfo) string {
+	switch {
+	case c.Suspended:
+		return "suspended"
+	case c.Running:
+		return "running"
+	default:
+		return "stopped"
+	}
 }

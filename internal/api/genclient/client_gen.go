@@ -600,6 +600,7 @@ type CityInfo struct {
 	PhasesCompleted *[]string `json:"phases_completed,omitempty"`
 	Running         bool      `json:"running"`
 	Status          *string   `json:"status,omitempty"`
+	Suspended       bool      `json:"suspended"`
 }
 
 // CityLifecyclePayload defines model for CityLifecyclePayload.
