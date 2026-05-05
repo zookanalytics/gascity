@@ -18,10 +18,17 @@ import (
 )
 
 // CityInfo describes a managed city for the /v0/cities endpoint.
+//
+// Suspended is independent of Running: a city can be both running (the
+// supervisor manages its processes) and suspended (workspace.suspended is
+// true in city.toml, so the reconciler will drain any session that wakes).
+// Operators need to see both flags to diagnose why a session that
+// successfully attaches immediately disappears.
 type CityInfo struct {
 	Name            string   `json:"name"`
 	Path            string   `json:"path"`
 	Running         bool     `json:"running"`
+	Suspended       bool     `json:"suspended"`
 	Status          string   `json:"status,omitempty"`
 	Error           string   `json:"error,omitempty"`
 	PhasesCompleted []string `json:"phases_completed,omitempty"`
