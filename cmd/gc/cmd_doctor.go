@@ -153,6 +153,7 @@ func doDoctor(fix, verbose, asJSON bool, stdout, stderr io.Writer) int {
 			d.Register(newDoltTopologyCheck(cityPath, cfg))
 			d.Register(newDoltDriftCheck(cityPath, cfg))
 		}
+		d.Register(doctor.NewCitySuspendedCheck(cfg))
 		d.Register(doctor.NewConfigValidCheck(cfg))
 		d.Register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		d.Register(doctor.NewPreStartScriptsCheck(cfg))
