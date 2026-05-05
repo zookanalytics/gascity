@@ -1219,6 +1219,204 @@ exit 0
 	}
 }
 
+// jsonlExportEnv produces the env map shared by jsonl-export commit/push tests.
+// It points $PATH at binDir, sets the dolt args log, neutralizes inherited git
+// config, and parameterizes the archive repo + state file locations so each
+// test can reason about post-run filesystem state.
+func jsonlExportEnv(t *testing.T, binDir, cityDir, stateDir, archiveRepo, doltLog, gcLog, globalGitConfig string) map[string]string {
+	t.Helper()
+	return map[string]string{
+		"DOLT_ARGS_LOG":              doltLog,
+		"GC_CALL_LOG":                gcLog,
+		"GC_CITY":                    cityDir,
+		"GC_CITY_PATH":               cityDir,
+		"GC_PACK_STATE_DIR":          stateDir,
+		"GC_DOLT_HOST":               "127.0.0.1",
+		"GC_DOLT_PORT":               "3307",
+		"GC_DOLT_USER":               "root",
+		"GC_DOLT_PASSWORD":           "",
+		"GC_JSONL_ARCHIVE_REPO":      archiveRepo,
+		"GC_JSONL_MAX_PUSH_FAILURES": "99",
+		"GIT_CONFIG_GLOBAL":          globalGitConfig,
+		"GIT_CONFIG_NOSYSTEM":        "1",
+		"PATH":                       binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
+// TestJSONLExportRecoversFromInheritedGPGSignConfig regression-tests the bug
+// reported in gc-7zd8o: when the daemon's git environment inherits
+// `commit.gpgsign=true` and `gpg.format=ssh` (with no signing key in the agent),
+// jsonl-export.sh used to silently swallow the commit failure and then
+// "fail at push", emitting a misleading escalation. The fix initializes the
+// archive repo with `commit.gpgsign=false` and a fixed daemon identity so
+// commits succeed regardless of the operator's global git config.
+func TestJSONLExportRecoversFromInheritedGPGSignConfig(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveRepo := filepath.Join(cityDir, "archive")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	// Global git config that mirrors the production failure mode: signing
+	// is required but no key is loaded in the SSH agent.
+	gitConfigDir := t.TempDir()
+	globalGitConfig := filepath.Join(gitConfigDir, "gitconfig")
+	missingKey := filepath.Join(gitConfigDir, "missing-signing-key")
+	contents := "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = " + missingKey + "\n"
+	if err := os.WriteFile(globalGitConfig, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(global gitconfig): %v", err)
+	}
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := jsonlExportEnv(t, binDir, cityDir, stateDir, archiveRepo, doltLog, gcLog, globalGitConfig)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "ESCALATION:") {
+		t.Fatalf("expected no escalation, got:\n%s", gcData)
+	}
+
+	headFile := filepath.Join(archiveRepo, ".git", "refs", "heads")
+	entries, err := os.ReadDir(headFile)
+	if err != nil {
+		t.Fatalf("ReadDir(refs/heads): %v\nGC log:\n%s", err, gcData)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("archive repo has no commits — commit silently failed.\nGC log:\n%s", gcData)
+	}
+
+	cmd := exec.Command("git", "-C", archiveRepo, "config", "--local", "--get", "commit.gpgsign")
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git config --get commit.gpgsign: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "false" {
+		t.Fatalf("archive commit.gpgsign = %q, want %q", got, "false")
+	}
+}
+
+// TestJSONLExportEscalatesCommitFailureDistinctly verifies that when commit
+// fails for a reason the daemon can't pre-empt (e.g., a pre-commit hook
+// rejecting the change), the escalation says "commit failed", not the
+// misleading "push failed" that the swallow-and-fall-through code used to
+// emit. This is the user-visible symptom the bug report calls out.
+func TestJSONLExportEscalatesCommitFailureDistinctly(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveRepo := filepath.Join(cityDir, "archive")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	globalGitConfig := filepath.Join(t.TempDir(), "gitconfig")
+
+	// Pre-init the archive repo so we can install a failing pre-commit hook
+	// before the script runs. The script's `git init` is idempotent and won't
+	// clobber the existing repo.
+	if err := os.MkdirAll(archiveRepo, 0o755); err != nil {
+		t.Fatalf("MkdirAll(archive): %v", err)
+	}
+	initCmd := exec.Command("git", "-C", archiveRepo, "init", "-q")
+	initCmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL="+globalGitConfig,
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
+	if out, err := initCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	hookPath := filepath.Join(archiveRepo, ".git", "hooks", "pre-commit")
+	hookBody := "#!/bin/sh\necho 'rejected by test hook' >&2\nexit 1\n"
+	if err := os.WriteFile(hookPath, []byte(hookBody), 0o755); err != nil {
+		t.Fatalf("WriteFile(pre-commit): %v", err)
+	}
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := jsonlExportEnv(t, binDir, cityDir, stateDir, archiveRepo, doltLog, gcLog, globalGitConfig)
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	body := string(gcData)
+	if !strings.Contains(body, "ESCALATION: JSONL commit failed") {
+		t.Fatalf("expected commit-failed escalation, got:\n%s", body)
+	}
+	if strings.Contains(body, "ESCALATION: JSONL push failed") {
+		t.Fatalf("commit failure escalated as push failure (the bug):\n%s", body)
+	}
+
+	// The state file's push counter should not advance: this was a commit
+	// failure, not a push failure, so the tier-3 escalation logic never fires.
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	if data, err := os.ReadFile(stateFile); err == nil {
+		if strings.Contains(string(data), `"consecutive_push_failures": 1`) ||
+			strings.Contains(string(data), `"consecutive_push_failures":1`) {
+			t.Fatalf("commit failure incremented push counter:\n%s", data)
+		}
+	}
+}
+
+// TestJSONLExportSkipsPushWhenNoOriginConfigured verifies the third tier of
+// the gc-7zd8o fix: when the archive repo has no `origin` remote (the steady
+// state until the sync remote rolls out), the script must skip push without
+// escalating. Production was paging the mayor every 15 minutes because push
+// fails when no remote is configured.
+func TestJSONLExportSkipsPushWhenNoOriginConfigured(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	archiveRepo := filepath.Join(cityDir, "archive")
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	globalGitConfig := filepath.Join(t.TempDir(), "gitconfig")
+
+	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := jsonlExportEnv(t, binDir, cityDir, stateDir, archiveRepo, doltLog, gcLog, globalGitConfig)
+	// The script will init the archive without ever wiring an origin.
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	body := string(gcData)
+	if strings.Contains(body, "ESCALATION:") {
+		t.Fatalf("missing-origin run escalated when it should not have:\n%s", body)
+	}
+	if !strings.Contains(body, "no origin") {
+		t.Fatalf("expected missing-origin signal in DOG_DONE nudge, got:\n%s", body)
+	}
+
+	// The push counter must not increment when push was skipped, not failed.
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+	if data, err := os.ReadFile(stateFile); err == nil {
+		if strings.Contains(string(data), `"consecutive_push_failures": 1`) ||
+			strings.Contains(string(data), `"consecutive_push_failures":1`) {
+			t.Fatalf("missing-origin run incremented push counter:\n%s", data)
+		}
+	}
+}
+
 func runScript(t *testing.T, script string, env map[string]string) {
 	t.Helper()
 	cmd := exec.Command(script)

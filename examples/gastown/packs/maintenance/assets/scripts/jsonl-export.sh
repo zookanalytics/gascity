@@ -48,6 +48,14 @@ if [ ! -d "$ARCHIVE_REPO/.git" ]; then
     git -C "$ARCHIVE_REPO" init -q 2>/dev/null || true
 fi
 
+# Pin the archive's local git config so commits don't depend on the operator's
+# global config. Without this, an inherited `commit.gpgsign=true` with no key
+# in the SSH agent fails commit silently and the script later misreports it as
+# a push failure (see gc-7zd8o).
+git -C "$ARCHIVE_REPO" config --local commit.gpgsign false 2>/dev/null || true
+git -C "$ARCHIVE_REPO" config --local user.email "daemon@gastown.local" 2>/dev/null || true
+git -C "$ARCHIVE_REPO" config --local user.name "Gas Town Daemon" 2>/dev/null || true
+
 # Build scrub filter for the issues table.
 SCRUB_FILTER=""
 if [ "$SCRUB" = "true" ]; then
@@ -134,8 +142,42 @@ if git diff --cached --quiet 2>/dev/null; then
 fi
 
 EXPORTED_DBS=$((TOTAL_DBS - $(echo "$FAILED_DBS" | wc -w)))
-git commit -q -m "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
-    --author="Gas Town Daemon <daemon@gastown.local>" 2>/dev/null || true
+
+# Capture commit output so we can distinguish commit failure (config / hook /
+# repo state) from push failure (network / remote). Previously this was
+# `... 2>/dev/null || true`, which masked the real root cause and routed
+# every failure through the push-failed escalation path.
+COMMIT_OUTPUT=""
+if ! COMMIT_OUTPUT=$(git commit -q -m "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
+    --author="Gas Town Daemon <daemon@gastown.local>" 2>&1); then
+    gc mail send mayor/ -s "ESCALATION: JSONL commit failed [HIGH]" \
+        -m "Archive: $ARCHIVE_REPO
+
+git commit failed (this used to surface as a misleading 'push failed'
+escalation; see gc-7zd8o). Output:
+$COMMIT_OUTPUT" \
+        2>/dev/null || true
+    SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: commit-failed"
+    if [ -n "$FAILED_DBS" ]; then
+        SUMMARY="$SUMMARY, failed: $FAILED_DBS"
+    fi
+    gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+    echo "jsonl-export: $SUMMARY"
+    exit 0
+fi
+
+# No origin configured: the daemon committed locally; pushing is a no-op
+# until a remote is wired up. Treat as success without escalation so the
+# pre-remote bring-up window doesn't page the mayor every cooldown.
+if ! git remote get-url origin >/dev/null 2>&1; then
+    SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped (no origin)"
+    if [ -n "$FAILED_DBS" ]; then
+        SUMMARY="$SUMMARY, failed: $FAILED_DBS"
+    fi
+    gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
+    echo "jsonl-export: $SUMMARY"
+    exit 0
+fi
 
 PUSH_STATUS="ok"
 if ! git push origin main -q 2>/dev/null; then
