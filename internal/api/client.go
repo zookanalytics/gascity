@@ -641,9 +641,10 @@ func apiErrorFromResponse(status int, pd *genclient.ErrorModel) error {
 // (value-typed for callers' ergonomics).
 func cityInfoFromGen(g genclient.CityInfo) CityInfo {
 	out := CityInfo{
-		Name:    g.Name,
-		Path:    g.Path,
-		Running: g.Running,
+		Name:      g.Name,
+		Path:      g.Path,
+		Running:   g.Running,
+		Suspended: g.Suspended,
 	}
 	if g.Status != nil {
 		out.Status = *g.Status

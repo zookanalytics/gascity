@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -443,6 +444,36 @@ func TestDoCities(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "bright-lights") {
 		t.Errorf("expected 'bright-lights' in output, got: %s", stdout.String())
+	}
+	// gc-k2yqq: every row carries a STATE column. Without a running
+	// supervisor we have no API to query, so the state degrades to
+	// "stopped" rather than the misleading "running" the previous
+	// surface implied.
+	if !strings.Contains(stdout.String(), "STATE") {
+		t.Errorf("expected STATE header in output, got: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "stopped") {
+		t.Errorf("expected 'stopped' state in output (no supervisor running), got: %s", stdout.String())
+	}
+}
+
+func TestCityStateLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		ci   api.CityInfo
+		want string
+	}{
+		{"suspended_takes_precedence", api.CityInfo{Running: true, Suspended: true}, "suspended"},
+		{"running_only", api.CityInfo{Running: true}, "running"},
+		{"stopped_default", api.CityInfo{}, "stopped"},
+		{"suspended_not_running", api.CityInfo{Suspended: true}, "suspended"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cityStateLabel(tc.ci); got != tc.want {
+				t.Errorf("cityStateLabel(%+v) = %q, want %q", tc.ci, got, tc.want)
+			}
+		})
 	}
 }
 
