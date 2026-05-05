@@ -1320,11 +1320,15 @@ type singleCityStateResolver struct {
 }
 
 func (r *singleCityStateResolver) ListCities() []api.CityInfo {
-	return []api.CityInfo{{
+	ci := api.CityInfo{
 		Name:    r.state.CityName(),
 		Path:    r.state.CityPath(),
 		Running: true,
-	}}
+	}
+	if cfg := r.state.Config(); cfg != nil {
+		ci.Suspended = cfg.Workspace.Suspended
+	}
+	return []api.CityInfo{ci}
 }
 
 func (r *singleCityStateResolver) CityState(name string) api.State {
