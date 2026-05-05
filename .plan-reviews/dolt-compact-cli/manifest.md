@@ -52,8 +52,8 @@ Scope: a new `gc dolt compact [databases...]` subcommand that:
 - [x] prd-align-1 (bead: `gc-qn5p3r`, closed)
 - [x] prd-align-2 (bead: `gc-fm7r62`, closed)
 - [x] prd-align-3 (bead: `gc-lygvkw`, closed)
-- [x] plan-review-1 (bead: `gc-imyo2c`, in_progress — this commit)
-- [ ] plan-review-2 (bead: `gc-s6epvv`)
+- [x] plan-review-1 (bead: `gc-imyo2c`, closed)
+- [x] plan-review-2 (bead: `gc-s6epvv`, in_progress — this commit)
 - [ ] plan-review-3 (bead: `gc-ahiv4c`)
 - [ ] create-beads (bead: `gc-8zdml1`)
 
