@@ -230,12 +230,63 @@ func tailText(s string, maxLines int) string {
 // city.toml configuration.
 func initBd(t *testing.T, dir string) string {
 	t.Helper()
+	env := standaloneBdEnv(t, dir)
+
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		if !os.IsNotExist(err) {
+			t.Fatalf("stat %s/.git: %v", dir, err)
+		}
+		gitCmd := exec.Command("git", "init", "--quiet")
+		gitCmd.Dir = dir
+		gitCmd.Env = env
+		if out, err := gitCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init in %s failed: %v\noutput: %s", dir, err, out)
+		}
+	}
+
 	prefix := uniqueCityName()
-	out, err := bdStandalone(t, dir, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
-	if err != nil {
+	cmd := exec.Command(bdBinary, "init", "-p", prefix, "--skip-hooks", "--skip-agents", "-q")
+	cmd.Dir = dir
+	cmd.Env = env
+	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("bd init in %s failed: %v\noutput: %s", dir, err, out)
 	}
+	registerCityCommandEnv(dir, env)
+	t.Cleanup(func() { unregisterCityCommandEnv(dir) })
 	return prefix
+}
+
+func standaloneBdEnv(t *testing.T, dir string) []string {
+	t.Helper()
+
+	env := newIsolatedToolEnv(t, false)
+	env = filterEnvMany(env,
+		"GC_CITY",
+		"GC_CITY_PATH",
+		"GC_CITY_ROOT",
+		"GC_CITY_RUNTIME_DIR",
+		"GC_RIG",
+		"GC_RIG_ROOT",
+		"GC_BEADS",
+		"GC_BEADS_SCOPE_ROOT",
+		"GC_DOLT",
+		"GC_DOLT_HOST",
+		"GC_DOLT_PORT",
+		"GC_DOLT_USER",
+		"GC_DOLT_PASSWORD",
+		"BEADS_DIR",
+		"BEADS_DOLT_AUTO_START",
+		"BEADS_DOLT_SERVER_HOST",
+		"BEADS_DOLT_SERVER_PORT",
+		"BEADS_DOLT_SERVER_USER",
+		"BEADS_DOLT_PASSWORD",
+	)
+	if gcHome := parseEnvList(env)["GC_HOME"]; gcHome != "" {
+		env = replaceEnv(env, "HOME", gcHome)
+	}
+	env = replaceEnv(env, "BD_NON_INTERACTIVE", "1")
+	env = append(env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
+	return env
 }
 
 func bdStandalone(t testing.TB, dir string, args ...string) (string, error) {
