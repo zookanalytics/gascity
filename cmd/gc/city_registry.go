@@ -26,6 +26,12 @@ type cityView struct {
 	Started bool
 	Status  string
 
+	// Suspended snapshots cs.Config().Workspace.Suspended at build time.
+	// Copying it onto the view (instead of recomputing from cs in
+	// readers) lets ListCities expose the flag even when the controller
+	// is mid-shutdown / cs is a typed nil.
+	Suspended bool
+
 	// controllerState is a pointer to the city's api.State implementation.
 	// It is thread-safe via its own internal RWMutex.
 	cs api.State
@@ -408,10 +414,11 @@ func (r *cityRegistry) ListCities() []api.CityInfo {
 	out := make([]api.CityInfo, 0, len(snap.all))
 	for _, v := range snap.all {
 		ci := api.CityInfo{
-			Name:    v.Name,
-			Path:    v.Path,
-			Running: v.Started,
-			Status:  v.Status,
+			Name:      v.Name,
+			Path:      v.Path,
+			Running:   v.Started,
+			Suspended: v.Suspended,
+			Status:    v.Status,
 		}
 		// Running cities report empty status (matches old behavior).
 		if v.Started {
@@ -529,11 +536,24 @@ func (r *cityRegistry) toCityView(path string, mc *managedCity) *cityView {
 		cs = mc.cr.cs
 	}
 
+	// Snapshot Workspace.Suspended at view-build time so ListCities can
+	// surface it without calling back into the (possibly typed-nil) cs
+	// interface. Some tests construct CityRuntime{cs: nil}, where the
+	// interface value is non-nil but the underlying pointer is nil; calling
+	// Config() on that would panic. Concrete-pointer guard avoids it.
+	suspended := false
+	if mc.cr != nil && mc.cr.cs != nil {
+		if cfg := mc.cr.cs.Config(); cfg != nil {
+			suspended = cfg.Workspace.Suspended
+		}
+	}
+
 	v := &cityView{
 		Name:       mc.name,
 		Path:       path,
 		Started:    mc.started,
 		Status:     mc.status,
+		Suspended:  suspended,
 		cs:         cs,
 		Tombstoned: mc.tombstoned.Load(),
 	}
