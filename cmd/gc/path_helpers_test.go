@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"os"
+	"syscall"
 	"testing"
 	"time"
 
@@ -65,5 +68,32 @@ func cleanupManagedDoltTestCity(t *testing.T, cityPath string) {
 		if err := shutdownBeadsProvider(cityPath); err != nil {
 			t.Logf("shutdownBeadsProvider(%s): %v", cityPath, err)
 		}
+		reapOrphanDoltUnderTestCity(t, cityPath)
 	})
+}
+
+// reapOrphanDoltUnderTestCity force-kills any `dolt sql-server` whose
+// --config path is under cityPath but that the structured cleanup path
+// (controller stop, managed-dolt stop, bd stop op) failed to terminate.
+// These survive when bd init's state file was not yet finalized at the
+// moment cleanup ran, leaving currentManagedDoltPort and the bd stop op
+// unable to locate the live PID. Without this fallback, t.TempDir's later
+// cleanup removes the config directory and the dolt server is reparented
+// to PID 1 — the leak signature deacon's patrol reports as orphan dolt.
+func reapOrphanDoltUnderTestCity(t *testing.T, cityPath string) {
+	t.Helper()
+	procs, err := discoverDoltProcesses()
+	if err != nil || len(procs) == 0 {
+		return
+	}
+	for _, pid := range orphanedDoltsUnderCity(cityPath, procs) {
+		proc, err := os.FindProcess(pid)
+		if err != nil {
+			t.Logf("reap orphan dolt PID %d: find: %v", pid, err)
+			continue
+		}
+		if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Logf("reap orphan dolt PID %d: kill: %v", pid, err)
+		}
+	}
 }
