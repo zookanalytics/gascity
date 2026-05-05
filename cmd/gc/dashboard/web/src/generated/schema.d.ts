@@ -2266,6 +2266,7 @@ export interface components {
             phases_completed?: string[] | null;
             running: boolean;
             status?: string;
+            suspended: boolean;
         };
         CityLifecyclePayload: {
             name: string;
