@@ -57,6 +57,33 @@ type ReapPlan struct {
 	Protected []ProtectedProcess
 }
 
+// orphanedDoltsUnderCity returns dolt sql-server PIDs whose --config path is
+// under cityPath. Used by test cleanup as a defense-in-depth fallback when
+// the structured stop path (controller stop, managed-dolt stop, bd stop op)
+// missed a process — typically because the bd lifecycle's state file was not
+// finalized at the moment cleanup ran, or validDoltRuntimeState rejected an
+// in-progress server. Refuses to match when cityPath is empty, ".", or "/"
+// so a misconfigured caller cannot reap every dolt server on the host.
+func orphanedDoltsUnderCity(cityPath string, procs []DoltProcInfo) []int {
+	clean := filepath.Clean(cityPath)
+	if clean == "" || clean == "." || clean == string(filepath.Separator) {
+		return nil
+	}
+	cityPrefix := clean + string(filepath.Separator)
+	var pids []int
+	for _, p := range procs {
+		cfg := extractConfigPath(p.Argv)
+		if cfg == "" {
+			continue
+		}
+		if !strings.HasPrefix(filepath.Clean(cfg), cityPrefix) {
+			continue
+		}
+		pids = append(pids, p.PID)
+	}
+	return pids
+}
+
 // extractConfigPath pulls the --config <path> argument from a dolt sql-server
 // argv. Supports both `--config foo` and `--config=foo` forms; returns empty
 // when the flag is absent or has no value.

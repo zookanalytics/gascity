@@ -1,9 +1,18 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestExtractConfigPath_SpaceSeparated(t *testing.T) {
@@ -210,4 +219,207 @@ func TestPlanReap_BuildsOrphanAndProtectedLists(t *testing.T) {
 	if !reflect.DeepEqual(gotProtected, wantProtected) {
 		t.Errorf("Protected PIDs = %v, want %v", gotProtected, wantProtected)
 	}
+}
+
+func TestOrphanedDoltsUnderCity_MatchesConfigUnderCity(t *testing.T) {
+	procs := []DoltProcInfo{
+		{PID: 100, Argv: []string{"dolt", "sql-server", "--config", "/tmp/gc-state-runtime-builtin-1/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+		{PID: 101, Argv: []string{"dolt", "sql-server", "--config=/tmp/gc-state-runtime-builtin-1/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+		{PID: 200, Argv: []string{"dolt", "sql-server", "--config", "/tmp/other-city/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+		{PID: 300, Argv: []string{"dolt", "sql-server"}},
+	}
+	got := orphanedDoltsUnderCity("/tmp/gc-state-runtime-builtin-1", procs)
+	want := []int{100, 101}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("orphanedDoltsUnderCity = %v, want %v", got, want)
+	}
+}
+
+func TestOrphanedDoltsUnderCity_TrailingSlashCityPath(t *testing.T) {
+	procs := []DoltProcInfo{
+		{PID: 100, Argv: []string{"dolt", "sql-server", "--config", "/tmp/city/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+	}
+	got := orphanedDoltsUnderCity("/tmp/city/", procs)
+	want := []int{100}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("orphanedDoltsUnderCity (trailing slash) = %v, want %v", got, want)
+	}
+}
+
+func TestOrphanedDoltsUnderCity_DoesNotMatchSiblingPrefix(t *testing.T) {
+	// /tmp/city2 must not match cityPath=/tmp/city even though it shares
+	// the prefix string — filepath.Clean + separator boundary prevents this.
+	procs := []DoltProcInfo{
+		{PID: 100, Argv: []string{"dolt", "sql-server", "--config", "/tmp/city2/.gc/runtime/packs/dolt/dolt-config.yaml"}},
+	}
+	got := orphanedDoltsUnderCity("/tmp/city", procs)
+	if len(got) != 0 {
+		t.Errorf("orphanedDoltsUnderCity = %v, want empty (sibling path must not match)", got)
+	}
+}
+
+func TestOrphanedDoltsUnderCity_RejectsRootCityPath(t *testing.T) {
+	// A cityPath of "/" or "" must never reap — it would match every
+	// dolt process on the host.
+	procs := []DoltProcInfo{
+		{PID: 100, Argv: []string{"dolt", "sql-server", "--config", "/var/lib/dolt/config.yaml"}},
+	}
+	for _, cityPath := range []string{"", "/", "."} {
+		got := orphanedDoltsUnderCity(cityPath, procs)
+		if len(got) != 0 {
+			t.Errorf("orphanedDoltsUnderCity(%q) = %v, want empty (root path guard)", cityPath, got)
+		}
+	}
+}
+
+func TestOrphanedDoltsUnderCity_IgnoresProcsWithoutConfig(t *testing.T) {
+	procs := []DoltProcInfo{
+		{PID: 100, Argv: []string{"dolt", "sql-server"}},
+		{PID: 101, Argv: []string{"dolt", "sql-server", "--port", "3307"}},
+	}
+	got := orphanedDoltsUnderCity("/tmp/city", procs)
+	if len(got) != 0 {
+		t.Errorf("orphanedDoltsUnderCity = %v, want empty for procs without --config", got)
+	}
+}
+
+// fakeDoltBinaryPath compiles a tiny Go binary that calls time.Sleep, returns
+// its path. Reuses a process-wide path cached in fakeDoltBin so the cost is
+// paid once per `go test` invocation. The binary's argv[0] is overridden to
+// "dolt" via exec.Cmd.Args (see spawnFakeDolt) so /proc/PID/cmdline reads as
+// `dolt sql-server --config <path>` — what discoverDoltProcesses matches on.
+func fakeDoltBinaryPath(t *testing.T) string {
+	t.Helper()
+	fakeDoltBinOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "fake-dolt-")
+		if err != nil {
+			fakeDoltBinErr = err
+			return
+		}
+		src := "package main\nimport \"time\"\nfunc main() { time.Sleep(time.Hour) }\n"
+		srcPath := filepath.Join(dir, "fake_dolt.go")
+		if err := os.WriteFile(srcPath, []byte(src), 0o644); err != nil {
+			fakeDoltBinErr = err
+			return
+		}
+		bin := filepath.Join(dir, "fake-dolt-bin")
+		if out, err := exec.Command("go", "build", "-o", bin, srcPath).CombinedOutput(); err != nil {
+			fakeDoltBinErr = fmt.Errorf("build fake dolt: %w: %s", err, string(out))
+			return
+		}
+		fakeDoltBin = bin
+		registerProcessCleanup(func() { _ = os.RemoveAll(dir) })
+	})
+	if fakeDoltBinErr != nil {
+		t.Fatalf("fake dolt binary: %v", fakeDoltBinErr)
+	}
+	return fakeDoltBin
+}
+
+var (
+	fakeDoltBinOnce sync.Once
+	fakeDoltBin     string
+	fakeDoltBinErr  error
+)
+
+// spawnFakeDolt spawns a long-running process whose /proc/PID/cmdline reads
+// as `dolt sql-server --config <configPath>`. The actual binary is the tiny
+// time.Sleep helper from fakeDoltBinaryPath, symlinked as <dir>/dolt so
+// discoverDoltProcesses' `filepath.Base(argv[0]) == "dolt"` check matches.
+func spawnFakeDolt(t *testing.T, dir, configPath string) *exec.Cmd {
+	t.Helper()
+	bin := fakeDoltBinaryPath(t)
+	doltLink := filepath.Join(dir, "dolt")
+	if err := os.Symlink(bin, doltLink); err != nil {
+		t.Fatalf("symlink fake dolt: %v", err)
+	}
+	cmd := &exec.Cmd{
+		Path: doltLink,
+		Args: []string{"dolt", "sql-server", "--config", configPath},
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn fake dolt: %v", err)
+	}
+	return cmd
+}
+
+// TestReapOrphanDoltUnderTestCity_KillsLeakedDolt verifies the end-to-end
+// fallback: a process with a `dolt sql-server --config <cityPath>/...` argv
+// signature is killed by reapOrphanDoltUnderTestCity, even though the structured
+// stop path (state file, bd stop op) doesn't know about it.
+func TestReapOrphanDoltUnderTestCity_KillsLeakedDolt(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("discoverDoltProcesses is Linux-only")
+	}
+
+	cityPath := t.TempDir()
+	configPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	cmd := spawnFakeDolt(t, t.TempDir(), configPath)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	// Wait for the process to be visible in /proc with the expected argv.
+	waitForFakeDoltCmdline(t, cmd.Process.Pid)
+
+	reapOrphanDoltUnderTestCity(t, cityPath)
+
+	// cmd.Wait() returns once the kernel has reaped the child. The reaper
+	// sent SIGKILL via os.FindProcess(pid).Signal — that races against the
+	// parent's Wait() but the process *will* exit once SIGKILL lands.
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+	select {
+	case <-exited:
+		// Killed and reaped.
+	case <-time.After(3 * time.Second):
+		t.Fatalf("process %d still alive after reapOrphanDoltUnderTestCity", cmd.Process.Pid)
+	}
+}
+
+// TestReapOrphanDoltUnderTestCity_PreservesUnrelatedDolt verifies the helper
+// does not touch dolt processes whose --config is outside cityPath, even if
+// they were spawned by some other test or a production server.
+func TestReapOrphanDoltUnderTestCity_PreservesUnrelatedDolt(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("discoverDoltProcesses is Linux-only")
+	}
+
+	cityPath := t.TempDir()
+	otherPath := t.TempDir()
+	otherConfig := filepath.Join(otherPath, ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+
+	cmd := spawnFakeDolt(t, t.TempDir(), otherConfig)
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	})
+
+	waitForFakeDoltCmdline(t, cmd.Process.Pid)
+
+	reapOrphanDoltUnderTestCity(t, cityPath)
+
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("process %d was killed but should have been preserved (config under %s, cityPath %s): %v",
+			cmd.Process.Pid, otherPath, cityPath, err)
+	}
+}
+
+// waitForFakeDoltCmdline blocks until /proc/<pid>/cmdline contains the
+// fake-dolt argv signature so the reaper can see it. spawnFakeDolt's child
+// is observable in /proc almost immediately after Start, but the timing is
+// not guaranteed across runtime variations.
+func waitForFakeDoltCmdline(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		data, _ := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+		if strings.Contains(string(data), "sql-server") {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("fake dolt PID %d cmdline not visible in /proc within 2s", pid)
 }
