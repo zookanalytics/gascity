@@ -485,6 +485,7 @@ func TestGcBdSuppressesBdAutoExportForJsonShowAndUpdate(t *testing.T) {
 	rigFlag = ""
 
 	cityDir := t.TempDir()
+	t.Chdir(cityDir)
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
