@@ -432,8 +432,12 @@ is_user_database() {
         information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
             return 1
             ;;
-        beads_t[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
-            return 1
+        beads_t*)
+            local suffix="${1#beads_t}"
+            if [[ "$suffix" =~ ^[0-9a-f]{8,}$ ]]; then
+                return 1
+            fi
+            return 0
             ;;
         *)
             return 0
@@ -484,6 +488,7 @@ fi
 TOTAL_EXPORTED=0
 TOTAL_DBS=0
 FAILED_DBS=""
+FAILED_DB_COUNT=0
 HALTED=0
 STAGE_PATHS=()
 HALT_DB=""
@@ -491,8 +496,28 @@ HALT_PREV_COUNT=0
 HALT_CURRENT_COUNT=0
 HALT_DELTA=0
 
-for DB in $DATABASES; do
+valid_database_identifier() {
+    local name="$1"
+
+    case "$name" in
+        ''|-*|*[!A-Za-z0-9_-]*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
+while IFS= read -r DB; do
+    [ -z "$DB" ] && continue
     TOTAL_DBS=$((TOTAL_DBS + 1))
+    if ! valid_database_identifier "$DB"; then
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
+        continue
+    fi
+
     DB_DIR="$ARCHIVE_REPO/$DB"
     mkdir -p "$DB_DIR"
 
@@ -501,13 +526,17 @@ for DB in $DATABASES; do
     if ! dolt_sql -r json -q "SELECT * FROM \`$DB\`.issues $SCRUB_FILTER" > "$ISSUE_EXPORT_TMP" 2>/dev/null; then
         rm -f "$ISSUE_EXPORT_TMP"
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
     if ! mv -f "$ISSUE_EXPORT_TMP" "$DB_DIR/issues.jsonl"; then
         rm -f "$ISSUE_EXPORT_TMP"
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
 
@@ -524,26 +553,34 @@ for DB in $DATABASES; do
         if ! scrub_exported_issues < "$DB_DIR/issues.jsonl" > "$TMPFILE"; then
             rm -f "$TMPFILE"
             discard_failed_db_outputs "$DB"
-            FAILED_DBS="${FAILED_DBS}$DB "
+            FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+            FAILED_DBS="${FAILED_DBS}$DB
+"
             continue
         fi
     elif ! validate_exported_issues < "$DB_DIR/issues.jsonl" > "$TMPFILE"; then
         rm -f "$TMPFILE"
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
     if [ ! -s "$TMPFILE" ]; then
         echo "jsonl-export: issues export for $DB was empty" >&2
         rm -f "$TMPFILE"
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
     if ! validate_exported_issues < "$TMPFILE" >/dev/null; then
         rm -f "$TMPFILE"
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
     mv -f "$TMPFILE" "$DB_DIR/issues.jsonl"
@@ -552,7 +589,9 @@ for DB in $DATABASES; do
     # shapes in sync so any downstream reader sees the same filtered payload.
     if ! cp -f "$DB_DIR/issues.jsonl" "$ARCHIVE_REPO/$DB.jsonl" 2>/dev/null; then
         discard_failed_db_outputs "$DB"
-        FAILED_DBS="${FAILED_DBS}$DB "
+        FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
+        FAILED_DBS="${FAILED_DBS}$DB
+"
         continue
     fi
 
@@ -591,7 +630,9 @@ for DB in $DATABASES; do
             break
         fi
     fi
-done
+done <<EOF
+$DATABASES
+EOF
 
 cd "$ARCHIVE_REPO"
 if [ "${#STAGE_PATHS[@]}" -gt 0 ]; then
@@ -608,7 +649,7 @@ fi
 # until a later successful non-HALT run pushes the archive forward.
 if [ "$HALTED" -eq 1 ]; then
     if ! git diff --cached --quiet 2>/dev/null; then
-        EXPORTED_DBS=$((TOTAL_DBS - $(echo "$FAILED_DBS" | wc -w)))
+        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         commit_archive_snapshot \
             "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)" \
             "HALT baseline" || {
@@ -634,8 +675,8 @@ if git diff --cached --quiet 2>/dev/null; then
             PUSH_STATUS="failed"
         fi
         if [ -n "$FAILED_DBS" ]; then
-            EXPORTED_DBS=$((TOTAL_DBS - $(echo "$FAILED_DBS" | wc -w)))
-            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS, failed: $FAILED_DBS"
+            EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
+            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
@@ -644,8 +685,8 @@ if git diff --cached --quiet 2>/dev/null; then
         exit 0
     fi
     if [ -n "$FAILED_DBS" ]; then
-        EXPORTED_DBS=$((TOTAL_DBS - $(echo "$FAILED_DBS" | wc -w)))
-        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $FAILED_DBS"
+        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
+        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
         gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true
         echo "jsonl-export: $SUMMARY"
         exit 0
@@ -655,7 +696,7 @@ if git diff --cached --quiet 2>/dev/null; then
     exit 0
 fi
 
-EXPORTED_DBS=$((TOTAL_DBS - $(echo "$FAILED_DBS" | wc -w)))
+EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
 commit_archive_snapshot \
     "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
     "archive snapshot" || {
@@ -671,7 +712,7 @@ fi
 
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"
 if [ -n "$FAILED_DBS" ]; then
-    SUMMARY="$SUMMARY, failed: $FAILED_DBS"
+    SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true

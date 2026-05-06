@@ -112,7 +112,8 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 	}
 
 	doltSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe"
-	maintenanceSystemNeedle := "information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*"
+	maintenanceScratchNeedle := "benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*"
+	maintenanceTempNeedle := "beads_t[0-9a-f]"
 	for _, tt := range []struct {
 		pack     string
 		rel      string
@@ -120,7 +121,11 @@ func TestBuiltinDatabaseEnumeratorsSkipManagedProbeDatabase(t *testing.T) {
 		minCount int
 	}{
 		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), doltSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceScratchNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "jsonl-export.sh"), maintenanceTempNeedle, 1},
 		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), doltSystemNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceScratchNeedle, 1},
+		{"maintenance", filepath.Join("assets", "scripts", "reaper.sh"), maintenanceTempNeedle, 1},
 		{"dolt", filepath.Join("commands", "list", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "cleanup", "run.sh"), doltSystemNeedle, 1},
 		{"dolt", filepath.Join("commands", "health", "run.sh"), doltSystemNeedle, 2},

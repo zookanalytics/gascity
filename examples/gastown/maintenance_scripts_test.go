@@ -11,13 +11,16 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 var rawDoltSQLCallRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])dolt(?:[ \t]+|[ \t]*\\[ \t]*\r?\n[ \t]*)+sql([ \t]|$)`)
 
 var (
-	sqlFenceRe  = regexp.MustCompile("(?s)```sql\\s*\\n(.*?)```")
-	mailTableRe = regexp.MustCompile(`(?i)(?:FROM|UPDATE|INTO|JOIN)\s+\x60?mail\x60?\b`)
+	sqlFenceRe            = regexp.MustCompile("(?s)```sql\\s*\\n(.*?)```")
+	mailTableRe           = regexp.MustCompile(`(?i)(?:FROM|UPDATE|INTO|JOIN|DELETE\s+FROM)\s+(?:\x60?[\w-]+\x60?\.)?\x60?mail\x60?\b`)
+	rawDurationIntervalRe = regexp.MustCompile(`(?i)\bINTERVAL\s+\{\{(?:max_age|purge_age|stale_issue_age)\}\}`)
 )
 
 func TestMaintenanceDoltScriptsUseProjectedConnectionTarget(t *testing.T) {
@@ -812,6 +815,7 @@ func TestMaintenanceDoltScriptsSkipTestPatternDatabases(t *testing.T) {
 		"benchdb",
 		"testdb_foo",
 		"beads_t1234abcd",
+		"beads_t1234abcd9",
 		"beads_ptbaz",
 		"beads_vrqux",
 		"doctest_xyz",
@@ -887,6 +891,100 @@ exit 0
 	}
 }
 
+func TestMaintenanceDoltScriptsSkipUnsafeDatabaseIdentifiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		script string
+		env    map[string]string
+	}{
+		{
+			name:   "reaper",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			env: map[string]string{
+				"GC_REAPER_DRY_RUN": "1",
+			},
+		},
+		{
+			name:   "jsonl export",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\nfoo db\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+  *"SELECT *"*)
+    printf '{"id":"ga-1"}\n'
+    ;;
+esac
+exit 0
+`)
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_ARGS_LOG":       doltLog,
+				"GC_CALL_LOG":         gcLog,
+				"GC_CITY":             cityDir,
+				"GC_CITY_PATH":        cityDir,
+				"GC_PACK_STATE_DIR":   stateDir,
+				"GC_DOLT_HOST":        "127.0.0.1",
+				"GC_DOLT_PORT":        "3307",
+				"GC_DOLT_USER":        "root",
+				"GC_DOLT_PASSWORD":    "",
+				"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+				"GIT_CONFIG_NOSYSTEM": "1",
+				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for key, value := range tt.env {
+				if key == "GC_JSONL_ARCHIVE_REPO" {
+					value = filepath.Join(cityDir, value)
+				}
+				env[key] = value
+			}
+
+			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
+			if !strings.Contains(log, "`beads`") {
+				t.Fatalf("script did not query safe database:\n%s", log)
+			}
+			for _, unsafe := range []string{"`foo db`", "`foo`", "`db`"} {
+				if strings.Contains(log, unsafe) {
+					t.Fatalf("script queried unsafe database token %s:\n%s", unsafe, log)
+				}
+			}
+		})
+	}
+}
+
 func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 	path := filepath.Join(exampleDir(), "packs", "maintenance", "formulas", "mol-dog-reaper.toml")
 	data, err := os.ReadFile(path)
@@ -907,12 +1005,64 @@ func TestReaperFormulaSQLReflectsCurrentSchema(t *testing.T) {
 		if strings.Contains(fence, "parent_id") {
 			t.Errorf("formula sql fence %d references parent_id (column does not exist in wisps):\n%s", i, fence)
 		}
-		if strings.Contains(fence, "LEFT JOIN wisps parent") {
+		if strings.Contains(fence, "LEFT JOIN wisps parent ON") {
 			t.Errorf("formula sql fence %d still has the broken parent self-join:\n%s", i, fence)
 		}
 		if mailTableRe.MatchString(fence) {
 			t.Errorf("formula sql fence %d treats `mail` as a SQL table; mail messages are beads with Type=message:\n%s", i, fence)
 		}
+		if rawDurationIntervalRe.MatchString(fence) {
+			t.Errorf("formula sql fence %d uses raw Go duration values in SQL INTERVAL; reaper.sh normalizes durations to integer hours:\n%s", i, fence)
+		}
+	}
+}
+
+func TestReaperParentIDIsParentChildDependencyProjection(t *testing.T) {
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		call := name + " " + strings.Join(args, " ")
+		switch call {
+		case "bd list --json --label=parent-projection --include-infra --include-gates --limit 50":
+			return []byte(`[
+				{
+					"id":"ga-child",
+					"title":"child",
+					"status":"open",
+					"issue_type":"task",
+					"created_at":"2026-05-06T00:00:00Z",
+					"labels":["parent-projection"],
+					"dependencies":[
+						{"issue_id":"ga-child","depends_on_id":"ga-parent","type":"parent-child"}
+					]
+				}
+			]`), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", call)
+		}
+	}
+	store := beads.NewBdStore("/city", runner)
+
+	got, err := store.List(beads.ListQuery{Label: "parent-projection", Limit: 50})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("List returned %d beads, want 1", len(got))
+	}
+	if got[0].ParentID != "ga-parent" {
+		t.Fatalf("ParentID = %q, want dependency-projected parent ga-parent", got[0].ParentID)
+	}
+
+	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+	scriptData, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", scriptPath, err)
+	}
+	script := string(scriptData)
+	if strings.Contains(script, "parent_id") {
+		t.Fatalf("reaper queried parent_id directly; Dolt ParentID is projected from parent-child dependencies:\n%s", script)
+	}
+	if !strings.Contains(script, "dependencies d") || !strings.Contains(script, "d.type = 'parent-child'") {
+		t.Fatalf("reaper does not follow the canonical Dolt parent-child projection:\n%s", script)
 	}
 }
 
@@ -920,14 +1070,17 @@ func TestReaperSQLReflectsCurrentSchema(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
 	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
 
 	writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
 	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
 exit 0
 `)
 
 	env := map[string]string{
 		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
 		"DOLT_DBS":         "beads",
 		"GC_CITY":          cityDir,
 		"GC_CITY_PATH":     cityDir,
@@ -935,6 +1088,7 @@ exit 0
 		"GC_DOLT_PORT":     "3307",
 		"GC_DOLT_USER":     "root",
 		"GC_DOLT_PASSWORD": "",
+		"DOLT_PURGE_COUNT": "1",
 		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		// No GC_REAPER_DRY_RUN — allow DOLT_COMMIT to fire.
 	}
@@ -970,6 +1124,1387 @@ exit 0
 	} else if callIdx >= 0 && useIdx > callIdx {
 		t.Errorf("USE `beads` appears after CALL DOLT_COMMIT:\n%s", log)
 	}
+	if strings.Contains(log, " mail=") || strings.Contains(log, " mail:") {
+		t.Errorf("reaper still reports removed mail cleanup in Dolt commit message:\n%s", log)
+	}
+	purgeIdx := strings.Index(log, "DELETE FROM `beads`.wisps")
+	if purgeIdx < 0 {
+		t.Errorf("reaper missing closed-wisp purge delete:\n%s", log)
+	} else {
+		purgeSQL := log[purgeIdx:]
+		if !strings.Contains(purgeSQL, "child_wisp.status IN ('open', 'hooked', 'in_progress')") ||
+			!strings.Contains(purgeSQL, "d.type = 'parent-child'") ||
+			!strings.Contains(purgeSQL, "d.depends_on_id IS NOT NULL") {
+			t.Errorf("reaper purge can delete closed parents with non-closed children:\n%s", purgeSQL)
+		}
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "mail:") {
+		t.Errorf("reaper DOG_DONE still reports removed mail cleanup:\n%s", gcData)
+	}
+}
+
+func TestReaperClosesStaleWispChainsToFixpoint(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	closeCountState := filepath.Join(t.TempDir(), "close-count-state")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"COUNT(DISTINCT w.id)"*)
+    n=0
+    if [ -f "$CLOSE_COUNT_STATE" ]; then
+      n=$(cat "$CLOSE_COUNT_STATE")
+    fi
+    case "$n" in
+      0)
+        printf '1\n' > "$CLOSE_COUNT_STATE"
+        printf 'COUNT(*)\n1\n'
+        ;;
+      1)
+        printf '2\n' > "$CLOSE_COUNT_STATE"
+        printf 'COUNT(*)\n1\n'
+        ;;
+      *)
+        printf 'COUNT(*)\n0\n'
+        ;;
+    esac
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n2\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"CLOSE_COUNT_STATE": closeCountState,
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if got := strings.Count(log, "UPDATE `beads`.wisps SET status='closed'"); got != 2 {
+		t.Fatalf("reaper closed only %d stale wisp chain level(s), want 2:\n%s", got, log)
+	}
+	if !strings.Contains(log, "closed_wisps=2") {
+		t.Fatalf("reaper commit did not report all closed chain levels:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "closed_wisps:2") {
+		t.Fatalf("reaper summary did not report all closed chain levels:\n%s", gcData)
+	}
+}
+
+func TestReaperCountQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    printf 'non-fatal mutation warning from dolt\n' >&2
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    printf 'non-fatal warning from dolt\n' >&2
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	doltData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if !strings.Contains(string(doltData), "DELETE FROM `beads`.wisps") {
+		t.Fatalf("reaper did not act on count stdout when Dolt emitted stderr warning:\n%s", doltData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") || strings.Contains(gcLogText, "count returned non-numeric") {
+		t.Fatalf("reaper treated successful count stderr as an anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "purged:1") {
+		t.Fatalf("reaper summary did not include purge count from stdout:\n%s", gcLogText)
+	}
+}
+
+func TestReaperRowQueriesIgnoreSuccessfulStderrWarnings(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT id FROM "*"issues"*)
+    printf 'id\nga-old\n'
+    printf 'non-fatal warning from dolt\n' >&2
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	if !strings.Contains(bdLogText, "close ga-old --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not act on row-query stdout when Dolt emitted stderr warning:\n%s", bdLogText)
+	}
+	if strings.Contains(bdLogText, "non-fatal warning") {
+		t.Fatalf("reaper treated successful row-query stderr as an issue id:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") || strings.Contains(gcLogText, "stale issue query failed") {
+		t.Fatalf("reaper treated successful row-query stderr as an anomaly:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "closed:1") {
+		t.Fatalf("reaper summary did not include city issue close from stdout:\n%s", gcLogText)
+	}
+}
+
+func TestReaperDoesNotCloseNonClosedWispsByAgeOnly(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"COUNT("*"wisps w"*"dependencies d"*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n2\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") && !strings.Contains(log, "dependencies d") {
+		t.Fatalf("reaper closed non-closed wisps by age alone instead of using parent-child dependencies:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "stale_wisps:2") {
+		t.Fatalf("reaper did not report observed stale non-closed wisps:\n%s", gcData)
+	}
+}
+
+func TestReaperClosesStaleWispsOnlyWithClosedParent(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	closeCountState := filepath.Join(t.TempDir(), "close-count-state")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"COUNT("*"wisps w"*"dependencies d"*)
+    n=0
+    if [ -f "$CLOSE_COUNT_STATE" ]; then
+      n=$(cat "$CLOSE_COUNT_STATE")
+    fi
+    if [ "$n" = "0" ]; then
+      printf '1\n' > "$CLOSE_COUNT_STATE"
+      printf 'COUNT(*)\n1\n'
+    else
+      printf 'COUNT(*)\n0\n'
+    fi
+    ;;
+  *"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n2\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"CLOSE_COUNT_STATE": closeCountState,
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "parent_id") {
+		t.Fatalf("reaper used removed parent_id column:\n%s", log)
+	}
+	if !strings.Contains(log, "UPDATE `beads`.wisps SET status='closed'") {
+		t.Fatalf("reaper did not close schema-safe stale wisp candidates:\n%s", log)
+	}
+	if !strings.Contains(log, "COUNT(DISTINCT w.id)") {
+		t.Fatalf("reaper stale-wisp close count can be join-multiplied:\n%s", log)
+	}
+	if !strings.Contains(log, "dependencies d") || !strings.Contains(log, "d.type = 'parent-child'") {
+		t.Fatalf("reaper stale-wisp close path does not use parent-child dependencies:\n%s", log)
+	}
+	if strings.Contains(log, "parent_wisp.id IS NULL AND parent_issue.id IS NULL") {
+		t.Fatalf("reaper closes stale wisps when parent liveness is unresolved:\n%s", log)
+	}
+	if !strings.Contains(log, "parent_wisp.status = 'closed'") || !strings.Contains(log, "parent_issue.status = 'closed'") {
+		t.Fatalf("reaper stale-wisp close path does not require a closed parent:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(gcData), "stale_wisps:2") || !strings.Contains(string(gcData), "closed_wisps:1") {
+		t.Fatalf("reaper summary did not report observed and closed wisp counts:\n%s", gcData)
+	}
+}
+
+func TestReaperEscalatesDoltCommitFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"CALL DOLT_COMMIT"*)
+    printf 'commit failed\n' >&2
+    exit 42
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	if !strings.Contains(string(logData), "CALL DOLT_COMMIT") {
+		t.Fatalf("reaper did not exercise CALL DOLT_COMMIT path:\n%s", logData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION: Reaper anomalies detected [MEDIUM]") {
+		t.Fatalf("reaper did not escalate Dolt commit failure:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "Dolt commit failed for beads") {
+		t.Fatalf("reaper escalation did not identify the failed database:\n%s", gcLogText)
+	}
+}
+
+func TestReaperDoesNotCountFailedPurgeAsSuccess(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'delete failed\n' >&2
+    exit 42
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "purging closed wisps failed for beads") {
+		t.Fatalf("reaper did not escalate failed purge:\n%s", gcLogText)
+	}
+	if strings.Contains(gcLogText, "purged:1") {
+		t.Fatalf("reaper counted failed purge as success:\n%s", gcLogText)
+	}
+}
+
+func TestReaperCommitReportsOnlySuccessfulPurgeRows(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	closeCountState := filepath.Join(t.TempDir(), "close-count-state")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"UPDATE "*"wisps SET status='closed'"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'delete failed\n' >&2
+    exit 42
+    ;;
+  *"COUNT("*"wisps w"*"dependencies d"*)
+    n=0
+    if [ -f "$CLOSE_COUNT_STATE" ]; then
+      n=$(cat "$CLOSE_COUNT_STATE")
+    fi
+    if [ "$n" = "0" ]; then
+      printf '1\n' > "$CLOSE_COUNT_STATE"
+      printf 'COUNT(*)\n1\n'
+    else
+      printf 'COUNT(*)\n0\n'
+    fi
+    ;;
+  *"SELECT COUNT(*) FROM "*"wisps"*"status IN ('open', 'hooked', 'in_progress')"*"created_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"CLOSE_COUNT_STATE": closeCountState,
+		"DOLT_ARGS_LOG":     doltLog,
+		"GC_CALL_LOG":       gcLog,
+		"GC_CITY":           cityDir,
+		"GC_CITY_PATH":      cityDir,
+		"GC_DOLT_HOST":      "127.0.0.1",
+		"GC_DOLT_PORT":      "3307",
+		"GC_DOLT_USER":      "root",
+		"GC_DOLT_PASSWORD":  "",
+		"PATH":              binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "CALL DOLT_COMMIT") {
+		t.Fatalf("reaper did not commit successful close after failed purge:\n%s", log)
+	}
+	if !strings.Contains(log, "closed_wisps=1 purged=0") {
+		t.Fatalf("reaper commit did not report only successful purge rows:\n%s", log)
+	}
+	if strings.Contains(log, "purged=1") {
+		t.Fatalf("reaper commit claimed failed purge rows:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "purged:1") {
+		t.Fatalf("reaper summary claimed failed purge rows:\n%s", gcData)
+	}
+}
+
+func TestReaperDoesNotCountFailedIssueCloseAsSuccess(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "beads")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT id FROM "*"issues"*)
+    printf 'id\nga-old\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+case "$*" in
+  close*)
+    printf 'close failed\n' >&2
+    exit 42
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      filepath.Join(t.TempDir(), "bd.log"),
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "closing stale issue ga-old failed for beads") {
+		t.Fatalf("reaper did not escalate failed issue close:\n%s", gcLogText)
+	}
+	if strings.Contains(gcLogText, "closed:1") {
+		t.Fatalf("reaper counted failed issue close as success:\n%s", gcLogText)
+	}
+}
+
+func TestReaperAutoClosesIssuesOnlyInCityDatabase(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\nrigdb\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\nga-city\n'
+    ;;
+  *"SELECT id FROM "*"rigdb"*"issues"*)
+    printf 'id\nrig-old\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	if !strings.Contains(bdLogText, "close ga-city --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close city-scoped stale issue:\n%s", bdLogText)
+	}
+	if strings.Contains(bdLogText, "rig-old") {
+		t.Fatalf("reaper attempted unscoped close for rig-scoped stale issue:\n%s", bdLogText)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "closed:1") || !strings.Contains(gcLogText, "skipped_non_city_issues:1") {
+		t.Fatalf("reaper summary did not report city close and non-city skip:\n%s", gcLogText)
+	}
+	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") || strings.Contains(gcLogText, "non-city database") {
+		t.Fatalf("reaper escalated expected non-city stale issue skips:\n%s", gcLogText)
+	}
+}
+
+func TestReaperCityDatabaseUsesGCCityPathFallback(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\nga-city\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          "",
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not resolve city metadata through GC_CITY_PATH:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper disabled issue auto-close despite GC_CITY_PATH metadata:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "closed:1") {
+		t.Fatalf("reaper summary did not report city issue close:\n%s", gcLogText)
+	}
+}
+
+func TestReaperScopesIssueAutoCloseToCityBeadsDir(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	ambientBeadsDir := filepath.Join(t.TempDir(), "wrong-beads")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\nga-city\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf 'pwd=%s beads=%s args=%s\n' "$PWD" "${BEADS_DIR:-}" "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"BEADS_DIR":        ambientBeadsDir,
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	bdLogText := string(bdData)
+	if !strings.Contains(bdLogText, "args=close ga-city --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close city issue:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "pwd="+cityDir) {
+		t.Fatalf("reaper did not run bd close from city dir:\n%s", bdLogText)
+	}
+	if !strings.Contains(bdLogText, "beads="+filepath.Join(cityDir, ".beads")) {
+		t.Fatalf("reaper did not scope bd close to the city beads dir:\n%s", bdLogText)
+	}
+	if strings.Contains(bdLogText, "beads="+ambientBeadsDir) {
+		t.Fatalf("reaper used ambient BEADS_DIR for city auto-close:\n%s", bdLogText)
+	}
+}
+
+func TestReaperSkipsIssueAutoCloseWhenConfiguredCityDatabaseDoesNotMatchMetadata(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\nwrongdb\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\nga-city\n'
+    ;;
+  *"SELECT id FROM "*"wrongdb"*"issues"*)
+    printf 'id\nga-wrong\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":           doltLog,
+		"BD_CALL_LOG":             bdLog,
+		"GC_CALL_LOG":             gcLog,
+		"GC_CITY":                 cityDir,
+		"GC_CITY_PATH":            cityDir,
+		"GC_REAPER_CITY_DATABASE": "wrongdb",
+		"GC_DOLT_HOST":            "127.0.0.1",
+		"GC_DOLT_PORT":            "3307",
+		"GC_DOLT_USER":            "root",
+		"GC_DOLT_PASSWORD":        "",
+		"PATH":                    binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ") {
+		t.Fatalf("reaper attempted issue auto-close with invalid city database override:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "city database wrongdb from GC_REAPER_CITY_DATABASE does not match city metadata database citydb") {
+		t.Fatalf("reaper did not report invalid city database override:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper did not disable stale issue auto-close for invalid city database override:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "skipped_non_city_issues:2") {
+		t.Fatalf("reaper did not report skipped stale issue candidate:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSkipsIssueAutoCloseWhenCityMetadataIsNotJSON(t *testing.T) {
+	cityDir := t.TempDir()
+	metadataDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", metadataDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(`not-json`), 0o644); err != nil {
+		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT id FROM "*"issues"*)
+    printf 'id\nga-old\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ") {
+		t.Fatalf("reaper attempted issue auto-close after metadata parse failed:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper did not degrade to disabled auto-close after metadata parse failure:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "skipped_non_city_issues:1") {
+		t.Fatalf("reaper did not report skipped stale issue candidate:\n%s", gcLogText)
+	}
+}
+
+func TestReaperCityDatabaseUsesShellFallbackWhenJSONParsersUnavailable(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	binDir := t.TempDir()
+	for _, tool := range []string{"bash", "dirname", "tail", "grep", "cut", "tr", "mktemp", "rm", "sed", "wc", "cat", "head"} {
+		linkTestPathTool(t, binDir, tool)
+	}
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"SELECT id FROM "*"citydb"*"issues"*)
+    printf 'id\nga-city\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir,
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if !strings.Contains(string(bdData), "close ga-city --reason stale:auto-closed by reaper") {
+		t.Fatalf("reaper did not close city issue through metadata fallback:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "ESCALATION") || strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper escalated despite successful shell metadata fallback:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "closed:1") {
+		t.Fatalf("reaper summary did not report city issue close:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSkipsIssueAutoCloseWhenCityMetadataIsMalformed(t *testing.T) {
+	cityDir := t.TempDir()
+	metadataDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", metadataDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(`{"dolt_database":"beads"`), 0o644); err != nil {
+		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"SELECT id FROM "*"issues"*)
+    printf 'id\nga-old\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ") {
+		t.Fatalf("reaper accepted malformed metadata and attempted issue auto-close:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper did not disable auto-close for malformed city metadata:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "skipped_non_city_issues:1") {
+		t.Fatalf("reaper did not report skipped stale issue candidate:\n%s", gcLogText)
+	}
+}
+
+func TestReaperSkipsIssueAutoCloseWhenCityDatabaseUnknown(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\nrigdb\n'
+    ;;
+  *"SELECT id FROM "*"issues"*)
+    printf 'id\nga-old\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"BD_CALL_LOG":      bdLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	bdData, err := os.ReadFile(bdLog)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if strings.Contains(string(bdData), "close ") {
+		t.Fatalf("reaper attempted issue auto-close without city database identity:\n%s", bdData)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if !strings.Contains(gcLogText, "stale issue auto-close disabled") {
+		t.Fatalf("reaper did not escalate missing city database identity:\n%s", gcLogText)
+	}
+	if !strings.Contains(gcLogText, "skipped_non_city_issues:2") {
+		t.Fatalf("reaper did not report skipped stale issue candidates:\n%s", gcLogText)
+	}
+}
+
+func TestReaperIgnoresNothingToCommitAfterMutationRace(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"CALL DOLT_COMMIT"*)
+    printf 'nothing to commit\n' >&2
+    exit 1
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG":    doltLog,
+		"GC_CALL_LOG":      gcLog,
+		"GC_CITY":          cityDir,
+		"GC_CITY_PATH":     cityDir,
+		"GC_DOLT_HOST":     "127.0.0.1",
+		"GC_DOLT_PORT":     "3307",
+		"GC_DOLT_USER":     "root",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	gcLogText := string(gcData)
+	if strings.Contains(gcLogText, "mail send mayor/ -s ESCALATION") || strings.Contains(gcLogText, "Dolt commit found nothing to commit") {
+		t.Fatalf("reaper escalated benign nothing-to-commit race:\n%s", gcLogText)
+	}
+}
+
+func TestReaperFormulaMatchesScriptDefaults(t *testing.T) {
+	scriptPath := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh")
+	scriptData, err := os.ReadFile(scriptPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", scriptPath, err)
+	}
+	formulaPath := filepath.Join(exampleDir(), "packs", "maintenance", "formulas", "mol-dog-reaper.toml")
+	formulaData, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", formulaPath, err)
+	}
+
+	script := string(scriptData)
+	formula := string(formulaData)
+	for _, check := range []struct {
+		scriptEnv string
+		formVar   string
+	}{
+		{scriptEnv: "GC_REAPER_MAX_AGE", formVar: "max_age"},
+		{scriptEnv: "GC_REAPER_PURGE_AGE", formVar: "purge_age"},
+		{scriptEnv: "GC_REAPER_STALE_ISSUE_AGE", formVar: "stale_issue_age"},
+	} {
+		scriptDefault := extractShellDefault(t, script, check.scriptEnv)
+		formulaDefault := extractFormulaDefault(t, formula, check.formVar)
+		if scriptDefault != formulaDefault {
+			t.Errorf("%s default mismatch: script=%q formula=%q", check.formVar, scriptDefault, formulaDefault)
+		}
+	}
+}
+
+func extractShellDefault(t *testing.T, script, envName string) string {
+	t.Helper()
+	re := regexp.MustCompile(envName + `:-([^}"]+)`)
+	m := re.FindStringSubmatch(script)
+	if len(m) != 2 {
+		t.Fatalf("default for %s not found in script", envName)
+	}
+	return m[1]
+}
+
+func extractFormulaDefault(t *testing.T, formula, varName string) string {
+	t.Helper()
+	re := regexp.MustCompile(`(?s)\[vars\.` + regexp.QuoteMeta(varName) + `\].*?default = "([^"]+)"`)
+	m := re.FindStringSubmatch(formula)
+	if len(m) != 2 {
+		t.Fatalf("default for %s not found in formula", varName)
+	}
+	return m[1]
 }
 
 func listenManagedDoltPort(t *testing.T) net.Listener {
@@ -1339,30 +2874,68 @@ func writeExecutable(t *testing.T, path, body string) {
 	}
 }
 
+func linkTestPathTool(t *testing.T, binDir, name string) {
+	t.Helper()
+	realPath, err := exec.LookPath(name)
+	if err != nil {
+		t.Fatalf("LookPath(%s): %v", name, err)
+	}
+	linkPath := filepath.Join(binDir, name)
+	if err := os.Symlink(realPath, linkPath); err != nil {
+		t.Fatalf("Symlink(%s, %s): %v", realPath, linkPath, err)
+	}
+}
+
+func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
+	t.Helper()
+	metadataDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", metadataDir, err)
+	}
+	metadata := fmt.Sprintf("{\n  \"dolt_database\": %q\n}\n", db)
+	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
+		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+}
+
 func writeMaintenanceDoltStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
 printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
 case "$*" in
-  *"SHOW DATABASES"*)
-    printf 'Database\n'
-    if [ -n "${DOLT_DBS:-}" ]; then
-      for db in $DOLT_DBS; do
-        printf '%s\n' "$db"
-      done
-    else
-      printf 'beads\n'
-    fi
-    ;;
-  *"SELECT *"*)
-    printf '{"id":"ga-1","title":"sample"}\n'
-    ;;
-  *"COUNT("*)
+*"SHOW DATABASES"*)
+  printf 'Database\n'
+  if [ -n "${DOLT_DBS:-}" ]; then
+    for db in $DOLT_DBS; do
+      printf '%s\n' "$db"
+    done
+  else
+    printf 'beads\n'
+  fi
+  ;;
+*"SELECT *"*)
+  printf '{"id":"ga-1","title":"sample"}\n'
+  ;;
+*"DELETE FROM "*"wisps"*)
+  if [ -n "${DOLT_PURGE_COUNT:-}" ]; then
+    printf 'ROW_COUNT()\n%s\n' "$DOLT_PURGE_COUNT"
+  else
+    printf 'ROW_COUNT()\n0\n'
+  fi
+  ;;
+*"status = 'closed'"*"closed_at <"*)
+  if [ -n "${DOLT_PURGE_COUNT:-}" ]; then
+    printf 'COUNT(*)\n%s\n' "$DOLT_PURGE_COUNT"
+  else
     printf 'COUNT(*)\n0\n'
-    ;;
-  *"SELECT id"*)
-    printf 'id\n'
-    ;;
+  fi
+  ;;
+*"COUNT("*)
+  printf 'COUNT(*)\n0\n'
+  ;;
+*"SELECT id"*)
+  printf 'id\n'
+  ;;
 esac
 exit 0
 `)
