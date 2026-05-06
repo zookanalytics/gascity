@@ -54,6 +54,31 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	cityRoot := filepath.Dir(path)
+
+	cacheEnabled := !packCacheDisabled()
+	var (
+		cachePath string
+		buildID   string
+	)
+	if cacheEnabled {
+		cachePath = packCachePath(cityRoot)
+		buildID = packCacheBuildID()
+		if buildID != "" {
+			if city, prov, hit := loadPackCache(cachePath, buildID, extraIncludes, fs); hit {
+				return city, prov, nil
+			}
+		} else {
+			cacheEnabled = false
+		}
+	}
+
+	var rec *recordingFS
+	if cacheEnabled {
+		rec = newRecordingFS(fs)
+		fs = rec
+	}
+
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -63,7 +88,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
 	}
-	cityRoot := filepath.Dir(path)
 	prov := newProvenance(path)
 	prov.recordSource(path, data)
 	prov.Warnings = append(prov.Warnings, rootWarnings...)
@@ -328,6 +352,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if implicitErr != nil {
 		return nil, nil, implicitErr
 	}
+	// readImplicitImportsWithData uses os.ReadFile, bypassing fs. Record the
+	// path explicitly so the cache invalidates when implicit-import.toml
+	// changes (or is created/deleted).
+	if rec != nil && implicitPath != "" {
+		rec.addSource(implicitPath)
+	}
 	if len(implicitImports) > 0 {
 		// v0.15.1 collision gate: if a user's [imports.<name>] would
 		// silently shadow a **bootstrap** implicit-import pack, hard-stop
@@ -536,6 +566,10 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// can compare the loaded snapshot to future reloads without re-reading
 	// mutable files from disk.
 	prov.captureRevisionSnapshot(fs, root, cityRoot)
+
+	if cacheEnabled && rec != nil {
+		savePackCache(cachePath, buildID, extraIncludes, rec.snapshot(), root, prov)
+	}
 	return root, prov, nil
 }
 
