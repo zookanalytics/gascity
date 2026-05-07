@@ -16,9 +16,10 @@ pool = "dog"
 ```
 
 On each patrol tick the controller checks if enough time has passed
-since the last run (tracked via `type:order-run` beads), instantiates
-a wisp, and labels it for the configured pool. A dog picks it up and
-runs this formula.
+since the last run (tracked via prior wisps labeled
+`order-run:<scoped-name>`), instantiates a wisp, labels it
+`order-run:<scoped-name>` and `order-tracking`, and routes it to the
+configured pool. A dog picks it up and runs this formula.
 
 ## What it produces
 
@@ -176,6 +177,7 @@ gc runtime drain-ack
 exit
 ```
 
-The controller's order subsystem creates a `type:order-run` tracking
-bead for each dispatch; cooldown evaluation on the next patrol tick
-reads that history."""
+The controller's order dispatcher labels each fresh wisp with
+`order-run:<scoped-name>` and `order-tracking`; cooldown evaluation on
+the next patrol tick queries those labels to find the most recent
+run."""
