@@ -1,21 +1,24 @@
 description = """
 Generate activity digest for the mayor.
 
-This is a **periodic formula** — dispatched by the deacon's
-`periodic-formulas` step when the cooldown trigger elapses. Configured
-in `city.toml` under `[formulas]`:
+This is a **periodic formula** — dispatched by the controller's order
+subsystem (`cmd/gc/order_dispatch.go`) when the cooldown trigger
+elapses. Configured via an order file at `orders/digest-generate.toml`
+in this pack:
 
 ```toml
-[[formulas.periodic]]
+[order]
+description = "Generate daily code digest across all rigs"
 formula = "mol-digest-generate"
 trigger = "cooldown"
 interval = "24h"
 pool = "gastown.dog"
 ```
 
-The deacon checks if enough time has passed since the last run
-(tracked via `type:order-run` beads), pours a wisp, and labels it
-for the dog pool. A dog picks it up and runs this formula.
+On each patrol tick the controller checks if enough time has passed
+since the last run (tracked via `type:order-run` beads), instantiates
+a wisp, and labels it for the configured pool. A dog picks it up and
+runs this formula.
 
 ## What it produces
 
@@ -173,5 +176,6 @@ gc runtime drain-ack
 exit
 ```
 
-The deacon records this run via a `type:order-run` bead for cooldown
-tracking on the next patrol cycle."""
+The controller's order subsystem creates a `type:order-run` tracking
+bead for each dispatch; cooldown evaluation on the next patrol tick
+reads that history."""
