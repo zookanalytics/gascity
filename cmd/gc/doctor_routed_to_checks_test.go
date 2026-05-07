@@ -133,6 +133,40 @@ func TestV2RoutedToNamespaceCheckAllowsAmbiguousShortRouteForUnboundAgent(t *tes
 	}
 }
 
+func TestV2RoutedToNamespaceCheckAllowsRigPrefixedBareRouteForUnboundAgent(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog"},
+			{Name: "polecat", Dir: "repo", BindingName: "gastown"},
+		},
+		Rigs: []config.Rig{
+			{Name: "repo", Path: rigDir},
+		},
+	}
+	cityStore := beads.NewMemStoreFrom(0, nil, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RIG-1", Title: "wisp", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "repo/dog"}},
+	}, nil)
+	stores := map[string]beads.Store{
+		cityDir: cityStore,
+		rigDir:  rigStore,
+	}
+
+	result := newV2RoutedToNamespaceCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		store, ok := stores[path]
+		if !ok {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok: %#v", result.Status, result)
+	}
+}
+
 func TestV2RoutedToNamespaceCheckWarnsOnSkippedStoreScopes(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := t.TempDir()
