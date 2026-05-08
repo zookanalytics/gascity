@@ -68,6 +68,94 @@ func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) 
 	}
 }
 
+// TestResolveProviderAgentStartCommandHonorsProcessNames verifies that an
+// [[agent]] block with start_command (no provider) can declare process_names
+// so the runtime-readiness check has a non-empty list to match against.
+// Without this, IsRuntimeRunning short-circuits to false on the first probe
+// (its empty-list guard), the bead never confirms creation_complete, and the
+// reconciler eventually rolls state=creating back to state=asleep while
+// pending_create_claim stays set — stranding the agent for ~34 minutes.
+func TestResolveProviderAgentStartCommandHonorsProcessNames(t *testing.T) {
+	agent := &Agent{
+		Name:         "cockpit",
+		StartCommand: "/path/to/cockpit.sh",
+		ProcessNames: []string{"cockpit", "tmux"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	want := []string{"cockpit", "tmux"}
+	if !reflect.DeepEqual(rp.ProcessNames, want) {
+		t.Errorf("ProcessNames = %v, want %v", rp.ProcessNames, want)
+	}
+}
+
+// TestResolveProviderAgentStartCommandHonorsEnv verifies that an [[agent]]
+// block with start_command (no provider) carries its env through to the
+// resolved provider. The env normally arrives via mergeAgentOverrides, but
+// the start_command escape hatch returns early before that step.
+func TestResolveProviderAgentStartCommandHonorsEnv(t *testing.T) {
+	agent := &Agent{
+		Name:         "cockpit",
+		StartCommand: "/path/to/cockpit.sh",
+		Env:          map[string]string{"COCKPIT_MODE": "tui", "TERM": "xterm-256color"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got := rp.Env["COCKPIT_MODE"]; got != "tui" {
+		t.Errorf("Env[COCKPIT_MODE] = %q, want %q", got, "tui")
+	}
+	if got := rp.Env["TERM"]; got != "xterm-256color" {
+		t.Errorf("Env[TERM] = %q, want %q", got, "xterm-256color")
+	}
+}
+
+// TestResolveProviderAgentStartCommandHonorsEmitsPermissionWarning verifies
+// that an [[agent]] block with start_command can suppress permission-warning
+// detection via emits_permission_warning. The escape hatch returned early
+// before mergeAgentOverrides could apply the field.
+func TestResolveProviderAgentStartCommandHonorsEmitsPermissionWarning(t *testing.T) {
+	emits := true
+	agent := &Agent{
+		Name:                   "cockpit",
+		StartCommand:           "/path/to/cockpit.sh",
+		EmitsPermissionWarning: &emits,
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if !rp.EmitsPermissionWarning {
+		t.Error("EmitsPermissionWarning = false, want true")
+	}
+}
+
+// TestResolveProviderAgentStartCommandHonorsReadyHints verifies that the
+// escape hatch carries ReadyDelayMs and ReadyPromptPrefix through. Custom
+// start_command agents need the same readiness knobs as provider-based ones.
+func TestResolveProviderAgentStartCommandHonorsReadyHints(t *testing.T) {
+	delay := 250
+	agent := &Agent{
+		Name:              "cockpit",
+		StartCommand:      "/path/to/cockpit.sh",
+		ReadyDelayMs:      &delay,
+		ReadyPromptPrefix: "cockpit> ",
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if rp.ReadyDelayMs != 250 {
+		t.Errorf("ReadyDelayMs = %d, want 250", rp.ReadyDelayMs)
+	}
+	if rp.ReadyPromptPrefix != "cockpit> " {
+		t.Errorf("ReadyPromptPrefix = %q, want %q", rp.ReadyPromptPrefix, "cockpit> ")
+	}
+}
+
 func TestResolveProviderAgentProvider(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
