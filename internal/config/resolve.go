@@ -39,7 +39,33 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if mode == "" {
 			mode = "none"
 		}
-		return &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}, nil
+		rp := &ResolvedProvider{Command: agent.StartCommand, PromptMode: mode, PromptFlag: agent.PromptFlag}
+		// Carry agent-level fields that drive runtime liveness, env, and
+		// readiness signaling. The non-escape-hatch path applies these via
+		// mergeAgentOverrides; this early return must mirror that. Without
+		// ProcessNames in particular, IsRuntimeRunning short-circuits to
+		// false on its empty-list guard, creation_complete is never
+		// stamped, and the bead rolls back to asleep with
+		// pending_create_claim still set.
+		if len(agent.ProcessNames) > 0 {
+			rp.ProcessNames = append([]string(nil), agent.ProcessNames...)
+		}
+		if agent.ReadyDelayMs != nil {
+			rp.ReadyDelayMs = *agent.ReadyDelayMs
+		}
+		if agent.ReadyPromptPrefix != "" {
+			rp.ReadyPromptPrefix = agent.ReadyPromptPrefix
+		}
+		if agent.EmitsPermissionWarning != nil {
+			rp.EmitsPermissionWarning = *agent.EmitsPermissionWarning
+		}
+		if len(agent.Env) > 0 {
+			rp.Env = make(map[string]string, len(agent.Env))
+			for k, v := range agent.Env {
+				rp.Env[k] = v
+			}
+		}
+		return rp, nil
 	}
 
 	// Step 2: determine provider name.
