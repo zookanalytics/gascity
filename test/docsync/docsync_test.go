@@ -35,7 +35,14 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates"}
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
 // gitignored scratch space for local work).
-var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "release-gates", "scripts", "test", "tmp"}
+//
+// "specs" holds per-bead research / planning docs (parallel to "plans");
+// the pre-commit hook already treats `specs/**` as staged doc content
+// (.githooks/pre-commit:6). "worktrees" covers parented git-worktree
+// pointer directories that some contributor setups (e.g. refinery
+// rebase staging) place inside the repo root; neither directory is
+// tracked upstream.
+var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "release-gates", "scripts", "specs", "test", "tmp", "worktrees"}
 
 var markdownFileNameIgnored = map[string]bool{
 	"README.md": true,
