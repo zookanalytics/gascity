@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // mockCheck is a configurable Check for testing the runner.
@@ -485,6 +487,105 @@ func TestDoctor_RunStillStreams(t *testing.T) {
 	if !strings.Contains(out, "✓ alpha") || !strings.Contains(out, "⚠ beta") {
 		t.Errorf("streaming output missing expected lines: %q", out)
 	}
+}
+
+// TestDoctor_RunStreamsIncrementally verifies Run emits each completed
+// check's output BEFORE the next check starts. A regression here looks
+// like "doctor wedges before producing any output" when in fact some
+// later check is slow or hung — the user/agent has no signal at all
+// because Run buffers everything until the slowest check returns. See
+// gc-chkly: the pre-fix code called RunCollect (which collects all
+// results) and only printed afterwards, so any single hung check stalled
+// every preceding check's output as well.
+func TestDoctor_RunStreamsIncrementally(t *testing.T) {
+	t.Parallel()
+
+	enteredSecond := make(chan struct{})
+	unblockSecond := make(chan struct{})
+	first := &mockCheck{name: "first", status: StatusOK, msg: "ok"}
+	second := &gatedCheck{name: "second", entered: enteredSecond, unblock: unblockSecond}
+	third := &mockCheck{name: "third", status: StatusOK, msg: "ok"}
+
+	d := &Doctor{}
+	d.Register(first)
+	d.Register(second)
+	d.Register(third)
+
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	w := &lockedWriter{mu: &mu, buf: &buf}
+
+	done := make(chan *Report, 1)
+	go func() {
+		done <- d.Run(&CheckContext{CityPath: "/tmp"}, w, false)
+	}()
+
+	select {
+	case <-enteredSecond:
+	case <-time.After(2 * time.Second):
+		close(unblockSecond)
+		t.Fatal("second check never entered Run within 2s")
+	}
+
+	mu.Lock()
+	snapshot := buf.String()
+	mu.Unlock()
+	if !strings.Contains(snapshot, "✓ first") {
+		t.Errorf("expected first check output to be flushed before second check completes; got %q", snapshot)
+	}
+	if strings.Contains(snapshot, "third") {
+		t.Errorf("third check output appeared before second completed; got %q", snapshot)
+	}
+
+	close(unblockSecond)
+
+	select {
+	case r := <-done:
+		if r.Passed != 3 {
+			t.Errorf("Passed = %d, want 3", r.Passed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2s after unblocking second check")
+	}
+
+	final := buf.String()
+	for _, want := range []string{"✓ first", "✓ second", "✓ third"} {
+		if !strings.Contains(final, want) {
+			t.Errorf("final output missing %q: %s", want, final)
+		}
+	}
+}
+
+// gatedCheck signals on entered when Run is invoked and blocks until
+// unblock is closed. It lets tests verify that earlier checks' output
+// has been flushed before this check returns.
+type gatedCheck struct {
+	name    string
+	entered chan struct{}
+	unblock chan struct{}
+}
+
+func (c *gatedCheck) Name() string { return c.name }
+func (c *gatedCheck) Run(_ *CheckContext) *CheckResult {
+	close(c.entered)
+	<-c.unblock
+	return &CheckResult{Name: c.name, Status: StatusOK, Message: "ok"}
+}
+func (c *gatedCheck) CanFix() bool              { return false }
+func (c *gatedCheck) Fix(_ *CheckContext) error { return nil }
+
+// lockedWriter is a thread-safe io.Writer wrapping a bytes.Buffer. The
+// streaming test snapshots the buffer from the test goroutine while the
+// Run goroutine is still writing.
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
 }
 
 // detailCheck returns a result with Details for verbose testing.
