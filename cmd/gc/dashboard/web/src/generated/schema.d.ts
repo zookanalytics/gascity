@@ -3648,7 +3648,8 @@ export interface components {
             last_activity?: string;
             name: string;
             path: string;
-            prefix?: string;
+            /** @description Effective bead-ID prefix (explicit or derived from name). */
+            prefix: string;
             /** Format: int64 */
             running_count: number;
             suspended: boolean;

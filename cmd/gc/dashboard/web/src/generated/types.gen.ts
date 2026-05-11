@@ -2285,7 +2285,10 @@ export type RigResponse = {
     last_activity?: string;
     name: string;
     path: string;
-    prefix?: string;
+    /**
+     * Effective bead-ID prefix (explicit or derived from name).
+     */
+    prefix: string;
     running_count: number;
     suspended: boolean;
 };

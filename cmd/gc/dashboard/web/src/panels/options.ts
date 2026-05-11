@@ -7,9 +7,14 @@
 import { api, cityScope } from "../api";
 import { logDebug, logWarn } from "../logger";
 
+export interface RigOption {
+  name: string;
+  prefix: string;
+}
+
 export interface Options {
   agents: string[];
-  rigs: string[];
+  rigs: RigOption[];
   sessions: { id: string; label: string; recipient: string }[];
   beads: { id: string; title: string }[];
   mail: { id: string; subject: string }[];
@@ -80,7 +85,9 @@ async function fetchOptions(city: string): Promise<Options> {
 
   return {
     agents: [...new Set(agentOptions.map((agent) => agent.recipient))].sort(),
-    rigs: (rigsR.data?.items ?? []).map((r) => r.name ?? "").filter(Boolean),
+    rigs: (rigsR.data?.items ?? [])
+      .map((r) => ({ name: r.name ?? "", prefix: r.prefix ?? "" }))
+      .filter((r) => r.name !== ""),
     sessions: agentOptions,
     beads: (beadsR.data?.items ?? []).map((b) => ({
       id: b.id ?? "",

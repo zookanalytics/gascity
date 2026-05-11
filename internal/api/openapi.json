@@ -5597,6 +5597,7 @@
             "type": "string"
           },
           "prefix": {
+            "description": "Effective bead-ID prefix (explicit or derived from name).",
             "type": "string"
           },
           "running_count": {
@@ -5610,6 +5611,7 @@
         "required": [
           "name",
           "path",
+          "prefix",
           "suspended",
           "agent_count",
           "running_count"
