@@ -22,6 +22,7 @@ lives in the [Architecture](../architecture/index.md) section.
 | `dependency-aware-bounded-parallel-lifecycle` | Implemented | Bounded parallel start/stop waves for session lifecycle |
 | `beads-dolt-contract-redesign` | Accepted | Canonical bd+Dolt contract, topology commands, migration, and provider-boundary redesign |
 | `idle-session-sleep` | Accepted | Idle-sleep policy, precedence, and wake mechanics |
+| `input-area-state` | Proposed | Ghost-text-aware input-area inspection API for buffered-input detection |
 | `named-configured-sessions` | Accepted | Explicit canonical named sessions backed by reusable templates; partially superseded by `session-model-unification` |
 | `session-model-unification` | Accepted | Unified post-pool session model: config factories, canonical named identities, exact session ownership, and `scale_check`-only controller demand |
 | `session-lifecycle-domain-cleanup-plan` | Implemented with hardening | Red-green-refactor plan for centralizing session lifecycle projection and transition writes behind typed abstractions |

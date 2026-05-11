@@ -1,10 +1,14 @@
 ---
-title: "InputAreaState: ghost-text-aware input-area inspection"
-status: draft (stage 1 of convoy gc-8g41r)
-owner: gascity/gc-toolkit pack
-target_branch: integration/input-area-state
-last_updated: 2026-05-09
+title: "InputAreaState"
 ---
+
+| Field | Value |
+|---|---|
+| Status | Proposed |
+| Date | 2026-05-09 |
+| Author(s) | Claude (mechanik-orchestrated polecat) |
+| Issue | gc-8g41r |
+| Supersedes | N/A |
 
 # InputAreaState: ghost-text-aware input-area inspection
 
