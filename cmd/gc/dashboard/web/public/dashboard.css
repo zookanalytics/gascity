@@ -4046,3 +4046,61 @@
             border-bottom: 1px dashed var(--border);
             background: var(--bg-dark);
         }
+
+        /* Mayor terminal spike (gc-lgjze) — disposable iframe panel. */
+        .mayor-tty-panel .panel-header {
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .mayor-tty-controls {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+
+        .mayor-tty-url-input {
+            flex: 1 1 200px;
+            min-width: 0;
+            padding: 4px 8px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-primary);
+            font-family: monospace;
+            font-size: 0.75rem;
+        }
+
+        .mayor-tty-btn {
+            padding: 4px 10px;
+            background: var(--bg-dark);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+
+        .mayor-tty-btn:hover {
+            border-color: var(--text-primary);
+        }
+
+        .mayor-tty-body {
+            max-height: 480px;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .mayor-tty-iframe {
+            display: block;
+            width: 100%;
+            height: 480px;
+            border: 0;
+            background: #000;
+        }
+
+        .panel.expanded .mayor-tty-iframe {
+            height: calc(100vh - 80px);
+        }
