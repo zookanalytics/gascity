@@ -37,6 +37,23 @@
       <div class="summary-banner" id="status-banner"></div>
 
       <div class="panels">
+        <div class="panel panel-full mayor-tty-panel" id="mayor-tty-panel">
+          <div class="panel-header">
+            <h2>🖥️ Mayor Terminal (spike)</h2>
+            <div class="mayor-tty-controls">
+              <label for="mayor-tty-url" class="sr-only">ttyd URL</label>
+              <input type="text" id="mayor-tty-url" class="mayor-tty-url-input" placeholder="http://localhost:7681" />
+              <button type="button" class="mayor-tty-btn" id="mayor-tty-apply">Apply</button>
+              <button type="button" class="mayor-tty-btn" id="mayor-tty-reload">Reload</button>
+            </div>
+            <button class="collapse-btn" aria-label="Toggle panel">▼</button>
+            <button class="expand-btn">Expand</button>
+          </div>
+          <div class="panel-body mayor-tty-body">
+            <iframe id="mayor-tty-iframe" class="mayor-tty-iframe" title="Mayor terminal" src="about:blank"></iframe>
+          </div>
+        </div>
+
         <div class="panel panel-full" id="supervisor-overview-panel" hidden>
           <div class="panel-header">
             <h2>🏙️ Fleet Overview</h2>

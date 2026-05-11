@@ -132,6 +132,10 @@ describe("dashboard city scope navigation", () => {
     vi.doMock("./panels/supervisor", () => ({
       renderSupervisorOverview: vi.fn(),
     }));
+    vi.doMock("./panels/mayor_tty", () => ({
+      installMayorTtyInteractions: vi.fn(),
+      renderMayorTty: vi.fn(),
+    }));
 
     await import("./main");
     await waitFor(() => {
@@ -222,6 +226,10 @@ describe("dashboard city scope navigation", () => {
     }));
     vi.doMock("./panels/supervisor", () => ({
       renderSupervisorOverview: vi.fn(),
+    }));
+    vi.doMock("./panels/mayor_tty", () => ({
+      installMayorTtyInteractions: vi.fn(),
+      renderMayorTty: vi.fn(),
     }));
 
     await import("./main");
