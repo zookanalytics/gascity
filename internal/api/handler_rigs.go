@@ -16,11 +16,9 @@ import (
 type rigResponse struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-	// Prefix is the effective bead-ID prefix for this rig: the explicit
-	// `prefix` from `city.toml` when set, otherwise the value derived from
-	// the rig name. Always populated so clients can match prefixed bead
-	// IDs (e.g. "tk-1234") against the rig list without re-deriving.
-	Prefix        string     `json:"prefix" doc:"Effective bead-ID prefix (explicit or derived from name)."`
+	// Always populated. Explicit when configured, otherwise derived from rig name.
+	// Lets clients match bead-ID prefixes against the rig list without re-deriving.
+	Prefix        string     `json:"prefix" doc:"Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name."`
 	Suspended     bool       `json:"suspended"`
 	DefaultBranch string     `json:"default_branch,omitempty"`
 	AgentCount    int        `json:"agent_count"`

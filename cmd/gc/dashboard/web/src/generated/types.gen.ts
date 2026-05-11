@@ -2286,7 +2286,7 @@ export type RigResponse = {
     name: string;
     path: string;
     /**
-     * Effective bead-ID prefix (explicit or derived from name).
+     * Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name.
      */
     prefix: string;
     running_count: number;

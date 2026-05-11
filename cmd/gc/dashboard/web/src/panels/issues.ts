@@ -8,10 +8,12 @@ import { popPause, pushPause, showToast } from "../ui";
 
 let allIssues: BeadRecord[] = [];
 let currentTab: "ready" | "progress" | "all" = "ready";
-// currentRig holds the effective bead-ID prefix (e.g. "tk"), or "all".
-// The dropdown labels rigs by name; filtering and table lookup use the
-// prefix because that's what `inferRig(issue)` derives from the bead ID.
-let currentRig = "all";
+// currentRig holds the effective bead-ID prefix (e.g. "tk"), or null for "All".
+// null is a non-string-collidable sentinel so a rig named/prefixed "all" stays
+// filterable independently. The dropdown labels rigs by name; filtering and
+// table lookup use the prefix because that's what `inferRig(issue)` derives
+// from the bead ID.
+let currentRig: string | null = null;
 let rigsByPrefix = new Map<string, RigOption>();
 let currentIssueID = "";
 
@@ -52,7 +54,7 @@ export async function renderIssues(): Promise<void> {
   const rigTabs = byId("rig-filter-tabs");
   if (rigTabs) {
     clear(rigTabs);
-    rigTabs.append(rigButton("all", "All", currentRig === "all"));
+    rigTabs.append(rigButton(null, "All", currentRig === null));
     options.rigs.forEach((rig) => {
       if (rig.prefix === "") return;
       rigTabs.append(rigButton(rig.prefix, rig.name, currentRig === rig.prefix));
@@ -76,11 +78,11 @@ export function resetIssuesNoCity(): void {
   clear(issuesList);
   issuesList.append(el("div", { class: "empty-state" }, [el("p", {}, ["Select a city to view beads"])]));
   clear(rigTabs);
-  currentRig = "all";
+  currentRig = null;
   currentIssueID = "";
   allIssues = [];
   rigsByPrefix = new Map();
-  rigTabs.append(rigButton("all", "All", true));
+  rigTabs.append(rigButton(null, "All", true));
   byId("issues-count")!.textContent = "0";
   if (detailOpen) popPause();
 }
@@ -119,7 +121,7 @@ function renderIssueTable(): void {
   const filtered = allIssues.filter((issue) => {
     const state = issue.assignee ? "progress" : "ready";
     const matchesTab = currentTab === "all" || currentTab === state;
-    const matchesRig = currentRig === "all" || inferRig(issue) === currentRig;
+    const matchesRig = currentRig === null || inferRig(issue) === currentRig;
     return matchesTab && matchesRig;
   });
 
@@ -171,10 +173,13 @@ function renderIssueTable(): void {
   ]));
 }
 
-function rigButton(value: string, label: string, active: boolean): HTMLElement {
-  const btn = el("button", { class: `rig-btn${active ? " active" : ""}`, "data-rig": value }, [label]);
+function rigButton(prefix: string | null, label: string, active: boolean): HTMLElement {
+  const btn = el("button", {
+    class: `rig-btn${active ? " active" : ""}`,
+    "data-rig": prefix ?? undefined,
+  }, [label]);
   btn.addEventListener("click", () => {
-    currentRig = value;
+    currentRig = prefix;
     document.querySelectorAll(".rig-btn").forEach((node) => node.classList.remove("active"));
     btn.classList.add("active");
     renderIssueTable();

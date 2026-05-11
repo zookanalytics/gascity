@@ -2219,7 +2219,7 @@ type RigResponse struct {
 	Name          string     `json:"name"`
 	Path          string     `json:"path"`
 
-	// Prefix Effective bead-ID prefix (explicit or derived from name).
+	// Prefix Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name.
 	Prefix       string `json:"prefix"`
 	RunningCount int64  `json:"running_count"`
 	Suspended    bool   `json:"suspended"`
