@@ -53,7 +53,10 @@ func TestNoBdExecOutsideBeads(t *testing.T) {
 		}
 		if info.IsDir() {
 			base := filepath.Base(path)
-			if base == ".git" || base == "vendor" || base == ".claude" || strings.HasPrefix(base, ".beads-src") {
+			// "worktrees" covers parented git-worktree pointer directories that
+			// some contributor setups (e.g. refinery rebase staging) place inside
+			// the repo root; not tracked upstream.
+			if base == ".git" || base == "vendor" || base == ".claude" || base == "worktrees" || strings.HasPrefix(base, ".beads-src") {
 				return filepath.SkipDir
 			}
 			return nil
