@@ -44,7 +44,6 @@ const (
 	defaultProbeIterations = 200
 	defaultProbeDebounceMs = 500
 	probeReadyPromptPrefix = "❯"
-	probeUserEchoPrefix    = ">"
 )
 
 type probeMode string
@@ -160,7 +159,8 @@ func TestLiveNudgeSubmitProbe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt(%q): %v", cityPath, err)
 	}
-	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cfg.Workspace.Name, cityPath)
+	cityName := resolveLiveNudgeProbeCityName(cfg, cityPath)
+	sp, err := newSessionProviderByName(cfg.Session.Provider, cfg.Session, cityName, cityPath)
 	if err != nil {
 		t.Fatalf("newSessionProviderByName: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestLiveNudgeSubmitProbe(t *testing.T) {
 
 	socket := cfg.Session.Socket
 	if socket == "" {
-		socket = cfg.Workspace.Name
+		socket = cityName
 	}
 
 	tm := sessiontmux.NewTmuxWithConfig(sessiontmux.Config{SocketName: socket})
@@ -345,8 +345,13 @@ func runProbeIteration(t *testing.T, tm *sessiontmux.Tmux, socket, target string
 		captures.flush(t, modeArtifactsDir, idx)
 	}
 
-	// Reset the pane: Ctrl-C interrupts any in-flight response and clears
-	// the input if stuck. Wait briefly for the idle prompt to return.
+	// Reset Claude's input state between iterations. Ctrl-C alone is not
+	// enough: on a stuck Enter, the prompt clears visually but Claude's
+	// internal input buffer retains the unsubmitted text, so the next
+	// iteration's send-keys would prepend the prior token. Ctrl-U
+	// (unix-line-discard) drops the unsubmitted buffer first; Ctrl-C
+	// then interrupts any in-flight response.
+	_ = tmuxSendKeys(socket, target, "C-u")
 	_ = tmuxSendKeys(socket, target, "C-c")
 	_ = waitForPane(socket, target, 10*time.Second, promptIsIdle)
 
@@ -354,7 +359,11 @@ func runProbeIteration(t *testing.T, tm *sessiontmux.Tmux, socket, target string
 }
 
 // classifyProbeOutcome polls the pane for up to `timeout` and decides which
-// outcome category the iteration falls into.
+// outcome category the iteration falls into. The classifier locks in
+// SUBMITTED as soon as it sees the token outside the input box; STUCK
+// requires the token to remain in the input box across the full polling
+// window (transient "token still rendering" states resolve to either
+// submitted or lost on the next sample).
 func classifyProbeOutcome(socket, target, token string, timeout time.Duration) probeIterOutcome {
 	deadline := time.Now().Add(timeout)
 	var lastSeen probeIterOutcome
@@ -376,9 +385,11 @@ func classifyProbeOutcome(socket, target, token string, timeout time.Duration) p
 		case paneTokenStuck(text, token):
 			lastSeen = probeIterStuck
 		case strings.Contains(text, token):
-			// Token visible but not in either submit-echo or input-box
-			// shape — treat as submitted (a render quirk shouldn't be
-			// reported as stuck).
+			// Token visible somewhere — likely in scrollback that the
+			// strict paneTokenSubmitted predicate missed (long lines
+			// wrap and break the `❯ <token>` prefix). Conservative call:
+			// treat as submitted, since stuck would require it to be in
+			// the current input box.
 			return probeIterSubmitted
 		default:
 			lastSeen = probeIterLost
@@ -393,21 +404,33 @@ func classifyProbeOutcome(socket, target, token string, timeout time.Duration) p
 	}
 }
 
-// paneTokenSubmitted reports whether the token appears as a submitted user
-// message (echoed past the input box).
-func paneTokenSubmitted(text, token string) bool {
-	for _, line := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, probeUserEchoPrefix+" ") && strings.Contains(trimmed, token) {
-			return true
+// findInputBoxLineIndex returns the index of the LAST `❯` line in the pane,
+// which Claude only ever uses for the current input box. Returns -1 if no
+// prompt line is present. Distinguishing this from earlier `❯` lines is
+// essential: Claude echoes submitted user messages with the same `❯` glyph
+// in scrollback, so a naive any-line check confuses submitted-and-echoed
+// with stuck-in-input.
+func findInputBoxLineIndex(text string) int {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, probeReadyPromptPrefix) {
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
-// paneTokenStuck reports whether the token sits in the `❯` input box.
-func paneTokenStuck(text, token string) bool {
-	for _, line := range strings.Split(text, "\n") {
+// paneTokenSubmitted reports whether the token appears as an echoed user
+// message in scrollback — any `❯ <text>` line that is NOT the current
+// input box.
+func paneTokenSubmitted(text, token string) bool {
+	lines := strings.Split(text, "\n")
+	inputIdx := findInputBoxLineIndex(text)
+	for i, line := range lines {
+		if i == inputIdx {
+			continue
+		}
 		trimmed := strings.TrimSpace(line)
 		if !strings.HasPrefix(trimmed, probeReadyPromptPrefix) {
 			continue
@@ -418,6 +441,19 @@ func paneTokenStuck(text, token string) bool {
 		}
 	}
 	return false
+}
+
+// paneTokenStuck reports whether the token sits in the current input box
+// (the LAST `❯` line, the only `❯` line that represents pending input).
+func paneTokenStuck(text, token string) bool {
+	idx := findInputBoxLineIndex(text)
+	if idx < 0 {
+		return false
+	}
+	lines := strings.Split(text, "\n")
+	trimmed := strings.TrimSpace(lines[idx])
+	rest := strings.TrimSpace(strings.TrimPrefix(trimmed, probeReadyPromptPrefix))
+	return strings.Contains(rest, token)
 }
 
 // promptIsIdle reports whether the latest `❯` prompt line is empty.
@@ -584,12 +620,21 @@ func writeProbeReport(path string, report probeReport) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// resolveLiveNudgeProbeSocket is exposed for tests to introspect socket
-// resolution if needed; not used by TestLiveNudgeSubmitProbe itself.
-func resolveLiveNudgeProbeSocket(cfg *config.City) string {
-	socket := cfg.Session.Socket
-	if socket == "" {
-		socket = cfg.Workspace.Name
+// resolveLiveNudgeProbeCityName returns the effective city name used as the
+// default tmux socket and provider context. It mirrors the resolution rules
+// in cmd/gc: prefer the resolved name (set by site bindings), then the
+// city.toml workspace name, finally the directory basename. The bare
+// city.toml emitted by `gc init --provider claude` has no [workspace] name,
+// so without the basename fallback the probe would address the default
+// tmux server instead of the per-city socket.
+func resolveLiveNudgeProbeCityName(cfg *config.City, cityPath string) string {
+	if cfg != nil {
+		if n := strings.TrimSpace(cfg.ResolvedWorkspaceName); n != "" {
+			return n
+		}
+		if n := strings.TrimSpace(cfg.Workspace.Name); n != "" {
+			return n
+		}
 	}
-	return socket
+	return filepath.Base(filepath.Clean(cityPath))
 }
