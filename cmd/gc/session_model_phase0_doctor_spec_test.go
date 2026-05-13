@@ -82,11 +82,14 @@ func TestPhase0DoctorReportsStaleRoutedConfig(t *testing.T) {
 func TestPhase0DoctorReportsMissingBeadOwner(t *testing.T) {
 	cityPath, store := newPhase0DoctorCity(t)
 
+	// Default test city derives prefix "tc" from "test-city". Use that
+	// prefix so the assignee is classified as a bead ID under the
+	// config-driven contract enforced by looksLikeSessionBeadID.
 	if _, err := store.Create(beads.Bead{
 		Type:     "task",
 		Status:   "open",
 		Title:    "missing owner",
-		Assignee: "gc-missing-session",
+		Assignee: "tc-missing-session",
 	}); err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
