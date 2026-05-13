@@ -3364,6 +3364,224 @@ start_command = "claude --model sonnet"
 	}
 }
 
+// TestPackLevelPatches_QualifiedName_HitsCorrectBinding verifies a patch
+// targeting "<binding>.<bare>" matches only the agent imported under that
+// binding. The qualified form lets pack authors disambiguate when multiple
+// imported packs would otherwise share a bare name.
+func TestPackLevelPatches_QualifiedName_HitsCorrectBinding(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "mayor"
+nudge = "base nudge"
+start_command = "claude --model base"
+`)
+	writeFile(t, dir, "packs/overlay/pack.toml", `
+[pack]
+name = "overlay"
+schema = 2
+
+[imports.gastown]
+source = "../base"
+
+[[patches.agent]]
+name = "gastown.mayor"
+start_command = "claude --model patched"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{Includes: []string{"packs/overlay"}},
+	}
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ExpandCityPacks: %v", err)
+	}
+	var found *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Name == "mayor" && cfg.Agents[i].BindingName == "gastown" {
+			found = &cfg.Agents[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("imported mayor (binding=gastown) not found")
+	}
+	if found.StartCommand != "claude --model patched" {
+		t.Errorf("StartCommand = %q, want %q", found.StartCommand, "claude --model patched")
+	}
+	if found.Nudge != "base nudge" {
+		t.Errorf("Nudge = %q, want %q (inherited from base)", found.Nudge, "base nudge")
+	}
+}
+
+// TestPackLevelPatches_QualifiedName_BindingNotFound verifies that a
+// qualified-name patch targeting a binding that does not exist returns an
+// explanatory error mentioning the full qualified name as authored.
+func TestPackLevelPatches_QualifiedName_BindingNotFound(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "mayor"
+`)
+	writeFile(t, dir, "packs/overlay/pack.toml", `
+[pack]
+name = "overlay"
+schema = 2
+
+[imports.gastown]
+source = "../base"
+
+[[patches.agent]]
+name = "wrongbinding.mayor"
+nudge = "boo"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{Includes: []string{"packs/overlay"}},
+	}
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	if err == nil {
+		t.Fatal("expected error for qualified-name patch with unknown binding")
+	}
+	if !strings.Contains(err.Error(), "wrongbinding.mayor") {
+		t.Errorf("error = %q, want mention of 'wrongbinding.mayor'", err.Error())
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error = %q, want mention of 'not found'", err.Error())
+	}
+}
+
+// TestPackLevelPatches_BareName_RegressionFirstOccurrence verifies that a
+// bare-name patch (no dot) keeps the legacy first-match semantics: it
+// matches the first agent with that bare name regardless of binding.
+func TestPackLevelPatches_BareName_RegressionFirstOccurrence(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "worker"
+nudge = "base nudge"
+`)
+	writeFile(t, dir, "packs/overlay/pack.toml", `
+[pack]
+name = "overlay"
+schema = 2
+
+[imports.gastown]
+source = "../base"
+
+[[patches.agent]]
+name = "worker"
+nudge = "patched nudge"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{Includes: []string{"packs/overlay"}},
+	}
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ExpandCityPacks: %v", err)
+	}
+	// The single agent is the imported one (binding=gastown). A bare-name
+	// patch matches it without filtering on binding — same as before this
+	// change.
+	if len(cfg.Agents) != 1 {
+		t.Fatalf("got %d agents, want 1", len(cfg.Agents))
+	}
+	a := cfg.Agents[0]
+	if a.Name != "worker" {
+		t.Errorf("Name = %q, want worker", a.Name)
+	}
+	if a.BindingName != "gastown" {
+		t.Errorf("BindingName = %q, want gastown", a.BindingName)
+	}
+	if a.Nudge != "patched nudge" {
+		t.Errorf("Nudge = %q, want %q", a.Nudge, "patched nudge")
+	}
+}
+
+// TestPackLevelPatches_QualifiedAndBareNameMixed verifies that a single
+// [[patches.agent]] table containing both qualified-name and bare-name
+// entries applies each one to its intended target.
+func TestPackLevelPatches_QualifiedAndBareNameMixed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "packs/base/pack.toml", `
+[pack]
+name = "base"
+schema = 1
+
+[[agent]]
+name = "mayor"
+nudge = "base mayor nudge"
+`)
+	writeFile(t, dir, "packs/overlay/pack.toml", `
+[pack]
+name = "overlay"
+schema = 2
+
+[imports.gastown]
+source = "../base"
+
+[[agent]]
+name = "scout"
+nudge = "base scout nudge"
+
+[[patches.agent]]
+name = "gastown.mayor"
+nudge = "patched mayor"
+
+[[patches.agent]]
+name = "scout"
+nudge = "patched scout"
+`)
+
+	cfg := &City{
+		Workspace: Workspace{Includes: []string{"packs/overlay"}},
+	}
+	_, _, _, err := ExpandCityPacks(cfg, fsys.OSFS{}, dir)
+	if err != nil {
+		t.Fatalf("ExpandCityPacks: %v", err)
+	}
+	var mayor, scout *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "mayor":
+			mayor = &cfg.Agents[i]
+		case "scout":
+			scout = &cfg.Agents[i]
+		}
+	}
+	if mayor == nil {
+		t.Fatal("imported mayor not found")
+	}
+	if scout == nil {
+		t.Fatal("overlay-own scout not found")
+	}
+	if mayor.BindingName != "gastown" {
+		t.Errorf("mayor BindingName = %q, want gastown", mayor.BindingName)
+	}
+	if mayor.Nudge != "patched mayor" {
+		t.Errorf("mayor Nudge = %q, want %q", mayor.Nudge, "patched mayor")
+	}
+	if scout.BindingName != "" {
+		t.Errorf("scout BindingName = %q, want empty (overlay-own)", scout.BindingName)
+	}
+	if scout.Nudge != "patched scout" {
+		t.Errorf("scout Nudge = %q, want %q", scout.Nudge, "patched scout")
+	}
+}
+
 func TestPackDoctorEntriesParsed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "pack.toml", `
