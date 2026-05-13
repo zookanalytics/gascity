@@ -347,23 +347,71 @@ func runProbeIteration(t *testing.T, tm *sessiontmux.Tmux, socket, target string
 
 	// Reset Claude's input state between iterations. Ctrl-C alone is not
 	// enough: on a stuck Enter, the prompt clears visually but Claude's
-	// internal input buffer retains the unsubmitted text, so the next
-	// iteration's send-keys would prepend the prior token. Ctrl-U
-	// (unix-line-discard) drops the unsubmitted buffer first; Ctrl-C
-	// then interrupts any in-flight response.
-	_ = tmuxSendKeys(socket, target, "C-u")
-	_ = tmuxSendKeys(socket, target, "C-c")
-	_ = waitForPane(socket, target, 10*time.Second, promptIsIdle)
+	// internal input buffer retains the unsubmitted text. Worse, a stuck
+	// Enter that becomes a newline turns the buffer into a multi-line
+	// input — Ctrl-U only clears the current line, so leftover lines
+	// from prior iters cascade-fail every subsequent pre-idle-wait.
+	// resetProbeInput sends an aggressive clear sequence and verifies
+	// it landed.
+	resetProbeInput(socket, target)
 
 	return res
 }
 
-// classifyProbeOutcome polls the pane for up to `timeout` and decides which
-// outcome category the iteration falls into. The classifier locks in
-// SUBMITTED as soon as it sees the token outside the input box; STUCK
-// requires the token to remain in the input box across the full polling
-// window (transient "token still rendering" states resolve to either
-// submitted or lost on the next sample).
+// resetProbeInput drives the target session back to an empty `❯` input
+// box between iterations. Claude Code's TUI has several distinct post-iter
+// states the reset must handle:
+//   - Idle (clean submit, no response in flight) — Ctrl-C is a no-op
+//   - Wrangling (response in flight) — Ctrl-C cancels the response
+//   - Interrupted (post-Ctrl-C from a prior reset) — input box still shows
+//     prior text; Esc exits this mode
+//   - Stuck (the bug under measurement) — text in input box, no response
+//
+// The reset sends Esc first (exits Interrupted mode cleanly), then Ctrl-C
+// (cancels any in-flight render), then drains the input buffer with Ctrl-U.
+// Backspace is included in the drain loop for the multi-line case (newlines
+// from stuck-Enter iters would leave Ctrl-U clearing only the current line).
+func resetProbeInput(socket, target string) {
+	_ = tmuxSendKeys(socket, target, "Escape")
+	_ = tmuxSendKeys(socket, target, "C-c")
+	for i := 0; i < 8; i++ {
+		if waitForPaneOnce(socket, target, promptIsIdle) {
+			return
+		}
+		_ = tmuxSendKeys(socket, target, "C-u")
+		_ = tmuxSendKeys(socket, target, "BSpace")
+		time.Sleep(150 * time.Millisecond)
+	}
+	// Last-resort: another Escape + Ctrl-C, then a 5s poll. If this still
+	// doesn't resolve, the next iter's pre-idle-wait will report error and
+	// the summary will count the cascade.
+	_ = tmuxSendKeys(socket, target, "Escape")
+	_ = tmuxSendKeys(socket, target, "C-c")
+	_ = waitForPane(socket, target, 5*time.Second, promptIsIdle)
+}
+
+// waitForPaneOnce is the non-polling variant: a single capture + predicate
+// check. Used inside resetProbeInput's bounded retry loop where the outer
+// loop already controls retry cadence.
+func waitForPaneOnce(socket, target string, predicate func(string) bool) bool {
+	text, err := capturePane(socket, target, 220)
+	if err != nil {
+		return false
+	}
+	return predicate(text)
+}
+
+// classifyProbeOutcome polls the pane for the full `timeout` window and returns
+// the outcome of the LAST sampled state. Earlier locking on first-seen
+// SUBMITTED was inflating the count: Claude renders the echo asynchronously
+// during a submit, but a reset interrupt (Ctrl-C in the prior iteration's
+// cleanup or a subsequent rollback) can revert the visible state to "text
+// still in input box". The brief's operator-observed bug is "text sits in
+// `❯` input box; pane capture shows no submission", which is the stable
+// final state — so the classifier must reflect that, not transient render
+// frames. STUCK and SUBMITTED are now determined from the final settled
+// sample. LOST means the token vanished entirely (e.g., scrolled off,
+// classified token unique-prefix collided).
 func classifyProbeOutcome(socket, target, token string, timeout time.Duration) probeIterOutcome {
 	deadline := time.Now().Add(timeout)
 	var lastSeen probeIterOutcome
@@ -376,21 +424,23 @@ func classifyProbeOutcome(socket, target, token string, timeout time.Duration) p
 				}
 				return probeIterError
 			}
-			time.Sleep(100 * time.Millisecond)
+			time.Sleep(150 * time.Millisecond)
 			continue
 		}
 		switch {
-		case paneTokenSubmitted(text, token):
-			return probeIterSubmitted
 		case paneTokenStuck(text, token):
+			// Token in the current input box. Stuck takes precedence over
+			// scrollback-submitted evidence: even if the token also appears
+			// in scrollback (Claude rendered an echo that was later rolled
+			// back), the visible terminal state shows no submission.
 			lastSeen = probeIterStuck
+		case paneTokenSubmitted(text, token):
+			lastSeen = probeIterSubmitted
 		case strings.Contains(text, token):
 			// Token visible somewhere — likely in scrollback that the
 			// strict paneTokenSubmitted predicate missed (long lines
-			// wrap and break the `❯ <token>` prefix). Conservative call:
-			// treat as submitted, since stuck would require it to be in
-			// the current input box.
-			return probeIterSubmitted
+			// wrap and break the `❯ <token>` prefix).
+			lastSeen = probeIterSubmitted
 		default:
 			lastSeen = probeIterLost
 		}
@@ -400,7 +450,7 @@ func classifyProbeOutcome(socket, target, token string, timeout time.Duration) p
 			}
 			return lastSeen
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(150 * time.Millisecond)
 	}
 }
 
@@ -456,8 +506,13 @@ func paneTokenStuck(text, token string) bool {
 	return strings.Contains(rest, token)
 }
 
-// promptIsIdle reports whether the latest `❯` prompt line is empty.
-// Used to gate iterations and confirm cleanup succeeded.
+// promptIsIdle reports whether the latest `❯` prompt line is in a state
+// that accepts new input. That includes:
+//   - Empty input box (the canonical idle case)
+//   - Claude's "Press up to edit queued messages" prompt (the input box is
+//     empty; the line content is the help banner Claude shows when prior
+//     nudges are still being processed). This is NOT a stuck state — the
+//     next iter's send-keys will append a new queued message cleanly.
 func promptIsIdle(text string) bool {
 	// Find the LAST `❯` line — Claude only ever renders one input prompt
 	// at the bottom; earlier matches would be scrollback noise.
@@ -468,7 +523,15 @@ func promptIsIdle(text string) bool {
 			continue
 		}
 		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, probeReadyPromptPrefix))
-		return rest == ""
+		if rest == "" {
+			return true
+		}
+		// Claude's queued-messages banner indicates the input box is
+		// accepting input; the banner text is help, not buffered input.
+		if strings.HasPrefix(rest, "Press up to edit queued messages") {
+			return true
+		}
+		return false
 	}
 	return false
 }
