@@ -3578,6 +3578,7 @@ exit 0
 // later `git push origin main` would target the same ref the test verifies.
 func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 	t.Helper()
+	neutralizeUserGitConfig(t)
 	dbDir := filepath.Join(archiveRepo, "beads")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -3730,6 +3731,7 @@ exec '%s' "$@"
 
 func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevCount int) string {
 	t.Helper()
+	neutralizeUserGitConfig(t)
 	dbDir := filepath.Join(archiveRepo, "beads")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -3773,6 +3775,7 @@ func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevC
 
 func initSeedArchiveWithRemote(t *testing.T, archiveRepo string) (string, string) {
 	t.Helper()
+	neutralizeUserGitConfig(t)
 	remoteRepo := filepath.Join(t.TempDir(), "archive-remote.git")
 	if out, err := exec.Command("git", "init", "--bare", "-q", remoteRepo).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v\n%s", err, out)
