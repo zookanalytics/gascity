@@ -58,7 +58,7 @@ newest_backup_mtime_for_db() {
                 newest_mtime="$backup_mtime"
             fi
         fi
-    done < <(find "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
+    done < <(find -L "$BACKUP_ARTIFACT_DIR" -type f -print0 2>/dev/null)
     printf '%s\n' "$newest_mtime"
 }
 
