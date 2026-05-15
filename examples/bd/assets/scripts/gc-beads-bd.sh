@@ -501,12 +501,44 @@ ensure_types_custom_in_yaml() {
     local config_yaml="$dir/.beads/config.yaml"
     [ -f "$config_yaml" ] || return 0
     [ -n "$types" ] || return 0
+
+    # Self-heal: split lines where types.custom got concatenated onto a
+    # previous key's value (e.g. "backup.enabled: falsetypes.custom: ...").
+    # Pre-fix versions of this function produced that pattern when the
+    # config file lacked a trailing newline; the corrupted YAML disabled
+    # every key after the bad line and drove the 2026-04-28..2026-05-01
+    # dolt_backup hot loop. Splitting here recovers already-damaged files.
+    if grep -qE '[^[:space:]]types\.custom:' "$config_yaml" 2>/dev/null; then
+        local healed
+        healed=$(mktemp "$config_yaml.heal.XXXXXX") || return 0
+        awk '{
+            if (match($0, /[^[:space:]]types\.custom:/)) {
+                print substr($0, 1, RSTART)
+                print substr($0, RSTART+1)
+            } else {
+                print
+            }
+        }' "$config_yaml" > "$healed" 2>/dev/null
+        if [ "$(grep -c '^types\.custom:' "$healed" 2>/dev/null)" -gt 1 ]; then
+            local dedup
+            dedup=$(mktemp "$config_yaml.dedup.XXXXXX") || { rm -f "$healed"; return 0; }
+            awk '/^types\.custom:/ { if (seen) next; seen=1 } { print }' "$healed" > "$dedup" 2>/dev/null
+            mv -f "$dedup" "$healed" 2>/dev/null || rm -f "$dedup"
+        fi
+        mv -f "$healed" "$config_yaml" 2>/dev/null || rm -f "$healed"
+    fi
+
     if grep -q "^types\.custom:" "$config_yaml" 2>/dev/null; then
         return 0
     fi
     local tmp
     tmp=$(mktemp "$config_yaml.tmp.XXXXXX") || return 0
     cat "$config_yaml" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+    # Ensure file ends with a newline before appending. Without this, the
+    # types.custom line concatenates onto the prior value (the bug above).
+    if [ -s "$tmp" ] && [ -n "$(tail -c1 "$tmp")" ]; then
+        printf '\n' >> "$tmp"
+    fi
     printf 'types.custom: %s\n' "$types" >> "$tmp"
     mv -f "$tmp" "$config_yaml" || rm -f "$tmp"
 }
