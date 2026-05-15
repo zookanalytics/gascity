@@ -1299,11 +1299,21 @@ type DoctorConfig struct {
 	// enforced by mechanical checks (no uncommitted changes, no
 	// unpushed commits, no stashes) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
+
+	// PackScriptTimeoutSecs bounds how long any single pack doctor
+	// script (`gc doctor` Run or `gc doctor --fix`) is allowed to
+	// take before it is killed and reported as an error. Zero or
+	// negative values fall back to the package default (30s). A
+	// per-script bound is the load-bearing safety against a wedged
+	// pack tool (eg `bd --version` hung on a contended lock) blocking
+	// the whole doctor run indefinitely.
+	PackScriptTimeoutSecs int `toml:"pack_script_timeout_secs,omitempty" jsonschema:"default=30"`
 }
 
 const (
 	defaultWorktreeRigWarnBytes  = int64(10) * 1024 * 1024 * 1024 // 10 GB
 	defaultWorktreeRigErrorBytes = int64(50) * 1024 * 1024 * 1024 // 50 GB
+	defaultPackScriptTimeout     = 30 * time.Second
 )
 
 // WorktreeRigWarnBytes returns the warning threshold in bytes. Falls
@@ -1314,6 +1324,18 @@ func (c DoctorConfig) WorktreeRigWarnBytes() int64 {
 		return n
 	}
 	return defaultWorktreeRigWarnBytes
+}
+
+// PackScriptTimeout returns the per-pack-doctor-script wall-clock
+// bound. Falls back to defaultPackScriptTimeout when unset or
+// non-positive — a zero or negative configured value means "no timeout"
+// is never accepted, because that is the precise hang the bound exists
+// to prevent.
+func (c DoctorConfig) PackScriptTimeout() time.Duration {
+	if c.PackScriptTimeoutSecs > 0 {
+		return time.Duration(c.PackScriptTimeoutSecs) * time.Second
+	}
+	return defaultPackScriptTimeout
 }
 
 // WorktreeRigErrorBytes returns the error threshold in bytes. Falls
