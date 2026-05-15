@@ -153,6 +153,10 @@ func TestResolveBdScopeTarget(t *testing.T) {
 	// Pin cwd inside the test city so bdRigFromCwd does not find an
 	// unrelated .beads/redirect (e.g. when running from a polecat worktree).
 	setCwd(t, cityDir)
+	// Scrub GC_RIG so the env-based rig fallback added for agents running
+	// outside any rig dir (e.g. witness in .gc/agents/<rig>/) does not
+	// pull these "no rig" cases into rig scope.
+	t.Setenv("GC_RIG", "")
 	cfgForTest := func() *config.City {
 		return &config.City{
 			Workspace: config.Workspace{Name: "gascity"},
@@ -1543,6 +1547,161 @@ func TestResolveBdScopeTargetRoutesExistingCityBeadFromRigCwd(t *testing.T) {
 		ScopeRoot: cityDir,
 		ScopeKind: "city",
 		Prefix:    "mc",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+// TestResolveBdScopeTargetUsesGCRigEnv covers the witness (and any other agent
+// session that lives outside a rig directory). The witness CWD is
+// `.gc/agents/<rig>/witness`, which is inside the city scope but not inside
+// any rig path and has no `.beads/redirect`. Before this fix, `gc bd list`
+// from that CWD fell through to city scope and silently returned the wrong
+// beads. With GC_RIG=<rig> set in the agent's env (as template_resolve.go
+// does for rig-scoped agents), the resolution now lands on the rig scope.
+func TestResolveBdScopeTargetUsesGCRigEnv(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	rigDir := filepath.Join(cityDir, "rigs", "gascity")
+	agentDir := filepath.Join(cityDir, ".gc", "agents", "gascity", "witness")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, agentDir)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: filepath.Join("rigs", "gascity"), Prefix: "gc"}},
+	}
+
+	t.Setenv("GC_RIG", "gascity")
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list", "--status=open"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "gc",
+		RigName:   "gascity",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+// TestResolveBdScopeTargetGCRigEnvFallsBackOnUnknownRig confirms that an
+// ambient GC_RIG pointing at a rig not declared in this city's config
+// does NOT cause an error — it silently falls back to city scope.
+// Explicit --rig errors loudly; env vars are ambient and must degrade
+// gracefully so a stale GC_RIG from a different city does not break
+// every `gc bd` call.
+func TestResolveBdScopeTargetGCRigEnvFallsBackOnUnknownRig(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	agentDir := filepath.Join(cityDir, ".gc", "agents", "gascity", "witness")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, agentDir)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: filepath.Join("rigs", "gascity"), Prefix: "gc"}},
+	}
+
+	t.Setenv("GC_RIG", "no-such-rig")
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "de",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+// TestResolveBdScopeTargetGCRigEnvFallsBackOnUnboundRig confirms that a
+// GC_RIG pointing at a declared-but-unbound rig (no path) falls through
+// to city scope rather than erroring or returning a partial target.
+func TestResolveBdScopeTargetGCRigEnvFallsBackOnUnboundRig(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(string, execStoreTarget, string) bool { return false }
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	agentDir := filepath.Join(cityDir, ".gc", "agents", "unbound", "witness")
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, agentDir)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "unbound", Prefix: "ub"}},
+	}
+
+	t.Setenv("GC_RIG", "unbound")
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"list"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "de",
+	}
+	if got != want {
+		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
+	}
+}
+
+// TestResolveBdScopeTargetCityBeadPrefixWinsOverGCRigEnv confirms that a
+// bead-ID argument whose prefix matches the city store still routes to
+// city scope, even when GC_RIG is set. Bead-prefix detection runs before
+// the env fallback so `gc bd show <city-bead>` always finds the bead.
+func TestResolveBdScopeTargetCityBeadPrefixWinsOverGCRigEnv(t *testing.T) {
+	origProbe := bdBeadExists
+	defer func() { bdBeadExists = origProbe }()
+	bdBeadExists = func(_ string, target execStoreTarget, beadID string) bool {
+		return target.ScopeKind == "city" && beadID == "de-city1"
+	}
+
+	cityDir := filepath.Join(t.TempDir(), "city")
+	rigDir := filepath.Join(cityDir, "rigs", "gascity")
+	agentDir := filepath.Join(cityDir, ".gc", "agents", "gascity", "witness")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setCwd(t, agentDir)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "gascity", Path: filepath.Join("rigs", "gascity"), Prefix: "gc"}},
+	}
+
+	t.Setenv("GC_RIG", "gascity")
+	got, err := resolveBdScopeTarget(cfg, cityDir, "", []string{"show", "de-city1"})
+	if err != nil {
+		t.Fatalf("resolveBdScopeTarget() error = %v", err)
+	}
+	want := execStoreTarget{
+		ScopeRoot: cityDir,
+		ScopeKind: "city",
+		Prefix:    "de",
 	}
 	if got != want {
 		t.Fatalf("resolveBdScopeTarget() = %#v, want %#v", got, want)
