@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseDoctorSection(t *testing.T) {
@@ -126,6 +127,49 @@ func TestDoctorConfigByteAccessors(t *testing.T) {
 				t.Errorf("WorktreeRigErrorBytes() = %d, want %d", got, tt.wantError)
 			}
 		})
+	}
+}
+
+func TestDoctorConfigPackScriptTimeout(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  DoctorConfig
+		want time.Duration
+	}{
+		{"empty falls back to default", DoctorConfig{}, defaultPackScriptTimeout},
+		{"explicit positive seconds", DoctorConfig{PackScriptTimeoutSecs: 5}, 5 * time.Second},
+		{"zero falls back to default", DoctorConfig{PackScriptTimeoutSecs: 0}, defaultPackScriptTimeout},
+		{"negative falls back to default", DoctorConfig{PackScriptTimeoutSecs: -10}, defaultPackScriptTimeout},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.PackScriptTimeout(); got != tt.want {
+				t.Errorf("PackScriptTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParsePackScriptTimeoutSection(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[doctor]
+pack_script_timeout_secs = 45
+
+[[agent]]
+name = "mayor"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Doctor.PackScriptTimeoutSecs != 45 {
+		t.Errorf("PackScriptTimeoutSecs = %d, want 45", cfg.Doctor.PackScriptTimeoutSecs)
+	}
+	if got := cfg.Doctor.PackScriptTimeout(); got != 45*time.Second {
+		t.Errorf("PackScriptTimeout() = %v, want 45s", got)
 	}
 }
 

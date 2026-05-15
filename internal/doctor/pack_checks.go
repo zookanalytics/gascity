@@ -1,13 +1,23 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+// defaultPackScriptTimeout bounds an individual pack doctor Run or Fix
+// script when the caller does not configure one. A hung pack script is
+// the documented failure mode (eg `bd --version` wedged on a contended
+// lock); without a per-script ceiling, `gc doctor` blocks indefinitely
+// on the first wedged check. 30s is long enough for cold-start tools
+// that touch disk/network and short enough that an operator notices.
+const defaultPackScriptTimeout = 30 * time.Second
 
 // PackScriptCheck implements Check by running a script shipped with
 // a pack. The script follows the pack doctor protocol:
@@ -45,6 +55,10 @@ type PackScriptCheck struct {
 	// Populated from pack.toml `[[doctor]] warmup = true` or from
 	// `doctor.toml`'s `warmup` field. Default false.
 	Warmup bool
+	// Timeout bounds how long Run or Fix may take before the subprocess
+	// is killed and the operation reported as an error. Zero falls
+	// back to defaultPackScriptTimeout.
+	Timeout time.Duration
 }
 
 // Name returns the check's fully-qualified name.
@@ -59,6 +73,16 @@ func (c *PackScriptCheck) CanFix() bool { return c.FixScript != "" }
 // warm-up scan. Reflects the pack manifest's `warmup` field.
 func (c *PackScriptCheck) WarmupEligible() bool { return c.Warmup }
 
+// timeout returns the effective wall-clock bound for a single Run or
+// Fix invocation. Zero or negative Timeout falls back to the package
+// default so a forgotten value never silently disables the safety net.
+func (c *PackScriptCheck) timeout() time.Duration {
+	if c.Timeout > 0 {
+		return c.Timeout
+	}
+	return defaultPackScriptTimeout
+}
+
 // Fix runs the pack's fix script with the same environment contract as
 // Run. Returns nil on exit 0 (remediation succeeded); returns an error
 // carrying the exit code and any captured output on non-zero exit or
@@ -69,14 +93,35 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	cmd := exec.Command(c.FixScript) //nolint:gosec // path from pack config
+	timeout := c.timeout()
+	cmdCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, c.FixScript) //nolint:gosec // path from pack config
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,
 		"GC_PACK_DIR="+c.PackDir,
 	)
+	preparePackCmdForTimeout(cmd)
+	cmd.Cancel = func() error { return killPackCmdTree(cmd) }
+	// WaitDelay forces CombinedOutput to return promptly once the
+	// context fires — without it, an orphaned grandchild that inherits
+	// the stdout pipe can keep cmd.Wait() blocked for the lifetime
+	// of that child, defeating the timeout entirely.
+	cmd.WaitDelay = 250 * time.Millisecond
 
+	start := time.Now()
 	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	// Surface the timeout case first so it's never masked by exec.ExitError
+	// (the kernel kills the process when the context fires; some shells
+	// translate that to a non-zero exit code rather than a context error).
+	if cmdCtx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("fix script %s timed out after %s (limit %s)",
+			c.CheckName, elapsed.Round(time.Millisecond), timeout)
+	}
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -93,14 +138,33 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
+	timeout := c.timeout()
+	runCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, c.Script) //nolint:gosec // script path from pack config
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,
 		"GC_PACK_DIR="+c.PackDir,
 	)
+	preparePackCmdForTimeout(cmd)
+	cmd.Cancel = func() error { return killPackCmdTree(cmd) }
+	cmd.WaitDelay = 250 * time.Millisecond
 
+	start := time.Now()
 	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if runCtx.Err() == context.DeadlineExceeded {
+		return &CheckResult{
+			Name:   c.CheckName,
+			Status: StatusError,
+			Message: fmt.Sprintf("%s timed out after %s (limit %s)",
+				c.CheckName, elapsed.Round(time.Millisecond), timeout),
+		}
+	}
+
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
