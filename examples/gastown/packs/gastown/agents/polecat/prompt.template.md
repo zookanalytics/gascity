@@ -154,10 +154,11 @@ When blocked, you MUST escalate. Do NOT wait for human input.
 ```bash
 # Blocking issues
 WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+MAYOR_TARGET="mayor"
 gc mail send "$WITNESS_TARGET" -s "ESCALATION: Brief description [HIGH]" -m "Details"
 
 # Cross-rig or strategic
-gc mail send mayor/ -s "BLOCKED: <topic>" -m "Context"
+gc mail send "$MAYOR_TARGET" -s "BLOCKED: <topic>" -m "Context"
 ```
 
 After escalating: continue if possible, otherwise `gc bd update <bead> --status=escalated && gc runtime drain-ack && exit`.
@@ -168,9 +169,10 @@ After escalating: continue if possible, otherwise `gc bd update <bead> --status=
 
 ```bash
 WITNESS_TARGET="${GC_RIG:+$GC_RIG/}witness"
+MAYOR_TARGET="mayor"
 gc session nudge "$WITNESS_TARGET" "Quick question about bead status" # Default: nudge
 gc mail send "$WITNESS_TARGET" -s "HELP: Blocked on X" -m "..."       # Escalation: mail
-gc mail send mayor/ -s "BLOCKED: Need coordination" -m "..."          # Cross-rig: mail
+gc mail send "$MAYOR_TARGET" -s "BLOCKED: Need coordination" -m "..."  # Cross-rig: mail
 ```
 
 ### Polecat Communication Rules
