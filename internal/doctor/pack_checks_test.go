@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeCheckScript(t *testing.T, dir, content string) string {
@@ -314,6 +315,88 @@ func TestPackScriptCheckFixMissingScript(t *testing.T) {
 	err := c.Fix(&CheckContext{CityPath: t.TempDir()})
 	if err == nil {
 		t.Fatal("Fix() returned nil for missing script, want error")
+	}
+}
+
+func TestPackScriptCheckRunTimeoutFires(t *testing.T) {
+	dir := t.TempDir()
+	// Script sleeps far longer than the timeout we set below.
+	script := writeCheckScript(t, dir, "#!/bin/sh\nsleep 10\n")
+
+	c := &PackScriptCheck{
+		CheckName: "topo:slow",
+		Script:    script,
+		PackDir:   dir,
+		PackName:  "topo",
+		Timeout:   100 * time.Millisecond,
+	}
+
+	start := time.Now()
+	result := c.Run(&CheckContext{CityPath: dir})
+	elapsed := time.Since(start)
+
+	if result.Status != StatusError {
+		t.Errorf("Status = %v, want StatusError", result.Status)
+	}
+	if !strings.Contains(result.Message, "timed out") {
+		t.Errorf("Message = %q, want it to mention timeout", result.Message)
+	}
+	if !strings.Contains(result.Message, "topo:slow") {
+		t.Errorf("Message = %q, want it to name the check %q", result.Message, "topo:slow")
+	}
+	// Should return within ~1s of timeout, never wait for the full sleep.
+	if elapsed > 5*time.Second {
+		t.Errorf("Run blocked %v past the 100ms timeout; should kill subprocess promptly", elapsed)
+	}
+}
+
+func TestPackScriptCheckFixTimeoutFires(t *testing.T) {
+	dir := t.TempDir()
+	fix := writeFixScript(t, dir, "#!/bin/sh\nsleep 10\n")
+
+	c := &PackScriptCheck{
+		CheckName: "topo:slow-fix",
+		Script:    "/irrelevant",
+		FixScript: fix,
+		PackDir:   dir,
+		PackName:  "topo",
+		Timeout:   100 * time.Millisecond,
+	}
+
+	start := time.Now()
+	err := c.Fix(&CheckContext{CityPath: dir})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Fix() returned nil, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("error = %q, want it to mention timeout", err.Error())
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("Fix blocked %v past the 100ms timeout; should kill subprocess promptly", elapsed)
+	}
+}
+
+func TestPackScriptCheckRunZeroTimeoutUsesDefault(t *testing.T) {
+	// A check with zero Timeout falls back to the package default,
+	// which must be long enough that a fast-completing script finishes
+	// successfully (i.e. the timeout doesn't fire at 0 by accident).
+	dir := t.TempDir()
+	script := writeCheckScript(t, dir, "#!/bin/sh\necho ok\nexit 0\n")
+
+	c := &PackScriptCheck{
+		CheckName: "topo:fast",
+		Script:    script,
+		PackDir:   dir,
+		PackName:  "topo",
+		// Timeout deliberately unset (zero value).
+	}
+
+	result := c.Run(&CheckContext{CityPath: dir})
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK (zero timeout must use default, not fire immediately): %q",
+			result.Status, result.Message)
 	}
 }
 

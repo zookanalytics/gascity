@@ -271,6 +271,7 @@ func doDoctor(fix, verbose, asJSON bool, stdout, stderr io.Writer) int {
 
 	// Pack doctor checks — scripts shipped with packs.
 	if cfgErr == nil {
+		packScriptTimeout := doctorCfg.PackScriptTimeout()
 		for _, entry := range cfg.PackDoctors {
 			d.Register(&doctor.PackScriptCheck{
 				CheckName: entry.PackName + ":" + entry.Name,
@@ -278,6 +279,7 @@ func doDoctor(fix, verbose, asJSON bool, stdout, stderr io.Writer) int {
 				FixScript: entry.FixScript,
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
+				Timeout:   packScriptTimeout,
 			})
 		}
 	}
