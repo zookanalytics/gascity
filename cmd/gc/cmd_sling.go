@@ -848,9 +848,13 @@ func doSlingBatch(opts slingOpts, deps slingDeps, querier BeadChildQuerier, stdo
 		return 1
 	}
 	if result.DryRun {
-		// For batch dry-run, look up the container bead for display.
+		// Render the batch preview only for actual container types. A leaf
+		// type=task is routed by DoSling (the non-container delegation in
+		// DoSlingBatch), so its dry-run preview must mirror that — otherwise
+		// the user sees an empty "Children (0 total, 0 open)" list and an
+		// empty "Route commands" section that misrepresents real sling.
 		if querier != nil {
-			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil {
+			if b, getErr := querier.Get(opts.BeadOrFormula); getErr == nil && beads.IsContainerType(b.Type) {
 				children, _ := querier.List(beads.ListQuery{
 					ParentID: b.ID, IncludeClosed: true, Sort: beads.SortCreatedAsc,
 				})
