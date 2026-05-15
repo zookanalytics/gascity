@@ -252,6 +252,21 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return bdRigScopeTarget(cityPath, rig), nil
 	}
 
+	// Fall back to GC_RIG env. Rig-scoped agents (the witness in
+	// .gc/agents/<rig>/, dispatched sessions running outside the rig
+	// repo, etc.) have GC_RIG set by template_resolve.go but a CWD that
+	// is not within any rig path and has no .beads/redirect, so without
+	// this fallback `gc bd list` silently returns city-scope beads.
+	// Degrade gracefully on stale or unknown GC_RIG: explicit --rig
+	// errors loudly, but env vars are ambient and must not break every
+	// `gc bd` call in environments where GC_RIG points at a foreign
+	// rig.
+	if envRig := strings.TrimSpace(os.Getenv("GC_RIG")); envRig != "" {
+		if rig, ok := rigByName(cfg, envRig); ok && strings.TrimSpace(rig.Path) != "" {
+			return bdRigScopeTarget(cityPath, rig), nil
+		}
+	}
+
 	return cityTarget, nil
 }
 
