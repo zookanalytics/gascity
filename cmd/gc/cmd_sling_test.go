@@ -5516,6 +5516,54 @@ func TestDryRunConvoy(t *testing.T) {
 	}
 }
 
+// TestDryRunLeafTaskRoutesAsSingle covers gc-mzda7: a leaf type=task bead with
+// no children must render the single-bead dry-run preview (Route command +
+// bead summary), not the container/batch preview that shows an empty
+// "Children (0 total, 0 open)" list and an empty "Route commands" section.
+// The real (non-dry-run) sling correctly delegates to DoSling for non-
+// container types, so the dry-run preview must reflect that.
+func TestDryRunLeafTaskRoutesAsSingle(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Title: "Implement login page", Type: "task", Status: "open"}
+	// No children registered — leaf task.
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("BL-42")
+	opts := testOpts(a, "BL-42")
+	opts.DryRun = true
+	code := doSlingBatch(opts, deps, q, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("dry-run returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	out := stdout.String()
+	// Should render single-bead preview.
+	if !strings.Contains(out, "Route command (not executed):") {
+		t.Errorf("stdout missing single-bead route header; got: %s", out)
+	}
+	if !strings.Contains(out, "bd update 'BL-42' --set-metadata gc.routed_to=mayor") {
+		t.Errorf("stdout missing route command for leaf task BL-42; got: %s", out)
+	}
+	// Should NOT render container/batch preview for a non-container type.
+	if strings.Contains(out, "container bead") {
+		t.Errorf("stdout incorrectly framed leaf task as container; got: %s", out)
+	}
+	if strings.Contains(out, "Children (0 total, 0 open)") {
+		t.Errorf("stdout printed empty children list for leaf task; got: %s", out)
+	}
+	if strings.Contains(out, "Route commands (not executed):") {
+		t.Errorf("stdout used plural batch route header for leaf task; got: %s", out)
+	}
+	if len(runner.calls) != 0 {
+		t.Errorf("got %d runner calls, want 0: %v", len(runner.calls), runner.calls)
+	}
+}
+
 func TestDryRunBatchOnFormula(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
