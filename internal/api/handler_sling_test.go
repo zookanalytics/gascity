@@ -98,6 +98,11 @@ func TestSlingWithBead(t *testing.T) {
 	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
 		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
 	}
+	// myrig/worker is a singleton (max=1, no pool markers), so the API
+	// path must also stamp the assignee — see gastownhall/gascity#yb5uhi.
+	if updated.Assignee != "myrig/worker" {
+		t.Fatalf("assignee = %q, want myrig/worker (singleton routing must stamp assignee)", updated.Assignee)
+	}
 }
 
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {

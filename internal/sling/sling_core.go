@@ -353,11 +353,12 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
 	if deps.Router != nil {
 		req := RouteRequest{
-			BeadID:  beadID,
-			Target:  a.QualifiedName(),
-			WorkDir: rigDir,
-			Env:     slingEnv,
-			Force:   opts.Force,
+			BeadID:    beadID,
+			Target:    a.QualifiedName(),
+			WorkDir:   rigDir,
+			Env:       slingEnv,
+			Force:     opts.Force,
+			Singleton: !a.SupportsInstanceExpansion(),
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -1139,11 +1140,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, child.ID)
 		if deps.Router != nil {
 			req := RouteRequest{
-				BeadID:  child.ID,
-				Target:  a.QualifiedName(),
-				WorkDir: rigDir,
-				Env:     childEnv,
-				Force:   opts.Force,
+				BeadID:    child.ID,
+				Target:    a.QualifiedName(),
+				WorkDir:   rigDir,
+				Env:       childEnv,
+				Force:     opts.Force,
+				Singleton: !a.SupportsInstanceExpansion(),
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
 				childResult.Failed = true

@@ -438,5 +438,18 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
+	// Singleton targets also get a direct assignee stamp so the target's
+	// own Tier 1 work_query surfaces routed work. Pool agents keep
+	// routed-only semantics. See gastownhall/gascity#yb5uhi and the
+	// matching block in cmd/gc/cmd_sling.go cliBeadRouter.Route.
+	if req.Singleton {
+		target := req.Target
+		if err := r.store.Update(req.BeadID, beads.UpdateOpts{Assignee: &target}); err != nil {
+			if req.Force && errors.Is(err, beads.ErrNotFound) {
+				return nil
+			}
+			return fmt.Errorf("setting assignee on %s: %w", req.BeadID, err)
+		}
+	}
 	return nil
 }

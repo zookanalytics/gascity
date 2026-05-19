@@ -451,6 +451,9 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	if bead.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
 	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton routing must surface via Tier 1 hook query)", bead.Assignee)
+	}
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
 	}
@@ -483,8 +486,76 @@ func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
 	if bead.Metadata["gc.routed_to"] != "mayor" {
 		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
 	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (pinned-default singletons must also receive direct assignment)", bead.Assignee)
+	}
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
+	}
+}
+
+// TestDoSlingBeadToBindingSingletonSetsAssignee covers gastownhall/gascity#yb5uhi:
+// routing to a binding-named singleton (e.g. gc-toolkit.mechanik) must stamp the
+// bead's assignee so the singleton's own Tier 1 work_query surfaces routed work.
+// Before the fix, only gc.routed_to was set and the singleton's hook query
+// missed the bead because Tier 2/3 short-circuit for named-origin sessions.
+func TestDoSlingBeadToBindingSingletonSetsAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "mechanik",
+		BindingName:       "gc-toolkit",
+		MaxActiveSessions: intPtr(1),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	opts := testOpts(a, "BL-42")
+	code := doSling(opts, deps, nil, stdout, stderr)
+
+	if code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	want := "gc-toolkit.mechanik"
+	if bead.Metadata["gc.routed_to"] != want {
+		t.Errorf("gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], want)
+	}
+	if bead.Assignee != want {
+		t.Errorf("assignee = %q, want %q (binding singleton routing must stamp assignee for Tier 1 hook query)", bead.Assignee, want)
+	}
+}
+
+// TestDoSlingBeadToSingletonOverwritesExistingAssignee verifies that a stale
+// human or other agent assignee is replaced when routing to a singleton. The
+// sling operation is an explicit "give this bead to <target>" command, so the
+// target must own the bead afterward — otherwise it would remain invisible to
+// the target's Tier 1 work_query.
+func TestDoSlingBeadToSingletonOverwritesExistingAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Pre-seed an existing assignee on the bead, as if a human had claimed it.
+	preAssign := "human-alice"
+	if err := deps.Store.Update("BL-42", beads.UpdateOpts{Assignee: &preAssign}); err != nil {
+		t.Fatalf("seed assignee: %v", err)
+	}
+	opts := testOpts(a, "BL-42")
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (sling to singleton must replace stale claim)", bead.Assignee)
 	}
 }
 
@@ -631,6 +702,9 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	}
 	if bead.Metadata["gc.routed_to"] != "hello-world/polecat" {
 		t.Errorf("gc.routed_to = %q, want hello-world/polecat", bead.Metadata["gc.routed_to"])
+	}
+	if bead.Assignee != "" {
+		t.Errorf("assignee = %q, want empty (pool agents race via --unassigned, not direct assignment)", bead.Assignee)
 	}
 }
 

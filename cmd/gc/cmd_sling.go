@@ -626,6 +626,17 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if err := r.deps.Store.SetMetadata(req.BeadID, "gc.routed_to", req.Target); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
+	// Singleton targets also get a direct assignee stamp. Without this the
+	// target's own Tier 1 work_query (assignee match) misses routed work
+	// because Tiers 2-3 short-circuit for named-origin sessions. Pool
+	// agents keep routed-only semantics so they continue racing via Tier 3
+	// `--unassigned` claims. See gastownhall/gascity#yb5uhi.
+	if req.Singleton {
+		target := req.Target
+		if err := r.deps.Store.Update(req.BeadID, beads.UpdateOpts{Assignee: &target}); err != nil {
+			return fmt.Errorf("setting assignee on %s: %w", req.BeadID, err)
+		}
+	}
 	return nil
 }
 

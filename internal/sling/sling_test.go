@@ -1487,6 +1487,72 @@ func TestSlingRouteBeadWithTypedRouter(t *testing.T) {
 	if router.routed[0].Target != "mayor" {
 		t.Errorf("Target = %q, want mayor", router.routed[0].Target)
 	}
+	if !router.routed[0].Singleton {
+		t.Errorf("Singleton = false, want true (mayor max=1 with no pool markers)")
+	}
+}
+
+// TestSlingRouteBeadSingletonFlag verifies that finalize() correctly marks
+// pool agents as non-singleton in RouteRequest, so routers can distinguish
+// pool race semantics (gc.routed_to + --unassigned) from singleton direct
+// assignment. Mirrors gastownhall/gascity#yb5uhi.
+func TestSlingRouteBeadSingletonFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		agent      config.Agent
+		wantSingle bool
+	}{
+		{
+			name:       "named singleton (max=1, no pool markers)",
+			agent:      config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			wantSingle: true,
+		},
+		{
+			name:       "binding singleton (mechanik-style)",
+			agent:      config.Agent{Name: "mechanik", BindingName: "gc-toolkit", MaxActiveSessions: intPtr(1)},
+			wantSingle: true,
+		},
+		{
+			name: "pool (max>1)",
+			agent: config.Agent{
+				Name: "polecat", Dir: "hello-world",
+				MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+			},
+			wantSingle: false,
+		},
+		{
+			name: "named pool (max=1 with MinActiveSessions)",
+			agent: config.Agent{
+				Name: "worker", Dir: "myrig",
+				MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(1),
+			},
+			wantSingle: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &fakeBeadRouter{}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+			deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+			deps.Router = router
+			deps.Store = seededStore("BL-42")
+
+			s, err := New(deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.RouteBead(context.Background(), "BL-42", tc.agent, RouteOpts{}); err != nil {
+				t.Fatalf("RouteBead: %v", err)
+			}
+			if len(router.routed) != 1 {
+				t.Fatalf("got %d route calls, want 1", len(router.routed))
+			}
+			if got := router.routed[0].Singleton; got != tc.wantSingle {
+				t.Errorf("Singleton = %v, want %v", got, tc.wantSingle)
+			}
+		})
+	}
 }
 
 func TestSlingAttachFormulaRoutesSourceBeadWithTypedRouter(t *testing.T) {
