@@ -103,6 +103,12 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// Singleton reports whether the target is a single-session named agent
+	// (no pool instance expansion). Routers use this to also stamp
+	// `assignee=Target` for built-in routing so the target's own Tier 1
+	// work_query surfaces the bead; pool agents keep routed-only semantics
+	// and race via `--unassigned` instead. See gastownhall/gascity#yb5uhi.
+	Singleton bool
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
