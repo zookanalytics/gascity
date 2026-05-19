@@ -170,6 +170,17 @@ func TestMain(m *testing.M) {
 	if !isTestscriptCommandInvocation(os.Args[0]) {
 		clearProcessLiveEnvForTests()
 	}
+	// Point git's global/system config at /dev/null so child `git commit`
+	// invocations in tests do not inherit the developer's signing config
+	// (commit.gpgsign + gpg.format=ssh). `make test` strips SSH_AUTH_SOCK
+	// via env -i, so signed commits would otherwise fail with
+	// "Couldn't get agent socket" in tests that exec git for setup.
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
+		panic(err)
+	}
 	testTempRoot, err := os.MkdirTemp("/tmp", "gctest-")
 	if err != nil {
 		panic(err)
