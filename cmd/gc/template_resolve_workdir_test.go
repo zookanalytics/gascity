@@ -422,8 +422,10 @@ dolt.auto-start: false
 	if got := tp.Env["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, wantPort)
 	}
-	if got := tp.Env["GC_DOLT_HOST"]; got != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed target", got)
+	// Loopback host is projected so bd routes via SQL instead of falling
+	// back to its CLI mode (which forks `dolt remote -v` on each call).
+	if got := tp.Env["GC_DOLT_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q for managed target", got, "127.0.0.1")
 	}
 	// HOME is intentionally passed through to agents (PR #272:
 	// HOME/USER/XDG env passthrough for macOS Keychain and config access).
