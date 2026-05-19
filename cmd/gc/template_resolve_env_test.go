@@ -238,3 +238,160 @@ func TestResolveTemplateInjectsPerDispatcherTraceDefault(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveTemplateExpandsAgentEnvVarsInConfiguredEnv verifies that
+// agent.toml [env] values can reference city/rig-scoped vars
+// (GT_ROOT, GC_ALIAS, GC_RIG, GC_RIG_ROOT, GC_DIR) using ${VAR} syntax
+// even when those vars are not present in the supervisor's own process
+// environment. This is the gc-rch40w bug that broke PR #32 (BASH_ENV
+// expanded to "/rigs/.../init.sh" with a stray leading slash because
+// ${GT_ROOT} silently expanded to "") and PR #34 (PATH lost the
+// rig-scoped bin dir for the same reason).
+//
+// The fix expands cfgAgent.Env (and resolved.Env) against an environment
+// that includes the in-flight agentEnv, not just os.Environ() of the
+// supervisor. ${PATH} must still resolve from the supervisor passthrough.
+func TestResolveTemplateExpandsAgentEnvVarsInConfiguredEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sep := string(os.PathListSeparator)
+	t.Setenv("PATH", "/usr/bin")
+	// Match the production supervisor: these vars are NOT in the
+	// process env. Set them to empty defensively in case the test
+	// harness inherited them from a parent shell — empty is
+	// indistinguishable from unset under os.Getenv.
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Setenv("GC_DIR", "")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "demo", Path: rigRoot}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name: "runner",
+		Dir:  "demo",
+		Env: map[string]string{
+			"PATH":     "${GT_ROOT}/rigs/x/bin" + sep + "${PATH}",
+			"BASH_ENV": "${GC_RIG_ROOT}/init.sh",
+			"ALIAS_AT": "${GC_ALIAS}",
+			"RIG_AT":   "${GC_RIG}",
+			"DIR_AT":   "${GC_DIR}",
+			"BEADS_AT": "${BEADS_DIR}",
+		},
+	}
+	qualifiedName := agent.QualifiedName()
+	tp, err := resolveTemplate(params, agent, qualifiedName, nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	// PATH must contain the GT_ROOT-prefixed segment, not the broken
+	// form "/rigs/x/bin" produced when ${GT_ROOT} silently expanded
+	// to empty. The supervisor's ${PATH} must also remain resolvable.
+	wantSegment := cityPath + "/rigs/x/bin"
+	pathSegments := strings.Split(tp.Env["PATH"], sep)
+	foundExpanded := false
+	for _, seg := range pathSegments {
+		if seg == "/rigs/x/bin" {
+			t.Fatalf("PATH = %q contains broken segment %q — ${GT_ROOT} expanded to empty", tp.Env["PATH"], seg)
+		}
+		if seg == wantSegment {
+			foundExpanded = true
+		}
+	}
+	if !foundExpanded {
+		t.Fatalf("PATH = %q, want a segment %q (expanded ${GT_ROOT})", tp.Env["PATH"], wantSegment)
+	}
+	foundUsrBin := false
+	for _, seg := range pathSegments {
+		if seg == "/usr/bin" {
+			foundUsrBin = true
+			break
+		}
+	}
+	if !foundUsrBin {
+		t.Fatalf("PATH = %q, want a segment /usr/bin (expanded ${PATH} from passthroughEnv)", tp.Env["PATH"])
+	}
+
+	wantBashEnv := rigRoot + "/init.sh"
+	if got := tp.Env["BASH_ENV"]; got != wantBashEnv {
+		t.Fatalf("BASH_ENV = %q, want %q (expanded ${GC_RIG_ROOT})", got, wantBashEnv)
+	}
+	if got := tp.Env["ALIAS_AT"]; got != qualifiedName {
+		t.Fatalf("ALIAS_AT = %q, want %q (expanded ${GC_ALIAS})", got, qualifiedName)
+	}
+	if got := tp.Env["RIG_AT"]; got != "demo" {
+		t.Fatalf("RIG_AT = %q, want %q (expanded ${GC_RIG})", got, "demo")
+	}
+	if got := tp.Env["DIR_AT"]; got != tp.WorkDir {
+		t.Fatalf("DIR_AT = %q, want %q (expanded ${GC_DIR} = tp.WorkDir)", got, tp.WorkDir)
+	}
+	wantBeadsDir := filepath.Join(rigRoot, ".beads")
+	if got := tp.Env["BEADS_AT"]; got != wantBeadsDir {
+		t.Fatalf("BEADS_AT = %q, want %q (expanded ${BEADS_DIR})", got, wantBeadsDir)
+	}
+}
+
+// TestResolveTemplateExpandsAgentEnvVarsInProviderEnv verifies that
+// provider [env] entries (resolved.Env) also see agentEnv vars during
+// expansion. Symmetry with cfgAgent.Env matters because anything a
+// provider preset wants to compute from the city/rig layout (e.g. a
+// trace-file path under ${GT_ROOT}) would have failed for the same
+// gc-rch40w reason. Supervisor passthrough must also remain visible.
+func TestResolveTemplateExpandsAgentEnvVarsInProviderEnv(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	t.Setenv("PATH", "/usr/bin")
+	t.Setenv("GT_ROOT", "")
+
+	params := &agentBuildParams{
+		cityName:  "city",
+		cityPath:  cityPath,
+		workspace: &config.Workspace{Provider: "test"},
+		providers: map[string]config.ProviderSpec{
+			"test": {
+				Command:    "echo",
+				PromptMode: "none",
+				Env: map[string]string{
+					"PROVIDER_ROOT": "${GT_ROOT}/provider-stuff",
+					"PROVIDER_PATH": "${PATH}",
+				},
+			},
+		},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{Name: "runner"}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	wantProviderRoot := cityPath + "/provider-stuff"
+	if got := tp.Env["PROVIDER_ROOT"]; got != wantProviderRoot {
+		t.Fatalf("PROVIDER_ROOT = %q, want %q (resolved.Env must see agentEnv GT_ROOT)", got, wantProviderRoot)
+	}
+	if got := tp.Env["PROVIDER_PATH"]; got != "/usr/bin" {
+		t.Fatalf("PROVIDER_PATH = %q, want %q (resolved.Env must see passthrough PATH)", got, "/usr/bin")
+	}
+}

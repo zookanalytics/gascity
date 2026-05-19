@@ -1248,16 +1248,25 @@ func passthroughEnv() map[string]string {
 	return m
 }
 
-// expandEnvMap returns a copy of m with os.ExpandEnv applied to each value.
-// This allows TOML-sourced env blocks to reference the controller's environment,
-// e.g. DOLTHUB_TOKEN = "$DOLTHUB_TOKEN".
-func expandEnvMap(m map[string]string) map[string]string {
+// expandEnvMap returns a copy of m with each value expanded using ${VAR}/$VAR
+// syntax. References are looked up in src first, then fall back to
+// os.Environ() so existing TOML blocks like DOLTHUB_TOKEN = "$DOLTHUB_TOKEN"
+// still resolve from the controller's environment. src lets callers inject
+// values the supervisor doesn't carry (e.g. GT_ROOT, GC_RIG, GC_RIG_ROOT
+// that template_resolve.go computes into agentEnv) without leaking them
+// into os.Environ. A nil src is treated as an empty map.
+func expandEnvMap(src, m map[string]string) map[string]string {
 	if m == nil {
 		return nil
 	}
 	out := make(map[string]string, len(m))
 	for k, v := range m {
-		out[k] = os.ExpandEnv(v)
+		out[k] = os.Expand(v, func(name string) string {
+			if val, ok := src[name]; ok {
+				return val
+			}
+			return os.Getenv(name)
+		})
 	}
 	return out
 }
