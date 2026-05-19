@@ -539,14 +539,16 @@ set -eu
 	if got["GC_BEADS_PREFIX"] != "repo" {
 		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got["GC_BEADS_PREFIX"], "repo")
 	}
-	if got["GC_DOLT_HOST"] != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed target", got["GC_DOLT_HOST"])
+	// Loopback host is projected so bd routes via SQL instead of falling
+	// back to its CLI mode (which forks `dolt remote -v` on each call).
+	if got["GC_DOLT_HOST"] != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q for managed target", got["GC_DOLT_HOST"], "127.0.0.1")
 	}
 	if got["GC_DOLT_PORT"] != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got["GC_DOLT_PORT"], wantPort)
 	}
-	if got["BEADS_DOLT_SERVER_HOST"] != "" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for managed target", got["BEADS_DOLT_SERVER_HOST"])
+	if got["BEADS_DOLT_SERVER_HOST"] != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q for managed target", got["BEADS_DOLT_SERVER_HOST"], "127.0.0.1")
 	}
 	if got["BEADS_DOLT_SERVER_PORT"] != wantPort {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got["BEADS_DOLT_SERVER_PORT"], wantPort)

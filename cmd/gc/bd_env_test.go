@@ -237,6 +237,86 @@ dolt.auto-start: false
 	}
 }
 
+func TestApplyCanonicalDoltTargetEnvCouplesHostAndPort(t *testing.T) {
+	// applyCanonicalDoltTargetEnv must project HOST and PORT together or
+	// not at all. HOST without PORT would route bd via SQL with no port to
+	// connect to; PORT without HOST puts bd into its CLI fallback which
+	// forks `dolt remote -v` per call.
+	for _, tc := range []struct {
+		name     string
+		target   contract.DoltConnectionTarget
+		wantHost string // "" means key absent
+		wantPort string
+	}{
+		{
+			name:     "managed loopback projects both",
+			target:   contract.DoltConnectionTarget{Host: "127.0.0.1", Port: "3307"},
+			wantHost: "127.0.0.1",
+			wantPort: "3307",
+		},
+		{
+			name:     "external host projects both",
+			target:   contract.DoltConnectionTarget{Host: "db.example.com", Port: "3307", External: true},
+			wantHost: "db.example.com",
+			wantPort: "3307",
+		},
+		{
+			name:   "empty host strips both",
+			target: contract.DoltConnectionTarget{Port: "3307"},
+		},
+		{
+			name:   "empty port strips both",
+			target: contract.DoltConnectionTarget{Host: "127.0.0.1"},
+		},
+		{
+			name:   "empty target strips both",
+			target: contract.DoltConnectionTarget{},
+		},
+		{
+			name:   "whitespace-only host strips both",
+			target: contract.DoltConnectionTarget{Host: "   ", Port: "3307"},
+		},
+		{
+			name:   "whitespace-only port strips both",
+			target: contract.DoltConnectionTarget{Host: "127.0.0.1", Port: "   "},
+		},
+		{
+			name:     "host with surrounding whitespace gets trimmed",
+			target:   contract.DoltConnectionTarget{Host: "  127.0.0.1  ", Port: " 3307 "},
+			wantHost: "127.0.0.1",
+			wantPort: "3307",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Seed env with stale values to confirm strip behavior.
+			env := map[string]string{
+				"GC_DOLT_HOST": "stale.example.com",
+				"GC_DOLT_PORT": "9999",
+			}
+			applyCanonicalDoltTargetEnv(env, tc.target)
+			if got, ok := env["GC_DOLT_HOST"]; tc.wantHost == "" {
+				if ok {
+					t.Errorf("GC_DOLT_HOST = %q, want absent", got)
+				}
+			} else if got != tc.wantHost {
+				t.Errorf("GC_DOLT_HOST = %q, want %q", got, tc.wantHost)
+			}
+			if got, ok := env["GC_DOLT_PORT"]; tc.wantPort == "" {
+				if ok {
+					t.Errorf("GC_DOLT_PORT = %q, want absent", got)
+				}
+			} else if got != tc.wantPort {
+				t.Errorf("GC_DOLT_PORT = %q, want %q", got, tc.wantPort)
+			}
+		})
+	}
+}
+
+func TestApplyCanonicalDoltTargetEnvNilEnvIsNoop(_ *testing.T) {
+	// Should not panic; nothing to assert beyond not crashing.
+	applyCanonicalDoltTargetEnv(nil, contract.DoltConnectionTarget{Host: "127.0.0.1", Port: "3307"})
+}
+
 func TestManagedLocalDoltHostRecognizesIPv6LoopbackAndWildcard(t *testing.T) {
 	for _, tc := range []struct {
 		host string
@@ -1657,11 +1737,13 @@ dolt.auto-start: false
 	if got := env["BEADS_DOLT_SERVER_PORT"]; got != wantPort {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, wantPort)
 	}
-	if got := env["GC_DOLT_HOST"]; got != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed target", got)
+	// Loopback host is projected so bd routes via SQL instead of falling
+	// back to its CLI mode (which forks `dolt remote -v` on each call).
+	if got := env["GC_DOLT_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q for managed target", got, "127.0.0.1")
 	}
-	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want empty for managed target", got)
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q for managed target", got, "127.0.0.1")
 	}
 }
 
@@ -1764,6 +1846,15 @@ func TestBdRuntimeEnvForRigFallsBackToManagedCityPort(t *testing.T) {
 	}
 	if got := env["BEADS_DOLT_SERVER_PORT"]; got != want {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want %q", got, want)
+	}
+	// HOST must be projected alongside PORT — bd CLI mode (empty HOST)
+	// forks `dolt remote -v` per call and saturates the host on multi-DB
+	// data dirs.
+	if got := env["GC_DOLT_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q", got, "127.0.0.1")
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q", got, "127.0.0.1")
 	}
 	if got := env["BEADS_DIR"]; got != filepath.Join(rigDir, ".beads") {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, filepath.Join(rigDir, ".beads"))

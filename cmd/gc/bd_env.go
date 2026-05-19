@@ -155,30 +155,21 @@ func applyCanonicalDoltTargetEnv(env map[string]string, target contract.DoltConn
 	if env == nil {
 		return
 	}
-	// GC-owned projections must use the resolved target, not ambient parent
-	// shell host/port. Stale GC_DOLT_HOST/PORT was causing gc bd and projected
-	// session flows to drift away from the canonical external endpoint.
-	if shouldProjectResolvedDoltHost(target) {
-		env["GC_DOLT_HOST"] = strings.TrimSpace(target.Host)
+	// Always project the resolved host/port together — never inherit ambient
+	// parent shell host/port (PR #790 intent). Coupling them prevents a
+	// latent broken state where HOST alone would route bd via SQL with no
+	// port to connect to. Projecting the resolved loopback host in
+	// managed_city eliminates bd's empty-HOST CLI fallback (which forks
+	// `dolt remote -v` per call and saturates the host on multi-DB data dirs).
+	host := strings.TrimSpace(target.Host)
+	port := strings.TrimSpace(target.Port)
+	if host != "" && port != "" {
+		env["GC_DOLT_HOST"] = host
+		env["GC_DOLT_PORT"] = port
 	} else {
 		delete(env, "GC_DOLT_HOST")
-	}
-	if strings.TrimSpace(target.Port) != "" {
-		env["GC_DOLT_PORT"] = target.Port
-	} else {
 		delete(env, "GC_DOLT_PORT")
 	}
-}
-
-func shouldProjectResolvedDoltHost(target contract.DoltConnectionTarget) bool {
-	host := strings.TrimSpace(target.Host)
-	if host == "" {
-		return false
-	}
-	if target.External {
-		return true
-	}
-	return !managedLocalDoltHost(host)
 }
 
 func applyCanonicalDoltAuthEnv(env map[string]string, cityPath, scopeRoot string, target contract.DoltConnectionTarget) {
