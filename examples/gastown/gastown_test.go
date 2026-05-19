@@ -1345,6 +1345,71 @@ func TestGastownPromptPeerAddressesUseBindingPrefix(t *testing.T) {
 	}
 }
 
+// TestRefineryFormulaCleanupPathsDetachWorktree guards against the
+// regression where the refinery's worktree is parked on the target
+// branch (default `main`) between patrol cycles. Git refuses to have
+// two worktrees share a branch checkout, so an operator can't keep
+// `main` checked out in the primary rig directory while the refinery
+// worktree also holds it.
+//
+// Every cleanup path — rebase-rejection cleanup, test-failure rejection
+// cleanup, direct-merge success cleanup, and mr/pr handoff cleanup —
+// must end with the worktree in detached HEAD state. The fix appends
+// `git switch --detach HEAD` after the temp-branch deletion in each
+// path so the worktree releases the target branch.
+func TestRefineryFormulaCleanupPathsDetachWorktree(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+
+	checks := []struct {
+		name      string
+		startText string
+		endText   string
+	}{
+		{
+			name:      "rebase rejection cleanup",
+			startText: "If rebase FAILED (conflicts):",
+			endText:   "A new polecat will pick up the bead",
+		},
+		{
+			name:      "test failure rejection cleanup",
+			startText: "If branch caused it:",
+			endText:   "If pre-existing on target:",
+		},
+		{
+			name:      "direct merge cleanup",
+			startText: "**If MERGE_STRATEGY = \"direct\" (default):**",
+			endText:   "**If MERGE_STRATEGY = \"mr\":**",
+		},
+		{
+			name:      "mr handoff cleanup",
+			startText: "**If MERGE_STRATEGY = \"mr\":**",
+			endText:   "**If MERGE_STRATEGY = \"local\":**",
+		},
+	}
+	for _, check := range checks {
+		t.Run(check.name, func(t *testing.T) {
+			start := strings.Index(body, check.startText)
+			if start < 0 {
+				t.Fatalf("missing section start %q", check.startText)
+			}
+			end := strings.Index(body[start:], check.endText)
+			if end < 0 {
+				t.Fatalf("missing section end %q after %q", check.endText, check.startText)
+			}
+			section := body[start : start+end]
+			if !strings.Contains(section, "git switch --detach HEAD") {
+				t.Errorf("%s missing `git switch --detach HEAD` — refinery worktree will be left on target branch and block other worktrees from holding it:\n%s", check.name, section)
+			}
+		})
+	}
+}
+
 func TestGastownPatrolWispCommandsPropagateRoutingNamespace(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
