@@ -29,7 +29,7 @@ closes the bead once the PR is verified.
 
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
-version = 4
+version = 5
 contract = "graph.v2"
 
 [vars]
@@ -201,7 +201,7 @@ gc bd update $WORK \
   --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
 ```
 4. Do NOT delete the branch (new polecat needs it for conflict resolution).
-5. Clean up temp branch: `git checkout {{target_branch}} && git branch -D temp`
+5. Clean up temp branch (leaves worktree detached so other worktrees can hold {{target_branch}}): `git checkout {{target_branch}} && git branch -D temp && git switch --detach HEAD`
 6. Pour next patrol iteration before burning:
 ```bash
 NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
@@ -273,7 +273,7 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
    - Delete branch: `git push origin --delete $BRANCH`
-   - Clean up: `git checkout "$TARGET" && git branch -D temp`
+   - Clean up (leaves worktree detached so other worktrees can hold $TARGET): `git checkout "$TARGET" && git branch -D temp && git switch --detach HEAD`
    - Pour next patrol iteration before burning:
      ```bash
      NEXT=$(gc bd mol wisp mol-refinery-patrol --root-only --var target_branch={{target_branch}} --var rig_name={{rig_name}} --var binding_prefix={{binding_prefix}} --json | jq -r '.new_epic_id')
@@ -442,9 +442,10 @@ gc bd update $WORK \
 gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"
 ```
 
-**4. Cleanup:**
+**4. Cleanup (leaves worktree detached so other worktrees can hold $TARGET):**
 ```bash
 git branch -d temp
+git switch --detach HEAD
 ```
 If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 
@@ -581,10 +582,11 @@ gc bd update $WORK \
 gc bd close $WORK --reason "Pull request ready: $PR_URL"
 ```
 
-**5. Cleanup:**
+**5. Cleanup (leaves worktree detached so other worktrees can hold $TARGET):**
 ```bash
 git checkout "$TARGET"
 git branch -d temp
+git switch --detach HEAD
 ```
 Do NOT delete `$BRANCH` in mr mode — GitHub pull requests need the source branch.
 
