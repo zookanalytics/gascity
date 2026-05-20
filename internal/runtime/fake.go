@@ -45,6 +45,17 @@ type Fake struct {
 	// about to consult configured results. Tests use this to coordinate
 	// cancellation without relying on wall-clock sleeps.
 	WaitForIdleStarted map[string]chan struct{}
+	// StopGates blocks Stop on a per-name channel until the caller closes it.
+	// A nil or absent entry returns immediately with the configured
+	// StopErrors value (or nil). The gate is consulted under f.mu and the
+	// lock is released before the block, so other Fake methods remain
+	// callable while a Stop is gated. Used to test ordering invariants in
+	// callers that must persist state before tearing down the runtime.
+	StopGates map[string]chan struct{}
+	// StopStarted signals when Stop has recorded its call and is about to
+	// consult its gate. Tests use this to coordinate without wall-clock
+	// sleeps.
+	StopStarted map[string]chan struct{}
 }
 
 // Call records a single method invocation on [Fake].
@@ -83,6 +94,8 @@ func NewFake() *Fake {
 		InterruptBoundaryErrors: make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
+		StopGates:               make(map[string]chan struct{}),
+		StopStarted:             make(map[string]chan struct{}),
 	}
 }
 
@@ -108,6 +121,8 @@ func NewFailFake() *Fake {
 		InterruptBoundaryErrors: make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
+		StopGates:               make(map[string]chan struct{}),
+		StopStarted:             make(map[string]chan struct{}),
 		broken:                  true,
 	}
 }
@@ -133,13 +148,29 @@ func (f *Fake) Start(_ context.Context, name string, cfg Config) error {
 
 // Stop removes a fake session. Returns nil if it doesn't exist.
 // When broken, always returns an error.
+//
+// When StopGates[name] is set, the method releases f.mu and blocks on
+// the gate before applying the configured error or deletion. This lets
+// tests assert that callers persist durable state before tearing down
+// the runtime.
 func (f *Fake) Stop(name string) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "Stop", Name: name})
+	if started := f.StopStarted[name]; started != nil {
+		close(started)
+		delete(f.StopStarted, name)
+	}
 	if f.broken {
+		f.mu.Unlock()
 		return fmt.Errorf("session unavailable")
 	}
+	gate := f.StopGates[name]
+	f.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if err, ok := f.StopErrors[name]; ok {
 		return err
 	}
