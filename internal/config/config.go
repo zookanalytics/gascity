@@ -213,6 +213,8 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// Instrumentation configures opt-in CLI invocation tracing.
+	Instrumentation InstrumentationConfig `toml:"instrumentation,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula, append_fragments, and env;
@@ -1323,6 +1325,16 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+}
+
+// InstrumentationConfig holds optional CLI instrumentation settings.
+// When CLITraceEnabled is true, every `gc <subcmd>` invocation appends a
+// JSON line to <city>/.gc/runtime/gc-invocations.jsonl with timing,
+// exit code, and identity envelope fields. Defaults to off.
+type InstrumentationConfig struct {
+	// CLITraceEnabled toggles in-binary CLI invocation tracing.
+	// The GC_CLI_TRACE environment variable (1/0/true/false) overrides this.
+	CLITraceEnabled bool `toml:"cli_trace_enabled,omitempty" jsonschema:"default=false"`
 }
 
 // EventsConfig holds events provider settings.

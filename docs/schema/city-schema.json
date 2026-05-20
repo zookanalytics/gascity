@@ -1025,6 +1025,10 @@
           "type": "array",
           "description": "Services declares workspace-owned HTTP services mounted on the\ncontroller edge under /svc/{name}."
         },
+        "instrumentation": {
+          "$ref": "#/$defs/InstrumentationConfig",
+          "description": "Instrumentation configures opt-in CLI invocation tracing."
+        },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
           "description": "AgentDefaults provides city-level defaults for agents that don't\noverride them (canonical TOML key: agent_defaults). The runtime\ncurrently applies default_sling_formula, append_fragments, and env;\nthe attachment-list fields remain tombstones, and the other fields\nare parsed/composed but not yet inherited automatically."
@@ -1304,6 +1308,18 @@
         "source"
       ],
       "description": "Import defines a named import of another pack."
+    },
+    "InstrumentationConfig": {
+      "properties": {
+        "cli_trace_enabled": {
+          "type": "boolean",
+          "description": "CLITraceEnabled toggles in-binary CLI invocation tracing.\nThe GC_CLI_TRACE environment variable (1/0/true/false) overrides this.",
+          "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "InstrumentationConfig holds optional CLI instrumentation settings."
     },
     "K8sConfig": {
       "properties": {

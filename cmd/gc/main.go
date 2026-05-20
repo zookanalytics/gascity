@@ -97,7 +97,9 @@ var rigFlag string
 
 // run executes the gc CLI with the given args, writing output to stdout and
 // errors to stderr. Returns the exit code.
-func run(args []string, stdout, stderr io.Writer) int {
+func run(args []string, stdout, stderr io.Writer) (code int) {
+	startTime := time.Now()
+
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	cityFlag, rigFlag = "", ""
 	defer func() {
@@ -125,6 +127,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if args == nil {
 		args = []string{}
 	}
+
+	defer func() {
+		recordCLIInvocation(root, args, startTime, code, stderr)
+	}()
+
 	jsonExecution := shouldBufferJSONExecution(root, args)
 	if jsonExecution {
 		execStdout.target = &jsonStdout
@@ -132,24 +139,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 	root.SetArgs(args)
 	root.SetOut(execStdout)
 	root.SetErr(stderr)
-	if handled, code := handleJSONSchemaRequest(root, args, stdout); handled {
-		return code
+	if handled, exitCode := handleJSONSchemaRequest(root, args, stdout); handled {
+		return exitCode
 	}
-	if handled, code := handleJSONContractRequest(root, args, stdout, stderr); handled {
-		return code
+	if handled, exitCode := handleJSONContractRequest(root, args, stdout, stderr); handled {
+		return exitCode
 	}
 	if err := root.Execute(); err != nil {
-		code := commandExitCode(err)
+		exitCode := commandExitCode(err)
 		if jsonExecution {
 			if len(bytes.TrimSpace(jsonStdout.Bytes())) > 0 {
 				if _, copyErr := io.Copy(stdout, &jsonStdout); copyErr != nil {
 					return 1
 				}
 			} else {
-				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), code)
+				_ = writeJSONFailure(stdout, "command_failed", commandFailureMessage(err), exitCode)
 			}
 		}
-		return code
+		return exitCode
 	}
 	if jsonExecution {
 		if _, err := io.Copy(stdout, &jsonStdout); err != nil {
