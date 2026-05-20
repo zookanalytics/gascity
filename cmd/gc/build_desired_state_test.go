@@ -3241,10 +3241,13 @@ func (s *delayingPoolCreateStore) peakConcurrency() int {
 // + dolt commit in a tight serial loop. With bounded-parallel phase B, wall
 // time should collapse to roughly ceil(N/poolRealizeParallelism) × delay.
 //
-// The assertion bounds elapsed strictly below half the serial floor so a
-// regression that re-serializes the loop (e.g., a future refactor that
-// accidentally holds a mutex across the create call) fails this test before
-// it ships.
+// The assertion uses a deterministic peak-concurrency counter on the
+// injected store: a serial regression (e.g., a future refactor that
+// accidentally holds a mutex across the create call) peaks at 1
+// in-flight create, while the bounded-parallel implementation peaks at
+// all N. Asserting peakConcurrency() >= 2 catches re-serialization
+// without any wall-clock dependency (the prior elapsed-time check
+// flaked under loaded `make test -p=4` runs).
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
 		requestCount = 8
