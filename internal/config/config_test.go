@@ -5110,6 +5110,275 @@ func TestAgentDefaultsSlingFormula_ControlDispatcherSkipped(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// agent_defaults.env inheritance
+// ---------------------------------------------------------------------------
+
+func TestAgentDefaultsEnv_ExplicitAgentInherits(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker"},
+		},
+		AgentDefaults: AgentDefaults{
+			Env: map[string]string{
+				"PATH": "/opt/bin:${PATH}",
+				"LANG": "en_US.UTF-8",
+			},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	got := cfg.Agents[0].Env
+	want := map[string]string{
+		"PATH": "/opt/bin:${PATH}",
+		"LANG": "en_US.UTF-8",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Agent.Env = %v, want %v", got, want)
+	}
+}
+
+func TestAgentDefaultsEnv_AgentKeyWinsOnCollision(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{
+				Name: "worker",
+				Env: map[string]string{
+					"PATH": "/agent/bin:${PATH}", // explicit override
+				},
+			},
+		},
+		AgentDefaults: AgentDefaults{
+			Env: map[string]string{
+				"PATH": "/defaults/bin:${PATH}",
+				"LANG": "en_US.UTF-8", // not on agent — inherited
+			},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	got := cfg.Agents[0].Env
+	want := map[string]string{
+		"PATH": "/agent/bin:${PATH}", // agent value preserved
+		"LANG": "en_US.UTF-8",        // default merged in
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Agent.Env = %v, want %v", got, want)
+	}
+}
+
+func TestAgentDefaultsEnv_ImplicitAgentInherits(t *testing.T) {
+	cfg := &City{
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+		},
+		AgentDefaults: AgentDefaults{
+			Env: map[string]string{
+				"PATH": "/opt/bin:${PATH}",
+			},
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	found := false
+	for _, a := range cfg.Agents {
+		if a.Implicit && a.Name != ControlDispatcherAgentName {
+			found = true
+			if a.Env["PATH"] != "/opt/bin:${PATH}" {
+				t.Errorf("implicit agent %q: Env[PATH] = %q, want %q",
+					a.Name, a.Env["PATH"], "/opt/bin:${PATH}")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no implicit non-control-dispatcher agents found")
+	}
+}
+
+func TestAgentDefaultsEnv_ControlDispatcherSkipped(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: ControlDispatcherAgentName, Implicit: true},
+		},
+		AgentDefaults: AgentDefaults{
+			Env: map[string]string{
+				"PATH": "/opt/bin:${PATH}",
+			},
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if len(cfg.Agents[0].Env) != 0 {
+		t.Errorf("control-dispatcher got Env = %v, want empty (skipped)", cfg.Agents[0].Env)
+	}
+}
+
+func TestAgentDefaultsEnv_NoDefaults_NoMutation(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "worker", Env: map[string]string{"FOO": "bar"}},
+			{Name: "other"}, // nil Env
+		},
+		AgentDefaults: AgentDefaults{}, // no env
+	}
+	ApplyAgentDefaults(cfg)
+
+	if !reflect.DeepEqual(cfg.Agents[0].Env, map[string]string{"FOO": "bar"}) {
+		t.Errorf("Agent.Env = %v, want unchanged %v", cfg.Agents[0].Env, map[string]string{"FOO": "bar"})
+	}
+	if cfg.Agents[1].Env != nil {
+		t.Errorf("Agent.Env = %v, want nil when no defaults", cfg.Agents[1].Env)
+	}
+}
+
+func TestAgentDefaultsEnv_MergeLaterWinsOnCollision(t *testing.T) {
+	dst := AgentDefaults{
+		Env: map[string]string{
+			"PATH": "/old/bin:${PATH}",
+			"LANG": "C",
+		},
+	}
+	src := AgentDefaults{
+		Env: map[string]string{
+			"PATH": "/new/bin:${PATH}", // collision — src wins
+			"TZ":   "UTC",              // new key
+		},
+	}
+	mergeAgentDefaults(&dst, src, "test-label", nil)
+
+	want := map[string]string{
+		"PATH": "/new/bin:${PATH}",
+		"LANG": "C",
+		"TZ":   "UTC",
+	}
+	if !reflect.DeepEqual(dst.Env, want) {
+		t.Errorf("after merge, Env = %v, want %v", dst.Env, want)
+	}
+}
+
+func TestAgentDefaultsEnv_MergeIntoNilDst(t *testing.T) {
+	dst := AgentDefaults{} // nil Env
+	src := AgentDefaults{
+		Env: map[string]string{"PATH": "/opt/bin"},
+	}
+	mergeAgentDefaults(&dst, src, "test-label", nil)
+
+	if dst.Env == nil {
+		t.Fatal("dst.Env still nil after merging non-empty src")
+	}
+	if dst.Env["PATH"] != "/opt/bin" {
+		t.Errorf("dst.Env[PATH] = %q, want %q", dst.Env["PATH"], "/opt/bin")
+	}
+}
+
+func TestAgentDefaultsEnv_ParseFromTOML(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[agent_defaults.env]
+PATH = "/opt/bin:${PATH}"
+LANG = "en_US.UTF-8"
+
+[[agent]]
+name = "worker"
+
+[[agent]]
+name = "override-worker"
+env = { PATH = "/agent/bin:${PATH}" }
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.Env["PATH"] != "/opt/bin:${PATH}" {
+		t.Errorf("AgentDefaults.Env[PATH] = %q, want %q",
+			cfg.AgentDefaults.Env["PATH"], "/opt/bin:${PATH}")
+	}
+
+	ApplyAgentDefaults(cfg)
+
+	var worker, override *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "worker":
+			worker = &cfg.Agents[i]
+		case "override-worker":
+			override = &cfg.Agents[i]
+		}
+	}
+	if worker == nil || override == nil {
+		t.Fatalf("missing agents: worker=%v override=%v", worker, override)
+	}
+
+	wantWorker := map[string]string{
+		"PATH": "/opt/bin:${PATH}",
+		"LANG": "en_US.UTF-8",
+	}
+	if !reflect.DeepEqual(worker.Env, wantWorker) {
+		t.Errorf("worker.Env = %v, want %v", worker.Env, wantWorker)
+	}
+
+	wantOverride := map[string]string{
+		"PATH": "/agent/bin:${PATH}", // explicit wins
+		"LANG": "en_US.UTF-8",        // inherited
+	}
+	if !reflect.DeepEqual(override.Env, wantOverride) {
+		t.Errorf("override-worker.Env = %v, want %v", override.Env, wantOverride)
+	}
+}
+
+func TestAgentDefaultsEnv_AliasPreferCanonical(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[agents.env]
+PATH = "/legacy/bin:${PATH}"
+
+[agent_defaults.env]
+PATH = "/canonical/bin:${PATH}"
+LANG = "en_US.UTF-8"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.Env["PATH"] != "/canonical/bin:${PATH}" {
+		t.Errorf("AgentDefaults.Env[PATH] = %q, want canonical value",
+			cfg.AgentDefaults.Env["PATH"])
+	}
+	if cfg.AgentDefaults.Env["LANG"] != "en_US.UTF-8" {
+		t.Errorf("AgentDefaults.Env[LANG] = %q, want %q",
+			cfg.AgentDefaults.Env["LANG"], "en_US.UTF-8")
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero after normalization", cfg.AgentsDefaults)
+	}
+}
+
+func TestAgentDefaultsEnv_AliasInheritedWhenCanonicalAbsent(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test"
+
+[agents.env]
+PATH = "/legacy/bin:${PATH}"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.AgentDefaults.Env["PATH"] != "/legacy/bin:${PATH}" {
+		t.Errorf("AgentDefaults.Env[PATH] = %q, want alias-supplied value",
+			cfg.AgentDefaults.Env["PATH"])
+	}
+	if !reflect.DeepEqual(cfg.AgentsDefaults, AgentDefaults{}) {
+		t.Errorf("AgentsDefaults = %#v, want zero after normalization", cfg.AgentsDefaults)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // max_active_sessions / min_active_sessions / scale_check
 // ---------------------------------------------------------------------------
 
