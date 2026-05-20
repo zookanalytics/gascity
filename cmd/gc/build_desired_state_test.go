@@ -3199,17 +3199,39 @@ func TestSelectOrCreatePoolSessionBead_SerializesAliasCheckAndCreate(t *testing.
 
 // delayingPoolCreateStore sleeps for `delay` on every session-bead create so
 // tests can measure whether realizePoolDesiredSessions runs distinct-alias
-// creates in parallel or serializes them. Wraps MemStore for all other ops.
+// creates in parallel or serializes them. It tracks peak concurrent in-flight
+// session-bead creates so callers can assert parallelism deterministically
+// without depending on wall-clock measurements. Wraps MemStore for all other
+// ops.
 type delayingPoolCreateStore struct {
 	*beads.MemStore
 	delay time.Duration
+
+	mu       sync.Mutex
+	inFlight int
+	peak     int
 }
 
 func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 	if bead.Type == sessionBeadType {
+		s.mu.Lock()
+		s.inFlight++
+		if s.inFlight > s.peak {
+			s.peak = s.inFlight
+		}
+		s.mu.Unlock()
 		time.Sleep(s.delay)
+		s.mu.Lock()
+		s.inFlight--
+		s.mu.Unlock()
 	}
 	return s.MemStore.Create(bead)
+}
+
+func (s *delayingPoolCreateStore) peakConcurrency() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.peak
 }
 
 // TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates verifies
@@ -3219,10 +3241,13 @@ func (s *delayingPoolCreateStore) Create(bead beads.Bead) (beads.Bead, error) {
 // + dolt commit in a tight serial loop. With bounded-parallel phase B, wall
 // time should collapse to roughly ceil(N/poolRealizeParallelism) × delay.
 //
-// The assertion bounds elapsed strictly below half the serial floor so a
-// regression that re-serializes the loop (e.g., a future refactor that
-// accidentally holds a mutex across the create call) fails this test before
-// it ships.
+// The assertion uses a deterministic peak-concurrency counter on the
+// injected store: a serial regression (e.g., a future refactor that
+// accidentally holds a mutex across the create call) peaks at 1
+// in-flight create, while the bounded-parallel implementation peaks at
+// all N. Asserting peakConcurrency() >= 2 catches re-serialization
+// without any wall-clock dependency (the prior elapsed-time check
+// flaked under loaded `make test -p=4` runs).
 func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.T) {
 	const (
 		requestCount = 8
@@ -3250,18 +3275,18 @@ func TestRealizePoolDesiredSessions_ParallelizesDistinctAliasCreates(t *testing.
 	}
 	state := PoolDesiredState{Template: "claude", Requests: requests}
 
-	start := time.Now()
 	realizePoolDesiredSessions(bp, &cfg.Agents[0], state, desired, &stderr)
-	elapsed := time.Since(start)
 
 	if got := len(desired); got != requestCount {
 		t.Fatalf("desired count = %d, want %d; stderr=%q", got, requestCount, stderr.String())
 	}
 
-	serialFloor := time.Duration(requestCount) * createDelay
-	parallelCeiling := serialFloor / 2
-	if elapsed >= parallelCeiling {
-		t.Fatalf("realizePoolDesiredSessions ran in %s for %d creates × %s delay; serial floor = %s, parallel ceiling = %s — the refactor did not parallelize", elapsed, requestCount, createDelay, serialFloor, parallelCeiling)
+	// Deterministic parallelism check: a serial loop would peak at 1
+	// concurrent create. We require at least 2 to prove the refactor
+	// actually drives creates in parallel without depending on
+	// wall-clock measurements (which flake under `make test -p=4`).
+	if peak := store.peakConcurrency(); peak < 2 {
+		t.Fatalf("peak concurrent session-bead creates = %d for %d requests; want >= 2 — the refactor did not parallelize", peak, requestCount)
 	}
 
 	aliases := make(map[string]bool, requestCount)
