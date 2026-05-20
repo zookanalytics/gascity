@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -1363,15 +1364,18 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// newSessionCloseCmd creates the "gc session close <id-or-alias>" command.
+// newSessionCloseCmd creates the "gc session close [id-or-alias]" command.
 func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
-		Use:   "close <session-id-or-alias>",
+		Use:   "close [session-id-or-alias]",
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
-		Args: cobra.ExactArgs(1),
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+When called with no argument, defaults to $GC_SESSION_ID — the
+canonical way for an agent to self-close from inside its own
+runtime.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionClose(args, stdout, stderr) != 0 {
 				return errExit
@@ -1383,7 +1387,22 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 }
 
 // cmdSessionClose is the CLI entry point for "gc session close".
+// When args is empty, falls back to $GC_SESSION_ID so an agent can
+// self-close from inside its own runtime without re-substituting
+// its own session id.
 func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
+	target := ""
+	if len(args) > 0 {
+		target = args[0]
+	}
+	if target == "" {
+		target = strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	}
+	if target == "" {
+		fmt.Fprintln(stderr, "gc session close: no session id given and $GC_SESSION_ID is unset") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
 	store, code := openCityStore(stderr, "gc session close")
 	if store == nil {
 		return code
@@ -1394,7 +1413,7 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer) int {
 	if cityErr == nil {
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, args[0])
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

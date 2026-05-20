@@ -342,6 +342,108 @@ mode = "always"
 	}
 }
 
+// TestPhase0CLISessionClose_DefaultsToGCSessionID verifies that
+// `gc session close` with no positional arg falls back to
+// $GC_SESSION_ID — the canonical way for an agent to self-close
+// from inside its own runtime.
+func TestPhase0CLISessionClose_DefaultsToGCSessionID(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+mode = "always"
+`)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              "test-city--worker",
+			"alias":                     "worker",
+			"template":                  "worker",
+			"configured_named_session":  "true",
+			"configured_named_identity": "worker",
+			"configured_named_mode":     "always",
+			"state":                     "suspended",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(named session): %v", err)
+	}
+
+	t.Setenv("GC_SESSION_ID", bead.ID)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionClose(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdSessionClose(nil) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	reopened, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("reopen city store: %v", err)
+	}
+	got, err := reopened.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
+// TestPhase0CLISessionClose_NoArgsRequiresGCSessionID verifies
+// that with no positional arg and $GC_SESSION_ID empty/unset the
+// command exits non-zero with a clear stderr message instead of
+// panicking on an empty argument list.
+func TestPhase0CLISessionClose_NoArgsRequiresGCSessionID(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+start_command = "true"
+max_active_sessions = 1
+`)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_SESSION_ID", "")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionClose(nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdSessionClose(nil) with empty $GC_SESSION_ID succeeded; want failure. stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if msg := stderr.String(); !strings.Contains(msg, "GC_SESSION_ID") {
+		t.Fatalf("stderr = %q, want mention of GC_SESSION_ID", msg)
+	}
+}
+
 func TestPhase0MailRecipientIdentity_RejectsTemplateFactoryTarget(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
 
