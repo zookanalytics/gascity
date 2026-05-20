@@ -373,7 +373,30 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	}
 
 	// Step 10: Merge environment layers.
-	env := mergeEnv(passthroughEnv(), expandEnvMap(resolved.Env), expandEnvMap(cfgAgent.Env), agentEnv)
+	//
+	// Each [env] layer's values are expanded against {passthrough,
+	// agentEnv} so that ${VAR} references resolve correctly. The
+	// expansion source must include agentEnv because the supervisor's
+	// own os.Environ() does NOT carry GT_ROOT, GC_RIG, GC_RIG_ROOT,
+	// GC_DIR, etc. — those are computed in this function and would
+	// silently expand to empty under os.ExpandEnv (the previous
+	// behavior that bit PR #32, PR #34, and gc-rch40w).
+	//
+	// Both resolved.Env (provider preset env merged with agent.Env via
+	// mergeAgentOverrides) and cfgAgent.Env (agent.toml [env] only)
+	// expand against the same source. Cross-layer expansion (cfgAgent.Env
+	// referencing already-expanded resolved.Env values) is deliberately
+	// not supported here: because mergeAgentOverrides already folds
+	// agent.Env into resolved.Env, a layered expansion would re-expand
+	// references like "${PATH}" against a PATH that already contains the
+	// agent's own augmentation, producing duplicated segments.
+	//
+	// Final merge order keeps agentEnv last so its values win on key
+	// collisions; agentEnv values are concrete strings produced by this
+	// function and are not expanded.
+	pthru := passthroughEnv()
+	expansionSrc := mergeEnv(pthru, agentEnv)
+	env := mergeEnv(pthru, expandEnvMap(expansionSrc, resolved.Env), expandEnvMap(expansionSrc, cfgAgent.Env), agentEnv)
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
