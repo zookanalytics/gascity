@@ -248,3 +248,41 @@ func TestRigActionUnknown(t *testing.T) {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
 }
+
+// TestRigPrefixExposesEffectivePrefix verifies the response carries the
+// effective bead-ID prefix (derived from the rig name when not explicitly
+// configured), so dashboard clients can match prefixed bead IDs against the
+// rig dropdown. Regression test for the prefix-vs-name mismatch that
+// emptied the dashboard's rig filter.
+func TestRigPrefixExposesEffectivePrefix(t *testing.T) {
+	state := newFakeState(t)
+	// "myrig" has no explicit prefix → DeriveBeadsPrefix("myrig") = "my".
+	state.cfg.Rigs = []config.Rig{
+		{Name: "myrig", Path: "/tmp/myrig"},
+		{Name: "fancy", Path: "/tmp/fancy", Prefix: "fp"},
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/rigs"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	var resp struct {
+		Items []rigResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	byName := make(map[string]rigResponse, len(resp.Items))
+	for _, r := range resp.Items {
+		byName[r.Name] = r
+	}
+	if got := byName["myrig"].Prefix; got != "my" {
+		t.Errorf("derived prefix for myrig = %q, want %q", got, "my")
+	}
+	if got := byName["fancy"].Prefix; got != "fp" {
+		t.Errorf("explicit prefix for fancy = %q, want %q", got, "fp")
+	}
+}

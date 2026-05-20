@@ -2218,9 +2218,11 @@ type RigResponse struct {
 	LastActivity  *time.Time `json:"last_activity,omitempty"`
 	Name          string     `json:"name"`
 	Path          string     `json:"path"`
-	Prefix        *string    `json:"prefix,omitempty"`
-	RunningCount  int64      `json:"running_count"`
-	Suspended     bool       `json:"suspended"`
+
+	// Prefix Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name.
+	Prefix       string `json:"prefix"`
+	RunningCount int64  `json:"running_count"`
+	Suspended    bool   `json:"suspended"`
 }
 
 // RigUpdateInputBody defines model for RigUpdateInputBody.

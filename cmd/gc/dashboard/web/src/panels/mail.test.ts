@@ -49,7 +49,7 @@ describe("mail compose flows", () => {
       beads: [],
       fetchedAt: Date.now(),
       mail: [],
-      rigs: ["city"],
+      rigs: [{ name: "city", prefix: "ci" }],
       sessions: [{ id: "mc-vv8", label: "mayor", recipient: "mayor" }],
     });
   });
