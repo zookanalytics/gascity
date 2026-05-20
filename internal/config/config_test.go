@@ -3076,6 +3076,13 @@ func TestDeriveBeadsPrefix(t *testing.T) {
 		{"hello_world", "hw"},
 		{"a-b-c-d", "abcd"},
 		{"longname", "lo"},
+		// Pathological inputs that strip to empty. The derivation itself
+		// returns "" — ValidateRigs is responsible for rejecting these
+		// (see TestValidateRigs_EmptyDerivedPrefix).
+		{"-go", ""},
+		{"-py", ""},
+		{"-go-py", ""},
+		{"", ""},
 	}
 	for _, tt := range tests {
 		got := DeriveBeadsPrefix(tt.name)
@@ -3230,6 +3237,48 @@ func TestValidateRigs_ExplicitPrefixAvoidsCollision(t *testing.T) {
 	}
 	if err := ValidateRigs(rigs, "ci"); err != nil {
 		t.Errorf("ValidateRigs: unexpected error: %v", err)
+	}
+}
+
+// Regression: rig names like "-go" or "-py" derive to an empty prefix via
+// DeriveBeadsPrefix (the suffix strip leaves nothing). EffectivePrefix() is
+// consumed at 50+ call sites (sling routing, bead routing, store opening,
+// GC_BEADS_PREFIX env injection, dashboard API contract) where an empty
+// string silently breaks lookups. Validation must reject empty derived
+// prefixes at the config boundary so downstream code can rely on non-empty.
+func TestValidateRigs_EmptyDerivedPrefix(t *testing.T) {
+	cases := []struct {
+		name    string
+		rigName string
+	}{
+		{"go suffix only", "-go"},
+		{"py suffix only", "-py"},
+		{"go-py combo strips to empty", "-go-py"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rigs := []Rig{{Name: tc.rigName, Path: "/path"}}
+			err := ValidateRigs(rigs, "ci")
+			if err == nil {
+				t.Fatalf("expected error for rig name %q with empty derived prefix", tc.rigName)
+			}
+			if !strings.Contains(err.Error(), tc.rigName) {
+				t.Errorf("error = %q, want mention of rig name %q", err, tc.rigName)
+			}
+			if !strings.Contains(err.Error(), "derived prefix is empty") {
+				t.Errorf("error = %q, want 'derived prefix is empty'", err)
+			}
+		})
+	}
+}
+
+// Regression companion to TestValidateRigs_EmptyDerivedPrefix: an explicit
+// Prefix on the rig must bypass the empty-derived-prefix check, since the
+// derivation isn't consulted when Prefix is set.
+func TestValidateRigs_EmptyDerivedPrefixAllowedWithExplicit(t *testing.T) {
+	rigs := []Rig{{Name: "-go", Path: "/path", Prefix: "go"}}
+	if err := ValidateRigs(rigs, "ci"); err != nil {
+		t.Errorf("ValidateRigs: explicit prefix should bypass empty-derivation check, got %v", err)
 	}
 }
 

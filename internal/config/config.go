@@ -3460,6 +3460,9 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 		seenNames[r.Name] = true
 
 		prefix := strings.ToLower(r.EffectivePrefix())
+		if prefix == "" {
+			return fmt.Errorf("rig %q: derived prefix is empty (rig name yields no prefix after DeriveBeadsPrefix); set rigs[].prefix explicitly or rename", r.Name)
+		}
 		if other, ok := seenPrefixes[prefix]; ok {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
