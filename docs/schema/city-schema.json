@@ -1313,7 +1313,7 @@
       "properties": {
         "cli_trace_enabled": {
           "type": "boolean",
-          "description": "CLITraceEnabled toggles in-binary CLI invocation tracing.\nThe GC_CLI_TRACE environment variable (1/0/true/false) overrides this.",
+          "description": "CLITraceEnabled was the original toml toggle for CLI invocation\ntracing. It is preserved in the schema for backwards-compatibility\nonly; enablement now requires GC_CLI_TRACE=1 because the default-\noff path must short-circuit before any config or filesystem I/O.\nSetting this field has no effect.",
           "default": false
         }
       },

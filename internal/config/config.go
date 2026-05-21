@@ -1328,12 +1328,16 @@ type MailConfig struct {
 }
 
 // InstrumentationConfig holds optional CLI instrumentation settings.
-// When CLITraceEnabled is true, every `gc <subcmd>` invocation appends a
-// JSON line to <city>/.gc/runtime/gc-invocations.jsonl with timing,
-// exit code, and identity envelope fields. Defaults to off.
+// Enablement is controlled exclusively by the GC_CLI_TRACE environment
+// variable (1/true to enable, 0/false or unset to disable). The
+// CLITraceEnabled toml field is retained for backwards-compatibility but
+// is no longer consulted — see comment on the field for context.
 type InstrumentationConfig struct {
-	// CLITraceEnabled toggles in-binary CLI invocation tracing.
-	// The GC_CLI_TRACE environment variable (1/0/true/false) overrides this.
+	// CLITraceEnabled was the original toml toggle for CLI invocation
+	// tracing. It is preserved in the schema for backwards-compatibility
+	// only; enablement now requires GC_CLI_TRACE=1 because the default-
+	// off path must short-circuit before any config or filesystem I/O.
+	// Setting this field has no effect.
 	CLITraceEnabled bool `toml:"cli_trace_enabled,omitempty" jsonschema:"default=false"`
 }
 

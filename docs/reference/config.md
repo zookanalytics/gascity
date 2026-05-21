@@ -354,7 +354,7 @@ InstrumentationConfig holds optional CLI instrumentation settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `cli_trace_enabled` | boolean |  | `false` | CLITraceEnabled toggles in-binary CLI invocation tracing. The GC_CLI_TRACE environment variable (1/0/true/false) overrides this. |
+| `cli_trace_enabled` | boolean |  | `false` | CLITraceEnabled was the original toml toggle for CLI invocation tracing. It is preserved in the schema for backwards-compatibility only; enablement now requires GC_CLI_TRACE=1 because the default- off path must short-circuit before any config or filesystem I/O. Setting this field has no effect. |
 
 ## K8sConfig
 
