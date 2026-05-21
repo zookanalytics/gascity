@@ -845,9 +845,6 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
-		// Best-effort stop cleans up any live runtime and allows auto.Provider
-		// to discard stale ACP route entries for suspended sessions as well.
-		_ = m.sp.Stop(sessName)
 		nudgeIDs, capped, err := CancelWaitsAndCollectNudgeIDs(m.store, id, time.Now().UTC())
 		if err != nil {
 			log.Printf("session %s: closing after wait cancellation lookup failed: %v", id, err)
@@ -863,10 +860,23 @@ func (m *Manager) CloseDetailed(id string) (CloseResult, error) {
 			return err
 		}
 
+		// Close the bead before stopping the runtime so the reconciler
+		// can never observe a dead runtime against a status=active bead
+		// and respawn it. status=closed beads are filtered out of the
+		// reconciler's open snapshot, so once Close returns the bead is
+		// invisible to the respawn path even if Stop below takes minutes
+		// or is interrupted (e.g. SIGHUP cascade during self-close).
 		if err := m.store.Close(id); err != nil {
 			return err
 		}
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
+
+		// Stop is best-effort; a failure leaves an orphan runtime that
+		// must be reaped out-of-band. Log so the operator sees the
+		// ghost rather than discovering it later.
+		if stopErr := m.sp.Stop(sessName); stopErr != nil {
+			log.Printf("session %s: closed; runtime stop returned %v (orphan runtime may require manual cleanup)", id, stopErr)
+		}
 		return nil
 	})
 	return result, err
