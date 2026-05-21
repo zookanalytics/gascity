@@ -213,6 +213,8 @@ type City struct {
 	// Services declares workspace-owned HTTP services mounted on the
 	// controller edge under /svc/{name}.
 	Services []Service `toml:"service,omitempty"`
+	// Instrumentation configures opt-in CLI invocation tracing.
+	Instrumentation InstrumentationConfig `toml:"instrumentation,omitempty"`
 	// AgentDefaults provides city-level defaults for agents that don't
 	// override them (canonical TOML key: agent_defaults). The runtime
 	// currently applies default_sling_formula, append_fragments, and env;
@@ -1323,6 +1325,30 @@ type MailConfig struct {
 	// Provider selects the mail backend: "fake", "fail",
 	// "exec:<script>", or "" (default: beadmail).
 	Provider string `toml:"provider,omitempty"`
+}
+
+// InstrumentationConfig holds optional CLI instrumentation settings.
+// Enablement is controlled exclusively by the GC_CLI_TRACE environment
+// variable (1/true to enable, 0/false or unset to disable). The
+// CLITraceEnabled toml field is retained for backwards-compatibility but
+// is no longer consulted — see comment on the field for context.
+type InstrumentationConfig struct {
+	// CLITraceEnabled was the original toml toggle for CLI invocation
+	// tracing. It is preserved in the schema for backwards-compatibility
+	// only; enablement now requires GC_CLI_TRACE=1 because the default-
+	// off path must short-circuit before any config or filesystem I/O.
+	// Setting this field has no effect.
+	//
+	// Redaction caveat: when tracing is enabled the args_truncated
+	// field redacts values of a small deny-list of sensitive flags
+	// (--token, --password, --secret, --api-key, --apikey, --auth,
+	// --bearer) and KEY=VALUE positional args whose KEY contains
+	// TOKEN/PASSWORD/SECRET/KEY/AUTH (case-insensitive). Values
+	// passed via flags outside that deny-list — including short-form
+	// flags like -p — are recorded verbatim up to the per-arg byte
+	// cap. Operators handling other secret-carrying flags should
+	// disable tracing for the affected invocation.
+	CLITraceEnabled bool `toml:"cli_trace_enabled,omitempty" jsonschema:"default=false"`
 }
 
 // EventsConfig holds events provider settings.

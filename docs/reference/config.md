@@ -33,6 +33,7 @@ City is the top-level configuration for a Gas City instance.
 | `convergence` | ConvergenceConfig |  |  | Convergence configures convergence loop limits. |
 | `doctor` | DoctorConfig |  |  | Doctor configures gc doctor thresholds and policy toggles (worktree size warnings, nested-worktree auto-prune). |
 | `service` | []Service |  |  | Services declares workspace-owned HTTP services mounted on the controller edge under /svc/&#123;name&#125;. |
+| `instrumentation` | InstrumentationConfig |  |  | Instrumentation configures opt-in CLI invocation tracing. |
 | `agent_defaults` | AgentDefaults |  |  | AgentDefaults provides city-level defaults for agents that don't override them (canonical TOML key: agent_defaults). The runtime currently applies default_sling_formula, append_fragments, and env; the attachment-list fields remain tombstones, and the other fields are parsed/composed but not yet inherited automatically. |
 | `pricing` | []ModelPricing |  |  | Pricing holds per-model cost rate overrides keyed by (provider, model). City-level entries override pack-level entries which override the defaults shipped with the pricing package. See internal/pricing for the estimation seam introduced by issue #1255 (1d). |
 
@@ -346,6 +347,14 @@ Import defines a named import of another pack.
 | `export` | boolean |  |  | Export re-exports this import's contents into the parent pack's namespace. Consumers of the parent get this import's agents flattened under the parent's binding name. |
 | `transitive` | boolean |  |  | Transitive controls whether this import's own imports are visible to the consumer. Defaults to true (transitive). Set to false to suppress transitive resolution for this specific import. |
 | `shadow` | string |  |  | Shadow controls shadow warnings when the importer defines an agent with the same name as one from this import. "warn" (default) emits a warning; "silent" suppresses it. Enum: `warn`, `silent` |
+
+## InstrumentationConfig
+
+InstrumentationConfig holds optional CLI instrumentation settings.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `cli_trace_enabled` | boolean |  | `false` | CLITraceEnabled was the original toml toggle for CLI invocation tracing. It is preserved in the schema for backwards-compatibility only; enablement now requires GC_CLI_TRACE=1 because the default- off path must short-circuit before any config or filesystem I/O. Setting this field has no effect.  Redaction caveat: when tracing is enabled the args_truncated field redacts values of a small deny-list of sensitive flags (--token, --password, --secret, --api-key, --apikey, --auth, --bearer) and KEY=VALUE positional args whose KEY contains TOKEN/PASSWORD/SECRET/KEY/AUTH (case-insensitive). Values passed via flags outside that deny-list — including short-form flags like -p — are recorded verbatim up to the per-arg byte cap. Operators handling other secret-carrying flags should disable tracing for the affected invocation. |
 
 ## K8sConfig
 
