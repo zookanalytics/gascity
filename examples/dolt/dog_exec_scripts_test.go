@@ -2382,3 +2382,225 @@ exit 0
 		t.Fatalf("fresh prod_dev backup should not be reported stale, log:\n%s", gcLog)
 	}
 }
+
+// TestDoctorScriptDiscoversNamedBackupURLAndChecksFreshnessAtURL exercises
+// the Path A discovery flow added for gc-lhq4yu. Under Path A, each DB's
+// `<db>-backup` is configured with a `file://` URL pointing at offsite
+// storage, and there is no local `.dolt-backup` artifact directory. The
+// doctor must read `dolt backup -v` per DB, parse the URL, and check
+// freshness at that path — not at the unset BACKUP_ARTIFACT_DIR — and
+// must not emit the legacy "backup artifact dir missing" advisory in
+// that configuration.
+func TestDoctorScriptDiscoversNamedBackupURLAndChecksFreshnessAtURL(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	offsiteRoot := filepath.Join(cityPath, "offsite")
+	for _, db := range []string{"prod", "archive"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s/.dolt: %v", db, err)
+		}
+		if err := os.MkdirAll(filepath.Join(offsiteRoot, db), 0o755); err != nil {
+			t.Fatalf("mkdir offsite/%s: %v", db, err)
+		}
+	}
+	freshBackup := filepath.Join(offsiteRoot, "prod", "manifest")
+	writeTestFile(t, freshBackup, "data")
+	fresh := time.Now()
+	if err := os.Chtimes(freshBackup, fresh, fresh); err != nil {
+		t.Fatalf("chtimes fresh: %v", err)
+	}
+	staleBackup := filepath.Join(offsiteRoot, "archive", "manifest")
+	writeTestFile(t, staleBackup, "data")
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(staleBackup, old, old); err != nil {
+		t.Fatalf("chtimes stale: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\narchive\n'
+    exit 0
+    ;;
+  "backup -v")
+    db="$(basename "$PWD")"
+    printf '%%s-backup file://%%s/%%s {}\n' "$db" %s "$db"
+    exit 0
+    ;;
+esac
+exit 0
+`, shellQuote(offsiteRoot)))
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "archive backup is") {
+		t.Fatalf("doctor did not report stale archive backup discovered via URL, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup is") {
+		t.Fatalf("fresh prod backup should not be reported stale, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "backup artifact dir missing") {
+		t.Fatalf("Path A doctor must not emit 'backup artifact dir missing' advisory, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptReportsMissingBackupWhenURLPathEmpty asserts the doctor
+// reports staleness when a `<db>-backup` URL is configured but the target
+// directory contains no backup artifacts yet. This is the first-time-sync
+// situation: backup is enrolled but never synced.
+func TestDoctorScriptReportsMissingBackupWhenURLPathEmpty(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	offsiteRoot := filepath.Join(cityPath, "offsite")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod/.dolt: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(offsiteRoot, "prod"), 0o755); err != nil {
+		t.Fatalf("mkdir offsite/prod: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+  "backup -v")
+    db="$(basename "$PWD")"
+    printf '%%s-backup file://%%s/%%s {}\n' "$db" %s "$db"
+    exit 0
+    ;;
+esac
+exit 0
+`, shellQuote(offsiteRoot)))
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "prod backup missing") {
+		t.Fatalf("doctor should report missing backup at empty URL path, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSkipsRemoteBackupURL asserts the doctor does not emit
+// freshness warnings for DBs whose `<db>-backup` is a non-file URL
+// (s3://, aws://, etc.). Remote freshness is the remote storage's
+// responsibility — we can't stat its files from here, and emitting
+// "backup missing" would be a false positive.
+func TestDoctorScriptSkipsRemoteBackupURL(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod/.dolt: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+  "backup -v")
+    db="$(basename "$PWD")"
+    printf '%s-backup aws://dynamo:bucket/%s {}\n' "$db" "$db"
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "prod backup") {
+		t.Fatalf("doctor must not report freshness for remote-URL backup, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "backup artifact dir missing") {
+		t.Fatalf("doctor must not emit legacy artifact-dir warning, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSilentWhenNoBackupConfiguredAndArtifactDirAbsent
+// asserts the doctor stays quiet for DBs that have neither a named
+// `<db>-backup` nor a local artifact directory — the "not enrolled in
+// backup" state. The legacy "backup artifact dir missing" advisory
+// (gc-lhq4yu) is gone; an unenrolled DB simply isn't checked.
+func TestDoctorScriptSilentWhenNoBackupConfiguredAndArtifactDirAbsent(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir prod/.dolt: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\n'
+    exit 0
+    ;;
+  "backup -v")
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if strings.Contains(string(gcLog), "backup artifact dir missing") {
+		t.Fatalf("doctor must not emit legacy 'backup artifact dir missing' advisory, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "prod backup") {
+		t.Fatalf("doctor must not warn about unenrolled DB, log:\n%s", gcLog)
+	}
+}

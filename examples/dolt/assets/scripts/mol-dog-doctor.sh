@@ -62,6 +62,40 @@ newest_backup_mtime_for_db() {
     printf '%s\n' "$newest_mtime"
 }
 
+newest_backup_mtime_in_dir() {
+    backup_dir_path="$1"
+    newest_mtime=0
+    if [ ! -d "$backup_dir_path" ]; then
+        printf '%s\n' "$newest_mtime"
+        return
+    fi
+    while IFS= read -r -d '' backup_path; do
+        backup_mtime=$(file_mtime "$backup_path")
+        if [ "$backup_mtime" -gt "$newest_mtime" ]; then
+            newest_mtime="$backup_mtime"
+        fi
+    done < <(find -L "$backup_dir_path" -type f -print0 2>/dev/null)
+    printf '%s\n' "$newest_mtime"
+}
+
+# discover_named_backup_url echoes the URL portion of `dolt backup -v`
+# for the named backup `<db>-backup`, run from the DB's data directory.
+# Echoes empty when no DB data dir exists, no named backup is
+# configured, or the dolt invocation fails — the caller distinguishes
+# "configured with file:// URL" from "configured with remote URL" from
+# "not configured" via the case-match on the result.
+discover_named_backup_url() {
+    db_name="$1"
+    db_data_dir="$DOLT_DATA_DIR/$db_name"
+    if [ ! -d "$db_data_dir/.dolt" ]; then
+        printf ''
+        return
+    fi
+    backup_line=$(cd "$db_data_dir" 2>/dev/null && dolt backup -v 2>/dev/null || true)
+    printf '%s\n' "$backup_line" \
+        | awk -v want="${db_name}-backup" '$1 == want {print $2; exit}'
+}
+
 append_backup_stale() {
     backup_stale_item="$1"
     if [ -n "$BACKUP_STALE_ITEMS" ]; then
@@ -115,28 +149,48 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
     ORPHAN_WARN=" [WARN: $ORPHAN_COUNT orphan DBs detected — run gc dolt cleanup]"
 fi
 
-# Backup freshness: check newest backup artifact per database.
+# Backup freshness: prefer the `<db>-backup` URL recorded in dolt itself
+# (auto-discovered via `dolt backup -v`). file:// URLs are stat'd at the
+# URL path — this is the Path A flow where the offsite location lives
+# outside any local artifact directory. Remote URLs (s3://, aws://,
+# gs://, http(s)://) are skipped because remote freshness is the
+# storage backend's responsibility. When no named backup is configured
+# for a DB, fall back to scanning $BACKUP_ARTIFACT_DIR for back-compat
+# with legacy Path B layouts that drop artifacts there directly; if
+# that directory is also absent, the DB is treated as not enrolled and
+# skipped silently (no advisory).
 BACKUP_STALE=""
 if [ -n "$USER_DBS" ]; then
-    if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
-        BACKUP_STALE=" [WARN: backup artifact dir missing]"
-    else
-        BACKUP_STALE_ITEMS=""
-        NOW_S=$(date +%s)
-        for db in $USER_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
-            if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
-                append_backup_stale "$db backup missing"
+    BACKUP_STALE_ITEMS=""
+    NOW_S=$(date +%s)
+    for db in $USER_DBS; do
+        backup_url=$(discover_named_backup_url "$db")
+        case "$backup_url" in
+            file://*)
+                backup_path="${backup_url#file://}"
+                NEWEST_BACKUP_MTIME=$(newest_backup_mtime_in_dir "$backup_path")
+                ;;
+            "")
+                if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
+                    continue
+                fi
+                NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+                ;;
+            *)
                 continue
-            fi
-            BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
-            if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
-                append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
-            fi
-        done
-        if [ -n "$BACKUP_STALE_ITEMS" ]; then
-            BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
+                ;;
+        esac
+        if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
+            append_backup_stale "$db backup missing"
+            continue
         fi
+        BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
+        if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
+            append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
+        fi
+    done
+    if [ -n "$BACKUP_STALE_ITEMS" ]; then
+        BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
     fi
 fi
 
