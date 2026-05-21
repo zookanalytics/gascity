@@ -1313,7 +1313,7 @@
       "properties": {
         "cli_trace_enabled": {
           "type": "boolean",
-          "description": "CLITraceEnabled was the original toml toggle for CLI invocation\ntracing. It is preserved in the schema for backwards-compatibility\nonly; enablement now requires GC_CLI_TRACE=1 because the default-\noff path must short-circuit before any config or filesystem I/O.\nSetting this field has no effect.",
+          "description": "CLITraceEnabled was the original toml toggle for CLI invocation\ntracing. It is preserved in the schema for backwards-compatibility\nonly; enablement now requires GC_CLI_TRACE=1 because the default-\noff path must short-circuit before any config or filesystem I/O.\nSetting this field has no effect.\n\nRedaction caveat: when tracing is enabled the args_truncated\nfield redacts values of a small deny-list of sensitive flags\n(--token, --password, --secret, --api-key, --apikey, --auth,\n--bearer) and KEY=VALUE positional args whose KEY contains\nTOKEN/PASSWORD/SECRET/KEY/AUTH (case-insensitive). Values\npassed via flags outside that deny-list — including short-form\nflags like -p — are recorded verbatim up to the per-arg byte\ncap. Operators handling other secret-carrying flags should\ndisable tracing for the affected invocation.",
           "default": false
         }
       },

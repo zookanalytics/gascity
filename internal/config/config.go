@@ -1338,6 +1338,16 @@ type InstrumentationConfig struct {
 	// only; enablement now requires GC_CLI_TRACE=1 because the default-
 	// off path must short-circuit before any config or filesystem I/O.
 	// Setting this field has no effect.
+	//
+	// Redaction caveat: when tracing is enabled the args_truncated
+	// field redacts values of a small deny-list of sensitive flags
+	// (--token, --password, --secret, --api-key, --apikey, --auth,
+	// --bearer) and KEY=VALUE positional args whose KEY contains
+	// TOKEN/PASSWORD/SECRET/KEY/AUTH (case-insensitive). Values
+	// passed via flags outside that deny-list — including short-form
+	// flags like -p — are recorded verbatim up to the per-arg byte
+	// cap. Operators handling other secret-carrying flags should
+	// disable tracing for the affected invocation.
 	CLITraceEnabled bool `toml:"cli_trace_enabled,omitempty" jsonschema:"default=false"`
 }
 

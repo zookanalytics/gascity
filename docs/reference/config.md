@@ -354,7 +354,7 @@ InstrumentationConfig holds optional CLI instrumentation settings.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `cli_trace_enabled` | boolean |  | `false` | CLITraceEnabled was the original toml toggle for CLI invocation tracing. It is preserved in the schema for backwards-compatibility only; enablement now requires GC_CLI_TRACE=1 because the default- off path must short-circuit before any config or filesystem I/O. Setting this field has no effect. |
+| `cli_trace_enabled` | boolean |  | `false` | CLITraceEnabled was the original toml toggle for CLI invocation tracing. It is preserved in the schema for backwards-compatibility only; enablement now requires GC_CLI_TRACE=1 because the default- off path must short-circuit before any config or filesystem I/O. Setting this field has no effect.  Redaction caveat: when tracing is enabled the args_truncated field redacts values of a small deny-list of sensitive flags (--token, --password, --secret, --api-key, --apikey, --auth, --bearer) and KEY=VALUE positional args whose KEY contains TOKEN/PASSWORD/SECRET/KEY/AUTH (case-insensitive). Values passed via flags outside that deny-list — including short-form flags like -p — are recorded verbatim up to the per-arg byte cap. Operators handling other secret-carrying flags should disable tracing for the affected invocation. |
 
 ## K8sConfig
 
