@@ -2393,9 +2393,12 @@ gc session attach <session-id-or-alias>
 End a conversation. Stops the runtime if active and closes the bead.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+When called with no argument, defaults to $GC_SESSION_ID — the
+canonical way for an agent to self-close from inside its own
+runtime.
 
 ```
-gc session close <session-id-or-alias>
+gc session close [session-id-or-alias]
 ```
 
 ## gc session kill
