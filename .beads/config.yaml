@@ -1,0 +1,15 @@
+issue_prefix: gc
+issue-prefix: gc
+dolt.auto-start: false
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+
+backup.enabled: false
+types.custom: molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step
+
+dolt.auto-commit: "batch"
+
+export.auto: false
+import.auto: false
+
+sync.remote: "git+ssh://git@github.com/zookanalytics/gascity.git"
