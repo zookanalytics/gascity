@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,9 +17,8 @@ import (
 
 // CLI invocation tracing. When enabled, the root command wraps Execute()
 // and appends one JSON line per invocation to
-// <city>/.gc/runtime/gc-invocations.jsonl. Enabled either via city.toml
-// ([instrumentation] cli_trace_enabled=true) or the GC_CLI_TRACE
-// environment variable. Defaults to off.
+// <city>/.gc/runtime/gc-invocations.jsonl. Enabled only via the
+// GC_CLI_TRACE environment variable (1/true). Defaults to off.
 //
 // The hook is fail-safe: any error during instrumentation logs a single
 // warn line to stderr and never affects the command's exit code.
@@ -39,6 +39,8 @@ const (
 
 // cliInvocationRecord is the schema written to gc-invocations.jsonl.
 // JSON field names are stable contract — downstream analyzers depend on them.
+// All fields are always present (no omitempty) so the schema is stable
+// across invocation contexts; agent-runtime envs that are unset emit "".
 type cliInvocationRecord struct {
 	TS              string `json:"ts"`
 	Cmd             string `json:"cmd"`
@@ -47,16 +49,31 @@ type cliInvocationRecord struct {
 	ExitCode        int    `json:"exit_code"`
 	PID             int    `json:"pid"`
 	PPID            int    `json:"ppid"`
-	GCSessionID     string `json:"gc_session_id,omitempty"`
-	GCAlias         string `json:"gc_alias,omitempty"`
-	GCSessionOrigin string `json:"gc_session_origin,omitempty"`
+	GCSessionID     string `json:"gc_session_id"`
+	GCAlias         string `json:"gc_alias"`
+	GCSessionOrigin string `json:"gc_session_origin"`
 }
 
 // cliTraceResolved captures the decision of whether to record and where.
-// Resolved at most once per invocation; the disabled path stops at Enabled.
+// Resolved at most once per process; the disabled path stops at Enabled.
 type cliTraceResolved struct {
 	Enabled bool
 	Path    string
+}
+
+// cliTraceResolveOnce caches the per-process resolution so repeated lookups
+// (e.g. tests or future call sites) pay the discovery cost at most once.
+// Exposed via resetCLITraceResolveCache for tests that need to vary env.
+var (
+	cliTraceResolveOnce  sync.Once
+	cliTraceResolveValue cliTraceResolved
+)
+
+// resetCLITraceResolveCache clears the cached resolution. Tests call this
+// between cases that vary GC_CLI_TRACE or the city layout.
+func resetCLITraceResolveCache() {
+	cliTraceResolveOnce = sync.Once{}
+	cliTraceResolveValue = cliTraceResolved{}
 }
 
 // recordCLIInvocation is the entry point invoked after root.Execute returns.
@@ -80,31 +97,32 @@ func recordCLIInvocation(root *cobra.Command, args []string, startTime time.Time
 }
 
 // resolveCLITrace decides whether tracing is on and where to write.
-// Order: GC_CLI_TRACE env override (1/0/true/false) → city.toml
-// [instrumentation] cli_trace_enabled → default false. Returns Enabled=false
-// when no writable city path can be resolved.
+// Default-off is constant-time: when GC_CLI_TRACE is unset or explicitly
+// false, this returns immediately with no config or filesystem I/O. Only
+// when GC_CLI_TRACE is explicitly true does it walk for the city path.
+//
+// The legacy city.toml `[instrumentation] cli_trace_enabled` flag is no
+// longer consulted — toml-only enablement would require reading config in
+// the default-off path, which violates the constant-time requirement.
 func resolveCLITrace() cliTraceResolved {
+	cliTraceResolveOnce.Do(func() {
+		cliTraceResolveValue = resolveCLITraceUncached()
+	})
+	return cliTraceResolveValue
+}
+
+func resolveCLITraceUncached() cliTraceResolved {
 	envOverride, envSet := parseCLITraceEnv()
 
-	if envSet && !envOverride {
+	// Default off. No I/O when env is unset, invalid, or explicitly false.
+	if !envSet || !envOverride {
 		return cliTraceResolved{}
 	}
 
+	// Enabled via env. Only now do we resolve the city path for the
+	// trace file location.
 	cityPath, err := resolveCity()
 	if err != nil || cityPath == "" {
-		return cliTraceResolved{}
-	}
-
-	cfgEnabled := false
-	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
-		cfgEnabled = cfg.Instrumentation.CLITraceEnabled
-	}
-
-	enabled := cfgEnabled
-	if envSet {
-		enabled = envOverride
-	}
-	if !enabled {
 		return cliTraceResolved{}
 	}
 
@@ -163,16 +181,78 @@ func resolveCmdChain(root *cobra.Command, args []string) string {
 	return cmd.CommandPath()
 }
 
+// cliTraceSensitiveFlags is the case-insensitive deny-list of flags whose
+// next positional value (or `=value` suffix) is replaced with
+// `<redacted:N>` where N is the original value's byte length.
+//
+// The single-letter form `-p` is intentionally omitted: too many legitimate
+// CLI patterns use short flags for non-sensitive options, and false
+// positives would corrupt the trace. Operators who need exhaustive
+// redaction should disable tracing for the affected invocation.
+var cliTraceSensitiveFlags = map[string]struct{}{
+	"--token":    {},
+	"--password": {},
+	"--secret":   {},
+	"--api-key":  {},
+	"--apikey":   {},
+	"--auth":     {},
+	"--bearer":   {},
+}
+
+// cliTraceSensitiveEnvSubstrings are substring matches (case-insensitive)
+// against the KEY portion of KEY=VALUE positional args. Any match triggers
+// redaction of the VALUE.
+var cliTraceSensitiveEnvSubstrings = []string{
+	"TOKEN",
+	"PASSWORD",
+	"SECRET",
+	"KEY",
+	"AUTH",
+}
+
 // truncateCLIArgs builds a space-joined args summary capped at maxTotal
-// bytes. Individual args longer than maxArg bytes are replaced with a
-// <len:N> sentinel so a single huge value (e.g., --description with a long
-// markdown body) doesn't blow the budget on its own.
+// bytes. Three transformations apply, in order:
+//
+//  1. Deny-listed flag values are replaced with `<redacted:N>`. Both the
+//     separated form (`--token <value>`) and inline form (`--token=<value>`)
+//     are handled. The redaction is unconditional — short and long values
+//     alike are stripped, since short tokens leak as easily as long ones.
+//  2. KEY=VALUE positional args whose KEY contains a sensitive substring
+//     (TOKEN, PASSWORD, SECRET, KEY, AUTH — case-insensitive) get the
+//     VALUE redacted in the same `<redacted:N>` form.
+//  3. Individual args longer than maxArg bytes are replaced with the
+//     `<len:N>` sentinel so a single huge value doesn't blow the budget.
+//
+// After the per-arg transformation the joined string is truncated to
+// maxTotal bytes (with `...` ellipsis when it overflows).
 func truncateCLIArgs(args []string, maxTotal, maxArg int) string {
 	if len(args) == 0 {
 		return ""
 	}
 	parts := make([]string, 0, len(args))
-	for _, arg := range args {
+	skipNext := false
+	for i, arg := range args {
+		if skipNext {
+			parts = append(parts, redactedSentinel(len(arg)))
+			skipNext = false
+			continue
+		}
+
+		if redacted, ok := redactSensitiveFlag(arg); ok {
+			parts = append(parts, redacted)
+			// If the flag was the separated form (no `=` in arg), the
+			// next positional is the value and must be redacted.
+			if !strings.Contains(arg, "=") && i+1 < len(args) {
+				skipNext = true
+			}
+			continue
+		}
+
+		if redacted, ok := redactSensitiveEnvKV(arg); ok {
+			parts = append(parts, redacted)
+			continue
+		}
+
 		if len(arg) > maxArg {
 			parts = append(parts, fmt.Sprintf("<len:%d>", len(arg)))
 			continue
@@ -189,9 +269,62 @@ func truncateCLIArgs(args []string, maxTotal, maxArg int) string {
 	return joined[:maxTotal-3] + "..."
 }
 
+// redactSensitiveFlag handles `--flag`, `--flag=value`, and the
+// case-insensitive deny-list. Returns the redacted form and true when the
+// arg matched a sensitive flag.
+func redactSensitiveFlag(arg string) (string, bool) {
+	if !strings.HasPrefix(arg, "--") {
+		return "", false
+	}
+	name := arg
+	value := ""
+	hasInlineValue := false
+	if eq := strings.IndexByte(arg, '='); eq > 0 {
+		name = arg[:eq]
+		value = arg[eq+1:]
+		hasInlineValue = true
+	}
+	if _, ok := cliTraceSensitiveFlags[strings.ToLower(name)]; !ok {
+		return "", false
+	}
+	if hasInlineValue {
+		return name + "=" + redactedSentinel(len(value)), true
+	}
+	// Separated form: pass the flag through; the next arg is consumed by
+	// the caller (skipNext) and replaced with the sentinel.
+	return name, true
+}
+
+// redactSensitiveEnvKV redacts the VALUE portion of KEY=VALUE positional
+// args when KEY contains a sensitive substring. Returns the redacted form
+// and true on match.
+func redactSensitiveEnvKV(arg string) (string, bool) {
+	if strings.HasPrefix(arg, "-") {
+		return "", false
+	}
+	eq := strings.IndexByte(arg, '=')
+	if eq <= 0 {
+		return "", false
+	}
+	key := arg[:eq]
+	value := arg[eq+1:]
+	upperKey := strings.ToUpper(key)
+	for _, needle := range cliTraceSensitiveEnvSubstrings {
+		if strings.Contains(upperKey, needle) {
+			return key + "=" + redactedSentinel(len(value)), true
+		}
+	}
+	return "", false
+}
+
+func redactedSentinel(n int) string {
+	return fmt.Sprintf("<redacted:%d>", n)
+}
+
 // appendCLIInvocation writes one JSON line to the active log, rotating
 // first if the file has crossed cliTraceMaxSizeBytes. All errors are
-// reported via warnCLITrace and otherwise swallowed.
+// reported via warnCLITrace and otherwise swallowed. Rotation is
+// asynchronous — only the rename happens on the host's critical path.
 func appendCLIInvocation(path string, rec cliInvocationRecord, stderr io.Writer) {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -202,9 +335,7 @@ func appendCLIInvocation(path string, rec cliInvocationRecord, stderr io.Writer)
 		warnCLITrace(stderr, "mkdir: %v", err)
 		return
 	}
-	if err := maybeRotateCLITrace(path, cliTraceMaxSizeBytes, stderr); err != nil {
-		warnCLITrace(stderr, "rotate: %v", err)
-	}
+	maybeRotateCLITrace(path, cliTraceMaxSizeBytes, stderr)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		warnCLITrace(stderr, "open: %v", err)
@@ -219,46 +350,70 @@ func appendCLIInvocation(path string, rec cliInvocationRecord, stderr io.Writer)
 	}
 }
 
-// maybeRotateCLITrace rotates path when its current size meets or exceeds
-// maxSize. A missing path is treated as "no rotation needed." Always uses
-// cliTraceMaxArchives for retention so callers don't need to thread it.
-func maybeRotateCLITrace(path string, maxSize int64, stderr io.Writer) error {
+// maybeRotateCLITrace performs synchronous size detection and rename, then
+// kicks off the gzip+prune in a detached goroutine. The function returns
+// as soon as the rename completes — the host command never blocks on
+// compression. Errors are reported via warnCLITrace and never propagated.
+//
+// On process exit the goroutine may be interrupted mid-gzip. The renamed
+// file remains on disk as `<path>.rotating.<pid>.<ts>` and is treated as
+// orphan state the next rotation cycle leaves alone. This is acceptable —
+// a missed archive is preferable to a slow `gc` invocation.
+func maybeRotateCLITrace(path string, maxSize int64, stderr io.Writer) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		if !os.IsNotExist(err) {
+			warnCLITrace(stderr, "rotate stat: %v", err)
 		}
-		return err
+		return
 	}
 	if fi.Size() < maxSize {
-		return nil
+		return
 	}
-	return rotateCLITrace(path, cliTraceMaxArchives, stderr)
-}
 
-// rotateCLITrace renames the active log to a unique temp name, gzips it
-// to a timestamped archive, then prunes archives beyond maxArchives.
-// On gzip failure the temp file is restored to the active path so the
-// next write does not start with an empty log.
-func rotateCLITrace(path string, maxArchives int, stderr io.Writer) error {
 	ts := time.Now().UTC().Format("20060102T150405.000000000Z")
 	archivePath := fmt.Sprintf("%s.%s.gz", path, ts)
 	tempPath := fmt.Sprintf("%s.rotating.%d.%s", path, os.Getpid(), ts)
 
 	if err := os.Rename(path, tempPath); err != nil {
-		return fmt.Errorf("rename to temp: %w", err)
+		warnCLITrace(stderr, "rotate rename: %v", err)
+		return
 	}
+
+	cliTraceRotateInFlight.Add(1)
+	go func() {
+		defer cliTraceRotateInFlight.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				warnCLITrace(stderr, "rotate panic: %v", r)
+			}
+		}()
+		finishCLITraceRotation(tempPath, archivePath, path, stderr)
+	}()
+}
+
+// cliTraceRotateInFlight tracks background rotations so tests can wait
+// for them to settle deterministically.
+var cliTraceRotateInFlight sync.WaitGroup
+
+// waitForCLITraceRotations blocks until all in-flight rotation goroutines
+// complete. Intended for tests only.
+func waitForCLITraceRotations() {
+	cliTraceRotateInFlight.Wait()
+}
+
+// finishCLITraceRotation runs the slow half of rotation: gzip the renamed
+// file, remove the temp, and prune older archives. Errors leave the temp
+// file on disk so nothing is silently destroyed.
+func finishCLITraceRotation(tempPath, archivePath, activePath string, stderr io.Writer) {
 	if err := gzipCLITraceFile(tempPath, archivePath); err != nil {
-		if restoreErr := os.Rename(tempPath, path); restoreErr != nil {
-			warnCLITrace(stderr, "rotate restore failed: %v (original gzip err: %v)", restoreErr, err)
-		}
-		return fmt.Errorf("gzip: %w", err)
+		warnCLITrace(stderr, "rotate gzip: %v", err)
+		return
 	}
 	if err := os.Remove(tempPath); err != nil && !os.IsNotExist(err) {
-		warnCLITrace(stderr, "remove temp: %v", err)
+		warnCLITrace(stderr, "rotate remove temp: %v", err)
 	}
-	pruneCLITraceArchives(path, maxArchives, stderr)
-	return nil
+	pruneCLITraceArchives(activePath, cliTraceMaxArchives, stderr)
 }
 
 // gzipCLITraceFile compresses src into dst. The destination is opened with

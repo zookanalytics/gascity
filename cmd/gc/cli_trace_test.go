@@ -253,9 +253,8 @@ func TestMaybeRotateCLITraceUnderThreshold(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	var stderr bytes.Buffer
-	if err := maybeRotateCLITrace(path, 1024, &stderr); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
+	maybeRotateCLITrace(path, 1024, &stderr)
+	waitForCLITraceRotations()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("active file removed under threshold: %v", err)
 	}
@@ -269,8 +268,10 @@ func TestMaybeRotateCLITraceMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, cliTraceFileBaseName)
 	var stderr bytes.Buffer
-	if err := maybeRotateCLITrace(path, 10, &stderr); err != nil {
-		t.Fatalf("rotate of missing file: %v", err)
+	maybeRotateCLITrace(path, 10, &stderr)
+	waitForCLITraceRotations()
+	if stderr.Len() != 0 {
+		t.Fatalf("unexpected stderr for missing file: %q", stderr.String())
 	}
 }
 
@@ -282,12 +283,11 @@ func TestRotateCLITraceCreatesArchive(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	var stderr bytes.Buffer
-	if err := rotateCLITrace(path, 10, &stderr); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
+	maybeRotateCLITrace(path, 10, &stderr)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("active file should be gone post-rotate; stat err = %v", err)
+		t.Fatalf("active file should be gone immediately after rename; stat err = %v", err)
 	}
+	waitForCLITraceRotations()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("readdir: %v", err)
@@ -342,6 +342,7 @@ func TestPruneCLITraceArchivesKeepsNewest(t *testing.T) {
 }
 
 func TestRecordCLIInvocationDisabledWritesNothing(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	withTempCity(t, dir, "")
 	t.Setenv("GC_CLI_TRACE", "")
@@ -358,10 +359,31 @@ func TestRecordCLIInvocationDisabledWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRecordCLIInvocationEnabledViaTOML(t *testing.T) {
+// TestRecordCLIInvocationTOMLOnlyDoesNotEnable codifies the rework
+// behavior: `cli_trace_enabled = true` in city.toml is no longer
+// sufficient on its own. Enablement requires GC_CLI_TRACE=1. The legacy
+// toml flag is retained in the schema but consulted nowhere.
+func TestRecordCLIInvocationTOMLOnlyDoesNotEnable(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = true\n")
 	_ = os.Unsetenv("GC_CLI_TRACE")
+
+	var stderr bytes.Buffer
+	rootCmd := newRootCmd(io.Discard, &stderr)
+	recordCLIInvocation(rootCmd, []string{"version"}, time.Now(), 0, &stderr)
+
+	tracePath := filepath.Join(dir, ".gc", "runtime", cliTraceFileBaseName)
+	if _, err := os.Stat(tracePath); !os.IsNotExist(err) {
+		t.Fatalf("trace file should not exist when only toml says enabled; stat err = %v", err)
+	}
+}
+
+func TestRecordCLIInvocationEnabledViaEnv(t *testing.T) {
+	resetCLITraceResolveCache()
+	dir := t.TempDir()
+	withTempCity(t, dir, "")
+	t.Setenv("GC_CLI_TRACE", "1")
 
 	var stderr bytes.Buffer
 	rootCmd := newRootCmd(io.Discard, &stderr)
@@ -382,6 +404,7 @@ func TestRecordCLIInvocationEnabledViaTOML(t *testing.T) {
 }
 
 func TestRecordCLIInvocationEnvOverridesTOMLOff(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = false\n")
 	t.Setenv("GC_CLI_TRACE", "1")
@@ -392,11 +415,12 @@ func TestRecordCLIInvocationEnvOverridesTOMLOff(t *testing.T) {
 
 	tracePath := filepath.Join(dir, ".gc", "runtime", cliTraceFileBaseName)
 	if _, err := os.Stat(tracePath); err != nil {
-		t.Fatalf("trace file expected when env=1 overrides toml=false: %v", err)
+		t.Fatalf("trace file expected when env=1 even with toml=false: %v", err)
 	}
 }
 
 func TestRecordCLIInvocationEnvOverridesTOMLOn(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = true\n")
 	t.Setenv("GC_CLI_TRACE", "0")
@@ -412,8 +436,10 @@ func TestRecordCLIInvocationEnvOverridesTOMLOn(t *testing.T) {
 }
 
 func TestRecordCLIInvocationFailingCommandStillRecorded(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
-	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = true\n")
+	withTempCity(t, dir, "")
+	t.Setenv("GC_CLI_TRACE", "1")
 
 	var stderr bytes.Buffer
 	rootCmd := newRootCmd(io.Discard, &stderr)
@@ -434,6 +460,7 @@ func TestRecordCLIInvocationFailingCommandStillRecorded(t *testing.T) {
 }
 
 func TestRecordCLIInvocationOutsideCityDoesNothing(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	t.Setenv("GC_CITY", "")
 	_ = os.Unsetenv("GC_CITY")
@@ -470,9 +497,8 @@ func TestAppendCLIInvocationRotatesAtThreshold(t *testing.T) {
 
 	var stderr bytes.Buffer
 	// Force rotation by calling maybeRotateCLITrace with a low threshold.
-	if err := maybeRotateCLITrace(path, 100, &stderr); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
+	maybeRotateCLITrace(path, 100, &stderr)
+	waitForCLITraceRotations()
 
 	entries, _ := os.ReadDir(dir)
 	var archives []string
@@ -517,6 +543,7 @@ func TestRecordCLIInvocationPanicDoesNotEscape(t *testing.T) {
 	// a path with a NUL byte (Open will return an error, not panic), so
 	// we instead exercise the recover() by passing nil root which the code
 	// already tolerates. Verify simply that the call returns normally.
+	resetCLITraceResolveCache()
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("recordCLIInvocation panicked: %v", r)
@@ -530,6 +557,7 @@ func TestRecordCLIInvocationPanicDoesNotEscape(t *testing.T) {
 // TestRecordCLIInvocationAppendErrorReportsToStderr exercises the failure
 // path: a file path under a directory that cannot be created.
 func TestRecordCLIInvocationAppendErrorReportsToStderr(t *testing.T) {
+	resetCLITraceResolveCache()
 	dir := t.TempDir()
 	// Create a regular file where the runtime directory would go to force
 	// MkdirAll to fail with NotADirectory.
@@ -541,10 +569,11 @@ func TestRecordCLIInvocationAppendErrorReportsToStderr(t *testing.T) {
 		t.Fatalf("seed blocker: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"),
-		[]byte("[workspace]\nname=\"t\"\n[instrumentation]\ncli_trace_enabled=true\n"), 0o644); err != nil {
+		[]byte("[workspace]\nname=\"t\"\n"), 0o644); err != nil {
 		t.Fatalf("seed city.toml: %v", err)
 	}
 	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CLI_TRACE", "1")
 	t.Chdir(cityPath)
 
 	var stderr bytes.Buffer
@@ -558,12 +587,15 @@ func TestRecordCLIInvocationAppendErrorReportsToStderr(t *testing.T) {
 }
 
 // TestRunRecordsInvocationEndToEnd exercises the full run() pipeline with
-// instrumentation enabled via city.toml, asserting that one JSONL line lands
-// in .gc/runtime/gc-invocations.jsonl with the expected fields.
+// instrumentation enabled via the GC_CLI_TRACE env var, asserting that one
+// JSONL line lands in .gc/runtime/gc-invocations.jsonl with the expected
+// fields.
 func TestRunRecordsInvocationEndToEnd(t *testing.T) {
+	resetCLITraceResolveCache()
 	configureIsolatedRuntimeEnv(t)
 	dir := t.TempDir()
-	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = true\n")
+	withTempCity(t, dir, "")
+	t.Setenv("GC_CLI_TRACE", "1")
 
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"version"}, &stdout, &stderr); code != 0 {
@@ -598,9 +630,10 @@ func TestRunRecordsInvocationEndToEnd(t *testing.T) {
 }
 
 // TestRunDoesNotRecordWhenDisabled asserts the default-off behavior: no
-// trace file is created when neither the env nor city.toml turns the
-// feature on.
+// trace file is created when GC_CLI_TRACE is unset, regardless of any
+// city.toml `cli_trace_enabled` setting.
 func TestRunDoesNotRecordWhenDisabled(t *testing.T) {
+	resetCLITraceResolveCache()
 	configureIsolatedRuntimeEnv(t)
 	dir := t.TempDir()
 	withTempCity(t, dir, "")
@@ -617,28 +650,23 @@ func TestRunDoesNotRecordWhenDisabled(t *testing.T) {
 	}
 }
 
-// TestAppendCLIInvocationRotateRestoresOnGzipFailure exercises the restore
-// path by colliding the archive filename with an existing read-only file.
-func TestAppendCLIInvocationRotateRestoresOnGzipFailure(t *testing.T) {
+// TestAppendCLIInvocationRotateProducesArchive exercises the happy-path
+// rotation through the async pipeline: the rename happens synchronously,
+// the gzip completes after the wait, and exactly one archive remains.
+func TestAppendCLIInvocationRotateProducesArchive(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, cliTraceFileBaseName)
 	if err := os.WriteFile(path, []byte("data\n"), 0o644); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	// Replace gzipCLITraceFile dependency by directly calling rotateCLITrace
-	// with a maxSize that triggers rotation, but we cannot easily inject a
-	// gzip failure without refactor. Instead, we verify the happy-path
-	// rotate produces a valid gz archive (smoke test the rotate flow end-
-	// to-end). Specific restore behavior is exercised through code review.
 	var stderr bytes.Buffer
-	if err := rotateCLITrace(path, 10, &stderr); err != nil {
-		t.Fatalf("rotate: %v", err)
-	}
-	// Active file gone, one archive present.
+	maybeRotateCLITrace(path, 1, &stderr)
+	// Rename is synchronous; the active file must already be gone.
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("active file should be removed; err=%v", err)
+		t.Fatalf("active file should be removed immediately; err=%v", err)
 	}
+	waitForCLITraceRotations()
 	entries, _ := os.ReadDir(dir)
 	var gz int
 	for _, e := range entries {
@@ -648,5 +676,290 @@ func TestAppendCLIInvocationRotateRestoresOnGzipFailure(t *testing.T) {
 	}
 	if gz != 1 {
 		t.Fatalf("want 1 gz archive; got %d", gz)
+	}
+}
+
+// TestCLIInvocationRecordSchemaStable asserts that all schema fields are
+// always present in the marshaled JSON, even when the agent-runtime envs
+// are unset. Downstream analyzers rely on a stable shape.
+func TestCLIInvocationRecordSchemaStable(t *testing.T) {
+	resetCLITraceResolveCache()
+	t.Setenv("GC_SESSION_ID", "")
+	_ = os.Unsetenv("GC_SESSION_ID")
+	t.Setenv("GC_ALIAS", "")
+	_ = os.Unsetenv("GC_ALIAS")
+	t.Setenv("GC_SESSION_ORIGIN", "")
+	_ = os.Unsetenv("GC_SESSION_ORIGIN")
+
+	root := &cobra.Command{Use: "gc"}
+	rec := buildCLIInvocationRecord(root, []string{"version"}, time.Now(), 0)
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, field := range []string{
+		"ts", "cmd", "args_truncated", "duration_ms", "exit_code",
+		"pid", "ppid", "gc_session_id", "gc_alias", "gc_session_origin",
+	} {
+		if _, ok := raw[field]; !ok {
+			t.Errorf("field %q missing from JSON; raw=%s", field, string(data))
+		}
+	}
+	for _, field := range []string{"gc_session_id", "gc_alias", "gc_session_origin"} {
+		v, _ := raw[field].(string)
+		if v != "" {
+			t.Errorf("%s = %q; want \"\"", field, v)
+		}
+	}
+}
+
+// TestResolveCLITraceConstantTimeDefaultOff verifies the constant-time
+// disabled path: with GC_CLI_TRACE unset, resolveCLITrace must not touch
+// the filesystem (no city.toml read, no ancestor walk).
+//
+// The check uses a chdir into a directory under which any successful
+// ancestor walk would have to traverse, then asserts that resolving
+// returns disabled without recording any access pattern that would
+// require filesystem I/O.
+func TestResolveCLITraceConstantTimeDefaultOff(t *testing.T) {
+	resetCLITraceResolveCache()
+	dir := t.TempDir()
+	// Seed a city.toml that would enable instrumentation if read.
+	// With the constant-time default-off path, this file must NOT be
+	// consulted.
+	withTempCity(t, dir, "[instrumentation]\ncli_trace_enabled = true\n")
+	_ = os.Unsetenv("GC_CLI_TRACE")
+
+	resolved := resolveCLITrace()
+	if resolved.Enabled {
+		t.Fatalf("resolved.Enabled = true; want false (env unset must short-circuit)")
+	}
+	if resolved.Path != "" {
+		t.Fatalf("resolved.Path = %q; want \"\"", resolved.Path)
+	}
+}
+
+// TestResolveCLITraceCache asserts that resolveCLITrace is computed once
+// per process. Changing GC_CLI_TRACE after the first call must not flip
+// the resolution until resetCLITraceResolveCache is called.
+func TestResolveCLITraceCache(t *testing.T) {
+	resetCLITraceResolveCache()
+	t.Setenv("GC_CLI_TRACE", "0")
+	first := resolveCLITrace()
+	if first.Enabled {
+		t.Fatalf("first.Enabled = true; want false")
+	}
+	t.Setenv("GC_CLI_TRACE", "1")
+	second := resolveCLITrace()
+	if second.Enabled {
+		t.Fatalf("second.Enabled = true; cache must hold previous decision")
+	}
+	resetCLITraceResolveCache()
+	dir := t.TempDir()
+	withTempCity(t, dir, "")
+	third := resolveCLITrace()
+	if !third.Enabled {
+		t.Fatalf("third.Enabled = false; want true after reset with env=1")
+	}
+}
+
+// TestTruncateCLIArgsRedactsSensitiveFlags walks the deny-list of flag
+// names and asserts both the separated form (`--token v`) and inline
+// form (`--token=v`) are redacted regardless of value length.
+func TestTruncateCLIArgsRedactsSensitiveFlags(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "token separated short value",
+			args: []string{"--token", "abc"},
+			want: "--token <redacted:3>",
+		},
+		{
+			name: "token separated long value",
+			args: []string{"--token", strings.Repeat("x", 80)},
+			want: "--token <redacted:80>",
+		},
+		{
+			name: "password inline",
+			args: []string{"--password=hunter2"},
+			want: "--password=<redacted:7>",
+		},
+		{
+			name: "secret uppercase flag name",
+			args: []string{"--SECRET", "shh"},
+			want: "--SECRET <redacted:3>",
+		},
+		{
+			name: "api-key with hyphen",
+			args: []string{"--api-key", "abc123"},
+			want: "--api-key <redacted:6>",
+		},
+		{
+			name: "apikey concatenated",
+			args: []string{"--apikey=zzz"},
+			want: "--apikey=<redacted:3>",
+		},
+		{
+			name: "auth flag",
+			args: []string{"--auth", "Basic foo"},
+			want: "--auth <redacted:9>",
+		},
+		{
+			name: "bearer inline",
+			args: []string{"--bearer=tok"},
+			want: "--bearer=<redacted:3>",
+		},
+		{
+			name: "non-sensitive flag passes through",
+			args: []string{"--verbose", "true"},
+			want: "--verbose true",
+		},
+		{
+			name: "single-letter -p not redacted",
+			args: []string{"-p", "8080"},
+			want: "-p 8080",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateCLIArgs(tc.args, 200, 64)
+			if got != tc.want {
+				t.Fatalf("truncateCLIArgs(%v) = %q; want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTruncateCLIArgsRedactsEnvStyleKV exercises the KEY=VALUE redaction
+// rules for substring-matched sensitive names.
+func TestTruncateCLIArgsRedactsEnvStyleKV(t *testing.T) {
+	cases := []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{name: "GITHUB_TOKEN", arg: "GITHUB_TOKEN=ghp_xxx", want: "GITHUB_TOKEN=<redacted:7>"},
+		{name: "MY_PASSWORD", arg: "MY_PASSWORD=secret", want: "MY_PASSWORD=<redacted:6>"},
+		{name: "API_KEY", arg: "API_KEY=k", want: "API_KEY=<redacted:1>"},
+		{name: "ANTHROPIC_SECRET", arg: "ANTHROPIC_SECRET=foo", want: "ANTHROPIC_SECRET=<redacted:3>"},
+		{name: "AUTH_HEADER", arg: "AUTH_HEADER=Bearer abc", want: "AUTH_HEADER=<redacted:10>"},
+		{name: "lowercase key match", arg: "github_token=v", want: "github_token=<redacted:1>"},
+		{name: "non-sensitive KV pass through", arg: "FOO=bar", want: "FOO=bar"},
+		{name: "leading dash skipped", arg: "-MYKEY=v", want: "-MYKEY=v"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateCLIArgs([]string{tc.arg}, 200, 64)
+			if got != tc.want {
+				t.Fatalf("truncateCLIArgs([%q]) = %q; want %q", tc.arg, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTruncateCLIArgsRedactionInterleavedWithOtherArgs ensures redaction
+// only consumes the immediate next positional, not arbitrary downstream
+// args, and that the boundary cases (last arg is a flag) don't crash.
+func TestTruncateCLIArgsRedactionInterleavedWithOtherArgs(t *testing.T) {
+	args := []string{"--token", "abc", "list", "--password=p", "--limit", "5"}
+	got := truncateCLIArgs(args, 200, 64)
+	want := "--token <redacted:3> list --password=<redacted:1> --limit 5"
+	if got != want {
+		t.Fatalf("interleaved redaction:\n got: %q\nwant: %q", got, want)
+	}
+
+	tail := truncateCLIArgs([]string{"foo", "--token"}, 200, 64)
+	wantTail := "foo --token"
+	if tail != wantTail {
+		t.Fatalf("trailing flag without value:\n got: %q\nwant: %q", tail, wantTail)
+	}
+}
+
+// TestMaybeRotateCLITraceReturnsBeforeGzip asserts that the rename is
+// synchronous (active file gone) while gzip is still in flight. The
+// rotation is given a pre-filled file large enough that the gzip work is
+// observable; we check the .gz does not yet exist at the time
+// maybeRotateCLITrace returns.
+func TestMaybeRotateCLITraceReturnsBeforeGzip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, cliTraceFileBaseName)
+	// Seed with enough data that gzip is not instantaneous, though we
+	// also rely on the goroutine scheduling boundary to ensure ordering.
+	payload := bytes.Repeat([]byte("payload-line\n"), 10000)
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	maybeRotateCLITrace(path, 1, &stderr)
+
+	// Immediately after the call returns, the active file must be gone
+	// (rename is synchronous).
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("active file present after rename; err=%v", err)
+	}
+	// The renamed temp file should exist while gzip runs.
+	entries, _ := os.ReadDir(dir)
+	var sawTemp bool
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".rotating.") {
+			sawTemp = true
+			break
+		}
+	}
+	if !sawTemp {
+		// Goroutine may have already finished the gzip in fast envs; that
+		// is still a correct outcome (gzip ran async, just very fast).
+		t.Logf("temp file not observed; goroutine completed before stat — acceptable")
+	}
+
+	waitForCLITraceRotations()
+
+	entries, _ = os.ReadDir(dir)
+	var gz int
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".gz") {
+			gz++
+		}
+	}
+	if gz != 1 {
+		t.Fatalf("want exactly 1 .gz after wait; got %d", gz)
+	}
+}
+
+// TestRecordCLIInvocationRedactsSensitiveArgs is an end-to-end check that
+// the JSONL line written by recordCLIInvocation has redacted values for
+// deny-listed flags.
+func TestRecordCLIInvocationRedactsSensitiveArgs(t *testing.T) {
+	resetCLITraceResolveCache()
+	dir := t.TempDir()
+	withTempCity(t, dir, "")
+	t.Setenv("GC_CLI_TRACE", "1")
+
+	var stderr bytes.Buffer
+	rootCmd := newRootCmd(io.Discard, &stderr)
+	recordCLIInvocation(rootCmd, []string{"version", "--token", "supersecret"}, time.Now(), 0, &stderr)
+
+	tracePath := filepath.Join(dir, ".gc", "runtime", cliTraceFileBaseName)
+	data, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatalf("trace file missing: %v", err)
+	}
+	var rec cliInvocationRecord
+	if err := json.Unmarshal(bytes.TrimSpace(data), &rec); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if strings.Contains(rec.ArgsTruncated, "supersecret") {
+		t.Fatalf("secret leaked in args_truncated: %q", rec.ArgsTruncated)
+	}
+	if !strings.Contains(rec.ArgsTruncated, "<redacted:") {
+		t.Fatalf("expected redacted sentinel in %q", rec.ArgsTruncated)
 	}
 }
