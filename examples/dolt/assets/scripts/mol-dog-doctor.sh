@@ -62,6 +62,43 @@ newest_backup_mtime_for_db() {
     printf '%s\n' "$newest_mtime"
 }
 
+# newest_backup_mtime_in_dir TARGET_DIR — return the newest mtime of any
+# file under TARGET_DIR (recursively), or 0 if the directory is missing
+# or empty. Used for Path A freshness checks where the backup URL points
+# at a directory dedicated to a single database, so no name prefixing is
+# required.
+newest_backup_mtime_in_dir() {
+    target_dir="$1"
+    if [ ! -d "$target_dir" ]; then
+        printf '0\n'
+        return 0
+    fi
+    newest_mtime=0
+    while IFS= read -r -d '' backup_path; do
+        backup_mtime=$(file_mtime "$backup_path")
+        if [ "$backup_mtime" -gt "$newest_mtime" ]; then
+            newest_mtime="$backup_mtime"
+        fi
+    done < <(find -L "$target_dir" -type f -print0 2>/dev/null)
+    printf '%s\n' "$newest_mtime"
+}
+
+# named_backup_url_for_db DB — print the URL of the <db>-backup named
+# Dolt backup, or nothing if no such backup is configured. Parses the
+# verbose `dolt backup -v` output (format: "<name> <url> {<params>}").
+# Mirrors the auto-discovery used by mol-dog-backup.sh so the doctor's
+# source of truth matches the backup script's.
+named_backup_url_for_db() {
+    db_name="$1"
+    db_dir="$DOLT_DATA_DIR/$db_name"
+    if [ ! -d "$db_dir/.dolt" ]; then
+        return 0
+    fi
+    (cd "$db_dir" && run_bounded 10 dolt backup -v 2>/dev/null) \
+        | awk -v want="${db_name}-backup" '$1 == want {print $2; exit}' \
+        || true
+}
+
 append_backup_stale() {
     backup_stale_item="$1"
     if [ -n "$BACKUP_STALE_ITEMS" ]; then
@@ -115,28 +152,56 @@ if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
     ORPHAN_WARN=" [WARN: $ORPHAN_COUNT orphan DBs detected — run gc dolt cleanup]"
 fi
 
-# Backup freshness: check newest backup artifact per database.
+# Backup freshness: prefer Path A (per-DB named backup URL discovered
+# via `dolt backup -v`); fall back to Path B (legacy local artifact
+# dir) for back-compat. A DB enrolled in neither is treated as "not
+# enrolled" and skipped silently — under Path A the legacy
+# `.dolt-backup` directory often does not exist, and emitting a
+# "missing artifact dir" advisory every 5 minutes was the recurrence
+# this loop was rewritten to fix (gc-lhq4yu).
 BACKUP_STALE=""
 if [ -n "$USER_DBS" ]; then
-    if [ ! -d "$BACKUP_ARTIFACT_DIR" ]; then
-        BACKUP_STALE=" [WARN: backup artifact dir missing]"
-    else
-        BACKUP_STALE_ITEMS=""
-        NOW_S=$(date +%s)
-        for db in $USER_DBS; do
-            NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
-            if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
-                append_backup_stale "$db backup missing"
+    BACKUP_STALE_ITEMS=""
+    NOW_S=$(date +%s)
+    LEGACY_DIR_EXISTS=0
+    if [ -d "$BACKUP_ARTIFACT_DIR" ]; then
+        LEGACY_DIR_EXISTS=1
+    fi
+    for db in $USER_DBS; do
+        backup_url=$(named_backup_url_for_db "$db")
+        case "$backup_url" in
+            file://*)
+                # Path A: freshness lives at the named-backup URL.
+                NEWEST_BACKUP_MTIME=$(newest_backup_mtime_in_dir "${backup_url#file://}")
+                ;;
+            '')
+                # No named backup. Use Path B if the legacy dir exists;
+                # otherwise the DB is not enrolled in any locally
+                # observable backup scheme — skip silently.
+                if [ "$LEGACY_DIR_EXISTS" -eq 1 ]; then
+                    NEWEST_BACKUP_MTIME=$(newest_backup_mtime_for_db "$db")
+                else
+                    continue
+                fi
+                ;;
+            *)
+                # Remote URL (s3://, http://, gs://, etc.). Remote
+                # freshness is the remote's problem; the doctor must
+                # not reach external services from a 5-minute probe.
                 continue
-            fi
-            BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
-            if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
-                append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
-            fi
-        done
-        if [ -n "$BACKUP_STALE_ITEMS" ]; then
-            BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
+                ;;
+        esac
+        if [ "$NEWEST_BACKUP_MTIME" -le 0 ]; then
+            append_backup_stale "$db backup missing"
+            continue
         fi
+        BACKUP_AGE=$((NOW_S - NEWEST_BACKUP_MTIME))
+        if [ "$BACKUP_AGE" -gt "$BACKUP_STALE_S" ]; then
+            append_backup_stale "$db backup is $((BACKUP_AGE / 3600))h old"
+        fi
+    done
+    if [ -n "$BACKUP_STALE_ITEMS" ]; then
+        BACKUP_STALE=" [WARN: backup freshness: $BACKUP_STALE_ITEMS]"
     fi
 fi
 
