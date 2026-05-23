@@ -93,6 +93,47 @@ func TestResolveProviderAgentStartCommandHonorsExplicitPromptMode(t *testing.T) 
 	}
 }
 
+// TestResolveProviderAgentStartCommandProcessNamesIsCopy verifies that the
+// escape hatch deep-copies ProcessNames so later mutation of the agent's
+// slice does not corrupt the resolved provider.
+func TestResolveProviderAgentStartCommandProcessNamesIsCopy(t *testing.T) {
+	agent := &Agent{
+		Name:         "cockpit",
+		StartCommand: "/path/to/cockpit.sh",
+		ProcessNames: []string{"cockpit", "tmux"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	agent.ProcessNames[0] = "MUTATED"
+	if rp.ProcessNames[0] != "cockpit" {
+		t.Errorf("ProcessNames[0] = %q, want %q (escape hatch must copy, not alias)", rp.ProcessNames[0], "cockpit")
+	}
+}
+
+// TestResolveProviderAgentStartCommandHonorsEnv verifies that an [[agent]]
+// block with start_command (no provider) carries its env through to the
+// resolved provider. The env normally arrives via mergeAgentOverrides, but
+// the start_command escape hatch returns early before that step.
+func TestResolveProviderAgentStartCommandHonorsEnv(t *testing.T) {
+	agent := &Agent{
+		Name:         "cockpit",
+		StartCommand: "/path/to/cockpit.sh",
+		Env:          map[string]string{"COCKPIT_MODE": "tui", "TERM": "xterm-256color"},
+	}
+	rp, err := ResolveProvider(agent, nil, nil, lookPathNone)
+	if err != nil {
+		t.Fatalf("ResolveProvider: %v", err)
+	}
+	if got := rp.Env["COCKPIT_MODE"]; got != "tui" {
+		t.Errorf("Env[COCKPIT_MODE] = %q, want %q", got, "tui")
+	}
+	if got := rp.Env["TERM"]; got != "xterm-256color" {
+		t.Errorf("Env[TERM] = %q, want %q", got, "xterm-256color")
+	}
+}
+
 func TestResolveProviderAgentProvider(t *testing.T) {
 	agent := &Agent{Name: "mayor", Provider: "claude"}
 	rp, err := ResolveProvider(agent, nil, nil, lookPathOnly("claude"))
