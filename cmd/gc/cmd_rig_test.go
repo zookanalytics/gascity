@@ -2964,7 +2964,7 @@ func writeRigListTestCity(t *testing.T) string {
 name = "test-city"
 
 [[agent]]
-name = "mayor"
+name = "coordinator"
 
 [[rigs]]
 name = "frontend"
@@ -3009,6 +3009,162 @@ func TestRouteRigList_APIJSONIncludesCacheAge(t *testing.T) {
 	}
 	if _, ok := fb["_cache_age_s"]; ok {
 		t.Errorf("_cache_age_s must be absent on fallback:\n%s", stdout.String())
+	}
+}
+
+func TestRouteRigList_APIJSONPreservesFallbackContract(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "coordinator"
+
+[[rigs]]
+name = "frontend"
+path = "/abs/frontend"
+prefix = "fe"
+default_branch = "trunk"
+default_sling_target = "frontend/worker"
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		prefix := "fe"
+		w.Header().Set("X-GC-Cache-Age-S", "3")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"name": "frontend", "path": "/abs/frontend", "prefix": prefix, "suspended": false, "agent_count": 1, "running_count": 1},
+			},
+			"total": 1,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeRigList(cityPath, c, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("unmarshal stdout: %v\n%s", err, stdout.String())
+	}
+	if got := out["schema_version"]; got != "1" {
+		t.Fatalf("schema_version = %#v, want 1; output=%s", got, stdout.String())
+	}
+	if _, ok := out["summary"].(map[string]any); !ok {
+		t.Fatalf("summary missing or wrong type: %#v; output=%s", out["summary"], stdout.String())
+	}
+	rigs, ok := out["rigs"].([]any)
+	if !ok || len(rigs) != 2 {
+		t.Fatalf("rigs = %#v, want HQ + frontend", out["rigs"])
+	}
+	hq, ok := rigs[0].(map[string]any)
+	if !ok {
+		t.Fatalf("HQ row = %#v", rigs[0])
+	}
+	if got := hq["running"]; got != true {
+		t.Fatalf("HQ running = %#v, want true; row=%#v", got, hq)
+	}
+	frontend, ok := rigs[1].(map[string]any)
+	if !ok {
+		t.Fatalf("frontend row = %#v", rigs[1])
+	}
+	if got := frontend["default_branch"]; got != "trunk" {
+		t.Fatalf("default_branch = %#v, want trunk; row=%#v", got, frontend)
+	}
+	if got := frontend["default_sling_target"]; got != "frontend/worker" {
+		t.Fatalf("default_sling_target = %#v, want frontend/worker; row=%#v", got, frontend)
+	}
+	if got := frontend["running"]; got != true {
+		t.Fatalf("running = %#v, want true; row=%#v", got, frontend)
+	}
+	if _, ok := out["_cache_age_s"]; !ok {
+		t.Fatalf("_cache_age_s missing; output=%s", stdout.String())
+	}
+	validateJSONResultSchema(t, []string{"rig", "list"}, stdout.Bytes())
+}
+
+func TestRouteRigList_APIHumanPreservesFallbackContract(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configRigPath := filepath.Join(t.TempDir(), "frontend-from-config")
+	if err := os.MkdirAll(filepath.Join(configRigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configRigPath, ".beads", "metadata.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staleAPIPath := filepath.Join(t.TempDir(), "frontend-from-api")
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[agent]]
+name = "coordinator"
+
+[[rigs]]
+name = "frontend"
+path = %q
+prefix = "cfg"
+default_branch = "trunk"
+`, configRigPath)
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-GC-Cache-Age-S", "3")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{
+					"name":           "frontend",
+					"path":           staleAPIPath,
+					"prefix":         "api",
+					"default_branch": "api-main",
+					"suspended":      false,
+					"agent_count":    1,
+					"running_count":  1,
+				},
+			},
+			"total": 1,
+		})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeRigList(cityPath, c, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Path:   " + configRigPath,
+		"Prefix: cfg",
+		"Default branch: trunk",
+		"Beads:  initialized",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("human API output missing %q:\n%s", want, output)
+		}
+	}
+	for _, unwanted := range []string{
+		staleAPIPath,
+		"Prefix: api",
+		"Default branch: api-main",
+	} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("human API output used stale API row value %q:\n%s", unwanted, output)
+		}
 	}
 }
 
