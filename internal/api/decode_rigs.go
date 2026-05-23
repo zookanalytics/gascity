@@ -13,17 +13,13 @@ type RigView struct {
 }
 
 // rigViewFromGen translates one genclient.RigResponse into a RigView.
-// Optional pointer fields (Prefix) are dereferenced safely.
 func rigViewFromGen(g genclient.RigResponse) RigView {
-	out := RigView{
+	return RigView{
 		Name:      g.Name,
 		Path:      g.Path,
+		Prefix:    g.Prefix,
 		Suspended: g.Suspended,
 	}
-	if g.Prefix != nil {
-		out.Prefix = *g.Prefix
-	}
-	return out
 }
 
 // rigsFromGenList translates the genclient list body into []RigView. Returns

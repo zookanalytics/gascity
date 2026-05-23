@@ -3073,6 +3073,25 @@ func writeDoctorPathADolt(t *testing.T, binDir string, urlsByDB map[string]strin
 		fmt.Sprintf(`    printf %s; exit 0 ;;`, shellQuote(dbCSV)),
 		`esac`,
 	)
+	// Bare `dolt backup` branch: the doctor's eligibility filter
+	// (introduced by upstream #2097) checks `dolt backup` listings for
+	// `<db>-backup` before enrolling a DB in backup-freshness scans.
+	// Membership in urlsByDB represents "this DB has a backup remote
+	// configured" — an empty URL value still counts (it just means the
+	// Path A URL string isn't being surfaced, exercising the script's
+	// '') / Path B fallback branch).
+	lines = append(lines,
+		`if [ "${1:-}" = "backup" ] && [ -z "${2:-}" ]; then`,
+		`  db="$(basename "$PWD")"`,
+		`  case "$db" in`,
+	)
+	for _, db := range dbs {
+		lines = append(lines, fmt.Sprintf(
+			`    %s) printf '%%s-backup\n' %s; exit 0 ;;`,
+			shellQuote(db), shellQuote(db),
+		))
+	}
+	lines = append(lines, `  esac`, `  exit 0`, `fi`)
 	// `dolt backup -v` branch: differentiate by $PWD's basename so a
 	// single shim serves every per-DB invocation.
 	lines = append(lines,
