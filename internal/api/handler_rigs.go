@@ -14,10 +14,12 @@ import (
 )
 
 type rigResponse struct {
-	Name          string     `json:"name"`
-	Path          string     `json:"path"`
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Always populated. Explicit when configured, otherwise derived from rig name.
+	// Lets clients match bead-ID prefixes against the rig list without re-deriving.
+	Prefix        string     `json:"prefix" doc:"Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name."`
 	Suspended     bool       `json:"suspended"`
-	Prefix        string     `json:"prefix,omitempty"`
 	DefaultBranch string     `json:"default_branch,omitempty"`
 	AgentCount    int        `json:"agent_count"`
 	RunningCount  int        `json:"running_count"`
@@ -62,7 +64,7 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		Name:          rig.Name,
 		Path:          rig.Path,
 		Suspended:     s.rigSuspended(cfg, rig, sp, cityName, cityPath),
-		Prefix:        rig.Prefix,
+		Prefix:        rig.EffectivePrefix(),
 		DefaultBranch: rig.DefaultBranch,
 		AgentCount:    agentCount,
 		RunningCount:  runningCount,
