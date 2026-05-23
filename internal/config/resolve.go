@@ -60,6 +60,15 @@ func ResolveProvider(agent *Agent, ws *Workspace, cityProviders map[string]Provi
 		if agent.ResumeCommand != "" {
 			resolved.ResumeCommand = agent.ResumeCommand
 		}
+		// Env mirrors mergeAgentOverrides on the regular path so [[agent]]
+		// blocks with start_command can declare env alongside their custom
+		// command. Without this, an agent-level env never reaches launch.
+		if len(agent.Env) > 0 {
+			resolved.Env = make(map[string]string, len(agent.Env))
+			for k, v := range agent.Env {
+				resolved.Env[k] = v
+			}
+		}
 		return resolved, nil
 	}
 
