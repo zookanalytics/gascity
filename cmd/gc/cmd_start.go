@@ -1284,6 +1284,7 @@ func agentCommandDir(cityPath string, a *config.Agent, rigs []config.Rig) string
 // agent sessions should inherit. Agents need PATH to find tools (including gc),
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
+// SSH_AUTH_SOCK so they can sign commits with the operator's ssh-agent,
 // and Claude auth/home context so managed sessions can launch reliably under
 // shell and supervisor-driven flows.
 func passthroughEnv() map[string]string {
@@ -1304,6 +1305,13 @@ func passthroughEnv() map[string]string {
 		if v := os.Getenv(key); v != "" {
 			m[key] = v
 		}
+	}
+	// SSH_AUTH_SOCK lets agents sign git commits when the repo has
+	// commit.gpgsign=true with gpg.format=ssh. Without it, git fails with
+	// "Couldn't find key in agent?" and operators have to hunt for a
+	// working socket per session.
+	if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
+		m["SSH_AUTH_SOCK"] = v
 	}
 	// Locale vars are needed so TUI tools (e.g. Claude Code statusline)
 	// correctly render UTF-8 glyphs inside managed tmux sessions.
