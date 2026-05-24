@@ -53,12 +53,20 @@ dolt version | head -1
 If the version is < 2.1.0, abort the molecule and nudge the mayor to
 upgrade dolt. Do NOT proceed to the sync step or close it as successful.
 
-Close this bead with:
+**On failure (version < 1.86.2)**, close this bead with:
 ```bash
 bd update "$GC_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=hard --set-metadata gc.failure_reason=dolt-too-old --status closed
 ```
-This formula does not wire scoped-abort metadata; the failed preflight outcome
-is the stop signal. Check the preflight outcome before acting on `sync`.
+
+**On success (version >= 1.86.2)**, close this bead with:
+```bash
+bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status closed
+```
+The sync step requires `gc.outcome=pass` metadata to proceed; a close-reason
+string alone is not sufficient.
+
+This formula does not wire scoped-abort metadata; the preflight outcome is
+the stop signal. Check the preflight outcome before acting on `sync`.
 """
 
 [[steps]]
