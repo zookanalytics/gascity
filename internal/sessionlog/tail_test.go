@@ -178,7 +178,9 @@ func TestExtractTailMetaUnknownModel(t *testing.T) {
 				"role":  "assistant",
 				"model": "unknown-model-xyz",
 				"usage": map[string]any{
-					"input_tokens": 10000,
+					"input_tokens":                10000,
+					"cache_read_input_tokens":     5000,
+					"cache_creation_input_tokens": 2000,
 				},
 			},
 		},
@@ -196,9 +198,19 @@ func TestExtractTailMetaUnknownModel(t *testing.T) {
 	if meta.Model != "unknown-model-xyz" {
 		t.Errorf("Model = %q, want %q", meta.Model, "unknown-model-xyz")
 	}
-	// Unknown model → no context window → no usage
+	// Unknown model → no context window → no ContextUsage view.
 	if meta.ContextUsage != nil {
 		t.Error("expected nil ContextUsage for unknown model")
+	}
+	// InputTokens is independent of ModelContextWindow: callers that
+	// want to trigger on absolute counts (e.g. cycle-recycle at >= 200k
+	// input) must work for newly-released model IDs the family table
+	// hasn't been taught about yet.
+	if meta.InputTokens == nil {
+		t.Fatal("expected non-nil InputTokens for unknown model with usage")
+	}
+	if *meta.InputTokens != 17000 {
+		t.Errorf("InputTokens = %d, want 17000", *meta.InputTokens)
 	}
 }
 
