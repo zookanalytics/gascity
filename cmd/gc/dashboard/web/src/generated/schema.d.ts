@@ -2147,6 +2147,8 @@ export interface components {
             context_window?: number;
             description?: string;
             display_name?: string;
+            /** Format: int64 */
+            input_tokens?: number;
             last_output?: string;
             model?: string;
             name: string;
@@ -4054,6 +4056,8 @@ export interface components {
             created_at: string;
             display_name?: string;
             id: string;
+            /** Format: int64 */
+            input_tokens?: number;
             kind?: string;
             last_active?: string;
             last_nudge_delivered_at?: string;
