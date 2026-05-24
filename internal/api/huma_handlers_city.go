@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // humaHandleCityGet is the Huma-typed handler for GET /v0/city.
@@ -35,14 +36,30 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 		return nil, huma.Error400BadRequest("no fields to update")
 	}
 
-	var err error
+	var (
+		err       error
+		eventType string
+	)
 	if *input.Body.Suspended {
 		err = sm.SuspendCity()
+		eventType = events.CitySuspended
 	} else {
 		err = sm.ResumeCity()
+		eventType = events.CityResumed
 	}
 	if err != nil {
 		return nil, mutationError(err)
+	}
+
+	// Mirror the CLI fallback path in cmd_suspend.go: every transition
+	// must record city.suspended/city.resumed so events.jsonl reflects
+	// the change regardless of whether the operator hit the API or fell
+	// through to direct file mutation.
+	if ep := s.state.EventProvider(); ep != nil {
+		ep.Record(events.Event{
+			Type:  eventType,
+			Actor: "api",
+		})
 	}
 
 	resp := &OKResponse{}
