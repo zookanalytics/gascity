@@ -4151,8 +4151,29 @@ func TestQualifyPool(t *testing.T) {
 		{Name: "dog", BindingName: "gastown", SourceDir: "/city/packs/gastown"},
 	}}
 	dirIsolatedCfg := &config.City{Agents: []config.Agent{
-		// City-level binding agent should NOT match a rig-scoped order.
+		// City-level binding agent serves as the fallback target for a
+		// rig-scoped order that has no rig-local agent. Without the
+		// fallback, the rig pour stamps `<rig>/dog`, which no pool
+		// reconciler claims. (gc-wyzct)
 		{Name: "dog", BindingName: "maintenance"},
+	}}
+	dirIsolatedBareCfg := &config.City{Agents: []config.Agent{
+		// City-level agent with no binding — fallback should yield the
+		// bare city-scope target, not `<rig>/dog`.
+		{Name: "dog"},
+	}}
+	rigOverridesCityCfg := &config.City{Agents: []config.Agent{
+		// Rig-local agent shadows the city-scope agent of the same
+		// name; rig-local wins, fallback never fires.
+		{Name: "dog", BindingName: "foo", Dir: "api"},
+		{Name: "dog", BindingName: "maintenance"},
+	}}
+	cityFallbackAmbiguousCfg := &config.City{Agents: []config.Agent{
+		// No rig-local agent — fallback to city scope hits two
+		// binding-qualified dogs and must surface ambiguity rather
+		// than guess.
+		{Name: "dog", BindingName: "maintenance", SourceDir: "/city/packs/maintenance"},
+		{Name: "dog", BindingName: "gastown", SourceDir: "/city/packs/gastown"},
 	}}
 
 	tests := []struct {
@@ -4185,7 +4206,12 @@ func TestQualifyPool(t *testing.T) {
 
 		// Rig-order binding lookup.
 		{"rig order resolves binding", rigBindingCfg, "dog", "api", "", "api/foo.dog", ""},
-		{"rig order isolated from city agent", dirIsolatedCfg, "dog", "api", "", "api/dog", ""},
+		{"rig order falls back to city binding agent", dirIsolatedCfg, "dog", "api", "", "maintenance.dog", ""},
+		{"rig order falls back to bare city agent", dirIsolatedBareCfg, "dog", "api", "", "dog", ""},
+		{"rig-local beats city fallback", rigOverridesCityCfg, "dog", "api", "", "api/foo.dog", ""},
+		{"city fallback ambiguity fails", cityFallbackAmbiguousCfg, "dog", "api", "", "", `ambiguous pool "dog" for city order: matches maintenance.dog, gastown.dog`},
+		{"city fallback honors source hint", cityFallbackAmbiguousCfg, "dog", "api", "/city/packs/maintenance", "maintenance.dog", ""},
+		{"rig order no match anywhere", rigBindingCfg, "wolf", "api", "", "api/wolf", ""},
 
 		// Ambiguity is a hard failure — dispatch must not recreate the
 		// original bare-name route/scaler mismatch.
