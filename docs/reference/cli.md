@@ -1273,7 +1273,7 @@ gc events
 | `--after` | uint64 |  | Resume from this city event sequence number (city scope only) |
 | `--after-cursor` | string |  | Resume from this supervisor event cursor (supervisor scope only) |
 | `--api` | string |  | GC API server URL override (auto-discovered by default) |
-| `--follow` | bool |  | Continuously stream events as they arrive |
+| `--follow` | bool |  | Continuously stream events as they arrive (starts at current head when --after/--after-cursor is not given) |
 | `--payload-match` | stringArray |  | Filter by payload field (key=value or key.subkey=value, repeatable) |
 | `--seq` | bool |  | Print the current head cursor and exit |
 | `--since` | string |  | Show events since duration ago (e.g. 1h, 30m) |
