@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -563,7 +564,7 @@ func TestDoEventsFollowStoppedCityRequiresRunningAPI(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsFollow(eventsAPIScope{
+	code := doEventsFollow(context.Background(), eventsAPIScope{
 		apiURL:   server.URL,
 		cityName: "mc-city",
 		cityPath: cityDir,
@@ -590,7 +591,7 @@ func TestDoEventsFollowStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
 	defer server.Close()
 
 	var stdout, stderr bytes.Buffer
-	code := doEventsFollow(eventsAPIScope{
+	code := doEventsFollow(context.Background(), eventsAPIScope{
 		apiURL:   server.URL,
 		cityName: "mc-city",
 		cityPath: cityDir,
@@ -600,6 +601,173 @@ func TestDoEventsFollowStoppedCityAfterSeqRequiresRunningAPI(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--follow requires a running city API") {
 		t.Fatalf("stderr = %q, want explicit follow limitation", stderr.String())
+	}
+}
+
+// TestDoEventsFollowCityBareUsesHeadAsCursor pins the documented behavior of
+// bare `gc events --follow` on a running city: the CLI fetches the current
+// head cursor via X-GC-Index and uses it as after_seq when opening the SSE
+// stream, so new events arrive without replaying historical backlog. Regression
+// guard for gc-4elgv2 (silent no-op on bare --follow).
+func TestDoEventsFollowCityBareUsesHeadAsCursor(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		streamAfterSeq string
+		streamReached  bool
+	)
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("X-GC-Index", "42")
+			writeJSONResponse(t, w, cityEventsListResponse(t, nil))
+		},
+		cityStream: func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			streamAfterSeq = r.URL.Query().Get("after_seq")
+			streamReached = true
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "id: 43\nevent: event\ndata: {\"seq\":43,\"type\":\"bead.created\",\"ts\":\"2026-05-22T18:00:00Z\",\"actor\":\"test\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		},
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsFollow(ctx, eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 0, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsFollow = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	reached := streamReached
+	seq := streamAfterSeq
+	mu.Unlock()
+
+	if !reached {
+		t.Fatal("stream endpoint never reached; bare --follow should connect to /events/stream after head probe")
+	}
+	if seq != "42" {
+		t.Errorf("server received after_seq=%q, want 42 (from X-GC-Index)", seq)
+	}
+	if !strings.Contains(stdout.String(), `"type":"bead.created"`) {
+		t.Errorf("stdout missing bead.created event; stdout=%s", stdout.String())
+	}
+}
+
+// TestDoEventsFollowCityWithAfterSeqUsesProvidedCursor verifies that
+// `gc events --follow --after <seq>` preserves the user-provided cursor when
+// opening the SSE stream. Regression guard for the bug acceptance criterion
+// that --after callers must not break.
+func TestDoEventsFollowCityWithAfterSeqUsesProvidedCursor(t *testing.T) {
+	var (
+		mu             sync.Mutex
+		streamAfterSeq string
+	)
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, _ *http.Request) {
+			// The reachability probe still consults this endpoint, but it
+			// must not influence the cursor sent to /stream.
+			w.Header().Set("X-GC-Index", "999")
+			writeJSONResponse(t, w, cityEventsListResponse(t, nil))
+		},
+		cityStream: func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			streamAfterSeq = r.URL.Query().Get("after_seq")
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "id: 101\nevent: event\ndata: {\"seq\":101,\"type\":\"bead.created\",\"ts\":\"2026-05-22T18:00:00Z\",\"actor\":\"test\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		},
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsFollow(ctx, eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", nil, 100, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsFollow = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	seq := streamAfterSeq
+	mu.Unlock()
+
+	if seq != "100" {
+		t.Errorf("server received after_seq=%q, want 100 (user-provided)", seq)
+	}
+	if !strings.Contains(stdout.String(), `"type":"bead.created"`) {
+		t.Errorf("stdout missing bead.created event; stdout=%s", stdout.String())
+	}
+}
+
+// TestDoEventsFollowSupervisorBareUsesHeadCursor pins the documented behavior
+// of bare `gc events --follow` in supervisor scope: the CLI fetches the
+// supervisor head cursor (composite per-city cursor) and uses it on the
+// stream. Regression guard for gc-4elgv2.
+func TestDoEventsFollowSupervisorBareUsesHeadCursor(t *testing.T) {
+	var (
+		mu              sync.Mutex
+		streamAfterCur  string
+		supervisorItems = []cliWireTaggedEvent{
+			{Actor: "human", City: "alpha", Seq: 7, Ts: time.Unix(1700000000, 0).UTC(), Type: "bead.created"},
+		}
+	)
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(w http.ResponseWriter, _ *http.Request) {
+			writeJSONResponse(t, w, supervisorEventsListResponse(t, supervisorItems))
+		},
+		supervisorStream: func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			streamAfterCur = r.URL.Query().Get("after_cursor")
+			mu.Unlock()
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "id: alpha:8\nevent: tagged_event\ndata: {\"seq\":8,\"city\":\"alpha\",\"type\":\"bead.created\",\"ts\":\"2026-05-22T18:00:00Z\",\"actor\":\"test\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+		},
+	})
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	var stdout, stderr bytes.Buffer
+	code := doEventsFollow(ctx, eventsAPIScope{apiURL: server.URL}, "", nil, 0, "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doEventsFollow = %d, want 0; stderr=%s", code, stderr.String())
+	}
+
+	mu.Lock()
+	cursor := streamAfterCur
+	mu.Unlock()
+
+	if cursor != "alpha:7" {
+		t.Errorf("server received after_cursor=%q, want alpha:7 (from head fetch)", cursor)
+	}
+	if !strings.Contains(stdout.String(), `"city":"alpha"`) {
+		t.Errorf("stdout missing alpha event; stdout=%s", stdout.String())
 	}
 }
 
