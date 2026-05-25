@@ -201,7 +201,7 @@ DTO or SSE envelope.`,
 	cmd.Flags().StringVar(&typeFilter, "type", "", "Filter by event type (e.g. bead.created)")
 	cmd.Flags().StringVar(&sinceFlag, "since", "", "Show events since duration ago (e.g. 1h, 30m)")
 	cmd.Flags().BoolVar(&watchFlag, "watch", false, "Block until matching events arrive (exits after first match or buffered replay)")
-	cmd.Flags().BoolVar(&followFlag, "follow", false, "Continuously stream events as they arrive")
+	cmd.Flags().BoolVar(&followFlag, "follow", false, "Continuously stream events as they arrive (starts at current head when --after/--after-cursor is not given)")
 	cmd.Flags().BoolVar(&seqFlag, "seq", false, "Print the current head cursor and exit")
 	cmd.Flags().StringVar(&timeoutFlag, "timeout", "30s", "Max wait duration for --watch (e.g. 30s, 5m)")
 	cmd.Flags().Uint64Var(&afterFlag, "after", 0, "Resume from this city event sequence number (city scope only)")
@@ -277,7 +277,7 @@ func cmdEventsFollow(apiURLOverride, typeFilter string, payloadMatchArgs []strin
 		fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	return doEventsFollow(scope, typeFilter, pm, afterSeq, afterCursor, stdout, stderr)
+	return doEventsFollow(context.Background(), scope, typeFilter, pm, afterSeq, afterCursor, stdout, stderr)
 }
 
 func cmdEventsWatch(apiURLOverride, typeFilter string, payloadMatchArgs []string, afterSeq uint64, afterCursor, timeoutFlag string, stdout, stderr io.Writer) int {
@@ -744,7 +744,7 @@ func supervisorWireEventFromTyped(item genclient.TypedTaggedEventStreamEnvelope)
 	return out, nil
 }
 
-func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
+func doEventsFollow(ctx context.Context, scope eventsAPIScope, typeFilter string, payloadMatch map[string][]string, afterSeq uint64, afterCursor string, stdout, stderr io.Writer) int {
 	if scope.localOnly {
 		printStreamingCityAPIRequirement("--follow", stderr)
 		return 1
@@ -756,7 +756,6 @@ func doEventsFollow(scope eventsAPIScope, typeFilter string, payloadMatch map[st
 		return 1
 	}
 
-	ctx := context.Background()
 	if scope.isSupervisor() {
 		cursor := strings.TrimSpace(afterCursor)
 		if cursor == "" {
