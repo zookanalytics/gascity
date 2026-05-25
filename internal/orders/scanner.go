@@ -34,6 +34,13 @@ type ScanOptions struct {
 	DeprecatedPathWarningWriter io.Writer
 	// VerboseDeprecatedPathWarnings bypasses DeprecatedPathWarningDedup.
 	VerboseDeprecatedPathWarnings bool
+	// ScopeFilter drops orders whose explicit Scope contradicts this value
+	// at the per-root discovery step, before cross-root priority merging.
+	// Orders with no explicit scope pass through. Empty disables filtering.
+	// This must run before priority merge so a higher-priority order whose
+	// scope contradicts the scan context cannot mask a lower-priority
+	// compatible sibling sharing the same name.
+	ScopeFilter string
 }
 
 // Scan discovers orders across formula layers. It prefers top-level
@@ -80,6 +87,9 @@ func ScanRootsWithOptions(fs fsys.FS, roots []ScanRoot, skip []string, opts Scan
 			return nil, err
 		}
 		for _, a := range discovered {
+			if opts.ScopeFilter != "" && a.Scope != "" && a.Scope != opts.ScopeFilter {
+				continue
+			}
 			name := a.Name
 			if _, exists := found[name]; !exists {
 				order = append(order, name)

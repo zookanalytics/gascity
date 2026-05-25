@@ -41,6 +41,13 @@ type Order struct {
 	Timeout string `toml:"timeout,omitempty"`
 	// Enabled controls whether the order is active. Defaults to true.
 	Enabled *bool `toml:"enabled,omitempty"`
+	// Scope declares which discovery context this order participates in.
+	// Empty (the default) preserves pre-scope behavior: the order is
+	// emitted at every import location where it is discovered. "city"
+	// limits discovery to city-level scans; "rig" limits discovery to
+	// rig-level scans. Pack authors set this to prevent a pack imported
+	// at both city and rig scopes from emitting the same order twice.
+	Scope string `toml:"scope,omitempty"`
 	// Source is the absolute file path to the discovered order file (set by scanner, not from TOML).
 	Source string `toml:"-"`
 	// FormulaLayer is the formula layer directory this order was
@@ -73,6 +80,7 @@ type orderDecode struct {
 	Pool        string `toml:"pool,omitempty"`
 	Timeout     string `toml:"timeout,omitempty"`
 	Enabled     *bool  `toml:"enabled,omitempty"`
+	Scope       string `toml:"scope,omitempty"`
 }
 
 func (d orderDecode) normalized() Order {
@@ -92,6 +100,7 @@ func (d orderDecode) normalized() Order {
 		Pool:        d.Pool,
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
+		Scope:       d.Scope,
 	}
 }
 
@@ -155,6 +164,12 @@ func Validate(a Order) error {
 		if _, err := time.ParseDuration(a.Timeout); err != nil {
 			return fmt.Errorf("order %q: invalid timeout %q: %w", a.Name, a.Timeout, err)
 		}
+	}
+	// Validate scope if set.
+	switch a.Scope {
+	case "", "city", "rig":
+	default:
+		return fmt.Errorf("order %q: invalid scope %q (must be \"city\", \"rig\", or unset)", a.Name, a.Scope)
 	}
 	switch a.Trigger {
 	case "cooldown":

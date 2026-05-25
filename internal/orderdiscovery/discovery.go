@@ -42,7 +42,9 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	cityLayers := cityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, opts.OrderScanOptions)
+	cityScanOpts := opts.OrderScanOptions
+	cityScanOpts.ScopeFilter = "city"
+	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, cityScanOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -56,13 +58,15 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	var rigOrders []orders.Order
+	rigScanOpts := opts.OrderScanOptions
+	rigScanOpts.ScopeFilter = "rig"
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, opts.OrderScanOptions)
+		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, rigScanOpts)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
