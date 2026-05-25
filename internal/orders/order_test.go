@@ -311,6 +311,72 @@ interval = "24h"
 	}
 }
 
+func TestParseScopeCity(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+scope = "city"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Scope != "city" {
+		t.Fatalf("Scope = %q, want %q", a.Scope, "city")
+	}
+}
+
+func TestParseScopeRig(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-x"
+trigger = "manual"
+scope = "rig"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Scope != "rig" {
+		t.Fatalf("Scope = %q, want %q", a.Scope, "rig")
+	}
+}
+
+func TestParseScopeOmitted(t *testing.T) {
+	data := []byte(`
+[order]
+formula = "mol-x"
+trigger = "manual"
+`)
+	a, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Scope != "" {
+		t.Fatalf("Scope = %q, want empty", a.Scope)
+	}
+}
+
+func TestValidateScopeAccepted(t *testing.T) {
+	for _, scope := range []string{"", "city", "rig"} {
+		a := Order{Name: "ok", Formula: "mol-x", Trigger: "manual", Scope: scope}
+		if err := Validate(a); err != nil {
+			t.Errorf("Validate scope=%q: %v", scope, err)
+		}
+	}
+}
+
+func TestValidateScopeRejected(t *testing.T) {
+	for _, scope := range []string{"global", "City", "Rig", "both", "rigs"} {
+		a := Order{Name: "bad", Formula: "mol-x", Trigger: "manual", Scope: scope}
+		if err := Validate(a); err == nil {
+			t.Errorf("Validate scope=%q: expected error", scope)
+		}
+	}
+}
+
 func TestParseTriggerWinsOverLegacyGate(t *testing.T) {
 	data := []byte(`
 [order]

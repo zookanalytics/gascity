@@ -502,6 +502,144 @@ interval = "5m"
 	t.Fatalf("missing rig-scoped watch order in %#v", aa)
 }
 
+func TestScanAllScopeCityOrderSkippedInRigScans(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "digest", `[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+pool = "dog"
+scope = "city"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "digest" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if !cityFound {
+		t.Fatalf("city-scoped digest missing from city scan: %#v", aa)
+	}
+	if rigFound {
+		t.Fatalf("city-scoped digest leaked into rig scan: %#v", aa)
+	}
+}
+
+func TestScanAllScopeRigOrderSkippedInCityScans(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "lint", `[order]
+exec = "scripts/lint.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "rig"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "lint" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if cityFound {
+		t.Fatalf("rig-scoped lint leaked into city scan: %#v", aa)
+	}
+	if !rigFound {
+		t.Fatalf("rig-scoped lint missing from rig scan: %#v", aa)
+	}
+}
+
+func TestScanAllScopeUnsetEmitsAtAllImportLocations(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "sweep", `[order]
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "sweep" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if !cityFound || !rigFound {
+		t.Fatalf("found city=%v rig=%v in %#v, want both (unset scope = current behavior)", cityFound, rigFound, aa)
+	}
+}
+
 func TestRigExclusiveLayersReturnsOnlyRigSuffix(t *testing.T) {
 	cityLayers := []string{"/city/base", "/city/local"}
 	rigLayers := []string{"/city/base", "/city/local", "/rig/base", "/rig/local"}

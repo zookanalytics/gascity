@@ -351,6 +351,36 @@ When multiple packs are imported, formulas layer by priority (lowest to highest)
 
 The importing pack always wins over its imports.
 
+#### Order scope
+
+Orders inherit the import scope by default: a pack imported at both city
+and rig scopes contributes its `orders/*.toml` to **both** discovery
+streams. For maintenance orders that only make sense city-wide (e.g.
+ones that target a city-only pool), pack authors can pin discovery to
+one scope with `scope`:
+
+```toml
+# orders/digest-generate.toml
+[order]
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+pool = "dog"
+scope = "city"   # never emitted as a rig-scoped order
+```
+
+- `scope = "city"` — discovered only by city-level order scans; rig
+  scans skip it even when the pack is imported at rig scope.
+- `scope = "rig"` — discovered only by rig-level scans; city scans
+  skip it.
+- omitted — current behavior is preserved: the order is emitted at
+  every import location where it is discovered.
+
+The Pack V2 agent and named-session `scope` field works the same way.
+Unlike agents, omitting `scope` on an order means "everywhere" rather
+than inheriting from `agent_defaults` — there is no order-defaults
+analogue.
+
 ### Pack identity and qualified names
 
 After composition, every agent, formula, and prompt retains its pack provenance.
