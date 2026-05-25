@@ -7,9 +7,8 @@ import (
 )
 
 func TestRigsFromGenList_Valid(t *testing.T) {
-	prefix := "fe"
 	items := []genclient.RigResponse{
-		{Name: "frontend", Path: "/abs/frontend", Prefix: &prefix, Suspended: false},
+		{Name: "frontend", Path: "/abs/frontend", Prefix: "fe", Suspended: false},
 		{Name: "backend", Path: "/abs/backend", Suspended: true},
 	}
 	body := &genclient.ListBodyRigResponse{Items: &items, Total: int64(len(items))}
@@ -55,8 +54,8 @@ func TestRigsFromGenList_Empty(t *testing.T) {
 }
 
 func TestRigsFromGenList_PartialMissingFields(t *testing.T) {
-	// A rig with Prefix nil must decode to RigView with empty Prefix, not
-	// panic. Mirrors the wire shape where omitempty=optional pointers.
+	// A rig with empty Prefix must decode to RigView with empty Prefix
+	// rather than failing. Mirrors the always-populated wire shape.
 	items := []genclient.RigResponse{
 		{Name: "noprefix", Path: "/abs/noprefix"},
 	}
