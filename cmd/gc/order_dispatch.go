@@ -1658,51 +1658,10 @@ func qualifyPool(pool, rig string, cfg *config.City, sourceDirHint string) (stri
 		return rig + "/" + pool, nil
 	}
 
-	qualified, found, err := findQualifiedPoolForDir(pool, rig, cfg, sourceDirHint)
-	if err != nil {
-		return "", err
-	}
-
-	// Rig-scope fallback to city scope: a rig-scoped order whose pool
-	// has no rig-local agent should resolve to the city-scope agent of
-	// the same name (e.g. a shared `dog`) and dispatch against that
-	// agent's qualified name directly — not `<rig>/<pool>`, which no
-	// pool reconciler claims. Without this fallback, the per-rig fanout
-	// emitted by scanAllOrders for `pool = "dog"` strands one workflow
-	// per rig on a phantom `<rig>/dog` route. (gc-wyzct)
-	if !found && rig != "" {
-		cityQualified, cityFound, err := findQualifiedPoolForDir(pool, "", cfg, sourceDirHint)
-		if err != nil {
-			return "", err
-		}
-		if cityFound {
-			return cityQualified, nil
-		}
-	}
-
-	if rig == "" {
-		return qualified, nil
-	}
-	return rig + "/" + qualified, nil
-}
-
-// findQualifiedPoolForDir scans cfg.Agents whose Dir matches the supplied
-// scope dir (rig name, or "" for city scope) for one whose Name or
-// BindingQualifiedName matches pool. Returns the binding-qualified target
-// to dispatch against, a found flag, and an ambiguity error if multiple
-// agents in the same priority tier match. When nothing matches, returns
-// (pool, false, nil) — the caller decides whether to retry at another
-// scope or fall back to a bare/prefixed pool name.
-//
-// Tier order (highest-priority first):
-//  1. Exact match on `binding.name` for dotted pool strings
-//  2. Bare match scoped by sourceDirHint (the pack the order came from)
-//  3. Bare match against an agent with no BindingName ("local" agent)
-//  4. Bare match against any agent
-func findQualifiedPoolForDir(pool, dir string, cfg *config.City, sourceDirHint string) (string, bool, error) {
+	qualified := pool
 	scope := "city order"
-	if dir != "" {
-		scope = fmt.Sprintf("rig %q", dir)
+	if rig != "" {
+		scope = fmt.Sprintf("rig %q", rig)
 	}
 
 	var exactQualified []string
@@ -1715,7 +1674,7 @@ func findQualifiedPoolForDir(pool, dir string, cfg *config.City, sourceDirHint s
 	}
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
-		if a.Dir != dir {
+		if a.Dir != rig {
 			continue
 		}
 		switch {
@@ -1734,23 +1693,27 @@ func findQualifiedPoolForDir(pool, dir string, cfg *config.City, sourceDirHint s
 
 	switch {
 	case len(exactQualified) == 1:
-		return exactQualified[0], true, nil
+		qualified = exactQualified[0]
 	case len(exactQualified) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(exactQualified, ", "))
 	case len(sourceScopedMatches) == 1:
-		return sourceScopedMatches[0], true, nil
+		qualified = sourceScopedMatches[0]
 	case len(sourceScopedMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(sourceScopedMatches, ", "))
 	case len(localBareMatches) == 1:
-		return localBareMatches[0], true, nil
+		qualified = localBareMatches[0]
 	case len(localBareMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(localBareMatches, ", "))
 	case len(bareMatches) == 1:
-		return bareMatches[0], true, nil
+		qualified = bareMatches[0]
 	case len(bareMatches) > 1:
-		return "", false, fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
+		return "", fmt.Errorf("ambiguous pool %q for %s: matches %s", pool, scope, strings.Join(bareMatches, ", "))
 	}
-	return pool, false, nil
+
+	if rig == "" {
+		return qualified, nil
+	}
+	return rig + "/" + qualified, nil
 }
 
 func appendUniquePoolTarget(values []string, want string) []string {
