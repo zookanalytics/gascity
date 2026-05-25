@@ -113,6 +113,44 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	}
 }
 
+func TestHandleSessionListCachesUntilIndexChanges(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = store
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/sessions"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first sessions = %d, want 200", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second sessions = %d, want 200", rec.Code)
+	}
+
+	// sessionReadModelRows -> ListAllSessionBeads issues one List(Label=...)
+	// and one List(Type=...) per uncached call. Only the label leg trips the
+	// countingStore.List switch (the type leg has no Assignee/Label/Status/
+	// AllowScan set), so after a cached repeat we expect exactly 1.
+	if store.listByLabelCalls != 1 {
+		t.Fatalf("ListByLabel calls after cached repeat = %d, want 1", store.listByLabelCalls)
+	}
+
+	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("third sessions = %d, want 200", rec.Code)
+	}
+	if store.listByLabelCalls != 2 {
+		t.Fatalf("ListByLabel calls after index change = %d, want 2", store.listByLabelCalls)
+	}
+}
+
 func TestHandleOrdersFeedCachesUntilIndexChanges(t *testing.T) {
 	state := newFakeState(t)
 	rigStore := &countingStore{Store: beads.NewMemStore()}
