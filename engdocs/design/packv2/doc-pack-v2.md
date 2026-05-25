@@ -381,6 +381,19 @@ Unlike agents, omitting `scope` on an order means "everywhere" rather
 than inheriting from `agent_defaults` — there is no order-defaults
 analogue.
 
+**Convention for new pack authors.** Declare `scope` explicitly on
+every order. The bundled packs do — `TestBundledOrdersDeclareScope`
+in `internal/builtinpacks/registry_test.go` keeps them honest. Pool-
+bound orders almost always want `scope = "city"` (the pool typically
+lives at one scope). Exec-based maintenance orders that touch shared
+city infrastructure (Dolt, the bead store, cross-rig branches) also
+want `scope = "city"` — they're harmful to run per-rig at best,
+duplicate work at worst. Only leave `scope` omitted if "everywhere"
+genuinely is the right discovery behavior for that order, and pair
+that decision with a one-line `# scope:` comment so a future reader
+sees the intent rather than oversight.
+
+
 ### Pack identity and qualified names
 
 After composition, every agent, formula, and prompt retains its pack provenance.
