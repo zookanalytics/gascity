@@ -305,7 +305,7 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
-			ctx = buildPrimeContext(cityPath, cityName, &a, cfg.Rigs, stderr)
+			ctx = buildPrimeContext(cityPath, cityName, &a, cfg, cfg.Rigs, stderr)
 			ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(&a, &cfg.Workspace, cfg.Providers)
 		}
 		if a.PromptTemplate != "" {
@@ -631,8 +631,10 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 
 // buildPrimeContext constructs a PromptContext for gc prime. Uses GC_*
 // environment variables when running inside a managed session, falls back
-// to currentRigContext when run manually.
-func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+// to currentRigContext when run manually. `cfg` is the loaded City config
+// and may be nil in tests; it supplies the city-level fallback for fields
+// like DefaultMergeStrategy.
+func buildPrimeContext(cityPath, cityName string, a *config.Agent, cfg *config.City, rigs []config.Rig, stderr io.Writer) PromptContext {
 	configDir := cityPath
 	if a.SourceDir != "" {
 		configDir = a.SourceDir
@@ -676,6 +678,7 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 
 	ctx.Branch = os.Getenv("GC_BRANCH")
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
+	ctx.DefaultMergeStrategy = mergeStrategyForRig(ctx.RigName, rigs, cfg)
 	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQuery(), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
