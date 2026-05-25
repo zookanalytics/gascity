@@ -1371,6 +1371,10 @@
           "type": "string",
           "description": "DefaultBranch overrides the rig's recorded mainline branch."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy overrides the rig-scoped default merge strategy\nresolved by refinery formulas. See Rig.DefaultMergeStrategy."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the rig's suspended state."

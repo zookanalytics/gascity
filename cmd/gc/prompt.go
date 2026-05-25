@@ -35,8 +35,13 @@ type PromptContext struct {
 	IssuePrefix   string
 	Branch        string
 	DefaultBranch string // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	// DefaultMergeStrategy is the rig's effective default merge strategy
+	// ("direct" or "pr"), resolved via Rig.EffectiveDefaultMergeStrategy.
+	// Empty string when neither the rig nor the city overrides the formula
+	// default; pack templates fall back to their own `[vars.X.default]`.
+	DefaultMergeStrategy string
+	WorkQuery            string // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery           string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
 	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
 	// "codex", or a custom provider name from the city's [providers] section).
 	// Templates can branch on this via {{ .ProviderKey }} or feed it to
@@ -297,6 +302,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["IssuePrefix"] = ctx.IssuePrefix
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
+	m["DefaultMergeStrategy"] = ctx.DefaultMergeStrategy
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
@@ -342,6 +348,27 @@ func defaultBranchForRig(rigName string, rigs []config.Rig, dir string) string {
 		}
 	}
 	return defaultBranchFor(dir)
+}
+
+// mergeStrategyForRig resolves the effective default merge strategy for
+// templates rendered in the context of `rigName`, walking rig → city → "".
+// Returns the empty string when neither the rig nor the city sets a
+// default; pack templates use this to opt into city-wide PR policy without
+// modifying the formula's own default. Empty `rigName` falls through to
+// the city default so an HQ-only city (no rig context) still honors a
+// city-level `default_merge_strategy`. `cfg` may be nil.
+func mergeStrategyForRig(rigName string, rigs []config.Rig, cfg *config.City) string {
+	if rigName != "" {
+		for i := range rigs {
+			if rigs[i].Name == rigName {
+				return rigs[i].EffectiveDefaultMergeStrategy(cfg)
+			}
+		}
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.DefaultMergeStrategy)
+	}
+	return ""
 }
 
 // promptFuncMap returns template functions available in prompt templates.

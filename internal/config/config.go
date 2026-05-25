@@ -183,6 +183,14 @@ type City struct {
 	NamedSessions []NamedSession `toml:"named_session,omitempty"`
 	// Rigs lists external projects registered in the city.
 	Rigs []Rig `toml:"rigs,omitempty"`
+	// DefaultMergeStrategy is the city-wide default merge strategy
+	// ("direct" or "pr") that refinery formulas resolve when a work bead
+	// does not carry an explicit `metadata.merge_strategy` and the
+	// originating rig does not set Rig.DefaultMergeStrategy. Empty defers
+	// to the formula's own default. Set this on a downstream city (e.g.,
+	// loomington) to require PR review for every refinery merge without
+	// touching the upstream pack's formula defaults.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
 	Patches Patches `toml:"patches,omitempty"`
 	// Beads configures the bead store backend.
@@ -471,6 +479,13 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy is the rig-scoped default merge strategy
+	// ("direct" or "pr") that refinery formulas resolve when a work bead
+	// does not carry an explicit `metadata.merge_strategy`. Empty defers to
+	// the city-level default (City.DefaultMergeStrategy), then to the
+	// formula's own default. Set this on a single rig to override the
+	// city-wide policy.
+	DefaultMergeStrategy string `toml:"default_merge_strategy,omitempty"`
 	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
 	Suspended bool `toml:"suspended,omitempty"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
@@ -973,6 +988,24 @@ func (r *Rig) EffectivePrefix() string {
 // (e.g., git symbolic-ref) when this returns "".
 func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
+}
+
+// EffectiveDefaultMergeStrategy returns the resolved default merge strategy
+// for this rig, walking rig → city → "". Callers (refinery formula
+// template rendering) treat the empty return as "use the formula's own
+// default" — typically "direct" for the gc-toolkit pack, "pr" for cities
+// that opt into PR-mandatory policy at the city level.
+//
+// `cfg` may be nil; the city fallback is skipped in that case. The
+// returned value is whitespace-trimmed.
+func (r *Rig) EffectiveDefaultMergeStrategy(cfg *City) string {
+	if s := strings.TrimSpace(r.DefaultMergeStrategy); s != "" {
+		return s
+	}
+	if cfg != nil {
+		return strings.TrimSpace(cfg.DefaultMergeStrategy)
+	}
+	return ""
 }
 
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
