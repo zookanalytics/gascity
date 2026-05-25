@@ -640,6 +640,106 @@ interval = "5m"
 	}
 }
 
+func TestScanAllScopeRigDoesNotMaskLowerPriorityCityCompatibleOrder(t *testing.T) {
+	// Regression: a higher-priority pack defines order X with scope="rig",
+	// a lower-priority pack defines order X with no scope (compatible).
+	// During a city scan, scope filtering must run before the cross-root
+	// priority merge so the higher-priority incompatible order does not
+	// overwrite — and then erase — the lower-priority compatible one.
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	lowPack := filepath.Join(t.TempDir(), "low-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(lowPack, "orders"), "audit", `[order]
+exec = "scripts/low.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	highPack := filepath.Join(t.TempDir(), "high-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(highPack, "orders"), "audit", `[order]
+exec = "scripts/high.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "rig"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		PackDirs: []string{lowPack, highPack},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var matched int
+	var exec string
+	for _, a := range aa {
+		if a.Name == "audit" && a.Rig == "" {
+			matched++
+			exec = a.Exec
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("got %d city-scoped audit orders, want 1: %#v", matched, aa)
+	}
+	if exec != "scripts/low.sh" {
+		t.Fatalf("Exec = %q, want lower-priority city-compatible order to survive higher-priority rig-scoped sibling", exec)
+	}
+}
+
+func TestScanAllScopeCityDoesNotMaskLowerPriorityRigCompatibleOrder(t *testing.T) {
+	// Mirror of the city case: higher-priority pack defines order X with
+	// scope="city"; lower-priority pack defines order X with no scope.
+	// During a rig scan, the lower-priority rig-compatible order must
+	// survive the higher-priority incompatible sibling.
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	lowPack := filepath.Join(t.TempDir(), "low-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(lowPack, "orders"), "audit", `[order]
+exec = "scripts/low.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	highPack := filepath.Join(t.TempDir(), "high-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(highPack, "orders"), "audit", `[order]
+exec = "scripts/high.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"frontend": {lowPack, highPack},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var matched int
+	var exec string
+	for _, a := range aa {
+		if a.Name == "audit" && a.Rig == "frontend" {
+			matched++
+			exec = a.Exec
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("got %d rig-scoped audit orders, want 1: %#v", matched, aa)
+	}
+	if exec != "scripts/low.sh" {
+		t.Fatalf("Exec = %q, want lower-priority rig-compatible order to survive higher-priority city-scoped sibling", exec)
+	}
+}
+
 func TestRigExclusiveLayersReturnsOnlyRigSuffix(t *testing.T) {
 	cityLayers := []string{"/city/base", "/city/local"}
 	rigLayers := []string{"/city/base", "/city/local", "/rig/base", "/rig/local"}

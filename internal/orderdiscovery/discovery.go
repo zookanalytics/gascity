@@ -42,11 +42,12 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	cityLayers := cityFormulaLayers(cityPath, cfg)
-	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, opts.OrderScanOptions)
+	cityScanOpts := opts.OrderScanOptions
+	cityScanOpts.ScopeFilter = "city"
+	cityOrders, err := orders.ScanRootsWithOptions(fsysImpl, CityOrderRoots(cityPath, cfg), cfg.Orders.Skip, cityScanOpts)
 	if err != nil {
 		return nil, err
 	}
-	cityOrders = filterOrdersByScope(cityOrders, "city")
 
 	rigNames := make(map[string]struct{}, len(cfg.FormulaLayers.Rigs)+len(cfg.RigPackDirs))
 	for rigName := range cfg.FormulaLayers.Rigs {
@@ -57,13 +58,15 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	var rigOrders []orders.Order
+	rigScanOpts := opts.OrderScanOptions
+	rigScanOpts.ScopeFilter = "rig"
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, opts.OrderScanOptions)
+		aa, err := orders.ScanRootsWithOptions(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip, rigScanOpts)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
@@ -76,7 +79,6 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		for i := range aa {
 			aa[i].Rig = rigName
 		}
-		aa = filterOrdersByScope(aa, "rig")
 		rigOrders = append(rigOrders, aa...)
 	}
 
@@ -216,23 +218,6 @@ func sortedRigNames(rigs map[string]struct{}) []string {
 	}
 	sort.Strings(names)
 	return names
-}
-
-// filterOrdersByScope drops orders whose explicit Scope contradicts the
-// current scan context. Orders with no explicit Scope are preserved
-// (backwards compatibility — pack authors opt in by declaring scope).
-// context must be "city" or "rig".
-func filterOrdersByScope(aa []orders.Order, context string) []orders.Order {
-	out := aa[:0]
-	for _, a := range aa {
-		switch a.Scope {
-		case "", context:
-			out = append(out, a)
-		default:
-			// Order's explicit scope contradicts this scan context — skip.
-		}
-	}
-	return out
 }
 
 func overridesFromConfig(cfgOverrides []config.OrderOverride) []orders.Override {
