@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 const testCommit = "abcdef123456abcdef123456abcdef123456abcd"
@@ -341,4 +343,84 @@ func testRepoRoot(t *testing.T) string {
 		t.Fatalf("repo root %q missing go.mod: %v", root, err)
 	}
 	return root
+}
+
+// TestBundledOrdersDeclareScope enforces that every shipped order TOML
+// either declares an explicit `scope = "city"` / `scope = "rig"` or
+// includes a `# scope:` comment explaining why omitted scope is
+// intentional. Without explicit scope, an order emits at every import
+// location it is discovered from, which double-counts the order when
+// the same pack is imported at both city and rig scope. New orders
+// added under any bundled pack must keep the bundle audited.
+func TestBundledOrdersDeclareScope(t *testing.T) {
+	root := testRepoRoot(t)
+
+	var checked int
+	for _, pack := range All() {
+		ordersDir := filepath.Join(root, pack.Subpath, "orders")
+		if _, err := os.Stat(ordersDir); os.IsNotExist(err) {
+			continue
+		}
+
+		entries, err := os.ReadDir(ordersDir)
+		if err != nil {
+			t.Fatalf("reading %s: %v", ordersDir, err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".toml") {
+				continue
+			}
+			path := filepath.Join(ordersDir, entry.Name())
+			checked++
+
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Errorf("reading %s: %v", path, err)
+				continue
+			}
+			order, err := orders.Parse(data)
+			if err != nil {
+				t.Errorf("parsing %s: %v", path, err)
+				continue
+			}
+			switch order.Scope {
+			case "city", "rig":
+				// Explicit scope — bundle-author has decided.
+			case "":
+				if !hasScopeJustificationComment(data) {
+					t.Errorf("%s: scope is unset and no `# scope:` comment justifies it.\n"+
+						"Set `scope = \"city\"` or `scope = \"rig\"`, or add a one-line\n"+
+						"comment starting with `# scope:` explaining why omitted scope is\n"+
+						"intentional. See engdocs/design/packv2/doc-pack-v2.md §Order scope.",
+						path)
+				}
+			default:
+				// Validate already catches this, but surface it here too.
+				t.Errorf("%s: scope = %q is invalid (must be \"city\", \"rig\", or unset)", path, order.Scope)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no bundled order TOMLs were checked — did the pack layout change?")
+	}
+}
+
+// hasScopeJustificationComment reports whether the file contains a
+// line whose first non-whitespace tokens are `# scope:` (any
+// capitalization of "scope"). The comment is the documented escape
+// hatch when "everywhere" really is the right discovery behavior for
+// an order — e.g., an exec order that is harmless to run from both
+// scopes and we explicitly want both copies firing.
+func hasScopeJustificationComment(data []byte) bool {
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if !strings.HasPrefix(line, "#") {
+			continue
+		}
+		trimmed := strings.TrimSpace(strings.TrimPrefix(line, "#"))
+		if strings.HasPrefix(strings.ToLower(trimmed), "scope:") {
+			return true
+		}
+	}
+	return false
 }
