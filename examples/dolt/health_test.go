@@ -168,7 +168,12 @@ func TestHealthScriptIsBounded(t *testing.T) {
 	script := filepath.Join(root, healthScript)
 
 	cmd := exec.Command("sh", script)
-	cmd.Env = append(os.Environ(),
+	// filteredEnv strips GC_*/DOLT_* so the host's GC_DOLT_STATE_FILE
+	// (which on a live workstation points at a real running Dolt) does
+	// not redirect the script away from this test's dead listener and
+	// fool the regression guard into reporting the wrong unhealthy state.
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",
@@ -765,6 +770,249 @@ exec /bin/date "$@"
 	}
 }
 
+// TestHealthScriptConsultsStateFileForCurrentPort is the regression
+// guard for gc-7p5rqr: after a Dolt port move (broken-pipe restart,
+// allocation collision), the supervisor still injects GC_DOLT_PORT
+// from the cached original config. The previous health script
+// probed that stale env port, reported `running=false`, and labeled
+// the alive Dolt PID a zombie because the listener-probe found no
+// holder on the wrong port.
+//
+// dolt-state.json is authoritative for "what is actually running."
+// When it shows a live server (running=true, pid alive, data_dir
+// matches), the health script must probe its port, not the cached
+// env value. Tests both "state.port differs from env" and "state
+// shows running on the env port" to pin both branches of the
+// override.
+func TestHealthScriptConsultsStateFileForCurrentPort(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	// Real listener for the state-file port — the script's
+	// managed_runtime_tcp_reachable probe needs an accepting socket
+	// to report reachable=true.
+	stateListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen state port: %v", err)
+	}
+	t.Cleanup(func() { _ = stateListener.Close() })
+	statePort := stateListener.Addr().(*net.TCPAddr).Port
+
+	// Grab a second port for the stale env GC_DOLT_PORT. Bind and
+	// close so it is guaranteed-different from statePort and
+	// known-closed: a script that honors the stale env port will
+	// report `running=false` against it, which the assertions catch.
+	envListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen env port: %v", err)
+	}
+	envPort := envListener.Addr().(*net.TCPAddr).Port
+	_ = envListener.Close()
+	if envPort == statePort {
+		t.Fatalf("env port collided with state port (%d); rerun", envPort)
+	}
+
+	// State file: live server on statePort with this test process's PID,
+	// data_dir matching what runtime.sh will compute.
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, statePort, os.Getpid())
+
+	// Fake dolt that accepts any SELECT — needed because the listener
+	// above is a bare TCP socket, not a real MySQL server.
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(envPort),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running   bool `json:"running"`
+			Reachable bool `json:"reachable"`
+			PID       int  `json:"pid"`
+			Port      int  `json:"port"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if report.Server.Port != statePort {
+		t.Errorf("server.port = %d, want %d (state file authoritative; env had stale %d)\n%s",
+			report.Server.Port, statePort, envPort, out)
+	}
+	if !report.Server.Running {
+		t.Errorf("server.running = false, want true (state file shows running on %d)\n%s",
+			statePort, out)
+	}
+	if !report.Server.Reachable {
+		t.Errorf("server.reachable = false, want true (fake dolt + real listener on %d)\n%s",
+			statePort, out)
+	}
+	if report.Server.PID == 0 {
+		t.Errorf("server.pid = 0, want non-zero (state file holds live PID)\n%s", out)
+	}
+}
+
+// TestHealthScriptFallsBackToEnvWhenStateMissing pins the negative
+// half of the precedence rule from gc-7p5rqr: when dolt-state.json
+// is absent, the script must still probe the env-supplied port —
+// the supervisor's env hint is the only signal left. Without this,
+// fixing the "state wins" case could regress every other consumer
+// to "no port found, exit 1".
+func TestHealthScriptFallsBackToEnvWhenStateMissing(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	// Provider state file present so runtime.sh's port resolver does
+	// not exit 78 on "no state at all". Provider state is the fallback
+	// the helper consults; the test exercises it to keep the env path
+	// reachable without writing a managed state file.
+	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running bool `json:"running"`
+			Port    int  `json:"port"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	wantPort, _ := strconv.Atoi(port)
+	if report.Server.Port != wantPort {
+		t.Errorf("server.port = %d, want %d (env fallback when state missing)\n%s",
+			report.Server.Port, wantPort, out)
+	}
+	if !report.Server.Running {
+		t.Errorf("server.running = false, want true (env-supplied port is live)\n%s", out)
+	}
+}
+
+// TestHealthScriptIgnoresStaleStateFile pins one more branch: a
+// state file claiming running=true on a port where nothing is
+// listening (zombie/stale state after kill -9) must not override
+// a live env port. Otherwise the health script would probe a dead
+// port and miss a server that actually is up.
+func TestHealthScriptIgnoresStaleStateFile(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	// Real listener for the env port — this is the live server.
+	envListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen env: %v", err)
+	}
+	t.Cleanup(func() { _ = envListener.Close() })
+	envPort := envListener.Addr().(*net.TCPAddr).Port
+
+	// Stale state: claim a closed port. Use the same trick — bind
+	// and release — to get a known-dead port distinct from envPort.
+	deadListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen dead: %v", err)
+	}
+	stalePort := deadListener.Addr().(*net.TCPAddr).Port
+	_ = deadListener.Close()
+	if stalePort == envPort {
+		t.Fatalf("dead port collided with env port (%d); rerun", stalePort)
+	}
+
+	writeManagedRuntimeStateForScriptWithPID(t, cityPath, stalePort, os.Getpid())
+
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), `#!/bin/sh
+exit 0
+`)
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+strconv.Itoa(envPort),
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Server struct {
+			Running bool `json:"running"`
+			Port    int  `json:"port"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if report.Server.Port != envPort {
+		t.Errorf("server.port = %d, want %d (state claims %d but nothing listens; env wins)\n%s",
+			report.Server.Port, envPort, stalePort, out)
+	}
+	if !report.Server.Running {
+		t.Errorf("server.running = false, want true (env port has a real listener)\n%s", out)
+	}
+}
+
 func writeManagedRuntimeStateForScript(t *testing.T, cityPath string, port int) {
 	t.Helper()
 	writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, os.Getpid())
@@ -994,7 +1242,11 @@ func TestHealthScriptJSONAlwaysExitsZero(t *testing.T) {
 	script := filepath.Join(root, healthScript)
 
 	cmd := exec.Command("sh", script, "--json")
-	cmd.Env = append(os.Environ(),
+	// Hermetic: strip GC_*/DOLT_* so a host GC_DOLT_STATE_FILE that
+	// points at a live Dolt server does not steer the script away
+	// from the dead port this test deliberately allocates.
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN"),
 		"GC_CITY_PATH="+cityPath,
 		"GC_PACK_DIR="+root,
 		"GC_DOLT_HOST=127.0.0.1",

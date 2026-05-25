@@ -68,6 +68,45 @@ done
 
 # Note: run_bounded / TIMEOUT_BIN are provided by assets/scripts/runtime.sh.
 
+# dolt-state.json is authoritative for "what is actually running."
+# port_resolve.sh honors GC_DOLT_PORT as an operator override, but the
+# `gc start` supervisor exports GC_DOLT_PORT from the original config
+# into every child env — so after a port move (broken-pipe restart,
+# allocation collision) that env value goes stale and this script
+# would probe the dead config port, label the alive PID a zombie, and
+# fool deacon patrols into restarting a healthy data plane (gc-7p5rqr).
+#
+# Re-resolve GC_DOLT_PORT from the state file only when ALL of these
+# hold: running=true, port and pid present, data_dir matches, the
+# pid is alive, AND something is actually listening on the state's
+# port. The listener check matters because state can desync from
+# reality (kill -9 before state update, port-in-use collision): if
+# state's port has no listener, treat the file as stale and leave
+# GC_DOLT_PORT alone so the env hint still drives the probe.
+if [ -f "$DOLT_STATE_FILE" ]; then
+  _hs_running=$(read_runtime_state_flag "$DOLT_STATE_FILE" running)
+  _hs_state_port=$(read_runtime_state_number "$DOLT_STATE_FILE" port)
+  _hs_state_pid=$(read_runtime_state_number "$DOLT_STATE_FILE" pid)
+  _hs_state_data_dir=$(read_runtime_state_string "$DOLT_STATE_FILE" data_dir)
+  if [ "$_hs_running" = "true" ] \
+     && [ -n "$_hs_state_port" ] \
+     && [ -n "$_hs_state_pid" ] \
+     && same_path "$_hs_state_data_dir" "$DOLT_DATA_DIR" \
+     && pid_is_running "$_hs_state_pid"; then
+    # Confirm state's port has a real listener before trusting it.
+    # managed_runtime_listener_pid succeeds for any listener; if the
+    # holder matches state.pid we have an exact match. Fall back to
+    # a plain TCP-reachable probe if the listener-pid lookup is
+    # inconclusive (lsof's MPTCP blind spot, sandboxed environments
+    # without ss/lsof) — reachable + matching data_dir is enough.
+    _hs_holder=$(managed_runtime_listener_pid "$_hs_state_port" || true)
+    if [ "$_hs_holder" = "$_hs_state_pid" ] \
+       || { [ -z "$_hs_holder" ] && managed_runtime_tcp_reachable "$_hs_state_port"; }; then
+      GC_DOLT_PORT="$_hs_state_port"
+    fi
+  fi
+fi
+
 # Determine host for probing.
 host="${GC_DOLT_HOST:-127.0.0.1}"
 
