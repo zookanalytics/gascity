@@ -25,6 +25,26 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err := cacheLiveOr503(store); err != nil {
 		return nil, err
 	}
+
+	wantPeek := input.Peek
+	index := s.latestIndex()
+	cacheKey := ""
+	// Skip caching for peek (terminal text is too volatile) and for
+	// paginated requests. cursorPresent is a private field so it's not
+	// part of cacheKeyFor's key; unpaginated and cursor-mode requests
+	// with the same Limit would otherwise share a cache key but return
+	// different response bodies (the unpaginated branch omits NextCursor).
+	if !wantPeek && !input.cursorPresent {
+		cacheKey = cacheKeyFor("sessions", input)
+		if body, ok := cachedResponseAs[ListBody[sessionResponse]](s, cacheKey, index); ok {
+			return &ListOutput[sessionResponse]{
+				Index:     index,
+				CacheAgeS: cacheAgeSeconds(store),
+				Body:      body,
+			}, nil
+		}
+	}
+
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
@@ -41,7 +61,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
 	}
 
-	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
@@ -71,15 +90,19 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		if pp.Limit < len(items) {
 			items = items[:pp.Limit]
 		}
+		body := ListBody[sessionResponse]{
+			Items:         items,
+			Total:         total,
+			Partial:       len(partialErrors) > 0,
+			PartialErrors: partialErrors,
+		}
+		if cacheKey != "" {
+			s.storeResponse(cacheKey, index, body)
+		}
 		return &ListOutput[sessionResponse]{
-			Index:     s.latestIndex(),
+			Index:     index,
 			CacheAgeS: cacheAgeSeconds(store),
-			Body: ListBody[sessionResponse]{
-				Items:         items,
-				Total:         total,
-				Partial:       len(partialErrors) > 0,
-				PartialErrors: partialErrors,
-			},
+			Body:      body,
 		}, nil
 	}
 
@@ -88,7 +111,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 		page = []sessionResponse{}
 	}
 	return &ListOutput[sessionResponse]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store),
 		Body: ListBody[sessionResponse]{
 			Items:         page,
