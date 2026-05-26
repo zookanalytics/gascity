@@ -1435,7 +1435,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		if _, err := orders.ScanRoots(fs, []orders.ScanRoot{{
 			Dir:          filepath.Join(topoDir, "orders"),
 			FormulaLayer: filepath.Join(topoDir, "formulas"),
-		}}, nil); err != nil {
+		}}, nil, ""); err != nil {
 			return nil, nil, nil, nil, nil, nil, nil, err
 		}
 	}
