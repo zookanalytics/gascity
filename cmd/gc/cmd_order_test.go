@@ -2608,7 +2608,8 @@ name = "mayor"
 	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	orderToml := `trigger = "manual"
+	orderToml := `[order]
+trigger = "manual"
 formula = "mol-digest"
 `
 	if err := os.WriteFile(filepath.Join(ordersDir, "digest.toml"), []byte(orderToml), 0o644); err != nil {

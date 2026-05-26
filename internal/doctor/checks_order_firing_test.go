@@ -344,6 +344,16 @@ exec = "true"
 trigger = "event"
 on = "` + timing + `"
 `
+	case "condition":
+		check := timing
+		if check == "" {
+			check = "true"
+		}
+		body = `[order]
+exec = "true"
+trigger = "condition"
+check = "` + check + `"
+`
 	default:
 		body = `[order]
 exec = "true"

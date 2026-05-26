@@ -270,3 +270,70 @@ func TestDiscoverRootReturnsUnreadableRootError(t *testing.T) {
 		t.Fatalf("error = %v, want readable root context", err)
 	}
 }
+
+func TestDiscoverRootRejectsInvalidScope(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/health-check.toml"] = []byte(`
+[order]
+formula = "health-check"
+trigger = "manual"
+scope = "City"
+`)
+
+	_, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
+	})
+	if err == nil {
+		t.Fatal("discoverRoot succeeded, want error for invalid scope value")
+	}
+	if !strings.Contains(err.Error(), "health-check") {
+		t.Fatalf("error = %v, want order name in message", err)
+	}
+	if !strings.Contains(err.Error(), "/pack/orders/health-check.toml") {
+		t.Fatalf("error = %v, want source path in message", err)
+	}
+	if !strings.Contains(err.Error(), `invalid scope "City"`) {
+		t.Fatalf("error = %v, want invalid-scope context from Validate", err)
+	}
+}
+
+func TestScanRootsRejectsInvalidScope(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/health-check.toml"] = []byte(`
+[order]
+formula = "health-check"
+trigger = "manual"
+scope = "global"
+`)
+
+	_, err := ScanRoots(fs, []ScanRoot{{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
+	}}, nil, "city")
+	if err == nil {
+		t.Fatal("ScanRoots succeeded, want error for invalid scope value rather than silent drop")
+	}
+	if !strings.Contains(err.Error(), `invalid scope "global"`) {
+		t.Fatalf("error = %v, want invalid-scope context from Validate", err)
+	}
+}
+
+func TestDiscoverRootRejectsMissingTrigger(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/pack/orders/no-trigger.toml"] = []byte(`
+[order]
+formula = "no-trigger"
+`)
+
+	_, err := discoverRoot(fs, ScanRoot{
+		Dir:          "/pack/orders",
+		FormulaLayer: "/pack/formulas",
+	})
+	if err == nil {
+		t.Fatal("discoverRoot succeeded, want error for missing trigger")
+	}
+	if !strings.Contains(err.Error(), "trigger is required") {
+		t.Fatalf("error = %v, want trigger-required context from Validate", err)
+	}
+}
