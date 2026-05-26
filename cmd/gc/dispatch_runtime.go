@@ -675,12 +675,19 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
 }
 
+// workflowServeControlReadyScanLimit caps the single-pass control-dispatcher
+// ready scan. Wider than workflowServeScanLimit because the scan returns the
+// entire city's ready queue and filtering happens client-side in jq, so the
+// limit has to cover the dispatcher's tail without clipping. 10× the prior
+// per-probe limit matches the bead-suggested value for gc-0xb70e.
+const workflowServeControlReadyScanLimit = 200
+
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
-	limit := fmt.Sprintf("%d", workflowServeScanLimit)
+	limit := fmt.Sprintf("%d", workflowServeControlReadyScanLimit)
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -690,40 +697,32 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_SESSION_NAME=` + shellquote.Quote(name)
 		break
 	}
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
-	}
+	// Single bd query + jq client-side filter. The bd CLI lacks OR semantics
+	// across --assignee and --metadata-field, so the prior shape forked one
+	// probe per candidate ID plus one for the routed-pool query. Collapsing
+	// to a single fork drops the per-dispatcher subprocess count from ~3 per
+	// wake-tick (after gc-k3r9zm) down to 1.
+	//
+	// Filter preserves the prior priority: direct-assigned work (assignee
+	// matches any candidate ID, deduped from env vars) comes first, then
+	// pool-routed work (unassigned + gc.routed_to=target). Bd's own
+	// priority sort is preserved within each group; dedupe keeps the first
+	// occurrence when a bead matches both.
+	//
+	// Legacy workflow-control assignee/route probes were removed in
+	// gc-k3r9zm and the new shape never emits them either.
 	query := queryPrefix + ` sh -c '` +
-		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
-		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
-		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
-		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
-		`done; ` +
-		`done; ` +
-		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
-	} else {
-		query += `:; `
-	}
-	query += `[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
+		`cands=$(printf "%s\n" "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID" | awk "NF && !seen[\$0]++"); ` +
+		`out=$(bd --readonly --sandbox ready --json --limit=` + limit + ` 2>/dev/null); ` +
+		`[ -z "$out" ] && out="[]"; ` +
+		`printf "%s" "$out" | jq --arg cands "$cands" --arg routed_to "$GC_CONTROL_TARGET" '\''` +
+		`($cands | split("\n") | map(select(length > 0))) as $cand_list | ` +
+		`((. // []) | map(select((.assignee // "") as $a | $a != "" and ($a | IN($cand_list[]))))) + ` +
+		`((. // []) | map(select((.assignee // "") == "" and (.metadata."gc.routed_to" // "") == $routed_to))) | ` +
+		`reduce .[] as $item ([]; if any(.[]; .id == $item.id) then . else . + [$item] end)` +
+		`'\''` +
+		`'`
 	return query
-}
-
-func workflowServeLegacyControlRoute(target string) string {
-	target = strings.TrimSpace(target)
-	if target == config.ControlDispatcherAgentName {
-		return "workflow-control"
-	}
-	const suffix = "/" + config.ControlDispatcherAgentName
-	if strings.HasSuffix(target, suffix) {
-		return strings.TrimSuffix(target, suffix) + "/workflow-control"
-	}
-	return ""
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
