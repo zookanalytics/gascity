@@ -73,7 +73,7 @@ schedule = "*/5 * * * *"
 	_, err := ScanRoots(fs, []ScanRoot{{
 		Dir:          "/pack/orders",
 		FormulaLayer: "/pack/formulas",
-	}}, nil)
+	}}, nil, "")
 	if err == nil {
 		t.Fatal("ScanRoots succeeded, want hard error for legacy subdirectory layout")
 	}
@@ -103,7 +103,7 @@ trigger = "manual"
 	_, err := ScanRoots(fs, []ScanRoot{
 		{Dir: "/base/orders", FormulaLayer: "/base/formulas"},
 		{Dir: "/pack/orders", FormulaLayer: "/pack/formulas"},
-	}, nil)
+	}, nil, "")
 	if err == nil {
 		t.Fatal("ScanRoots succeeded, want hard error for legacy subdirectory layouts")
 	}
