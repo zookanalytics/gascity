@@ -2370,14 +2370,81 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	for _, want := range []string{
 		`bd --readonly --sandbox ready --assignee="$cand"`,
 		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
-		`bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
 		}
 	}
+	for _, banned := range []string{
+		"workflow-control",
+		"GC_CONTROL_LEGACY_TARGET",
+	} {
+		if strings.Contains(query, banned) {
+			t.Fatalf("workflowServeControlReadyQuery should not reference legacy %q: %q", banned, query)
+		}
+	}
 	if !strings.Contains(query, `--limit=20`) {
 		t.Fatalf("workflowServeControlReadyQuery missing scan limit: %q", query)
+	}
+}
+
+// TestWorkflowServeControlReadyQueryDeduplicatesIdenticalCandidates verifies
+// that when env vars resolve to identical session identifiers, only one bd
+// probe runs per identifier. The dispatcher hook scan formerly forked one
+// probe per env-var name even when names collapsed to the same string,
+// inflating per-tick fork counts roughly 2x.
+func TestWorkflowServeControlReadyQueryDeduplicatesIdenticalCandidates(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_CONTROL_SESSION_NAME=gascity--control-dispatcher",
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+		"GC_CONTROL_TARGET=gascity/control-dispatcher",
+		"GC_SESSION_ID=",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	calls := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
+	assigneeCalls := 0
+	dashCount := 0
+	slashCount := 0
+	for _, call := range calls {
+		if !strings.Contains(call, "ready --assignee=") {
+			continue
+		}
+		assigneeCalls++
+		if strings.Contains(call, "ready --assignee=gascity--control-dispatcher") {
+			dashCount++
+		}
+		if strings.Contains(call, "ready --assignee=gascity/control-dispatcher") {
+			slashCount++
+		}
+	}
+	if assigneeCalls != 2 {
+		t.Fatalf("expected 2 assignee probes (one per unique candidate), got %d: %s", assigneeCalls, string(logData))
+	}
+	if dashCount != 1 {
+		t.Fatalf("expected exactly 1 probe for -- form, got %d: %s", dashCount, string(logData))
+	}
+	if slashCount != 1 {
+		t.Fatalf("expected exactly 1 probe for / form, got %d: %s", slashCount, string(logData))
 	}
 }
 
@@ -2559,24 +2626,39 @@ printf '[]'
 	}
 }
 
-func TestWorkflowServeControlReadyQueryUsesLegacyRouteForNamedSessions(t *testing.T) {
+// TestWorkflowServeControlReadyQueryDoesNotProbeLegacyWorkflowControl asserts
+// the dispatcher hook scan does not probe the renamed workflow-control assignee
+// or gc.routed_to slot. workflow-control was renamed to control-dispatcher in
+// commit aeb5f9e5 (Mar 31 2026); writers no longer emit the legacy name and a
+// city-wide bead audit on 2026-05-26 confirmed zero remaining legacy beads.
+func TestWorkflowServeControlReadyQueryDoesNotProbeLegacyWorkflowControl(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
-		"GC_SESSION_NAME":   "gascity--control-dispatcher",
-		"GC_ALIAS":          "gascity/control-dispatcher",
-		"GC_SESSION_ORIGIN": "named",
-	}, `#!/bin/sh
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "bd.log")
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
 set -eu
-case "$*" in
-  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/workflow-control --unassigned --json --limit=20")
-    printf '[{"id":"ga-legacy-route"}]'
-    ;;
-  *)
-    printf '[]'
-    ;;
-esac
-`)
-	assertJSONEqual(t, out, `[{"id":"ga-legacy-route"}]`)
+printf '%s\n' "$*" >> "$BD_LOG"
+printf '[]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	_, err := shellWorkQueryWithEnv(query, t.TempDir(), []string{
+		"PATH=" + tmp + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+		"GC_SESSION_NAME=gascity--control-dispatcher",
+		"GC_ALIAS=gascity/control-dispatcher",
+	})
+	if err != nil {
+		t.Fatalf("run workflow serve query: %v", err)
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	if strings.Contains(string(logData), "workflow-control") {
+		t.Fatalf("workflowServeControlReadyQuery still probes legacy workflow-control: %s", string(logData))
+	}
 }
 
 func runWorkflowServeShellQueryForTest(t *testing.T, query string, env map[string]string, bdScript string) string {
