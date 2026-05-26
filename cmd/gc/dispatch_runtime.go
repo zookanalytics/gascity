@@ -690,40 +690,27 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_SESSION_NAME=` + shellquote.Quote(name)
 		break
 	}
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		queryPrefix += ` GC_CONTROL_LEGACY_TARGET=` + shellquote.Quote(legacy)
-	}
+	// The candidate-id list collapses duplicate env-var values to a single
+	// probe per identifier. GC_CONTROL_SESSION_NAME mirrors GC_SESSION_NAME
+	// for control-dispatcher sessions, and GC_ALIAS mirrors GC_CONTROL_TARGET,
+	// so the loop would otherwise issue four probes for two unique values.
+	// awk preserves first-seen order while dropping blanks and repeats.
+	//
+	// Legacy workflow-control assignee/route probes were removed; the rename
+	// to control-dispatcher landed in aeb5f9e5 (Mar 31 2026), no writer
+	// emits the old name today, and a city-wide audit found zero legacy
+	// beads remaining. See gc-k3r9zm for the audit notes.
 	query := queryPrefix + ` sh -c '` +
 		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
-		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
-		`[ -z "$id" ] && continue; ` +
-		`legacy=""; case "$id" in *control-dispatcher) legacy="${id%control-dispatcher}workflow-control";; esac; ` +
-		`for cand in "$id" "$legacy"; do ` +
-		`[ -z "$cand" ] && continue; ` +
+		`printf "%s\n" "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID" | ` +
+		`awk "NF && !seen[\$0]++" | ` +
+		`while IFS= read -r cand; do ` +
 		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
 		`done; ` +
-		`done; ` +
-		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; `
-	if legacy := workflowServeLegacyControlRoute(target); legacy != "" {
-		query += `emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=` + limit + `; `
-	} else {
-		query += `:; `
-	}
-	query += `[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
+		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; ` +
+		`[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
 	return query
-}
-
-func workflowServeLegacyControlRoute(target string) string {
-	target = strings.TrimSpace(target)
-	if target == config.ControlDispatcherAgentName {
-		return "workflow-control"
-	}
-	const suffix = "/" + config.ControlDispatcherAgentName
-	if strings.HasSuffix(target, suffix) {
-		return strings.TrimSuffix(target, suffix) + "/workflow-control"
-	}
-	return ""
 }
 
 func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hookBead, error) {
