@@ -35,8 +35,14 @@ type PromptContext struct {
 	IssuePrefix   string
 	Branch        string
 	DefaultBranch string // e.g. "main" — from git symbolic-ref origin/HEAD
-	WorkQuery     string // command to find available work (from Agent.EffectiveWorkQuery)
-	SlingQuery    string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
+	// ConfigDir is the directory where the agent's config was defined — the
+	// pack source dir for pack-imported agents, the city dir for inline
+	// agents. Templates use {{ .ConfigDir }} to reference pack-relative
+	// assets (scripts, fragments, docs). Mirrors the field of the same name
+	// on SessionSetupContext.
+	ConfigDir  string
+	WorkQuery  string // command to find available work (from Agent.EffectiveWorkQuery)
+	SlingQuery string // command template to route work to this agent (from Agent.EffectiveSlingQuery)
 	// ProviderKey is the resolved provider name for this agent (e.g. "claude",
 	// "codex", or a custom provider name from the city's [providers] section).
 	// Templates can branch on this via {{ .ProviderKey }} or feed it to
@@ -297,6 +303,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["IssuePrefix"] = ctx.IssuePrefix
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
+	m["ConfigDir"] = ctx.ConfigDir
 	m["WorkQuery"] = ctx.WorkQuery
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
