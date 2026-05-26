@@ -32,12 +32,19 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 			FormulaLayer: layer,
 		})
 	}
-	return ScanRoots(fs, roots, skip)
+	return ScanRoots(fs, roots, skip, "")
 }
 
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
-func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+//
+// scopeFilter drops orders whose explicit Order.Scope contradicts the
+// scan context at the per-root step, before the cross-root priority
+// merge. Orders with no explicit scope pass through. Pass "" to disable
+// scope filtering. The filter must run before priority merge so a
+// higher-priority order whose scope contradicts the scan context cannot
+// mask a lower-priority compatible sibling sharing the same name.
+func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string, scopeFilter string) ([]Order, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -59,6 +66,9 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 			return nil, err
 		}
 		for _, a := range discovered {
+			if scopeFilter != "" && a.Scope != "" && a.Scope != scopeFilter {
+				continue
+			}
 			name := a.Name
 			if _, exists := found[name]; !exists {
 				order = append(order, name)
