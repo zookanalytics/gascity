@@ -25,6 +25,9 @@ func discoverRoot(fs fsys.FS, root ScanRoot) ([]Order, error) {
 		a.Name = name
 		a.Source = source
 		a.FormulaLayer = root.FormulaLayer
+		if err := Validate(a); err != nil {
+			return fmt.Errorf("invalid order %q in %s: %w", name, source, err)
+		}
 		if _, exists := found[name]; !exists {
 			names = append(names, name)
 		}
