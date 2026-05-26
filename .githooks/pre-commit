@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Skip the two heaviest pre-commit steps (test-fast-parallel and
+# dashboard-check + dashboard-smoke) by default in agent contexts.
+# Polecats commit at agent pace; running the full per-iteration validation
+# N times concurrent saturates FS/CPU/Dolt (see gc-53c8k4 for the 2026-05-24
+# supervisor SIGTERM cascade). Refinery's pre-publish review gate and
+# GitHub Actions CI run the full validation before the human-visible
+# artifact (PR), which is the gate that actually matters.
+#
+# Override either direction explicitly:
+#   GC_PRECOMMIT_SKIP_HEAVY=1  → always skip (regardless of GC_AGENT)
+#   GC_PRECOMMIT_SKIP_HEAVY=0  → always run  (force full validation in agent)
+#   unset                       → skip iff GC_AGENT is set
+if [ "${GC_PRECOMMIT_SKIP_HEAVY:-${GC_AGENT:+1}}" = "1" ]; then
+  SKIP_HEAVY=1
+else
+  SKIP_HEAVY=0
+fi
+
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || true)
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
@@ -61,14 +79,23 @@ fi
 if command -v npm >/dev/null 2>&1; then
   spec_changed=$(git diff --cached --name-only --diff-filter=ACM -- 'internal/api/openapi.json' || true)
   if [ -n "$spec_changed" ] || [ -n "$staged_web_src" ]; then
-    # Typecheck BEFORE build: vite's build transpiles TS to JS and
-    # silently ignores type errors. The Makefile target also runs the
-    # Vitest suite, builds dist/, and smoke-runs the compiled SPA via
-    # Vite preview so a bundle that builds but won't serve is caught
-    # before CI.
-    make dashboard-check dashboard-smoke
-    git add -f cmd/gc/dashboard/web/src/generated
-    git add cmd/gc/dashboard/web/dist
+    if [ "$SKIP_HEAVY" != "1" ]; then
+      # Typecheck BEFORE build: vite's build transpiles TS to JS and
+      # silently ignores type errors. The Makefile target also runs the
+      # Vitest suite, builds dist/, and smoke-runs the compiled SPA via
+      # Vite preview so a bundle that builds but won't serve is caught
+      # before CI.
+      make dashboard-check dashboard-smoke
+      git add -f cmd/gc/dashboard/web/src/generated
+      git add cmd/gc/dashboard/web/dist
+    fi
+    # SKIP_HEAVY=1: we did not rebuild the bundle or regenerate types,
+    # so we must not stage them — staging a stale dist/ or src/generated
+    # would ship drift in the polecat's commits. The refinery + CI
+    # (dashboard-ci + the `dashboard` Actions job) catch any drift at
+    # PR time and bounce the bead back via rejection_reason; the next
+    # polecat picks it up and either fixes the regen explicitly or
+    # commits with GC_PRECOMMIT_SKIP_HEAVY=0 to run the full block.
   fi
 else
   echo "warning: npm not on PATH — skipped dashboard SPA typecheck + rebuild. CI will enforce this." >&2
