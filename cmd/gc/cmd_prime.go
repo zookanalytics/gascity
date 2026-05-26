@@ -634,11 +634,16 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+	configDir := cityPath
+	if a.SourceDir != "" {
+		configDir = a.SourceDir
+	}
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
 		BindingName:   a.BindingName,
 		BindingPrefix: a.BindingPrefix(),
+		ConfigDir:     configDir,
 		Env:           a.Env,
 	}
 
