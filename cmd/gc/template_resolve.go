@@ -305,6 +305,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	configDir := p.cityPath
+	if cfgAgent.SourceDir != "" {
+		configDir = cfgAgent.SourceDir
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -316,6 +320,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		WorkDir:             workDir,
 		IssuePrefix:         findRigPrefix(rigName, p.rigs),
 		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
+		ConfigDir:           configDir,
 		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
 		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
 		ProviderKey:         providerKey,
@@ -418,11 +423,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	prependGCBinDirToPATH(env, env["GC_BIN"])
 	env = convergence.ScrubTokenEnv(env)
 
-	// Step 11: Expand session setup templates.
-	configDir := p.cityPath
-	if cfgAgent.SourceDir != "" {
-		configDir = cfgAgent.SourceDir
-	}
+	// Step 11: Expand session setup templates. configDir resolved above
+	// (shared with the renderPrompt PromptContext) so both wires use the
+	// same pack source dir.
 	setupCtx := SessionSetupContext{
 		Session:   sessName,
 		Agent:     qualifiedName,
