@@ -75,7 +75,7 @@ var (
 		}
 		return ep, nil
 	}
-	workflowServeIdlePollInterval  = 100 * time.Millisecond
+	workflowServeIdlePollInterval  = 1 * time.Second
 	workflowServeIdlePollAttempts  = 3
 	workflowServeWakeSweepInterval = 1 * time.Second
 	workflowServeMaxIdleSleep      = 30 * time.Second
