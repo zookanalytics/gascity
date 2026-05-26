@@ -489,6 +489,244 @@ interval = "5m"
 	t.Fatalf("missing rig-scoped watch order in %#v", aa)
 }
 
+func TestScanAllScopeCityOrderSkippedInRigScans(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "digest", `[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+pool = "dog"
+scope = "city"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "digest" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if !cityFound {
+		t.Fatalf("city-scoped digest missing from city scan: %#v", aa)
+	}
+	if rigFound {
+		t.Fatalf("city-scoped digest leaked into rig scan: %#v", aa)
+	}
+}
+
+func TestScanAllScopeRigOrderSkippedInCityScans(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "lint", `[order]
+exec = "scripts/lint.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "rig"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "lint" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if cityFound {
+		t.Fatalf("rig-scoped lint leaked into city scan: %#v", aa)
+	}
+	if !rigFound {
+		t.Fatalf("rig-scoped lint missing from rig scan: %#v", aa)
+	}
+}
+
+func TestScanAllScopeUnsetEmitsAtAllImportLocations(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "sweep", `[order]
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var cityFound, rigFound bool
+	for _, a := range aa {
+		if a.Name != "sweep" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityFound = true
+		case "frontend":
+			rigFound = true
+		}
+	}
+	if !cityFound || !rigFound {
+		t.Fatalf("found city=%v rig=%v in %#v, want both (unset scope = current behavior)", cityFound, rigFound, aa)
+	}
+}
+
+func TestScanAllScopeRigDoesNotMaskLowerPriorityCityCompatibleOrder(t *testing.T) {
+	// Regression: a higher-priority pack defines order X with scope="rig",
+	// a lower-priority pack defines order X with no scope (compatible).
+	// During a city scan, scope filtering must run before the cross-root
+	// priority merge so the higher-priority incompatible order does not
+	// overwrite — and then erase — the lower-priority compatible one.
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	lowPack := filepath.Join(t.TempDir(), "low-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(lowPack, "orders"), "audit", `[order]
+exec = "scripts/low.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	highPack := filepath.Join(t.TempDir(), "high-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(highPack, "orders"), "audit", `[order]
+exec = "scripts/high.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "rig"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		PackDirs: []string{lowPack, highPack},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var matched int
+	var exec string
+	for _, a := range aa {
+		if a.Name == "audit" && a.Rig == "" {
+			matched++
+			exec = a.Exec
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("got %d city-scoped audit orders, want 1: %#v", matched, aa)
+	}
+	if exec != "scripts/low.sh" {
+		t.Fatalf("Exec = %q, want lower-priority city-compatible order to survive higher-priority rig-scoped sibling", exec)
+	}
+}
+
+func TestScanAllScopeCityDoesNotMaskLowerPriorityRigCompatibleOrder(t *testing.T) {
+	// Mirror of the city case: higher-priority pack defines order X with
+	// scope="city"; lower-priority pack defines order X with no scope.
+	// During a rig scan, the lower-priority rig-compatible order must
+	// survive the higher-priority incompatible sibling.
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	lowPack := filepath.Join(t.TempDir(), "low-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(lowPack, "orders"), "audit", `[order]
+exec = "scripts/low.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	highPack := filepath.Join(t.TempDir(), "high-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(highPack, "orders"), "audit", `[order]
+exec = "scripts/high.sh"
+trigger = "cooldown"
+interval = "5m"
+scope = "city"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		RigPackDirs: map[string][]string{
+			"frontend": {lowPack, highPack},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	var matched int
+	var exec string
+	for _, a := range aa {
+		if a.Name == "audit" && a.Rig == "frontend" {
+			matched++
+			exec = a.Exec
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("got %d rig-scoped audit orders, want 1: %#v", matched, aa)
+	}
+	if exec != "scripts/low.sh" {
+		t.Fatalf("Exec = %q, want lower-priority rig-compatible order to survive higher-priority city-scoped sibling", exec)
+	}
+}
+
 func TestScanAllRigLocalOrderUsesCanonicalFormulaLayer(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	rigLayer := orderDiscoveryRigLayer(t, "frontend")
