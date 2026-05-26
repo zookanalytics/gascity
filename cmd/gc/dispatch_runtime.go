@@ -675,19 +675,12 @@ func isWorkflowServeControlDispatcherAgent(agentCfg config.Agent) bool {
 		strings.HasSuffix(qualified, "/"+config.ControlDispatcherAgentName)
 }
 
-// workflowServeControlReadyScanLimit caps the single-pass control-dispatcher
-// ready scan. Wider than workflowServeScanLimit because the scan returns the
-// entire city's ready queue and filtering happens client-side in jq, so the
-// limit has to cover the dispatcher's tail without clipping. 10× the prior
-// per-probe limit matches the bead-suggested value for gc-0xb70e.
-const workflowServeControlReadyScanLimit = 200
-
 func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames ...string) string {
 	target := strings.TrimSpace(agentCfg.QualifiedName())
 	if target == "" {
 		target = config.ControlDispatcherAgentName
 	}
-	limit := fmt.Sprintf("%d", workflowServeControlReadyScanLimit)
+	limit := fmt.Sprintf("%d", workflowServeScanLimit)
 	queryPrefix := `BD_EXPORT_AUTO=false GC_CONTROL_TARGET=` + shellquote.Quote(target)
 	for _, name := range controlSessionNames {
 		name = strings.TrimSpace(name)
@@ -697,31 +690,35 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 		queryPrefix += ` GC_CONTROL_SESSION_NAME=` + shellquote.Quote(name)
 		break
 	}
-	// Single bd query + jq client-side filter. The bd CLI lacks OR semantics
-	// across --assignee and --metadata-field, so the prior shape forked one
-	// probe per candidate ID plus one for the routed-pool query. Collapsing
-	// to a single fork drops the per-dispatcher subprocess count from ~3 per
-	// wake-tick (after gc-k3r9zm) down to 1.
+	// Per-candidate selector-side filtering. The earlier gc-0xb70e attempt
+	// to collapse this into a single global `bd ready --json --limit=N` plus
+	// a client-side jq filter was reverted in gc-939xr9: when the city's
+	// ready queue exceeds the global cap (P0/P1 work across rigs ranks ahead
+	// of P2/P3 dispatcher work in bd's priority sort), the dispatcher's
+	// bead is clipped from the scan window and the jq filter sees no match
+	// even though the work exists. Bd lacks OR semantics across --assignee
+	// and --metadata-field, so the only safe correctness shape is to move
+	// the OR into the shell: one bd invocation per candidate ID plus one
+	// for the routed-pool query.
 	//
-	// Filter preserves the prior priority: direct-assigned work (assignee
-	// matches any candidate ID, deduped from env vars) comes first, then
-	// pool-routed work (unassigned + gc.routed_to=target). Bd's own
-	// priority sort is preserved within each group; dedupe keeps the first
-	// occurrence when a bead matches both.
+	// The candidate-id list collapses duplicate env-var values to a single
+	// probe per identifier. GC_CONTROL_SESSION_NAME mirrors GC_SESSION_NAME
+	// for control-dispatcher sessions, and GC_ALIAS mirrors GC_CONTROL_TARGET,
+	// so the loop would otherwise issue four probes for two unique values.
+	// awk preserves first-seen order while dropping blanks and repeats.
 	//
 	// Legacy workflow-control assignee/route probes were removed in
 	// gc-k3r9zm and the new shape never emits them either.
 	query := queryPrefix + ` sh -c '` +
-		`cands=$(printf "%s\n" "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID" | awk "NF && !seen[\$0]++"); ` +
-		`out=$(bd --readonly --sandbox ready --json --limit=` + limit + ` 2>/dev/null); ` +
-		`[ -z "$out" ] && out="[]"; ` +
-		`printf "%s" "$out" | jq --arg cands "$cands" --arg routed_to "$GC_CONTROL_TARGET" '\''` +
-		`($cands | split("\n") | map(select(length > 0))) as $cand_list | ` +
-		`((. // []) | map(select((.assignee // "") as $a | $a != "" and ($a | IN($cand_list[]))))) + ` +
-		`((. // []) | map(select((.assignee // "") == "" and (.metadata."gc.routed_to" // "") == $routed_to))) | ` +
-		`reduce .[] as $item ([]; if any(.[]; .id == $item.id) then . else . + [$item] end)` +
-		`'\''` +
-		`'`
+		`tmp=$(mktemp); trap "rm -f \"$tmp\"" EXIT; ` +
+		`emit_ready() { r=$("$@" 2>/dev/null || true); [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; }; ` +
+		`printf "%s\n" "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID" | ` +
+		`awk "NF && !seen[\$0]++" | ` +
+		`while IFS= read -r cand; do ` +
+		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=` + limit + `; ` +
+		`done; ` +
+		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=` + limit + `; ` +
+		`[ -s "$tmp" ] && jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)" "$tmp" || printf "[]"` + `'`
 	return query
 }
 
