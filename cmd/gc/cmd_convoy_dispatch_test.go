@@ -2367,16 +2367,16 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	if !strings.Contains(query, "BD_EXPORT_AUTO=false") {
 		t.Fatalf("workflowServeControlReadyQuery should disable bd auto-export: %q", query)
 	}
-	// Single bd invocation + jq filter (gc-0xb70e). The per-candidate
-	// --assignee probe loop and the routed --metadata-field probe were
-	// collapsed into one wider scan; the assignee/routed split now lives
-	// in the jq filter.
+	// Per-selector probes (gc-939xr9 reverted the single-fork shape from
+	// gc-0xb70e because client-side filtering after a global limit can
+	// starve the dispatcher under city-wide backlog). Each candidate id
+	// runs through `bd ready --assignee="$cand"` and the routed pool runs
+	// through `bd ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET"
+	// --unassigned`; jq merges and dedupes with first-seen wins.
 	for _, want := range []string{
-		`bd --readonly --sandbox ready --json --limit=`,
-		`jq --arg cands `,
-		`--arg routed_to `,
-		`IN($cand_list[])`,
-		`.metadata."gc.routed_to"`,
+		`emit_ready bd --readonly --sandbox ready --assignee="$cand" --json --limit=`,
+		`emit_ready bd --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=`,
+		`jq -s "reduce add[] as \$item ([]; if any(.[]; .id == \$item.id) then . else . + [\$item] end)"`,
 	} {
 		if !strings.Contains(query, want) {
 			t.Fatalf("workflowServeControlReadyQuery missing %q in %q", want, query)
@@ -2385,27 +2385,33 @@ func TestWorkflowServeControlReadyQueryUsesControlTiers(t *testing.T) {
 	for _, banned := range []string{
 		"workflow-control",
 		"GC_CONTROL_LEGACY_TARGET",
-		// The prior shape's per-candidate probe loop must not return; gc-0xb70e
-		// collapsed it into a single bd ready invocation.
-		`--assignee="$cand"`,
-		`--metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned`,
+		// The collapsed-single-fork shape from gc-0xb70e must not return:
+		// client-side jq filtering after `bd ready --json --limit=N` is
+		// vulnerable to the dispatcher's bead being clipped from the scan
+		// window when the city has >N ready beads of higher priority.
+		`bd --readonly --sandbox ready --json --limit=`,
+		`IN($cand_list[])`,
+		`--arg cands `,
 	} {
 		if strings.Contains(query, banned) {
-			t.Fatalf("workflowServeControlReadyQuery should not reference legacy %q: %q", banned, query)
+			t.Fatalf("workflowServeControlReadyQuery should not reference banned %q: %q", banned, query)
 		}
 	}
-	if !strings.Contains(query, `--limit=200`) {
-		t.Fatalf("workflowServeControlReadyQuery missing wider scan limit: %q", query)
+	if !strings.Contains(query, `--limit=20`) {
+		t.Fatalf("workflowServeControlReadyQuery missing per-selector scan limit: %q", query)
 	}
 }
 
-// TestWorkflowServeControlReadyQueryForksBdOncePerTick verifies that the
-// dispatcher hook scan invokes the bd binary exactly once per wake-tick,
-// regardless of how many candidate session IDs the env exposes. Collapsing
-// the prior 3-fork shape (one --assignee probe per unique candidate plus one
-// routed --metadata-field probe) into a single wider scan + jq filter is the
-// load-bearing perf gain of gc-0xb70e.
-func TestWorkflowServeControlReadyQueryForksBdOncePerTick(t *testing.T) {
+// TestWorkflowServeControlReadyQueryForksBdOncePerSelector verifies that the
+// dispatcher hook scan invokes bd exactly once per unique candidate id plus
+// once for the routed pool. gc-0xb70e collapsed this to a single fork with
+// client-side jq filtering, but the global `bd ready --json --limit=N` cap
+// silently starved the dispatcher when the city's ready queue exceeded the
+// limit (see gc-939xr9). The per-selector shape moves the OR semantics into
+// shell because bd lacks cross-field OR; this test locks in the new fork
+// shape so a future "perf collapse" attempt has to update it and is forced
+// to consider the correctness regression.
+func TestWorkflowServeControlReadyQueryForksBdOncePerSelector(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	tmp := t.TempDir()
 	logPath := filepath.Join(tmp, "bd.log")
@@ -2434,21 +2440,111 @@ printf '[]'
 		t.Fatalf("read bd log: %v", err)
 	}
 	calls := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly 1 bd invocation per tick, got %d: %s", len(calls), string(logData))
+	// Five env-var slots map to three unique candidate ids (the dedup
+	// drops GC_SESSION_NAME = GC_CONTROL_SESSION_NAME and GC_CONTROL_TARGET
+	// = GC_ALIAS), plus one routed --metadata-field probe = 4 forks.
+	want := []string{
+		`--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20`,
+		`--readonly --sandbox ready --assignee=gascity/control-dispatcher --json --limit=20`,
+		`--readonly --sandbox ready --assignee=ga-session-id --json --limit=20`,
+		`--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20`,
 	}
-	want := "--readonly --sandbox ready --json --limit=200"
-	if calls[0] != want {
-		t.Fatalf("bd call = %q, want %q", calls[0], want)
+	if len(calls) != len(want) {
+		t.Fatalf("expected %d bd invocations per tick, got %d: %s", len(want), len(calls), string(logData))
 	}
+	for i, w := range want {
+		if calls[i] != w {
+			t.Fatalf("bd call %d = %q, want %q", i, calls[i], w)
+		}
+	}
+}
+
+// TestWorkflowServeControlReadyQueryFindsDispatcherBeadBehindLargeBacklog is a
+// regression test for gc-939xr9. The single-bd-fork shape in gc-0xb70e applies
+// the assignee/routed filter client-side in jq AFTER a global `bd ready --json
+// --limit=N` scan. When the city has more than N ready beads ahead of the
+// dispatcher's matching work (e.g., a city-wide backlog of higher-priority
+// P0/P1 work), the dispatcher's bead is clipped from the scan window before
+// the client-side filter runs. The result is a silent functional regression:
+// the dispatcher returns `[]` while matching work exists and is correctly
+// tagged.
+//
+// The mock here models bd's clipping behavior: when called with a global
+// `bd ready --json --limit=N`, it returns N unrelated beads (none assigned
+// to the dispatcher). When called with a per-selector `--assignee=<cand>`
+// probe, it returns the dispatcher's bead.
+//
+// The test asserts that the query still finds the dispatcher's bead in
+// either shape, which forces correctness: any future "collapse to one
+// global scan" attempt must either (a) keep selector-side filtering, or
+// (b) extend bd with multi-selector OR semantics so the global scan can
+// preserve correctness.
+func TestWorkflowServeControlReadyQueryFindsDispatcherBeadBehindLargeBacklog(t *testing.T) {
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+
+	// Pre-build a 200-bead JSON array of unrelated polecat work that would
+	// rank ahead of the dispatcher's P2-P3 bead in bd's priority sort.
+	// Using printf in the mock keeps the script readable.
+	backlog := backlogJSON(200)
+
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_SESSION_NAME": "gascity--control-dispatcher",
+		"GC_ALIAS":        "gascity/control-dispatcher",
+	}, `#!/bin/sh
+set -eu
+case "$*" in
+  *"--assignee=gascity--control-dispatcher"*"--json"*)
+    # Selector probe with bd-side filtering — only the dispatcher's bead
+    # matches the assignee, so a small per-selector --limit covers it.
+    printf '[{"id":"ga-dispatcher-work","assignee":"gascity--control-dispatcher"}]'
+    ;;
+  *"--assignee="*"--json"*)
+    # Other candidates have no assigned work.
+    printf '[]'
+    ;;
+  *"--metadata-field gc.routed_to="*"--unassigned"*)
+    # No pool-routed work in this scenario.
+    printf '[]'
+    ;;
+  "--readonly --sandbox ready --json --limit="*)
+    # Global-scan probe (the broken gc-0xb70e shape): returns 200 unrelated
+    # backlog beads. The dispatcher's bead is ranked past the limit, so it is
+    # absent from this slice — modeling bd's --limit clipping. Under the
+    # correct per-selector shape, this case never matches.
+    printf '`+backlog+`'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`)
+
+	assertJSONEqual(t, out, `[{"id":"ga-dispatcher-work","assignee":"gascity--control-dispatcher"}]`)
+}
+
+// backlogJSON returns a JSON array of n bead objects, each unrelated to
+// the control-dispatcher (assigned to distinct polecats). Used by the
+// gc-939xr9 regression test to model bd's --limit clipping under a
+// city-wide backlog.
+func backlogJSON(n int) string {
+	var b strings.Builder
+	b.WriteByte('[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":"ga-fill-%d","assignee":"polecat-%d"}`, i, i)
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	// bd ready returns only ready (open, unblocked) work — never in-progress;
-	// the mock returns the merged ready set bd would produce in priority order.
-	// The filter must include direct-assigned and pool-routed work but skip
-	// the unrelated polecat row.
+	// bd ready returns only ready (open, unblocked) work — never in-progress.
+	// Per-selector probes return only rows that match each selector, so the
+	// merge naturally excludes the unrelated polecat row (assigned to
+	// polecat-1, matched by no probe).
 	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
 		"GC_SESSION_NAME":   "gascity--control-dispatcher",
 		"GC_ALIAS":          "gascity/control-dispatcher",
@@ -2456,8 +2552,11 @@ func TestWorkflowServeControlReadyQueryIgnoresInProgressAssigned(t *testing.T) {
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
-    printf '[{"id":"ga-ready","assignee":"gascity--control-dispatcher"},{"id":"ga-routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}},{"id":"ga-other","assignee":"polecat-1"}]'
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-ready","assignee":"gascity--control-dispatcher"}]'
+    ;;
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}}]'
     ;;
   *)
     printf '[]'
@@ -2475,8 +2574,11 @@ func TestWorkflowServeControlReadyQueryIncludesMetadataRoutedWorkAfterAssignedPe
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
-    printf '[{"id":"ga-pending","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}},{"id":"ga-ready","assignee":null,"metadata":{"gc.kind":"scope-check","gc.routed_to":"gascity/control-dispatcher"}}]'
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-pending","assignee":"gascity--control-dispatcher","metadata":{"gc.kind":"retry"}}]'
+    ;;
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-ready","assignee":null,"metadata":{"gc.kind":"scope-check","gc.routed_to":"gascity/control-dispatcher"}}]'
     ;;
   *)
     printf '[]'
@@ -2497,8 +2599,11 @@ func TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging(t *test
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
-    printf '[{"id":"ga-z-assigned","assignee":"gascity--control-dispatcher"},{"id":"ga-dup","source":"assigned","assignee":"gascity--control-dispatcher"},{"id":"ga-a-routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}},{"id":"ga-dup","source":"routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}}]'
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
+    printf '[{"id":"ga-z-assigned","assignee":"gascity--control-dispatcher"},{"id":"ga-dup","source":"assigned","assignee":"gascity--control-dispatcher"}]'
+    ;;
+  "--readonly --sandbox ready --metadata-field gc.routed_to=gascity/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-a-routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}},{"id":"ga-dup","source":"routed","assignee":null,"metadata":{"gc.routed_to":"gascity/control-dispatcher"}}]'
     ;;
   *)
     printf '[]'
@@ -2525,8 +2630,11 @@ func TestWorkflowServeControlReadyQueryUsesConfiguredRuntimeNameWhenEnvIsManualS
 	}, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
+    ;;
+  "--readonly --sandbox ready --assignee="*"--json --limit=20"|"--readonly --sandbox ready --metadata-field gc.routed_to="*"--unassigned --json --limit=20")
+    printf '[]'
     ;;
   *)
     echo "unexpected bd invocation: $*" >&2
@@ -2553,7 +2661,7 @@ set -eu
 }
 printf '%s\n' "$*" >> "$BD_LOG"
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
+  "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20")
     printf '[{"id":"ga-control-ready","assignee":"gascity--control-dispatcher"}]'
     ;;
   *)
@@ -2579,29 +2687,32 @@ esac
 	if err != nil {
 		t.Fatalf("read bd log: %v", err)
 	}
-	// Single bd invocation per tick (gc-0xb70e) — BD_EXPORT_AUTO=false and
-	// the ready scan are the load-bearing assertions.
+	// Per-selector invocations (gc-939xr9). BD_EXPORT_AUTO=false and the
+	// configured runtime name appearing first are the load-bearing
+	// assertions; the configured name takes precedence over the manual
+	// GC_SESSION_NAME so the dispatcher claims canonical-named work.
 	calls := strings.Split(strings.TrimRight(string(logData), "\n"), "\n")
-	if len(calls) != 1 {
-		t.Fatalf("expected exactly 1 bd invocation, got %d: %s", len(calls), string(logData))
+	if len(calls) == 0 {
+		t.Fatalf("expected bd invocations, got none")
 	}
-	if want := "--readonly --sandbox ready --json --limit=200"; calls[0] != want {
-		t.Fatalf("bd call = %q, want %q", calls[0], want)
+	if want := "--readonly --sandbox ready --assignee=gascity--control-dispatcher --json --limit=20"; calls[0] != want {
+		t.Fatalf("first bd call = %q, want %q", calls[0], want)
 	}
 }
 
 func TestWorkflowServeControlReadyQueryQuotesMetadataFallbackTarget(t *testing.T) {
 	// A control-dispatcher target containing a space (e.g., rig dir "my rig")
-	// has to round-trip through the shell intact so the jq routed_to filter
-	// matches gc.routed_to="my rig/control-dispatcher". GC_CONTROL_TARGET is
-	// shell-quoted in the query prefix; the jq filter then sees the literal
-	// value via --arg routed_to "$GC_CONTROL_TARGET".
+	// has to round-trip through the shell intact so bd's --metadata-field
+	// filter matches gc.routed_to="my rig/control-dispatcher". GC_CONTROL_TARGET
+	// is shell-quoted in the query prefix and "$GC_CONTROL_TARGET" inside the
+	// emit_ready argument is double-quoted, so the entire value lands as a
+	// single bd argument.
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "my rig"})
 	out := runWorkflowServeShellQueryForTest(t, query, nil, `#!/bin/sh
 set -eu
 case "$*" in
-  "--readonly --sandbox ready --json --limit=200")
-    printf '[{"id":"ga-routed","assignee":null,"metadata":{"gc.routed_to":"my rig/control-dispatcher"}},{"id":"ga-other","assignee":null,"metadata":{"gc.routed_to":"other"}}]'
+  "--readonly --sandbox ready --metadata-field gc.routed_to=my rig/control-dispatcher --unassigned --json --limit=20")
+    printf '[{"id":"ga-routed","assignee":null,"metadata":{"gc.routed_to":"my rig/control-dispatcher"}}]'
     ;;
   *)
     printf '[]'
