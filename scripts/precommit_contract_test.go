@@ -183,7 +183,7 @@ func TestPreCommitHookSkipHeavyMatrix(t *testing.T) {
 
 // setupPreCommitFakeRepo builds a minimal git repo that mirrors the file
 // layout the pre-commit hook expects, stubs the external commands it
-// invokes (make, go, scripts/precommit-format-staged-go) to log + succeed,
+// invokes (make, go, npm, scripts/precommit-format-staged-go) to log + succeed,
 // stages a Go file (and optionally the openapi spec to trigger the
 // dashboard block), and returns the worktree path plus the path to the
 // call-log file.
@@ -203,6 +203,7 @@ exit 0
 `, callLog)
 	writeExecutable(t, filepath.Join(binDir, "make"), stub)
 	writeExecutable(t, filepath.Join(binDir, "go"), stub)
+	writeExecutable(t, filepath.Join(binDir, "npm"), stub)
 
 	scriptsDir := filepath.Join(workDir, "scripts")
 	if err := os.MkdirAll(scriptsDir, 0o755); err != nil {
