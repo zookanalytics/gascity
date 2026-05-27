@@ -493,13 +493,15 @@ func TestRuntimeScriptPortPrecedenceToleratesInconclusiveLsof(t *testing.T) {
 	tests := []struct {
 		name        string
 		lsofBody    string
+		ssBody      string
 		ncBody      func(port string) string
 		wantManaged bool
 		wantExit78  bool
 	}{
 		{
-			name:     "inconclusive lsof accepts reachable port",
+			name:     "inconclusive listener probe accepts reachable port",
 			lsofBody: "#!/bin/sh\nexit 0\n",
+			ssBody:   "#!/bin/sh\nexit 0\n",
 			ncBody: func(port string) string {
 				return `#!/bin/sh
 host="$2"
@@ -513,8 +515,9 @@ exit 1
 			wantManaged: true,
 		},
 		{
-			name:     "mismatched lsof pid still rejects port",
+			name:     "mismatched listener pid still rejects port",
 			lsofBody: "#!/bin/sh\necho $$\nsleep 5\n",
+			ssBody:   "#!/bin/sh\nprintf 'pid=%s\\n' \"$$\"\nsleep 5\n",
 			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 0
@@ -523,8 +526,9 @@ exit 0
 			wantExit78: true,
 		},
 		{
-			name:     "inconclusive lsof with unreachable port still rejects port",
+			name:     "inconclusive listener probe with unreachable port still rejects port",
 			lsofBody: "#!/bin/sh\nexit 0\n",
+			ssBody:   "#!/bin/sh\nexit 0\n",
 			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 1
@@ -554,6 +558,7 @@ exit 1
 
 			writeManagedRuntimeStateForScript(t, cityPath, port)
 			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "ss"), tt.ssBody)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
 
 			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
@@ -600,11 +605,13 @@ func TestRuntimeScriptPortPrecedenceAcceptsPsConfirmedPid(t *testing.T) {
 	tests := []struct {
 		name     string
 		lsofBody string
+		ssBody   string
 		ncBody   func(port string) string
 	}{
 		{
 			name:     "listener pid match via ps fallback",
 			lsofBody: "#!/bin/sh\necho 424242\n",
+			ssBody:   "#!/bin/sh\necho 'pid=424242'\n",
 			ncBody: func(_ string) string {
 				return `#!/bin/sh
 exit 1
@@ -612,8 +619,9 @@ exit 1
 			},
 		},
 		{
-			name:     "reachable port via ps fallback when lsof is inconclusive",
+			name:     "reachable port via ps fallback when listener probe is inconclusive",
 			lsofBody: "#!/bin/sh\nexit 0\n",
+			ssBody:   "#!/bin/sh\nexit 0\n",
 			ncBody: func(port string) string {
 				return `#!/bin/sh
 host="$2"
@@ -643,6 +651,7 @@ exit 1
 
 			writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, 424242)
 			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			writeExecutable(t, filepath.Join(fakeBin, "ss"), tt.ssBody)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
 			writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
 if [ "$1" = "-p" ] && [ "$2" = "424242" ]; then
@@ -728,6 +737,9 @@ func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
 exit 0
 `)
+	writeExecutable(t, filepath.Join(fakeBin, "ss"), `#!/bin/sh
+exit 0
+`)
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
 probe_port="$3"
@@ -784,6 +796,9 @@ func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
 			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
 			writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+exit 0
+`)
+			writeExecutable(t, filepath.Join(fakeBin, "ss"), `#!/bin/sh
 exit 0
 `)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
@@ -979,6 +994,21 @@ for arg in "$@"; do
   esac
 done
 exit 1
+`, mainPort, mainPID, rigPort, rigPID))
+
+	// Fake ss: maps "sport = :PORT" filter args to ss-formatted output
+	// so the listener PID extractor pulls out the matching PID. Mirrors
+	// the lsof fake — ss is preferred on Linux because Go's MPTCP
+	// listening sockets are invisible to lsof.
+	writeExecutable(t, filepath.Join(fakeBin, "ss"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    "sport = :%s") printf 'pid=%s\n'; exit 0 ;;
+    "sport = :%s") printf 'pid=%s\n'; exit 0 ;;
+  esac
+done
+exit 0
 `, mainPort, mainPID, rigPort, rigPID))
 
 	// Fake ps: handles pid_is_running (`-p <pid> -o pid=`) and the zombie
@@ -1430,7 +1460,13 @@ func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
 
 	// gc fails -> metadata_files falls back to find (no rigs here).
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	// lsof maps the city port to the server PID so server_pid resolves.
+	// ss maps the city port to the server PID so server_pid resolves on
+	// Linux test hosts, where ss-first listener detection runs before
+	// lsof (Go's MPTCP listening sockets are invisible to lsof).
+	writeExecutable(t, filepath.Join(fakeBin, "ss"),
+		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in \"sport = :%s\") printf 'pid=%s\\n'; exit 0 ;; esac; done\nexit 0\n", mainPort, serverPID))
+	// lsof maps the city port to the server PID so server_pid resolves on
+	// macOS, where the ss-first probe is skipped (ss is unavailable).
 	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
 		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
