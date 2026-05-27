@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -458,7 +457,11 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 	if len(recipients) == 0 {
 		return 0, 0, nil
 	}
-	routes := p.recipientRoutesForAll(recipients)
+	sessions, err := p.loadSessionsForRouting()
+	if err != nil {
+		return 0, 0, fmt.Errorf("loading sessions: %w", err)
+	}
+	routes := recipientRoutesForAllFromSessions(recipients, sessions, p.store != nil)
 	candidates, err := p.messageCandidatesForRoutes(routes)
 	if err != nil {
 		return 0, 0, fmt.Errorf("listing messages: %w", err)
@@ -482,7 +485,11 @@ func (p *Provider) CountRecipients(recipients []string) (int, int, error) {
 // filterMessages returns open message beads assigned to the recipient.
 // When includeRead is false, messages with the "read" label are excluded.
 func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Message, error) {
-	routes := p.recipientRoutes(recipient)
+	sessions, err := p.loadSessionsForRouting()
+	if err != nil {
+		return nil, fmt.Errorf("beadmail: loading sessions: %w", err)
+	}
+	routes := recipientRoutesFromSessions(recipient, sessions, p.store != nil)
 	candidates, err := p.messageCandidatesForRoutes(routes)
 	if err != nil {
 		return nil, fmt.Errorf("beadmail: listing beads: %w", err)
@@ -503,113 +510,125 @@ func (p *Provider) filterMessages(recipient string, includeRead bool) ([]mail.Me
 	return msgs, nil
 }
 
-// messageCandidates returns message beads relevant to a recipient using
-// targeted queries instead of a broad store scan. This avoids timeouts
-// on stores with many beads.
+// loadSessionsForRouting returns the session beads used for in-memory
+// recipient-route resolution. Stateless providers refetch per call so
+// long-lived shared users always see fresh topology; cached providers
+// reuse the provider-local enumeration.
+func (p *Provider) loadSessionsForRouting() ([]beads.Bead, error) {
+	if p.store == nil {
+		return nil, nil
+	}
+	sessions, err := p.cachedSessionBeads()
+	if err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+// recipientRoutesFromSessions returns the routing addresses for recipient
+// computed against a pre-loaded slice of session beads. Pure function — no
+// store I/O — so callers control how often the broad session enumeration
+// runs.
 //
-// For per-recipient queries, list by assignee+type+status — targeted to the
-// recipient's open messages. For global queries (recipient==""), falls back
-// to type-based listing since no assignee filter can be applied.
+// sessions must come from a source that already filters by
+// session.IsSessionBeadOrRepairable (e.g., session.ListAllSessionBeads).
+// hasStore reports whether the caller has a backing store at all; without
+// one, recipient resolution short-circuits to the literal recipient route.
 //
-// Type="message" is the authoritative discriminator; the legacy gc:message
-// label supplement was removed in #862 along with writes to that label.
-func (p *Provider) recipientRoutes(recipient string) []string {
+// Precedence mirrors the legacy per-recipient query chain:
+//  1. live current-address match (id, alias, session_name)
+//  2. closed current-address match
+//  3. live historical-alias match
+//  4. closed historical-alias match
+//
+// Two or more matches at any tier collapse to the literal recipient route
+// (ambiguous — no safe routing decision).
+func recipientRoutesFromSessions(recipient string, sessions []beads.Bead, hasStore bool) []string {
 	recipient = strings.TrimSpace(recipient)
 	if recipient == "" {
 		return nil
 	}
 	routes := make([]string, 0, 4)
 	routes = appendRecipientRoute(routes, recipient)
-	if recipient == "human" || p.store == nil {
+	if recipient == "human" || !hasStore {
 		return routes
 	}
 
-	liveMatches, err := p.recipientSessionMatchesByCurrentAddress(recipient, false)
-	if err != nil {
-		log.Printf("beadmail: listing sessions for recipient route %q: %v", recipient, err)
-		return routes
+	var liveCurrent, closedCurrent []beads.Bead
+	var liveHistorical, closedHistorical []beads.Bead
+	for _, b := range sessions {
+		if matchesCurrentSessionAddress(b, recipient) {
+			if b.Status == "closed" {
+				closedCurrent = appendUniqueSessionMatch(closedCurrent, b)
+			} else {
+				liveCurrent = appendUniqueSessionMatch(liveCurrent, b)
+			}
+			continue
+		}
+		if containsRecipientRoute(session.AliasHistory(b.Metadata), recipient) {
+			if b.Status == "closed" {
+				closedHistorical = appendUniqueSessionMatch(closedHistorical, b)
+			} else {
+				liveHistorical = appendUniqueSessionMatch(liveHistorical, b)
+			}
+		}
 	}
-	if len(liveMatches) > 1 {
+
+	if len(liveCurrent) > 1 {
 		return []string{recipient}
 	}
-	if len(liveMatches) == 1 {
-		return appendSessionRecipientRoutes(routes, liveMatches[0])
+	if len(liveCurrent) == 1 {
+		return appendSessionRecipientRoutes(routes, liveCurrent[0])
 	}
-
-	closedMatches, err := p.recipientSessionMatchesByCurrentAddress(recipient, true)
-	if err != nil {
-		log.Printf("beadmail: listing closed sessions for recipient route %q: %v", recipient, err)
-		return routes
-	}
-	if len(closedMatches) > 1 {
+	if len(closedCurrent) > 1 {
 		return []string{recipient}
 	}
-	if len(closedMatches) == 1 {
-		return appendSessionRecipientRoutes(routes, closedMatches[0])
+	if len(closedCurrent) == 1 {
+		return appendSessionRecipientRoutes(routes, closedCurrent[0])
 	}
-	return p.recipientRoutesByHistoricalAlias(recipient, routes)
+	historical := liveHistorical
+	if len(historical) == 0 {
+		historical = closedHistorical
+	}
+	if len(historical) > 1 {
+		return []string{recipient}
+	}
+	if len(historical) == 1 {
+		return appendSessionRecipientRoutes(routes, historical[0])
+	}
+	return routes
 }
 
-func (p *Provider) recipientSessionMatchesByCurrentAddress(recipient string, closed bool) ([]beads.Bead, error) {
-	var matches []beads.Bead
-	b, err := p.store.Get(recipient)
-	if err == nil && session.IsSessionBeadOrRepairable(b) && sessionRouteStatusMatches(b, closed) {
-		session.RepairEmptyType(p.store, &b)
-		matches = appendUniqueSessionRecipientMatch(matches, b)
-	} else if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		return nil, fmt.Errorf("looking up session %q: %w", recipient, err)
-	}
-
-	status := ""
-	if closed {
-		status = "closed"
-	}
-	for _, key := range []string{"alias", "session_name"} {
-		keyMatches, err := p.recipientSessionMatchesByMetadata(key, recipient, status)
-		if err != nil {
-			return nil, err
-		}
-		for _, match := range keyMatches {
-			matches = appendUniqueSessionRecipientMatch(matches, match)
+// recipientRoutesForAllFromSessions unions the routes for many recipients
+// against a single pre-loaded session slice. Doing the union here keeps
+// session enumeration out of the per-recipient loop — N recipients pay
+// one broad load, not N.
+func recipientRoutesForAllFromSessions(recipients []string, sessions []beads.Bead, hasStore bool) []string {
+	var routes []string
+	for _, recipient := range recipients {
+		for _, route := range recipientRoutesFromSessions(recipient, sessions, hasStore) {
+			routes = appendRecipientRoute(routes, route)
 		}
 	}
-	return matches, nil
+	return routes
 }
 
-func (p *Provider) recipientSessionMatchesByMetadata(key, recipient, status string) ([]beads.Bead, error) {
-	query := beads.ListQuery{Metadata: map[string]string{key: recipient}}
-	if status != "" {
-		query.Status = status
+// matchesCurrentSessionAddress reports whether the session's live address
+// surface (bead ID, alias, or session_name) equals recipient.
+func matchesCurrentSessionAddress(b beads.Bead, recipient string) bool {
+	if b.ID == recipient {
+		return true
 	}
-	items, err := p.store.List(query)
-	if err != nil {
-		return nil, err
+	if strings.TrimSpace(b.Metadata["alias"]) == recipient {
+		return true
 	}
-	matches := make([]beads.Bead, 0, len(items))
-	for _, b := range items {
-		if !session.IsSessionBeadOrRepairable(b) {
-			continue
-		}
-		session.RepairEmptyType(p.store, &b)
-		if !sessionRouteStatusMatches(b, status == "closed") {
-			continue
-		}
-		if strings.TrimSpace(b.Metadata[key]) != recipient {
-			continue
-		}
-		matches = append(matches, b)
+	if strings.TrimSpace(b.Metadata["session_name"]) == recipient {
+		return true
 	}
-	return matches, nil
+	return false
 }
 
-func sessionRouteStatusMatches(b beads.Bead, closed bool) bool {
-	if closed {
-		return b.Status == "closed"
-	}
-	return b.Status != "closed"
-}
-
-func appendUniqueSessionRecipientMatch(matches []beads.Bead, b beads.Bead) []beads.Bead {
+func appendUniqueSessionMatch(matches []beads.Bead, b beads.Bead) []beads.Bead {
 	for _, match := range matches {
 		if match.ID == b.ID {
 			return matches
@@ -621,48 +640,6 @@ func appendUniqueSessionRecipientMatch(matches []beads.Bead, b beads.Bead) []bea
 func appendSessionRecipientRoutes(routes []string, b beads.Bead) []string {
 	for _, address := range sessionAddressesForRecipientRouting(b) {
 		routes = appendRecipientRoute(routes, address)
-	}
-	return routes
-}
-
-func (p *Provider) recipientRoutesByHistoricalAlias(recipient string, routes []string) []string {
-	sessions, err := p.cachedSessionBeads()
-	if err != nil {
-		log.Printf("beadmail: listing sessions for historical recipient route %q: %v", recipient, err)
-		return routes
-	}
-	var liveMatches []beads.Bead
-	var closedMatches []beads.Bead
-	for _, b := range sessions {
-		if !session.IsSessionBeadOrRepairable(b) || !containsRecipientRoute(session.AliasHistory(b.Metadata), recipient) {
-			continue
-		}
-		if b.Status == "closed" {
-			closedMatches = append(closedMatches, b)
-			continue
-		}
-		liveMatches = append(liveMatches, b)
-	}
-	matches := liveMatches
-	if len(matches) == 0 {
-		matches = closedMatches
-	}
-	if len(matches) > 1 {
-		return []string{recipient}
-	}
-	if len(matches) == 1 {
-		return appendSessionRecipientRoutes(routes, matches[0])
-	}
-	return routes
-}
-
-func (p *Provider) recipientRoutesForAll(recipients []string) []string {
-	var routes []string
-	for _, recipient := range recipients {
-		recipientRoutes := p.recipientRoutes(recipient)
-		for _, route := range recipientRoutes {
-			routes = appendRecipientRoute(routes, route)
-		}
 	}
 	return routes
 }
