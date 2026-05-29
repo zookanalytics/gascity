@@ -98,8 +98,8 @@ func IsProviderCredentialEnv(key string) bool {
 }
 
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
-// sessions need to start reliably: user/home, provider auth/config, locale,
-// XDG, telemetry, and Claude nesting resets.
+// sessions need to start reliably: user/home, provider auth/config, ssh-agent
+// forwarding, locale, XDG, telemetry, and Claude nesting resets.
 func ProviderProcessPassthroughEnv() map[string]string {
 	m := make(map[string]string)
 	if v := os.Getenv("PATH"); v != "" {
@@ -120,6 +120,13 @@ func ProviderProcessPassthroughEnv() map[string]string {
 		if v := os.Getenv(key); v != "" {
 			m[key] = v
 		}
+	}
+	// SSH_AUTH_SOCK lets agents sign git commits when the repo has
+	// commit.gpgsign=true with gpg.format=ssh. Without it, git fails with
+	// "Couldn't find key in agent?" and operators have to hunt for a
+	// working socket per session.
+	if v := os.Getenv("SSH_AUTH_SOCK"); v != "" {
+		m["SSH_AUTH_SOCK"] = v
 	}
 	for _, key := range []string{"LANG", "LC_ALL", "LC_CTYPE"} {
 		if v := os.Getenv(key); v != "" {
