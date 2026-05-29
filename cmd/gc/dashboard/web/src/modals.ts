@@ -82,7 +82,7 @@ export async function promptActionDialog(config: ActionDialogConfig): Promise<Ac
 
   const options = await getOptions();
   populateDatalist(targetList, options.agents);
-  populateDatalist(rigList, options.rigs);
+  populateDatalist(rigList, options.rigs.map((rig) => rig.name));
 
   title.textContent = config.title;
   submit.textContent = submitLabel(config.mode);
