@@ -19,6 +19,21 @@ const (
 	orderFiringCurrentName    = "order-firing-current"
 	orderFiringInspectHintFmt = "Inspect with: gc order check && gc order history %s"
 	orderFiringHistoryTimeout = 15 * time.Second
+
+	// orderFiringStaleFloor is the minimum staleness yardstick the
+	// overdue/critical thresholds are measured against. Short-cadence orders
+	// (the 1m beads-health / dolt-health / gate-sweep sweeps) ride the
+	// supervisor's ~30s dispatch tick, so a single slipped tick plus
+	// event-read lag can push a 1m order's age past a naive
+	// 1.5×interval = 90s overdue threshold — a persistent false "overdue"
+	// on an otherwise-healthy town. Flooring the yardstick gives short
+	// intervals absolute slack for that jitter (overdue ~7m30s, critical
+	// ~15m for a 1m order) while still catching a genuinely stalled sweep
+	// well inside ~10 minutes. Orders whose real interval already exceeds
+	// the floor are unaffected, so long-cadence strictness is preserved.
+	// The displayed "expected every X" always shows the real interval,
+	// never the floor.
+	orderFiringStaleFloor = 5 * time.Minute
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an order.
@@ -615,10 +630,17 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
+	// Measure staleness against a floored yardstick so short-cadence orders
+	// get absolute slack for supervisor tick jitter; the displayed cadence
+	// below stays the real interval, not the floor. See orderFiringStaleFloor.
+	staleRef := expected
+	if staleRef < orderFiringStaleFloor {
+		staleRef = orderFiringStaleFloor
+	}
 	switch {
-	case age >= expected*3:
+	case age >= staleRef*3:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
+	case age >= staleRef+staleRef/2:
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
