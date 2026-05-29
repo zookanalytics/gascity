@@ -751,6 +751,26 @@ func TestPassthroughEnvOmitsUnsetDoltVars(t *testing.T) {
 	}
 }
 
+func TestPassthroughEnvIncludesSSHAuthSock(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/ssh-agent.sock")
+
+	got := passthroughEnv()
+
+	if got["SSH_AUTH_SOCK"] != "/tmp/ssh-agent.sock" {
+		t.Errorf("passthroughEnv()[SSH_AUTH_SOCK] = %q, want %q", got["SSH_AUTH_SOCK"], "/tmp/ssh-agent.sock")
+	}
+}
+
+func TestPassthroughEnvOmitsUnsetSSHAuthSock(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	got := passthroughEnv()
+
+	if _, ok := got["SSH_AUTH_SOCK"]; ok {
+		t.Error("passthroughEnv() should omit empty SSH_AUTH_SOCK")
+	}
+}
+
 func TestPassthroughEnvIncludesClaudeAuthContext(t *testing.T) {
 	t.Setenv("HOME", "/tmp/gc-home")
 	t.Setenv("USER", "gcuser")
