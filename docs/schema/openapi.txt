@@ -5956,6 +5956,7 @@
             "type": "string"
           },
           "prefix": {
+            "description": "Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name.",
             "type": "string"
           },
           "running_count": {
@@ -5969,6 +5970,7 @@
         "required": [
           "name",
           "path",
+          "prefix",
           "suspended",
           "agent_count",
           "running_count"
