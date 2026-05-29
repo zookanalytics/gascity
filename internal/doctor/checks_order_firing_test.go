@@ -380,6 +380,80 @@ func TestOrderFiringCurrent_Stale(t *testing.T) {
 	}
 }
 
+// TestClassifyOrderFiring_ShortCadenceStaleFloor pins gc-9i9k9x: the
+// overdue/critical thresholds are measured against a floored staleness
+// yardstick (orderFiringStaleFloor) so a short-cadence order (e.g. a 1m
+// health sweep) riding the supervisor's ~30s dispatch tick is not flagged
+// overdue for ordinary tick jitter, while a genuinely stalled short order
+// still flags. Long-cadence orders keep their real interval thresholds.
+func TestClassifyOrderFiring_ShortCadenceStaleFloor(t *testing.T) {
+	order := orders.Order{Name: "beads-health"}
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	controllerStarted := now.Add(-1 * time.Hour)
+
+	tests := []struct {
+		name       string
+		expected   time.Duration
+		age        time.Duration
+		wantStatus CheckStatus
+		wantSubstr string
+	}{
+		// (a) Regression: a 1m order fired ~90s ago is OK. Before the floor
+		// the overdue threshold was expected+expected/2 = 90s, so a 90s-old
+		// firing flipped the check to a warning on a healthy town.
+		{"short-90s-ok", time.Minute, 90 * time.Second, StatusOK, "expected every 1m"},
+		// Still OK just under the floored overdue threshold (floor*1.5 = 7m30s).
+		{"short-7m-ok", time.Minute, 7 * time.Minute, StatusOK, "expected every 1m"},
+		// (b) A genuinely stalled 1m order still flags overdue past floor*1.5.
+		{"short-8m-overdue", time.Minute, 8 * time.Minute, StatusWarning, "(overdue)"},
+		// ...and critical past floor*3 (15m).
+		{"short-16m-critical", time.Minute, 16 * time.Minute, StatusError, "(CRITICAL: stale)"},
+		// (c) Long orders are unaffected by the floor: a 4h order keeps its
+		// real 6h overdue / 12h critical thresholds.
+		{"long-5h-ok", 4 * time.Hour, 5 * time.Hour, StatusOK, "expected every 4h"},
+		{"long-7h-overdue", 4 * time.Hour, 7 * time.Hour, StatusWarning, "(overdue)"},
+		{"long-13h-critical", 4 * time.Hour, 13 * time.Hour, StatusError, "(CRITICAL: stale)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lastFired := now.Add(-tt.age)
+			status, _, detail := classifyOrderFiring(order, now, tt.expected, lastFired, controllerStarted)
+			if status != tt.wantStatus {
+				t.Fatalf("status = %v, want %v; detail = %q", status, tt.wantStatus, detail)
+			}
+			if !strings.Contains(detail, tt.wantSubstr) {
+				t.Fatalf("detail = %q, want substring %q", detail, tt.wantSubstr)
+			}
+		})
+	}
+}
+
+// TestOrderFiringCurrent_ShortCadenceHealthy_NoFalseOverdue regresses
+// gc-9i9k9x end-to-end through Run: a 1m-cadence cron order that fired ~90s
+// ago (well within supervisor tick jitter) must keep doctor green and must
+// display the real 1m interval, not the floor.
+func TestOrderFiringCurrent_ShortCadenceHealthy_NoFalseOverdue(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringTestOrder(t, cityPath, "beads-health", "cron", "* * * * *")
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-1 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "beads-health", Ts: now.Add(-90 * time.Second)},
+	)
+
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
+	}
+	joined := strings.Join(result.Details, "\n")
+	if strings.Contains(joined, "(overdue)") {
+		t.Fatalf("details = %v, want no overdue for a 1m order fired 90s ago", result.Details)
+	}
+	if !strings.Contains(joined, "expected every 1m") {
+		t.Fatalf("details = %v, want real 1m interval displayed, not the floor", result.Details)
+	}
+}
+
 func TestOrderFiringCurrent_IgnoresManualAndEventTriggers(t *testing.T) {
 	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	cityPath, cfg := orderFiringTestCity(t)
