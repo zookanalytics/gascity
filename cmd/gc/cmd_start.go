@@ -1375,8 +1375,8 @@ func agentCommandDir(cityPath string, a *config.Agent, rigs []config.Rig) string
 }
 
 // providerProcessPassthroughEnv returns non-GC process context that provider
-// sessions need to start reliably: user/home, provider auth/config, locale,
-// XDG, telemetry, and Claude nesting resets.
+// sessions need to start reliably: user/home, provider auth/config, ssh-agent
+// forwarding, locale, XDG, telemetry, and Claude nesting resets.
 func providerProcessPassthroughEnv() map[string]string {
 	return processenv.ProviderProcessPassthroughEnv()
 }
@@ -1385,6 +1385,7 @@ func providerProcessPassthroughEnv() map[string]string {
 // agent sessions should inherit. Agents need PATH to find tools (including gc),
 // GC_BEADS/GC_DOLT so they use the same bead store as the parent,
 // GC_DOLT_HOST/PORT/USER/PASSWORD so agents can connect to remote Dolt servers,
+// SSH_AUTH_SOCK so they can sign commits with the operator's ssh-agent,
 // and Claude auth/home context so managed sessions can launch reliably under
 // shell and supervisor-driven flows.
 func passthroughEnv() map[string]string {
