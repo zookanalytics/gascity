@@ -475,6 +475,125 @@ func TestCheckBeadStateRoutedWithLiveTrackingConvoyIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestCheckBeadStateSingletonRoutedOnlyWithLiveConvoyIsNotIdempotent is the
+// core regression for the round-4 codex finding on PR#30. A singleton bead in
+// the legacy routed-only shape (gc.routed_to=<target>, assignee="") with a live
+// tracking convoy was previously treated as idempotent — finalize never ran,
+// so the router never stamped an assignee and the work stayed invisible to the
+// singleton's Tier 1 hook query. Under Path D it must NOT be idempotent: only a
+// fully normalized assignee==target + empty gc.routed_to counts.
+func TestCheckBeadStateSingletonRoutedOnlyWithLiveConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for routed-only singleton with live convoy (must finalize to stamp assignee), got %+v", result)
+	}
+}
+
+// TestCheckBeadStateSingletonDualStampedWithLiveConvoyIsNotIdempotent covers the
+// other legacy shape from the round-4 finding: assignee==target AND a non-empty
+// gc.routed_to (dual-stamped), with a live tracking convoy. The old singleton
+// branch returned idempotent on assignee==target without checking gc.routed_to,
+// so the stale routed_to survived and routed-pool readers still counted it.
+// Path D requires exactly one stamped field, so this must finalize to clear it.
+func TestCheckBeadStateSingletonDualStampedWithLiveConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	assignee := "mayor"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("store.Update(assignee): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for dual-stamped singleton with live convoy (must finalize to clear gc.routed_to), got %+v", result)
+	}
+}
+
+// TestCheckBeadStateSingletonNormalizedWithLiveConvoyIsIdempotent pins the
+// positive case: a singleton bead already in the Path D normalized shape
+// (assignee==target, gc.routed_to empty) with a live tracking convoy is
+// idempotent — re-slinging it must skip routing.
+func TestCheckBeadStateSingletonNormalizedWithLiveConvoyIsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "auto convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{Title: "route me", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	assignee := "mayor"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("store.Update(assignee): %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, bead.ID, "tracks"); err != nil {
+		t.Fatalf("store.DepAdd(tracks): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for normalized singleton (assignee only) with live convoy, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateSingletonNormalizedWithoutConvoyIsNotIdempotent ensures the
+// convoy-recovery path still fires for singletons: a normalized bead with no
+// live tracking convoy must finalize again to recreate the missing convoy.
+func TestCheckBeadStateSingletonNormalizedWithoutConvoyIsNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: "route me", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(bead): %v", err)
+	}
+	assignee := "mayor"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("store.Update(assignee): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatalf("expected Idempotent=false for normalized singleton without a live convoy (must finalize to recover convoy), got %+v", result)
+	}
+}
+
 func TestCheckBeadStateRoutedWithClosedTrackingConvoyIsNotIdempotent(t *testing.T) {
 	store := beads.NewMemStore()
 	convoy, err := store.Create(beads.Bead{Title: "old convoy", Type: "convoy", Status: "open"})
@@ -1138,6 +1257,12 @@ func TestDoSlingCrossRigBlocks(t *testing.T) {
 	}
 }
 
+// TestDoSlingIdempotent pins that a singleton bead already in the Path D
+// normalized shape — assignee==target with no gc.routed_to — and backed by a
+// live convoy is idempotent: DoSling skips routing. Before Path D this pinned
+// the routed-only shape (gc.routed_to=mayor, assignee=""); that legacy shape is
+// no longer idempotent and gets normalized by the router instead — see
+// TestCheckBeadStateSingletonRoutedOnlyWithLiveConvoyIsNotIdempotent.
 func TestDoSlingIdempotent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -1146,11 +1271,11 @@ func TestDoSlingIdempotent(t *testing.T) {
 
 	store := beads.NewMemStore()
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
-	b, _ := store.Create(beads.Bead{
-		Title:    "test",
-		ParentID: convoy.ID,
-		Metadata: map[string]string{"gc.routed_to": "mayor"},
-	})
+	b, _ := store.Create(beads.Bead{Title: "test", ParentID: convoy.ID})
+	assignee := "mayor"
+	if err := store.Update(b.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("seed assignee: %v", err)
+	}
 
 	deps := testDeps(cfg, sp, runner.run)
 	deps.Store = store

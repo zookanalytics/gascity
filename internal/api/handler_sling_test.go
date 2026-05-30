@@ -182,6 +182,53 @@ func TestSlingSingletonClearsRoutedToMatchingTarget(t *testing.T) {
 	}
 }
 
+// TestSlingSingletonConvoyedRoutedOnlyNormalizes is the API-side round-4
+// regression for the codex finding on PR#30: a singleton bead in the legacy
+// routed-only shape (gc.routed_to=<target>, assignee="") that ALREADY has a
+// live tracking convoy must still be normalized. The old idempotency check
+// short-circuited before Route for already-convoyed singletons, leaving the
+// bead with no assignee (invisible to the singleton's Tier 1 hook query). After
+// the fix the route stamps the assignee and clears gc.routed_to.
+func TestSlingSingletonConvoyedRoutedOnlyNormalizes(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Legacy routed-only shape: gc.routed_to set, no assignee.
+	if err := store.SetMetadata(b.ID, "gc.routed_to", "myrig/worker"); err != nil {
+		t.Fatalf("seeding routed_to: %v", err)
+	}
+	// Live tracking convoy — the combination the old check treated as idempotent,
+	// short-circuiting before Route and stranding the routed-only shape.
+	convoy, err := store.Create(beads.Bead{Title: "live convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seeding convoy: %v", err)
+	}
+	if err := store.DepAdd(convoy.ID, b.ID, "tracks"); err != nil {
+		t.Fatalf("seeding tracks dep: %v", err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if updated.Assignee != "myrig/worker" {
+		t.Fatalf("assignee = %q, want myrig/worker (convoyed routed-only singleton must still be normalized to stamp assignee)", updated.Assignee)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (singleton route must clear it even with a live convoy — no dual-stamp)", got)
+	}
+}
+
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
 	h, state := newSlingTestServer(t)
 

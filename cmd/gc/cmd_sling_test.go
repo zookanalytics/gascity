@@ -6394,16 +6394,22 @@ func TestDryRunNilQuerier(t *testing.T) {
 
 // --- Idempotency detection (checkBeadState + integration) tests ---
 
+// TestCheckBeadStateIdempotentFixedAgent pins the Path D idempotent shape for a
+// fixed/singleton agent: assignee==target with no gc.routed_to and a live convoy
+// is idempotent. Before Path D this asserted a matching gc.routed_to was the
+// idempotent signal; singletons are now assignee-only, so a routed-only bead is
+// no longer idempotent — see
+// TestCheckBeadStateSingletonRoutedOnlyWithLiveConvoyIsNotIdempotent.
 func TestCheckBeadStateIdempotentFixedAgent(t *testing.T) {
 	q := &fakeQuerier{
-		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Assignee: "mayor"},
 		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	result := checkBeadState(q, "BL-42", a)
 	if !result.Idempotent {
-		t.Error("expected Idempotent=true for matching gc.routed_to")
+		t.Error("expected Idempotent=true for normalized singleton (assignee==target, no gc.routed_to)")
 	}
 	if len(result.Warnings) != 0 {
 		t.Errorf("expected no warnings, got %v", result.Warnings)
@@ -6492,13 +6498,19 @@ func TestCheckBeadStateDifferentPoolLabel(t *testing.T) {
 	}
 }
 
+// TestDoSlingIdempotentSkipsRouting pins that a singleton bead already in the
+// Path D normalized shape — assignee==target with no gc.routed_to — and backed
+// by a live convoy is idempotent: re-slinging skips routing. Before Path D this
+// test pinned the routed-only shape (gc.routed_to=mayor, assignee=""); under
+// Path D that legacy shape is no longer idempotent and gets normalized by the
+// router instead — see TestDoSlingSingletonRoutedOnlyWithConvoyNormalizes.
 func TestDoSlingIdempotentSkipsRouting(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	q := &fakeQuerier{
-		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Metadata: map[string]string{"gc.routed_to": "mayor"}},
+		bead:   beads.Bead{ID: "BL-42", ParentID: "CVY-1", Assignee: "mayor"},
 		parent: &beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"},
 	}
 
@@ -6615,6 +6627,85 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	}
 }
 
+// TestDoSlingSingletonRoutedOnlyWithConvoyNormalizes is the DoSling-level
+// round-4 regression for the codex finding on PR#30. A singleton bead in the
+// legacy routed-only shape (gc.routed_to=<target>, assignee="") that ALREADY
+// has a live tracking convoy was previously treated as idempotent, so doSling
+// returned before Route and the bead never got an assignee — invisible to the
+// singleton's Tier 1 hook query. After the fix doSling routes it and the router
+// normalizes it to assignee=mayor with an empty gc.routed_to.
+func TestDoSlingSingletonRoutedOnlyWithConvoyNormalizes(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Seed the legacy routed-only shape plus a LIVE tracking convoy: before the
+	// fix this combination short-circuited as idempotent and never normalized.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
+		t.Fatalf("seed routed_to: %v", err)
+	}
+	convoy, err := deps.Store.Create(beads.Bead{Title: "live convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed convoy: %v", err)
+	}
+	if err := deps.Store.DepAdd(convoy.ID, "BL-42", "tracks"); err != nil {
+		t.Fatalf("seed tracks dep: %v", err)
+	}
+
+	opts := testOpts(a, "BL-42")
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Errorf("routed-only singleton with a live convoy must not skip as idempotent: %s", stdout.String())
+	}
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
+}
+
+// TestDoSlingSingletonDualStampedWithConvoyNormalizes covers the dual-stamped
+// legacy shape (assignee=mayor AND gc.routed_to=mayor) with a live tracking
+// convoy. The old check returned idempotent on assignee==target alone, so the
+// stale gc.routed_to survived for routed-pool readers to count. After the fix
+// doSling finalizes and the router clears gc.routed_to, leaving exactly one
+// stamped field (assignee).
+func TestDoSlingSingletonDualStampedWithConvoyNormalizes(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Dual-stamp the bead (assignee + matching gc.routed_to) and give it a live
+	// tracking convoy — the shape the old idempotency check let through unchanged.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
+		t.Fatalf("seed routed_to: %v", err)
+	}
+	assignee := "mayor"
+	if err := deps.Store.Update("BL-42", beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("seed assignee: %v", err)
+	}
+	convoy, err := deps.Store.Create(beads.Bead{Title: "live convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("seed convoy: %v", err)
+	}
+	if err := deps.Store.DepAdd(convoy.ID, "BL-42", "tracks"); err != nil {
+		t.Fatalf("seed tracks dep: %v", err)
+	}
+
+	opts := testOpts(a, "BL-42")
+	if code := doSling(opts, deps, deps.Store, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	if strings.Contains(stdout.String(), "skipping (idempotent)") {
+		t.Errorf("dual-stamped singleton with a live convoy must not skip as idempotent: %s", stdout.String())
+	}
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
+}
+
 func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -6680,6 +6771,12 @@ func TestDoSlingNoConvoyRepeatIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestDoSlingKeepsWorkflowParentIdempotent pins that re-slinging a singleton
+// bead whose parent is a workflow root is idempotent and leaves the workflow
+// parent untouched (workflow roots own the routing lifecycle, so finalize is
+// not re-run). The bead is in the Path D normalized shape (assignee==target, no
+// gc.routed_to); before Path D this used the routed-only shape, which is no
+// longer idempotent for singletons.
 func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -6703,7 +6800,7 @@ func TestDoSlingKeepsWorkflowParentIdempotent(t *testing.T) {
 			Type:     "task",
 			Status:   "open",
 			ParentID: "WF-1",
-			Metadata: map[string]string{"gc.routed_to": "mayor"},
+			Assignee: "mayor",
 		},
 	}, nil)
 

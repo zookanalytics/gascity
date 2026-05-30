@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -370,6 +369,26 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) bool {
 	return false
 }
 
+// routeConflictWarnings returns advisory warnings describing pre-existing
+// routing state on a bead (assignee, gc.routed_to, pool labels). These are
+// informational only — they never block routing; finalize still runs to
+// normalize the bead.
+func routeConflictWarnings(beadID string, b beads.Bead) []string {
+	var warnings []string
+	if b.Assignee != "" {
+		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
+	}
+	if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
+		warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
+	}
+	for _, l := range b.Labels {
+		if strings.HasPrefix(l, "pool:") {
+			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
+		}
+	}
+	return warnings
+}
+
 // CheckBeadState checks whether a bead is already routed and returns a
 // structured result. Best-effort: nil querier or query failure → empty result.
 func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps) BeadCheckResult {
@@ -388,23 +407,40 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	}
 
 	if IsCustomSlingQuery(a) {
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
+		return BeadCheckResult{Warnings: routeConflictWarnings(beadID, b)}
 	}
 
 	target := a.QualifiedName()
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == target {
+	routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"])
+
+	// Singleton targets (Path D): the router stamps assignee ONLY and clears any
+	// gc.routed_to, so the sole normalized shape is assignee==target with an
+	// empty gc.routed_to. Branch on the SAME predicate the router uses to set
+	// RouteRequest.Singleton (!SupportsInstanceExpansion) so this idempotency
+	// decision matches what Route will actually produce — including the
+	// canonical-singleton-pool flavor (max=1 + Min/ScaleCheck) that the router
+	// treats as a pool. Treating a still-routed (gc.routed_to set) or
+	// assignee-less bead as idempotent here would skip finalize and strand the
+	// legacy shape: routed-only beads never get an assignee (invisible to the
+	// singleton's Tier 1 hook) and dual-stamped beads keep a gc.routed_to that
+	// routed-pool readers still count.
+	if !a.SupportsInstanceExpansion() {
+		if b.Assignee == target && routedTo == "" {
+			if needsConvoyRecovery(q, b, deps, opts) {
+				// Normalized, but missing its tracking convoy — let finalize
+				// re-run to recreate it and poke the controller.
+				return BeadCheckResult{}
+			}
+			return BeadCheckResult{Idempotent: true}
+		}
+		// Not normalized — let finalize run so Route stamps the assignee and
+		// clears any stale or dual-stamped gc.routed_to.
+		return BeadCheckResult{Warnings: routeConflictWarnings(beadID, b)}
+	}
+
+	// Pool targets: gc.routed_to==target is the normalized shape; pool instances
+	// race for the work via Tier 3 `--unassigned` claims.
+	if routedTo == target {
 		if b.Assignee == "" || b.Assignee == target {
 			if needsConvoyRecovery(q, b, deps, opts) {
 				// Prior sling set gc.routed_to but left no convoy — let
@@ -418,30 +454,7 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 		}
 	}
 
-	isMulti := agentutil.IsMultiSessionAgent(&a)
-	if !isMulti {
-		if b.Assignee == target {
-			if needsConvoyRecovery(q, b, deps, opts) {
-				return BeadCheckResult{}
-			}
-			return BeadCheckResult{Idempotent: true}
-		}
-		var warnings []string
-		if b.Assignee != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-		}
-		if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-		}
-		for _, l := range b.Labels {
-			if strings.HasPrefix(l, "pool:") {
-				warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-			}
-		}
-		return BeadCheckResult{Warnings: warnings}
-	}
-
-	if strings.TrimSpace(b.Metadata["gc.routed_to"]) == "" {
+	if routedTo == "" {
 		poolLabel := "pool:" + target
 		for _, l := range b.Labels {
 			if l == poolLabel {
@@ -452,17 +465,5 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 			}
 		}
 	}
-	var warnings []string
-	if b.Assignee != "" {
-		warnings = append(warnings, fmt.Sprintf("warning: bead %s already assigned to %q", beadID, b.Assignee))
-	}
-	if routedTo := strings.TrimSpace(b.Metadata["gc.routed_to"]); routedTo != "" {
-		warnings = append(warnings, fmt.Sprintf("warning: bead %s already routed to %q", beadID, routedTo))
-	}
-	for _, l := range b.Labels {
-		if strings.HasPrefix(l, "pool:") {
-			warnings = append(warnings, fmt.Sprintf("warning: bead %s already has pool label %q", beadID, l))
-		}
-	}
-	return BeadCheckResult{Warnings: warnings}
+	return BeadCheckResult{Warnings: routeConflictWarnings(beadID, b)}
 }
