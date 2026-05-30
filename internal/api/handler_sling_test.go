@@ -95,13 +95,15 @@ func TestSlingWithBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(%q): %v", b.ID, err)
 	}
-	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
-		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
-	}
-	// myrig/worker is a singleton (max=1, no pool markers), so the API
-	// path must also stamp the assignee — see gastownhall/gascity#yb5uhi.
+	// myrig/worker is a singleton (max=1, no pool markers), so under Path D
+	// the API router stamps assignee ONLY and leaves gc.routed_to empty: the
+	// target's Tier 1 hook query surfaces the work, and the default sling path
+	// never dual-stamps (upstream PR #1736). See gastownhall/gascity#yb5uhi.
 	if updated.Assignee != "myrig/worker" {
 		t.Fatalf("assignee = %q, want myrig/worker (singleton routing must stamp assignee)", updated.Assignee)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (singleton route stamps assignee only — no dual-stamp)", got)
 	}
 }
 

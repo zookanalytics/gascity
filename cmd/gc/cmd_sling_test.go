@@ -325,6 +325,29 @@ func assertStoreRoutedTo(t *testing.T, store beads.Store, beadID, want string) {
 	}
 }
 
+// assertStoreSingletonRouted asserts the Path D singleton-route contract on a
+// stored bead: assignee == want so the singleton's own Tier 1 work_query
+// surfaces the work (Tiers 2-3 short-circuit for named-origin sessions), and
+// gc.routed_to is empty because the default sling path stamps exactly one of
+// {assignee, gc.routed_to} — never both (upstream PR #1736). Use this for
+// singleton targets; use assertStoreRoutedTo for pool targets, which keep
+// routed-only semantics and race via Tier 3 `--unassigned` claims.
+//
+//nolint:unparam // want stays parameterized for non-mayor singleton targets (mechanik, refinery, ...)
+func assertStoreSingletonRouted(t *testing.T, store beads.Store, beadID, want string) {
+	t.Helper()
+	bead, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", beadID, err)
+	}
+	if bead.Assignee != want {
+		t.Fatalf("%s assignee = %q, want %q (singleton route must stamp assignee for Tier 1 hook query)", beadID, bead.Assignee, want)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("%s gc.routed_to = %q, want empty (singleton stamps assignee only — no dual-stamp, PR #1736)", beadID, got)
+	}
+}
+
 // sharedTestFormulaDir is a package-level temp directory containing minimal
 // formula TOML files for all formula names commonly used in sling tests.
 var (
@@ -452,11 +475,11 @@ func TestDoSlingBeadToFixedAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if bead.Metadata["gc.routed_to"] != "mayor" {
-		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
-	}
 	if bead.Assignee != "mayor" {
 		t.Errorf("assignee = %q, want mayor (singleton routing must surface via Tier 1 hook query)", bead.Assignee)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton routes stamp assignee only — no dual-stamp, per PR #1736)", got)
 	}
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
@@ -487,11 +510,11 @@ func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if bead.Metadata["gc.routed_to"] != "mayor" {
-		t.Errorf("gc.routed_to = %q, want mayor", bead.Metadata["gc.routed_to"])
-	}
 	if bead.Assignee != "mayor" {
 		t.Errorf("assignee = %q, want mayor (pinned-default singletons must also receive direct assignment)", bead.Assignee)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton routes stamp assignee only — no dual-stamp, per PR #1736)", got)
 	}
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want to contain 'Slung BL-42'", stdout.String())
@@ -500,9 +523,11 @@ func TestDoSlingPinnedDefaultSlingQueryUsesBuiltInRouting(t *testing.T) {
 
 // TestDoSlingBeadToBindingSingletonSetsAssignee covers gastownhall/gascity#yb5uhi:
 // routing to a binding-named singleton (e.g. gc-toolkit.mechanik) must stamp the
-// bead's assignee so the singleton's own Tier 1 work_query surfaces routed work.
-// Before the fix, only gc.routed_to was set and the singleton's hook query
-// missed the bead because Tier 2/3 short-circuit for named-origin sessions.
+// bead's assignee so the singleton's own Tier 1 work_query surfaces routed work —
+// Tier 2/3 short-circuit for named-origin sessions, so a routed-only bead would
+// be invisible to the target's hook. Under Path D the singleton route stamps
+// assignee ONLY; gc.routed_to is intentionally left empty so the default sling
+// path never dual-stamps (upstream PR #1736).
 func TestDoSlingBeadToBindingSingletonSetsAssignee(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
@@ -525,11 +550,11 @@ func TestDoSlingBeadToBindingSingletonSetsAssignee(t *testing.T) {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
 	want := "gc-toolkit.mechanik"
-	if bead.Metadata["gc.routed_to"] != want {
-		t.Errorf("gc.routed_to = %q, want %q", bead.Metadata["gc.routed_to"], want)
-	}
 	if bead.Assignee != want {
 		t.Errorf("assignee = %q, want %q (binding singleton routing must stamp assignee for Tier 1 hook query)", bead.Assignee, want)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton routes stamp assignee only — no dual-stamp)", got)
 	}
 }
 
@@ -560,6 +585,102 @@ func TestDoSlingBeadToSingletonOverwritesExistingAssignee(t *testing.T) {
 	}
 	if bead.Assignee != "mayor" {
 		t.Errorf("assignee = %q, want mayor (sling to singleton must replace stale claim)", bead.Assignee)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton routes stamp assignee only)", got)
+	}
+}
+
+// TestDoSling_Singleton_StampsAssigneeOnly pins the Path D contract for singleton
+// routes: the built-in CLI router stamps assignee=<target> and leaves
+// gc.routed_to empty. A singleton's own work_query short-circuits Tiers 2-3 for
+// named-origin sessions, so only a Tier 1 assignee match surfaces routed work on
+// its hook. See gastownhall/gascity#yb5uhi and upstream PR #1736.
+func TestDoSling_Singleton_StampsAssigneeOnly(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor", bead.Assignee)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton stamps assignee only)", got)
+	}
+}
+
+// TestDoSling_Pool_StampsRoutedToOnly pins the Path D contract for pool routes
+// (unchanged from prior behavior): the built-in CLI router stamps
+// gc.routed_to=<target> and leaves assignee empty so pool instances race for the
+// work via Tier 3 `--unassigned` claims.
+func TestDoSling_Pool_StampsRoutedToOnly(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	if code := doSling(testOpts(a, "HW-7"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("HW-7")
+	if err != nil {
+		t.Fatalf("store.Get(HW-7): %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "hello-world/polecat" {
+		t.Errorf("gc.routed_to = %q, want hello-world/polecat", got)
+	}
+	if bead.Assignee != "" {
+		t.Errorf("assignee = %q, want empty (pool routes race via --unassigned, not direct assignment)", bead.Assignee)
+	}
+}
+
+// TestDoSling_Singleton_DoesNotStampBoth is the explicit anti-regression for
+// upstream PR #1736's ruling that the default sling path must not dual-stamp.
+// A singleton route sets exactly one of {assignee, gc.routed_to} — assignee —
+// never both. This pins the field-pair exclusivity that the prior b4714629c
+// "stamp both" patch violated.
+func TestDoSling_Singleton_DoesNotStampBoth(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	assignee := strings.TrimSpace(bead.Assignee)
+	routedTo := strings.TrimSpace(bead.Metadata["gc.routed_to"])
+	stamped := 0
+	if assignee != "" {
+		stamped++
+	}
+	if routedTo != "" {
+		stamped++
+	}
+	if stamped != 1 {
+		t.Errorf("singleton route stamped %d of {assignee=%q, gc.routed_to=%q}, want exactly 1 (assignee only — no dual-stamp, PR #1736)", stamped, assignee, routedTo)
+	}
+	if assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (the single stamped field must be assignee)", assignee)
 	}
 }
 
@@ -733,8 +854,11 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(gc-1): %v", err)
 	}
-	if root.Metadata["gc.routed_to"] != "mayor" {
-		t.Errorf("gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	if root.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton formula route must stamp assignee for Tier 1 hook query)", root.Assignee)
+	}
+	if got := root.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton stamps assignee only — no dual-stamp, PR #1736)", got)
 	}
 	if !strings.Contains(stdout.String(), "formula") && !strings.Contains(stdout.String(), "wisp root gc-1") {
 		t.Errorf("stdout = %q, want mention of formula/wisp", stdout.String())
@@ -785,7 +909,7 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 for built-in routing", len(runner.calls))
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-1", "mayor")
 }
 
 func TestDoSlingSuspendedAgentForce(t *testing.T) {
@@ -3393,9 +3517,9 @@ func TestDoSlingBatchConvoyExpandsChildren(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
-	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
-	assertStoreRoutedTo(t, deps.Store, "BL-3", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-1", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-2", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-3", "mayor")
 	if !strings.Contains(stdout.String(), "Expanding convoy CVY-1") {
 		t.Errorf("stdout = %q, want expansion header", stdout.String())
 	}
@@ -3429,8 +3553,8 @@ func TestDoSlingBatchConvoyMixedStatus(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
-	assertStoreRoutedTo(t, deps.Store, "BL-3", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-1", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-3", "mayor")
 	out := stdout.String()
 	if !strings.Contains(out, "Expanding convoy CVY-2 (4 children, 2 open)") {
 		t.Errorf("stdout = %q, want header with counts", out)
@@ -3521,7 +3645,7 @@ func TestDoSlingBatchRegularBeadPassthrough(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
 	if !strings.Contains(stdout.String(), "Slung BL-42") {
 		t.Errorf("stdout = %q, want direct sling output", stdout.String())
 	}
@@ -6541,8 +6665,11 @@ func TestDoSlingIdempotentForceOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if bead.Metadata["gc.routed_to"] == "" {
-		t.Error("expected gc.routed_to to be set during forced routing")
+	if bead.Assignee != "mayor" {
+		t.Errorf("expected assignee=mayor during forced routing (singleton stamps assignee); got %q", bead.Assignee)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("singleton route stamps assignee only; gc.routed_to = %q, want empty (no dual-stamp, PR #1736)", got)
 	}
 	if strings.Contains(stdout.String(), "idempotent") {
 		t.Errorf("--force should not print idempotent message; stdout = %q", stdout.String())
@@ -6603,7 +6730,7 @@ func TestDoSlingBatchIdempotentChildSkipped(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-2", "mayor")
 	out := stdout.String()
 	if !strings.Contains(out, "Skipped BL-1") {
 		t.Errorf("stdout should mention skipped BL-1: %s", out)
