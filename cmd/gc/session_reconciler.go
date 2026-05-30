@@ -1603,6 +1603,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
+						if isManualSessionBead(*session) {
+							// Operator-owned shadow: no standing wake reason, so a
+							// config-drift drain is an unrecoverable kill, not a
+							// restart-in-place. Accept the drift like the pool sweep.
+							if err := silentRebaselineSessionHashes(session, store, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining manual-session config-drift hash for %s: %v\n", name, err) //nolint:errcheck
+							}
+							cancelSessionConfigDriftDrain(*session, sp, dt)
+							if trace != nil {
+								trace.recordDecision("reconciler.session.config_drift", tp.TemplateName, name, "config_drift", string(TraceOutcomeDeferredActive), configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									"active_reason": "manual_session",
+								}), nil, "")
+							}
+							continue
+						}
 						if isNamedSessionBead(*session) {
 							// Defer config-drift restart for named sessions
 							// that are actively in use (pending interaction,

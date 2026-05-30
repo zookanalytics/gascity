@@ -702,6 +702,83 @@ func TestConfigDrift_AttachedSessionPersistsAcrossCycles(t *testing.T) {
 	}
 }
 
+func TestConfigDrift_ManualSessionPersistsAcrossCycles(t *testing.T) {
+	// An operator-owned manual shadow has no standing wake reason, so a
+	// config-drift drain would be an unrecoverable kill (named sessions
+	// restart-in-place; manual shadows can't). It must be exempted from
+	// config-drift drains — drift accepted — the same as the pool sweep
+	// already exempts manual sessions.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	sessionName := "worker-thread-adhoc-abc123"
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName: "worker",
+		InstanceName: sessionName,
+		Alias:        sessionName,
+		Command:      "new-cmd",
+	}
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	oldStartedHash := runtime.CoreFingerprint(oldRuntime)
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// Deliberately NOT attached: a shadow the operator has detached from.
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"session_origin":      "manual",
+		"session_key":         "old-provider-conversation",
+		"started_config_hash": oldStartedHash,
+		"started_live_hash":   runtime.LiveFingerprint(oldRuntime),
+	})
+
+	// Multiple reconcile cycles — the shadow must survive all of them.
+	for i := 0; i < 5; i++ {
+		env.clk.Time = env.clk.Now().Add(10 * time.Second)
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get(%s): %v", i, session.ID, err)
+		}
+		env.reconcile([]beads.Bead{got})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("cycle %d: manual shadow was stopped during config-drift", i)
+		}
+		got, err = env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get after reconcile: %v", i, err)
+		}
+		if got.Metadata["state"] == "creating" {
+			t.Fatalf("cycle %d: state = creating; want drift accepted (no restart)", i)
+		}
+		if got.Metadata["session_key"] != "old-provider-conversation" {
+			t.Fatalf("cycle %d: session_key = %q; want conversation preserved", i, got.Metadata["session_key"])
+		}
+	}
+
+	// The drift was accepted (hash rebaselined), not left to re-drain.
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("final Get: %v", err)
+	}
+	if got.Metadata["started_config_hash"] == oldStartedHash {
+		t.Fatal("started_config_hash unchanged; want rebaselined to current (drift accepted)")
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash cleared; want rebaselined, not cleared")
+	}
+}
+
 func TestConfigDrift_AttachedSessionSurvivesTransientFalseNegative(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
