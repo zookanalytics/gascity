@@ -718,6 +718,40 @@ func TestDoSling_Singleton_ClearsStaleRoutedTo(t *testing.T) {
 	}
 }
 
+// TestDoSling_Singleton_ClearsRoutedToMatchingTarget covers the pre-routed
+// same-target case from the codex finding on PR#30: a bead already carries
+// gc.routed_to equal to the singleton target (e.g. a legacy/externally-routed
+// bead with gc.routed_to=mayor). Routing it to that same singleton must stamp
+// the assignee AND blank gc.routed_to — Path D stamps exactly one field, never
+// both. The earlier fix only cleared a *differing* (stale) gc.routed_to, so an
+// already-equal value survived and dual-stamped the bead (assignee=mayor +
+// gc.routed_to=mayor), which gc.routed_to readers still count.
+func TestDoSling_Singleton_ClearsRoutedToMatchingTarget(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Seed gc.routed_to pointing at the SAME target as the singleton route.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "mayor"); err != nil {
+		t.Fatalf("seeding matching gc.routed_to: %v", err)
+	}
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton route must stamp assignee)", bead.Assignee)
+	}
+	if got := strings.TrimSpace(bead.Metadata["gc.routed_to"]); got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton route must clear it even when it already equals the target — no dual-stamp)", got)
+	}
+}
+
 func TestDoSlingEnvPassthrough(t *testing.T) {
 	// Fixed agent (max=1): env should contain GC_SLING_TARGET with resolved session name.
 	t.Run("fixed agent", func(t *testing.T) {
@@ -6530,8 +6564,16 @@ func TestDoSlingRecoversMissingConvoyOnPreRoutedBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
-		t.Errorf("gc.routed_to = %q, want %q (should be unchanged)", got, "mayor")
+	// The singleton route clears gc.routed_to even though it already equals the
+	// target ("mayor"): Path D stamps exactly one field (assignee), never both,
+	// so the pre-routed value must not survive as a dual-stamp. The convoy
+	// recovery above still happens because CheckBeadState reads gc.routed_to
+	// before Route clears it. Regression for the codex finding on PR#30.
+	if got := strings.TrimSpace(bead.Metadata["gc.routed_to"]); got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton route clears it even when it already equals the target — no dual-stamp)", got)
+	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton recovery must stamp assignee)", bead.Assignee)
 	}
 	if bead.ParentID != "" {
 		t.Fatalf("ParentID = %q, want empty because auto-convoy membership uses tracks deps", bead.ParentID)

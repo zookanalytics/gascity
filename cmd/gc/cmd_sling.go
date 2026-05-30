@@ -635,17 +635,19 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if req.Singleton {
 		target := req.Target
 		opts := beads.UpdateOpts{Assignee: &target}
-		// Clear a *stale* gc.routed_to — one pointing at a different (e.g. an old
-		// pool) target — so the singleton route stays assignee-only and is not
-		// dual-stamped (Path D). Leaving it yields assignee=<singleton> plus a
-		// non-empty gc.routed_to=<old target> that gc.routed_to readers still
-		// count. A gc.routed_to already equal to the target is consistent, not
-		// stale: leave it untouched so the externally-routed convoy-recovery
-		// path that keys on gc.routed_to==target is unaffected. Blanking to ""
-		// reads identically to absent for every gc.routed_to reader (all use
+		// Clear ANY non-empty gc.routed_to so the singleton route stays
+		// assignee-only and is never dual-stamped (Path D) — including the case
+		// where gc.routed_to already equals the target. A singleton stamps
+		// exactly one field, never both: assignee=<singleton> beside a
+		// gc.routed_to=<same singleton> still leaves a value that gc.routed_to
+		// readers count, violating the contract. The externally-routed
+		// convoy-recovery path keys on gc.routed_to==target, but that decision is
+		// already made in CheckBeadState (which runs before Route), so the router
+		// need not preserve the metadata to recover the tracking convoy. Blanking
+		// to "" reads identically to absent for every gc.routed_to reader (all use
 		// TrimSpace(...) != "" or exact-match).
 		if cur, err := r.deps.Store.Get(req.BeadID); err == nil {
-			if rt := strings.TrimSpace(cur.Metadata["gc.routed_to"]); rt != "" && rt != target {
+			if rt := strings.TrimSpace(cur.Metadata["gc.routed_to"]); rt != "" {
 				opts.Metadata = map[string]string{"gc.routed_to": ""}
 			}
 		}

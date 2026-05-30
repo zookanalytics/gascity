@@ -145,6 +145,43 @@ func TestSlingSingletonClearsStaleRoutedTo(t *testing.T) {
 	}
 }
 
+// TestSlingSingletonClearsRoutedToMatchingTarget is the API-side regression for
+// the pre-routed same-target case in the codex finding on PR#30: a bead already
+// carrying gc.routed_to equal to the singleton target must still be reduced to a
+// single stamp. The route stamps assignee AND blanks gc.routed_to; leaving the
+// already-equal value dual-stamps the bead (assignee=<singleton> +
+// gc.routed_to=<same singleton>), which gc.routed_to readers still count.
+func TestSlingSingletonClearsRoutedToMatchingTarget(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed gc.routed_to pointing at the SAME target as the singleton route.
+	if err := store.SetMetadata(b.ID, "gc.routed_to", "myrig/worker"); err != nil {
+		t.Fatalf("seeding matching gc.routed_to: %v", err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if updated.Assignee != "myrig/worker" {
+		t.Fatalf("assignee = %q, want myrig/worker (singleton route must stamp assignee)", updated.Assignee)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (singleton route must clear it even when it already equals the target — no dual-stamp)", got)
+	}
+}
+
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
 	h, state := newSlingTestServer(t)
 
