@@ -187,6 +187,56 @@ append_fragments = ["footer"]
 	}
 }
 
+// TestRenderPromptInjectsRigImportedPackFragment is the render-path regression
+// for gc-a7qb1c: a sub-pack imported at the RIG level ships a template-fragment
+// at its PACK level. The renderer previously only saw cfg.PackDirs (city-level
+// imports), so the rig-imported fragment was never registered and
+// inject_fragment resolved to a nil template ("template not found").
+// effectivePackDirsForRig must surface the rig's pack dir so the fragment
+// injects — without regressing the city/HQ path.
+func TestRenderPromptInjectsRigImportedPackFragment(t *testing.T) {
+	const (
+		rigPackDir = "/packs/keeper"
+		fragName   = "refinery-rebase-handling"
+		fragBody   = "REBASE HANDLING FROM RIG SUB-PACK"
+	)
+
+	f := fsys.NewFake()
+	f.Files["/city/agents/refinery/prompt.template.md"] = []byte("Hello")
+	// The fragment lives only in the rig-imported sub-pack's PACK-level
+	// template-fragments/ — never in a city-level import.
+	f.Files[rigPackDir+"/template-fragments/rebase.template.md"] = []byte(`{{ define "` + fragName + `" }}` + fragBody + `{{ end }}`)
+
+	cfg := &config.City{
+		RigPackDirs: map[string][]string{"frontend": {rigPackDir}},
+	}
+	fragments := []string{fragName}
+
+	// Before the union: rendering with only cfg.PackDirs cannot find the
+	// fragment (the bug — nil template).
+	cityOnly := renderPrompt(f, "/city", "", "agents/refinery/prompt.template.md",
+		PromptContext{}, "", io.Discard, cfg.PackDirs, fragments, nil)
+	if strings.Contains(cityOnly, fragBody) {
+		t.Fatalf("precondition failed: city-only packDirs unexpectedly injected the rig fragment: %q", cityOnly)
+	}
+
+	// After the union: the rig-scoped pack dirs surface the sub-pack, so the
+	// fragment registers and injects (found).
+	withRig := renderPrompt(f, "/city", "", "agents/refinery/prompt.template.md",
+		PromptContext{}, "", io.Discard, effectivePackDirsForRig(cfg, "frontend"), fragments, nil)
+	if !strings.Contains(withRig, fragBody) {
+		t.Fatalf("effectivePackDirsForRig union did not inject rig fragment: got %q", withRig)
+	}
+
+	// A city/HQ agent (no rig) still renders without the rig fragment — the
+	// city-level path is unchanged.
+	cityAgent := renderPrompt(f, "/city", "", "agents/refinery/prompt.template.md",
+		PromptContext{}, "", io.Discard, effectivePackDirsForRig(cfg, ""), fragments, nil)
+	if strings.Contains(cityAgent, fragBody) {
+		t.Fatalf("city/HQ agent unexpectedly saw the rig fragment: %q", cityAgent)
+	}
+}
+
 func TestRenderPromptPatchedTemplateSuffixRenders(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/patches/gastown-mayor-prompt.template.md"] = []byte("Hello {{ .AgentName }}")

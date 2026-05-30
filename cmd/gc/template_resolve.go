@@ -322,7 +322,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderDisplayName: providerDisplayName,
 		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                 cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, effectivePackDirsForRig(p.city, rigName), fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)

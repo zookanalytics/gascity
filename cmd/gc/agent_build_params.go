@@ -230,6 +230,47 @@ func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigNam
 	return merged
 }
 
+// effectivePackDirsForRig returns the pack directories whose shared templates
+// and pack-level template-fragments/ are visible to an agent scoped to
+// rigName: the city-level pack dirs (cfg.PackDirs) unioned with that rig's
+// imported pack dirs (cfg.RigPackDirs[rigName]). A city/HQ agent
+// (rigName == "") — or a rig with no imported pack dirs — gets cfg.PackDirs
+// unchanged.
+//
+// Without this union the prompt renderer only ever saw cfg.PackDirs, so a
+// sub-pack imported at the RIG level never had its PACK-level
+// template-fragments/ registered, and inject_fragment resolved to a nil
+// template ("template not found"). City dirs come first so city-level
+// precedence is unchanged; the rig's dirs are appended and deduped. Mirrors
+// collectPackDirs, scoped to a single rig.
+func effectivePackDirsForRig(cfg *config.City, rigName string) []string {
+	if cfg == nil {
+		return nil
+	}
+	if rigName == "" {
+		return cfg.PackDirs
+	}
+	rigDirs := cfg.RigPackDirs[rigName]
+	if len(rigDirs) == 0 {
+		return cfg.PackDirs
+	}
+	seen := make(map[string]bool, len(cfg.PackDirs)+len(rigDirs))
+	merged := make([]string, 0, len(cfg.PackDirs)+len(rigDirs))
+	for _, dir := range cfg.PackDirs {
+		if !seen[dir] {
+			seen[dir] = true
+			merged = append(merged, dir)
+		}
+	}
+	for _, dir := range rigDirs {
+		if !seen[dir] {
+			seen[dir] = true
+			merged = append(merged, dir)
+		}
+	}
+	return merged
+}
+
 // templateNameFor returns the configuration template name for an agent.
 // For pool instances, this is the original template name (PoolName).
 // For named_session expansions, the template name is cfgAgent's own
