@@ -684,6 +684,40 @@ func TestDoSling_Singleton_DoesNotStampBoth(t *testing.T) {
 	}
 }
 
+// TestDoSling_Singleton_ClearsStaleRoutedTo pins the reroute half of the Path D
+// contract: when a bead already carries a non-empty gc.routed_to (e.g. it was
+// previously routed to a pool), rerouting it to a singleton target must stamp
+// the assignee AND blank the stale gc.routed_to. Leaving the old value intact
+// dual-stamps the bead (assignee=<singleton> + gc.routed_to=<old pool>),
+// violating the assignee-only/no-dual-stamp contract and letting gc.routed_to
+// readers still count the work. Regression for the codex finding on PR#30.
+func TestDoSling_Singleton_ClearsStaleRoutedTo(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	// Seed a stale pool route: the bead was previously slung to a pool, so it
+	// carries a non-empty gc.routed_to before this singleton reroute.
+	if err := deps.Store.SetMetadata("BL-42", "gc.routed_to", "hello-world/polecat"); err != nil {
+		t.Fatalf("seeding stale gc.routed_to: %v", err)
+	}
+	if code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("BL-42")
+	if err != nil {
+		t.Fatalf("store.Get(BL-42): %v", err)
+	}
+	if bead.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton reroute must stamp assignee)", bead.Assignee)
+	}
+	if got := strings.TrimSpace(bead.Metadata["gc.routed_to"]); got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton reroute must clear the stale pool route — no dual-stamp)", got)
+	}
+}
+
 func TestDoSlingEnvPassthrough(t *testing.T) {
 	// Fixed agent (max=1): env should contain GC_SLING_TARGET with resolved session name.
 	t.Run("fixed agent", func(t *testing.T) {

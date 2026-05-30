@@ -107,6 +107,44 @@ func TestSlingWithBead(t *testing.T) {
 	}
 }
 
+// TestSlingSingletonClearsStaleRoutedTo is the API-side regression for the codex
+// finding on PR#30: rerouting a bead that already carries a non-empty
+// gc.routed_to (e.g. a prior pool route) to a singleton target must stamp the
+// assignee AND blank the stale gc.routed_to in the same route. Leaving the old
+// value dual-stamps the bead (assignee=<singleton> + gc.routed_to=<old pool>),
+// violating Path D's assignee-only contract and letting gc.routed_to readers
+// still count the work.
+func TestSlingSingletonClearsStaleRoutedTo(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed a stale pool route: the bead was previously slung to a pool.
+	if err := store.SetMetadata(b.ID, "gc.routed_to", "myrig/polecat"); err != nil {
+		t.Fatalf("seeding stale gc.routed_to: %v", err)
+	}
+
+	body := `{"target":"myrig/worker","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if updated.Assignee != "myrig/worker" {
+		t.Fatalf("assignee = %q, want myrig/worker (singleton reroute must stamp assignee)", updated.Assignee)
+	}
+	if got := strings.TrimSpace(updated.Metadata["gc.routed_to"]); got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (singleton reroute must clear the stale pool route — no dual-stamp)", got)
+	}
+}
+
 func TestSlingWithMissingBeadReturnsBadRequest(t *testing.T) {
 	h, state := newSlingTestServer(t)
 

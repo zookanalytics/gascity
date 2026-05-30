@@ -442,7 +442,21 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// the matching block in cmd/gc/cmd_sling.go cliBeadRouter.Route.
 	if req.Singleton {
 		target := req.Target
-		if err := r.store.Update(req.BeadID, beads.UpdateOpts{Assignee: &target}); err != nil {
+		opts := beads.UpdateOpts{Assignee: &target}
+		// Clear a *stale* gc.routed_to — one pointing at a different (e.g. an old
+		// pool) target — so the singleton route stays assignee-only and is not
+		// dual-stamped (Path D). Leaving it yields assignee=<singleton> plus a
+		// non-empty gc.routed_to=<old target> that gc.routed_to readers still
+		// count. A gc.routed_to already equal to the target is consistent, not
+		// stale: leave it untouched so the externally-routed convoy-recovery
+		// path that keys on gc.routed_to==target is unaffected. Blanking to ""
+		// reads identically to absent for every gc.routed_to reader.
+		if cur, err := r.store.Get(req.BeadID); err == nil {
+			if rt := strings.TrimSpace(cur.Metadata["gc.routed_to"]); rt != "" && rt != target {
+				opts.Metadata = map[string]string{"gc.routed_to": ""}
+			}
+		}
+		if err := r.store.Update(req.BeadID, opts); err != nil {
 			if req.Force && errors.Is(err, beads.ErrNotFound) {
 				return nil
 			}
