@@ -3378,7 +3378,7 @@ func TestCheckBeadStateAssigneeWarns(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Errorf("got %d runner calls, want 0 for built-in routing", len(runner.calls))
 	}
-	assertStoreRoutedTo(t, deps.Store, "MY-42", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "MY-42", "mayor")
 }
 
 func TestCheckBeadStatePoolLabelWarns(t *testing.T) {
@@ -3955,8 +3955,11 @@ func TestOnFormulaAttachesAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if source.Metadata["gc.routed_to"] != "mayor" {
-		t.Errorf("gc.routed_to = %q, want mayor", source.Metadata["gc.routed_to"])
+	if source.Assignee != "mayor" {
+		t.Errorf("assignee = %q, want mayor (singleton on-formula route must stamp assignee for Tier 1 hook query)", source.Assignee)
+	}
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (singleton stamps assignee only — no dual-stamp, PR #1736)", got)
 	}
 	rootID := source.Metadata["molecule_id"]
 	if rootID == "" {
@@ -4007,8 +4010,11 @@ version = 1
 	if err != nil {
 		t.Fatalf("store.Get(BL-42): %v", err)
 	}
-	if source.Metadata["gc.routed_to"] != "mayor" {
-		t.Errorf("source gc.routed_to = %q, want mayor", source.Metadata["gc.routed_to"])
+	if source.Assignee != "mayor" {
+		t.Errorf("source assignee = %q, want mayor (singleton on-formula route must stamp assignee for Tier 1 hook query)", source.Assignee)
+	}
+	if got := source.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("source gc.routed_to = %q, want empty (singleton stamps assignee only — no dual-stamp, PR #1736)", got)
 	}
 	rootID := source.Metadata["molecule_id"]
 	if rootID == "" {
@@ -4070,8 +4076,11 @@ version = 1
 	if root.Metadata["gc.kind"] != "wisp" {
 		t.Fatalf("root gc.kind = %q, want wisp", root.Metadata["gc.kind"])
 	}
-	if root.Metadata["gc.routed_to"] != "mayor" {
-		t.Fatalf("root gc.routed_to = %q, want mayor", root.Metadata["gc.routed_to"])
+	if root.Assignee != "mayor" {
+		t.Fatalf("root assignee = %q, want mayor (singleton formula route must stamp assignee for Tier 1 hook query)", root.Assignee)
+	}
+	if got := root.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("root gc.routed_to = %q, want empty (singleton stamps assignee only — no dual-stamp, PR #1736)", got)
 	}
 	ready, err := deps.Store.Ready()
 	if err != nil {
@@ -5109,7 +5118,7 @@ func TestOnFormulaAutoBurnStaleMolecule(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
 		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
 }
 
 func TestOnFormulaMetadataAttachmentSkipsIdempotentRetry(t *testing.T) {
@@ -5134,7 +5143,7 @@ func TestOnFormulaMetadataAttachmentSkipsIdempotentRetry(t *testing.T) {
 	if firstRootID == "" {
 		t.Fatal("first sling did not set molecule_id")
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
 
 	stdout.Reset()
 	stderr.Reset()
@@ -5208,7 +5217,7 @@ func TestOnFormulaCleanBead(t *testing.T) {
 	if len(runner.calls) != 0 {
 		t.Fatalf("got %d runner calls, want 0 for built-in routing: %v", len(runner.calls), runner.calls)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-42", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-42", "mayor")
 }
 
 func TestOnFormulaNilQuerier(t *testing.T) {
@@ -5535,8 +5544,8 @@ func TestBatchAutoBurnStaleMolecules(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Auto-burned stale molecule MOL-1") {
 		t.Errorf("stderr = %q, want auto-burn message", stderr.String())
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
-	assertStoreRoutedTo(t, deps.Store, "BL-2", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-1", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-2", "mayor")
 }
 
 func TestOnFormulaPoolAttachmentKeepsLegacyStepsPrivate(t *testing.T) {
@@ -5697,8 +5706,8 @@ func TestBatchOnPartialCookFailure(t *testing.T) {
 	if !strings.Contains(out, "Slung 2/3 children") {
 		t.Errorf("stdout = %q, want summary", out)
 	}
-	assertStoreRoutedTo(t, deps.Store, "BL-1", "mayor")
-	assertStoreRoutedTo(t, deps.Store, "BL-3", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-1", "mayor")
+	assertStoreSingletonRouted(t, deps.Store, "BL-3", "mayor")
 }
 
 func TestBatchOnNudgeOnce(t *testing.T) {
