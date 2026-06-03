@@ -418,6 +418,475 @@ exit 1
 	}
 }
 
+func TestOrphanSweepRecognizesPascalCaseSessionSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      cat <<'EOF'
+{"_cache_age_s":2,"sessions":[
+  {"ID":"lo-session-abc","Template":"project/worker","State":"active","Title":"project/worker-1","Alias":"project/worker-1","SessionName":"project__worker-lo-session-abc","Attached":false,"Running":true},
+  {"ID":"lo-session-gone","Template":"project/worker","State":"drained","Title":"","Alias":"","SessionName":"project__worker-lo-session-gone","Attached":false,"Running":false}
+]}
+EOF
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-pool-live","status":"in_progress","assignee":"project__worker-lo-session-abc"},
+  {"id":"ga-pool-dead","status":"in_progress","assignee":"project__worker-lo-session-gone"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("unexpected orphan-sweep output:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	log := string(logData)
+	if strings.Contains(log, "bd update ga-pool-live ") {
+		t.Fatalf("assignee of running PascalCase session was reset:\n%s", log)
+	}
+	if !strings.Contains(log, "bd update ga-pool-dead --status=open --assignee=") {
+		t.Fatalf("assignee of non-running session was not reset:\n%s", log)
+	}
+}
+
+func TestOrphanSweepRefusesSweepOnUnknownSessionContainer(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"items":[{"SessionName":"project__worker-lo-renamed","Running":true}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-container-drift","status":"in_progress","assignee":"project__worker-lo-renamed"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "refusing to sweep") {
+		t.Fatalf("expected container-drift refusal in output:\n%s", out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("sweep reset beads despite unrecognized session container:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd update ") {
+		t.Fatalf("bd update issued despite unrecognized session container:\n%s", logData)
+	}
+}
+
+func TestOrphanSweepRefusesSweepOnMixedContainerDrift(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"items":[{"SessionName":"project__worker-lo-mixed","Running":true}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-mixed-drift","status":"in_progress","assignee":"project__worker-lo-mixed"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "refusing to sweep") {
+		t.Fatalf("expected mixed-container refusal in output:\n%s", out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("sweep reset beads despite mixed-container session payload:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd update ") {
+		t.Fatalf("bd update issued despite mixed-container session payload:\n%s", logData)
+	}
+}
+
+func TestOrphanSweepRefusesSweepOnObjectMapContainerDrift(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"items":{"live":{"SessionName":"project__worker-lo-map","Running":true}}}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-map-drift","status":"in_progress","assignee":"project__worker-lo-map"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "refusing to sweep") {
+		t.Fatalf("expected object-map container-drift refusal in output:\n%s", out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("sweep reset beads despite object-map session container:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd update ") {
+		t.Fatalf("bd update issued despite object-map session container:\n%s", logData)
+	}
+}
+
+func TestOrphanSweepSweepsEmptyTownWithBenignMetadataArrays(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[],"warnings":[{"code":"slow-cache"}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-true-orphan","status":"in_progress","assignee":"project__worker-lo-dead"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if strings.Contains(string(out), "refusing to sweep") {
+		t.Fatalf("benign metadata array disabled empty-town cleanup:\n%s", out)
+	}
+	if !strings.Contains(string(out), "orphan-sweep: reset 1 orphaned beads") {
+		t.Fatalf("expected empty-town sweep to reset the orphaned bead:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if !strings.Contains(string(logData), "bd update ga-true-orphan --status=open --assignee=") {
+		t.Fatalf("orphaned bead was not reset in empty town with benign metadata:\n%s", logData)
+	}
+}
+
+func TestOrphanSweepRefusesSweepOnUnknownSessionSchema(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	tmpDir := t.TempDir()
+	gcLog := filepath.Join(tmpDir, "gc.log")
+
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+case "$1" in
+  config)
+    if [ "$2" = "explain" ]; then
+      cat <<'EOF'
+Agent: project/worker
+  source: pack
+EOF
+      exit 0
+    fi
+    ;;
+  rig)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"rigs":[{"name":"hq","hq":true}]}\n'
+      exit 0
+    fi
+    ;;
+  session)
+    if [ "$2" = "list" ] && [ "$3" = "--json" ]; then
+      printf '{"sessions":[{"sessionId":"lo-future","state":"active"}]}\n'
+      exit 0
+    fi
+    ;;
+  bd)
+    if [ "$2" = "list" ]; then
+      cat <<'EOF'
+[
+  {"id":"ga-unswept","status":"in_progress","assignee":"project__worker-lo-future"}
+]
+EOF
+      exit 0
+    fi
+    if [ "$2" = "update" ]; then
+      exit 0
+    fi
+    ;;
+esac
+exit 1
+`)
+
+	env := map[string]string{
+		"GC_CITY":      cityDir,
+		"GC_CITY_PATH": cityDir,
+		"GC_CALL_LOG":  gcLog,
+		"PATH":         binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	script := filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "orphan-sweep.sh")
+	cmd := exec.Command(script)
+	cmd.Env = mergeTestEnv(env)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, out)
+	}
+	if !strings.Contains(string(out), "refusing to sweep") {
+		t.Fatalf("expected schema-drift refusal in output:\n%s", out)
+	}
+	if strings.Contains(string(out), "orphan-sweep: reset") {
+		t.Fatalf("sweep reset beads despite unrecognized session schema:\n%s", out)
+	}
+
+	logData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(logData), "bd update ") {
+		t.Fatalf("bd update issued despite unrecognized session schema:\n%s", logData)
+	}
+}
+
 func TestOrphanSweepRefreshesRigLivenessAfterBeadList(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()

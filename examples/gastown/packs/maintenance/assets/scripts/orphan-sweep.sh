@@ -110,26 +110,66 @@ if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
-# Step 2b: Parse identities of every live (non-closed) session so that
-# pool-spawned ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are
-# treated as known. The Go-side releaseOrphanedPoolAssignments path validates
-# these via liveOpenSessionAssignmentExists, but this shell sweep ran without
-# that guard — an ephemeral assignee whose template-stripped form did not
-# match any agent name was incorrectly reset, racing against active polekitten
-# work and producing the false-orphan loop tracked in ga-nvx.
-# Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
-# (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
-#     so `.[]` iterated four top-level scalar keys instead of session objects.
-# (2) Field names are snake_case lower (.closed/.id/.session_name/.alias/.agent_name),
-#     not PascalCase. Combined, LIVE_SESSION_IDS was ALWAYS empty and every
-#     ephemeral assignee like gastown__polecat-gc-XXXXX got stripped on every tick.
+# Step 2b: Parse identities of every live session so that pool-spawned
+# ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are treated as
+# known, mirroring the Go-side liveOpenSessionAssignmentExists guard
+# (false-orphan loop history: ga-nvx, gastownhall/gascity#2363).
+# `gc session list --json` has shipped two field generations:
+#   gen A: {"sessions":[{closed,id,session_name,alias,agent_name}], "schema_version":...}
+#   gen B: {"_cache_age_s","sessions":[{ID,SessionName,Alias,Title,Template,Running,...}]}
+# Accept both; deriving liveness from whichever marker the object carries.
+# Every captured response must carry a recognizable `sessions` array. A
+# response without one (renamed/moved container, or empty output from a
+# successful command) means the sweep is blind to liveness — refuse rather
+# than mass-orphan. `sessions: []` remains a legitimate empty town.
+TOTAL_SESSION_DOCS=$(jq -r -s 'length' "$SESSION_TMP" 2>/dev/null) || exit 0
+RECOGNIZED_SESSION_DOCS=$(jq -r -s '[.[] | select((.sessions? | type) == "array")] | length' "$SESSION_TMP" 2>/dev/null) || exit 0
+if [ "${TOTAL_SESSION_DOCS:-0}" -eq 0 ] || [ "$RECOGNIZED_SESSION_DOCS" != "$TOTAL_SESSION_DOCS" ]; then
+    echo "orphan-sweep: session list response lacks a recognizable sessions container — refusing to sweep" >&2
+    exit 0
+fi
+
+# A response whose recognized `sessions` array is empty but which carries
+# session-LIKE objects elsewhere (in arrays, object maps, or nested
+# containers) may be reporting live sessions under a renamed sibling
+# container (mixed-container drift). An object is session-like when it has a
+# session identity field, or an ID/Title field together with a
+# liveness/state marker. Unrelated metadata objects (warnings, summaries)
+# do not match, so they cannot disable empty-town cleanup.
+SUSPECT_SIBLING_DOCS=$(jq -r -s '
+    [.[]
+     | select((.sessions? | type) == "array" and (.sessions | length) == 0)
+     | del(.sessions)
+     | [.. | objects
+        | select(
+            has("SessionName") or has("session_name") or has("Alias") or has("alias")
+            or has("Template") or has("agent_name")
+            or ((has("ID") or has("id") or has("Title"))
+                and (has("Running") or has("closed") or has("State") or has("state")))
+          )]
+     | select(length > 0)
+    ] | length
+' "$SESSION_TMP" 2>/dev/null) || exit 0
+if [ "${SUSPECT_SIBLING_DOCS:-1}" -gt 0 ]; then
+    echo "orphan-sweep: session list reports an empty town but carries session-like objects outside the sessions array — refusing to sweep" >&2
+    exit 0
+fi
+TOTAL_SESSION_OBJECTS=$(jq -r -s '[.[] | .sessions[]?] | length' "$SESSION_TMP" 2>/dev/null) || exit 0
 LIVE_SESSION_IDS=$(jq -r -s '
     .[] | .sessions[]?
-    | select(.closed == false)
-    | [.id, .session_name, .alias, .agent_name]
+    | select((.Running == true) // (.closed == false))
+    | [.ID // .id, .SessionName // .session_name, .Alias // .alias, .Title, .agent_name // .Template]
     | .[]
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
+
+# Session objects present but zero identities extracted means a third field
+# generation has shipped. Resetting on that blindness would mass-orphan every
+# live pool assignee (the #2363 failure mode) — refuse to sweep instead.
+if [ "${TOTAL_SESSION_OBJECTS:-0}" -gt 0 ] && [ -z "$LIVE_SESSION_IDS" ]; then
+    echo "orphan-sweep: $TOTAL_SESSION_OBJECTS sessions listed but none matched a known schema — refusing to sweep" >&2
+    exit 0
+fi
 
 agent_exists() {
     local candidate="$1"
