@@ -87,7 +87,7 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	}
 
 	var failed, warned []stuckCreatingFinding
-	var details []string
+	var allowlisted []string
 	for _, b := range sessions {
 		if b.Status == "closed" {
 			continue
@@ -105,7 +105,7 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 			// Templates with pre_start commands legitimately create slowly;
 			// excluded per spec, but surfaced in verbose output so a
 			// genuinely wedged pre_start session is still discoverable.
-			details = append(details, "allowlisted (pre_start configured): "+f.detail())
+			allowlisted = append(allowlisted, "allowlisted (pre_start configured): "+f.detail())
 			continue
 		}
 		switch {
@@ -120,12 +120,16 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 		}
 	}
 
+	// Most severe first so verbose output leads with the actionable lines;
+	// allowlisted notes trail as context.
+	var details []string
 	for _, f := range failed {
 		details = append(details, f.detail())
 	}
 	for _, f := range warned {
 		details = append(details, f.detail())
 	}
+	details = append(details, allowlisted...)
 	r.Details = details
 
 	switch {
