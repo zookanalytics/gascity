@@ -1717,6 +1717,11 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
+	// The rig directory must exist on disk: sweep target enumeration skips
+	// configured rigs whose scope root is missing (gc-q40pm Problem B).
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rigPath): %v", err)
+	}
 	cr := &CityRuntime{
 		cityPath:            cityPath,
 		cityName:            "test-city",
@@ -1774,6 +1779,11 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 	}
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "frontend")
+	// The rig directory must exist on disk: sweep target enumeration skips
+	// configured rigs whose scope root is missing (gc-q40pm Problem B).
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rigPath): %v", err)
+	}
 	prevOpenSweepStore := newCityRuntimeOpenSweepStore
 	newCityRuntimeOpenSweepStore = func(scopeRoot, gotCityPath string) (beads.Store, error) {
 		if gotCityPath != cityPath {

@@ -425,6 +425,109 @@ func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	}
 }
 
+// poolCheckAgent returns a pool-shaped agent (instance expansion on) whose
+// qualified name is "hello-world/polecat", for CheckBeadState pool-semantics
+// tests.
+func poolCheckAgent() config.Agent {
+	return config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(3),
+	}
+}
+
+// TestCheckBeadStatePoolRoutedTemplateAssigneeNotIdempotent guards the
+// re-pour path (gc-q40pm): for a pool target, gc.routed_to==target with
+// assignee==target is NOT a settled routed state. Pool demand is ready work
+// with an empty assignee — "assigning the pool template itself is not pool
+// demand" (engdocs/architecture/dispatch.md, scale_check ↔ work_query
+// correspondence) — so the template-assigned shape is invisible to both
+// scale_check and every work_query tier. CheckBeadState must fall through so
+// the preflight re-pour normalization can clear the assignee.
+func TestCheckBeadStatePoolRoutedTemplateAssigneeNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	// Live tracking convoy: rules out the convoy-recovery escape so the
+	// assignee semantics are the only thing under test.
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: "hello-world/polecat",
+		Metadata: map[string]string{"gc.routed_to": "hello-world/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, poolCheckAgent(), SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatal("expected Idempotent=false for pool target with assignee==template (stuck shape, not pool demand)")
+	}
+}
+
+// TestCheckBeadStatePoolRoutedUnassignedRemainsIdempotent pins the settled
+// pool shape: routed to the pool with no assignee (and a live tracking
+// convoy) is the canonical pool-demand state, so a repeat sling is a no-op.
+func TestCheckBeadStatePoolRoutedUnassignedRemainsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Metadata: map[string]string{"gc.routed_to": "hello-world/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, poolCheckAgent(), SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for unassigned routed pool bead, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateSingletonRoutedSelfAssigneeRemainsIdempotent pins the
+// singleton counterpart: routed to a named singleton with assignee==target is
+// exactly the shape singleton routing stamps (Tier 1 visibility), so it stays
+// idempotent. The pool-side change must not leak into singleton semantics.
+func TestCheckBeadStateSingletonRoutedSelfAssigneeRemainsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for singleton routed self-assigned bead, got %+v", result)
+	}
+}
+
 // TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent guards the recovery
 // path: a bead with gc.routed_to set (e.g. declared via bd create --metadata
 // rather than routed through gc sling) but no convoy parent must not be
@@ -4222,17 +4325,39 @@ func TestDoSling_Reassign_ClearsHumanAssignee(t *testing.T) {
 	}
 }
 
-// TestDoSling_Reassign_PreservesAssigneeWithoutFlag: without --reassign
-// the existing human assignee is preserved (current warn-only behavior).
-// Locks in backward compatibility for the existing two-step flow.
-func TestDoSling_Reassign_PreservesAssigneeWithoutFlag(t *testing.T) {
+// TestDoSling_BareSlingClearsOpenAssigneeForPool: a bare sling (no
+// --reassign) of an OPEN bead to a pool clears the stale assignee. The old
+// warn-only behavior left the bead routed-but-unclaimable — the exact
+// failure --reassign was added to work around in #1007 and the re-pour
+// stall diagnosed in gc-q40pm. The pool re-pour normalization makes the
+// safe subset (open beads, i.e. unclaimed) automatic.
+func TestDoSling_BareSlingClearsOpenAssigneeForPool(t *testing.T) {
 	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
 	if _, err := DoSling(opts, deps, nil); err != nil {
 		t.Fatalf("DoSling: %v", err)
 	}
 	got, _ := store.Get(bead.ID)
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty (open bead slung to a pool re-enters the unassigned pool-demand shape)", got.Assignee)
+	}
+}
+
+// TestDoSling_BareSlingPreservesInProgressAssignee: an in_progress bead is
+// a live claim, so a bare sling must preserve its assignee — only an
+// explicit --reassign (or the controller's orphan release) may strip a
+// claim. Locks in the safety boundary of the pool re-pour normalization.
+func TestDoSling_BareSlingPreservesInProgressAssignee(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+	inProgress := "in_progress"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
 	if got.Assignee != "stephanie" {
-		t.Fatalf("Assignee = %q, want %q (preserved without --reassign)", got.Assignee, "stephanie")
+		t.Fatalf("Assignee = %q, want %q (in_progress claim must survive a bare sling)", got.Assignee, "stephanie")
 	}
 }
 

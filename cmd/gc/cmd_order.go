@@ -1461,7 +1461,7 @@ func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, o
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	stores, openErr := orderTrackingSweepStoresForConfig(cityPath, cfg)
+	stores, openErr := orderTrackingSweepStoresForConfig(cityPath, cfg, stderr)
 	if len(stores) == 0 {
 		if openErr != nil {
 			fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", openErr) //nolint:errcheck // best-effort stderr

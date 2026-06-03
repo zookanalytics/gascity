@@ -1322,7 +1322,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, error) {
-	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg, cr.stderr)
 	rigStores := cr.rigBeadStores()
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
 		var store beads.Store

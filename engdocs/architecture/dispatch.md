@@ -170,6 +170,16 @@ ready work with `assignee=<named-session-identity>` and no generic route
 metadata, so the reconciler does not also treat the handoff as generic pool
 demand.
 
+Because only the unassigned shape is pool demand, a bare
+`gc sling <pool> <bead>` of an existing **open** bead also clears any
+stale assignee (a handback target, a prior hand-walked recovery, or the
+pool template itself) so the re-poured bead actually re-enters the
+routed queue. Without that normalization a re-pour only rewrites
+`gc.routed_to` to the same value — invisible to scale_check and to every
+work-query tier, stalling the chain silently (gc-q40pm). In-progress
+beads are exempt: that status marks a live claim, and only `--reassign`
+or the controller's orphan release may strip one.
+
 The shared predicate is the agreement substrate. Failure envelopes
 intentionally differ: the worker path suppresses `bd ready` stderr and
 returns `[]` so a session exits cleanly, while the count form propagates

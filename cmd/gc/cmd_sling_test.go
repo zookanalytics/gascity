@@ -712,6 +712,158 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	}
 }
 
+// seedSlingPoolRepourBead materializes a bead in the test store with the
+// given status/assignee and routes it to hello-world/polecat, mirroring a
+// handback or stale-claim shape ahead of a bare re-pour.
+func seedSlingPoolRepourBead(t *testing.T, store beads.Store, id, status, assignee string) {
+	t.Helper()
+	if err := store.Update(id, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("seed status/assignee on %s: %v", id, err)
+	}
+	if err := store.SetMetadata(id, "gc.routed_to", "hello-world/polecat"); err != nil {
+		t.Fatalf("seed gc.routed_to on %s: %v", id, err)
+	}
+}
+
+// TestDoSlingPoolRepourClearsStaleOpenAssignee covers gc-q40pm Problem A:
+// a bead handed back to a named session (assignee=keeper, status=open,
+// gc.routed_to=<pool>) is re-poured with a bare `gc sling <pool> <bead>`.
+// The re-pour must clear the stale assignee so the bead matches the shared
+// pool-demand predicate (bd ready --unassigned --metadata-field
+// gc.routed_to=<pool>) that drives both reconciler spawn (scale_check) and
+// worker claim (work_query Tier 3). Before the fix the bare re-pour only
+// rewrote gc.routed_to to the same value — a supervisor no-op that stalled
+// the chain silently.
+func TestDoSlingPoolRepourClearsStaleOpenAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedSlingPoolRepourBead(t, deps.Store, "HW-8", "open", "hello-world/keeper")
+
+	opts := testOpts(a, "HW-8")
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "idempotent") {
+		t.Fatalf("re-pour short-circuited as idempotent; stdout: %s", stdout.String())
+	}
+	bead, err := deps.Store.Get("HW-8")
+	if err != nil {
+		t.Fatalf("store.Get(HW-8): %v", err)
+	}
+	if bead.Assignee != "" {
+		t.Errorf("assignee = %q, want empty (re-pour must restore the unassigned pool-demand shape)", bead.Assignee)
+	}
+	if bead.Status != "open" {
+		t.Errorf("status = %q, want open", bead.Status)
+	}
+	if bead.Metadata["gc.routed_to"] != "hello-world/polecat" {
+		t.Errorf("gc.routed_to = %q, want hello-world/polecat", bead.Metadata["gc.routed_to"])
+	}
+}
+
+// TestDoSlingPoolRepourClearsPoolTemplateAssignee covers the residue shape a
+// hand-walked recovery leaves behind: assignee set to the pool template
+// itself. Per dispatch.md, "assigning the pool template itself is not pool
+// demand" — no scale_check counts it and no work_query tier claims it for a
+// multi-instance pool — so a re-pour must clear it rather than short-circuit
+// as idempotent (the pre-fix behavior).
+func TestDoSlingPoolRepourClearsPoolTemplateAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedSlingPoolRepourBead(t, deps.Store, "HW-9", "open", "hello-world/polecat")
+
+	opts := testOpts(a, "HW-9")
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("HW-9")
+	if err != nil {
+		t.Fatalf("store.Get(HW-9): %v", err)
+	}
+	if bead.Assignee != "" {
+		t.Errorf("assignee = %q, want empty (template-assigned beads are unspawnable and unclaimable)", bead.Assignee)
+	}
+}
+
+// TestDoSlingPoolRepourLeavesInProgressClaim pins the safety boundary: an
+// in-progress bead is a live claim (bd update --claim flips open→in_progress
+// atomically), so a bare re-pour must NOT strip its assignee out from under
+// the owning session. Reclaiming dead claims is the orphan-release path's
+// job, not sling's.
+func TestDoSlingPoolRepourLeavesInProgressClaim(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedSlingPoolRepourBead(t, deps.Store, "HW-10", "in_progress", "polecat-lo-session-abc")
+
+	opts := testOpts(a, "HW-10")
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("HW-10")
+	if err != nil {
+		t.Fatalf("store.Get(HW-10): %v", err)
+	}
+	if bead.Assignee != "polecat-lo-session-abc" {
+		t.Errorf("assignee = %q, want polecat-lo-session-abc (in-progress claims must survive a re-pour)", bead.Assignee)
+	}
+	if bead.Status != "in_progress" {
+		t.Errorf("status = %q, want in_progress", bead.Status)
+	}
+}
+
+// TestDoSlingPoolRepourDryRunLeavesAssignee pins that --dry-run previews the
+// re-pour without mutating the bead.
+func TestDoSlingPoolRepourDryRunLeavesAssignee(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(3),
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	seedSlingPoolRepourBead(t, deps.Store, "HW-11", "open", "hello-world/keeper")
+
+	opts := testOpts(a, "HW-11")
+	opts.DryRun = true
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	bead, err := deps.Store.Get("HW-11")
+	if err != nil {
+		t.Fatalf("store.Get(HW-11): %v", err)
+	}
+	if bead.Assignee != "hello-world/keeper" {
+		t.Errorf("assignee = %q, want hello-world/keeper (dry-run must not mutate)", bead.Assignee)
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()
