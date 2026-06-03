@@ -5,6 +5,16 @@ staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go' || t
 staged_web_src=$(git diff --cached --name-only --diff-filter=ACM -- 'cmd/gc/dashboard/web/src/' 'cmd/gc/dashboard/web/index.html' 'cmd/gc/dashboard/web/public/' 'cmd/gc/dashboard/web/package.json' 'cmd/gc/dashboard/web/openapi-ts.config.ts' 'cmd/gc/dashboard/web/vite.config.ts' 'cmd/gc/dashboard/web/tsconfig.json' || true)
 staged_docs=$(git diff --cached --name-only --diff-filter=ACM -- '*.md' 'docs/**' 'engdocs/**' 'plans/**' 'specs/**' 'AGENTS.md' 'CONTRIBUTING.md' 'README.md' 'TESTING.md' || true)
 
+# When mid-rebase, skip the heavy gates (test/vet/codegen). The
+# formula's post-rebase `test` step is the safety net that runs the
+# full suite once on the final state. Per-commit testing during a
+# rebase that replays 30+ commits is purely redundant.
+git_dir=$(git rev-parse --git-dir)
+if [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ]; then
+  echo "pre-commit: rebase in progress — skipping vet/test/codegen (post-rebase test step is the gate)" >&2
+  exit 0
+fi
+
 if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" ]; then
   exit 0
 fi
