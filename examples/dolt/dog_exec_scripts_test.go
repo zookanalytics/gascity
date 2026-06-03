@@ -3837,3 +3837,117 @@ func TestDoctorScriptReportsMissingPathABackupArtifact(t *testing.T) {
 		t.Fatalf("empty Path A backup dir should report 'backup missing', log:\n%s", gcLog)
 	}
 }
+
+// TestDoctorScriptConnectionDenominatorReadsLiveMax pins the fix for the
+// mislabeled "Connections: N/50" advisory: 50 was a hardcoded default that
+// actually matched the listener's back_log, while the managed config sets
+// max_connections to 1000. The denominator (and the warn threshold derived
+// from it) must come from the live server's @@GLOBAL.max_connections.
+func TestDoctorScriptConnectionDenominatorReadsLiveMax(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n900\n'
+    exit 0
+    ;;
+  *"@@GLOBAL.max_connections"*)
+    printf '@@GLOBAL.max_connections\n1000\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "conns: 900/1000") {
+		t.Fatalf("doctor summary should report live max_connections denominator, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "Connections: 900/1000") {
+		t.Fatalf("advisory should report Connections: 900/1000, log:\n%s", gcLog)
+	}
+	// 900 >= 80% of the real 1000-connection limit: the WARN must fire
+	// against the live denominator, not a stale hardcoded 50.
+	if !strings.Contains(string(gcLog), "900 connections >= 80% of max 1000") {
+		t.Fatalf("connection WARN should use live max, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "/50") {
+		t.Fatalf("advisory still reports the mislabeled /50 denominator, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptConnCountProbeFailureWarnsInsteadOfZero pins the
+// swallowed-error fix: during the wedge, a failed PROCESSLIST count was
+// reported as "Connections: 0/50" — masking total pool saturation as an
+// idle server. A failed count probe on a reachable server must surface as
+// a WARN with an explicit unknown, never as zero.
+func TestDoctorScriptConnCountProbeFailureWarnsInsteadOfZero(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    echo "max waiting connections reached. Client rejected" >&2
+    exit 1
+    ;;
+  *"@@GLOBAL.max_connections"*)
+    printf '@@GLOBAL.max_connections\n1000\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "conns: unknown/1000") {
+		t.Fatalf("doctor summary should report unknown connection count, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "Connections: unknown/1000") {
+		t.Fatalf("advisory should report unknown count, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "connection-count probe failed") {
+		t.Fatalf("failed count probe must WARN, log:\n%s", gcLog)
+	}
+	if strings.Contains(string(gcLog), "Connections: 0/") {
+		t.Fatalf("failed count probe must not be masked as zero connections, log:\n%s", gcLog)
+	}
+}

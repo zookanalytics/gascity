@@ -1,11 +1,13 @@
 #!/bin/sh
 # gc dolt health — Lightweight Dolt data-plane health report.
 #
-# Checks server status and latency, per-database commit counts and open
-# beads, backup freshness, orphan databases, and zombie Dolt processes.
+# Checks server status and latency through connect-fresh representative
+# probes (majority verdict), connection-pool saturation, per-database
+# commit counts and open beads, backup freshness, orphan databases, and
+# zombie Dolt processes.
 #
 # Environment: GC_CITY_PATH, GC_DOLT_PORT, GC_DOLT_HOST, GC_DOLT_USER,
-#              GC_DOLT_PASSWORD
+#              GC_DOLT_PASSWORD, GC_HEALTH_PROBE_ATTEMPTS
 set -e
 
 : "${GC_DOLT_USER:=root}"
@@ -76,6 +78,50 @@ server_running=false
 server_pid=0
 server_latency=0
 server_reachable=false
+server_degraded=false
+
+# Verdict probe counters. The probe makes several connect-fresh attempts
+# of a representative query (see below) and requires a strict majority of
+# successes for reachable=true. One attempt is not evidence in either
+# direction: during the 2026-06 pool wedge a single trivial probe
+# occasionally squeezed through the saturated wait queue and flipped the
+# verdict to healthy while every real bd client was being rejected with
+# "max waiting connections reached". Conversely, a single transient blip
+# must not declare the data plane down. Majority-of-N gives sustained
+# evidence both ways within one bounded invocation.
+probe_attempts_target="${GC_HEALTH_PROBE_ATTEMPTS:-3}"
+case "$probe_attempts_target" in
+  ''|*[!0-9]*) probe_attempts_target=3 ;;
+esac
+[ "$probe_attempts_target" -lt 1 ] && probe_attempts_target=1
+probe_attempts=0
+probe_successes=0
+probe_rejected=0
+probe_timeouts=0
+probe_errors=0
+probe_last_error=""
+probe_db=""
+
+# Pool stats. active/max come from one bounded PROCESSLIST query;
+# saturated is set by observed wait-queue rejections OR active>=90% of
+# max. Pool saturation is the first-class signal this report previously
+# lacked: a wedged pool can keep answering an occasional trivial probe
+# while rejecting the steady-state client load.
+pool_active=0
+pool_max=0
+pool_saturated=false
+pool_probe_ok=false
+
+# Per-database inventory probes that fail (timeout, rejection) are
+# counted here and surface as probe_ok=false per entry — previously they
+# were masked as a healthy-looking "0 commits".
+db_probe_failures=0
+
+# json_escape STR — sanitize STR for embedding in a JSON string value:
+# strip control characters, escape backslashes and quotes, truncate.
+json_escape() {
+  printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-200
+}
 
 # Portable millisecond timestamp. BSD date(1) on macOS treats %N as a
 # literal 'N' (exits 0, output like "1776740122N"), so the GNU-only
@@ -88,28 +134,123 @@ now_ms() {
   esac
 }
 
+# db_name_is_safe NAME — accept only identifiers safe to interpolate
+# into SQL: first byte alnum/underscore, rest [A-Za-z0-9_-]. Shared by
+# the verdict probe and the inventory loop below.
+db_name_is_safe() {
+  case "$1" in
+    [A-Za-z0-9_]*)
+      case "$1" in *[!A-Za-z0-9_-]*) return 1 ;; esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# db_name_is_system NAME — true for schemas the report must skip.
+db_name_is_system() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) return 0 ;;
+  esac
+  return 1
+}
+
 # Find dolt PID by port.
 pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
 if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
   server_running=true
   [ -n "$pid" ] && server_pid="$pid"
-  # Measure query latency.
-  start_ms=$(now_ms)
   conn_args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
   # Always export DOLT_CLI_PASSWORD (even empty) so the client does not
-  # prompt for a password on stdin. Without this, the SELECT 1 probe
-  # silently fails with "Failed to parse credentials: operation not
-  # supported by device" on sessions without a controlling TTY —
-  # which then left the health report claiming "server: running" but
-  # never reporting per-database detail.
+  # prompt for a password on stdin. Without this, the probe silently
+  # fails with "Failed to parse credentials: operation not supported by
+  # device" on sessions without a controlling TTY — which then left the
+  # health report claiming "server: running" but never reporting
+  # per-database detail.
   export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
-  # Bound the ping. A TCP-reachable but unresponsive server (stuck
+
+  # Pick a representative database: the first user database on disk
+  # (deterministic glob order). The verdict probe must run the same
+  # shape of work real bd clients run — a fresh client connection plus
+  # a query that touches the database's storage layer (dolt_log reads
+  # the commit graph). A bare SELECT 1 proves only that the SQL engine
+  # can echo a constant: during the 2026-06 wedge it completed
+  # instantly whenever it squeezed through the saturated pool, while
+  # every table-touching client query ran 30+ minutes.
+  if [ -d "$data_dir" ]; then
+    for d in "$data_dir"/*/; do
+      [ ! -d "$d/.dolt" ] && continue
+      name="$(basename "$d")"
+      db_name_is_system "$name" && continue
+      db_name_is_safe "$name" || continue
+      probe_db="$name"
+      break
+    done
+  fi
+  if [ -n "$probe_db" ]; then
+    probe_query="USE \`$probe_db\`; SELECT COUNT(*) FROM dolt_log;"
+  else
+    # Fresh city with no databases yet: connectivity is all there is
+    # to measure.
+    probe_query="SELECT 1"
+  fi
+
+  # Bound each attempt. A TCP-reachable but unresponsive server (stuck
   # goroutine, saturated pool, migration lock) would otherwise hang.
-  if run_bounded 5 dolt $conn_args sql -q "SELECT 1" >/dev/null 2>&1; then
+  # Each `dolt sql` invocation is a fresh client process and therefore
+  # a fresh connection — the same connect path that surfaced
+  # "max waiting connections reached" to real clients.
+  _probe_err=$(mktemp)
+  while [ "$probe_attempts" -lt "$probe_attempts_target" ]; do
+    probe_attempts=$((probe_attempts + 1))
+    attempt_start=$(now_ms)
+    if run_bounded 5 dolt $conn_args sql -q "$probe_query" >/dev/null 2>"$_probe_err"; then
+      attempt_end=$(now_ms)
+      attempt_ms=$((attempt_end - attempt_start))
+      [ "$attempt_ms" -lt 0 ] && attempt_ms=0
+      probe_successes=$((probe_successes + 1))
+      # Report the slowest successful attempt: the pessimistic bound on
+      # what a fresh client experiences right now.
+      [ "$attempt_ms" -gt "$server_latency" ] && server_latency="$attempt_ms"
+    else
+      probe_rc=$?
+      if [ "$probe_rc" -eq 124 ]; then
+        probe_timeouts=$((probe_timeouts + 1))
+        probe_last_error="probe timed out after 5s"
+      elif grep -qiE 'max waiting connections|too many connections' "$_probe_err" 2>/dev/null; then
+        probe_rejected=$((probe_rejected + 1))
+        probe_last_error=$(head -1 "$_probe_err" 2>/dev/null || true)
+      else
+        probe_errors=$((probe_errors + 1))
+        probe_last_error=$(head -1 "$_probe_err" 2>/dev/null || true)
+      fi
+    fi
+  done
+  rm -f "$_probe_err"
+
+  # Strict majority of attempts must succeed. successes*2 > attempts is
+  # exact integer math for >50%.
+  if [ $((probe_successes * 2)) -gt "$probe_attempts" ]; then
     server_reachable=true
-    end_ms=$(now_ms)
-    server_latency=$((end_ms - start_ms))
-    [ "$server_latency" -lt 0 ] && server_latency=0
+  fi
+
+  # Observed wait-queue rejections are direct evidence of saturation —
+  # they are what real clients hit during the wedge.
+  [ "$probe_rejected" -gt 0 ] && pool_saturated=true
+
+  # Pool stats through one more bounded fresh connection. Run even when
+  # the verdict is unreachable: if this squeezes through it captures the
+  # smoking gun (active≈max) in the same report the escalation cites.
+  pool_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
+    -q "SELECT COUNT(*) AS active, @@GLOBAL.max_connections AS max_conn FROM information_schema.PROCESSLIST" 2>/dev/null || true)
+  pool_line=$(printf '%s\n' "$pool_csv" | grep -E '^[0-9]+,[0-9]+$' | head -1)
+  if [ -n "$pool_line" ]; then
+    pool_probe_ok=true
+    pool_active="${pool_line%%,*}"
+    pool_max="${pool_line##*,}"
+    if [ "$pool_max" -gt 0 ] && [ $((pool_active * 100)) -ge $((pool_max * 90)) ]; then
+      pool_saturated=true
+    fi
   fi
 fi
 
@@ -133,7 +274,7 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
   for d in "$data_dir"/*/; do
     [ ! -d "$d/.dolt" ] && continue
     name="$(basename "$d")"
-    case "$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+    db_name_is_system "$name" && continue
     # Reject names with anything outside [A-Za-z0-9_-] before interpolating
     # into the SQL identifier. The first byte must still be alnum/underscore
     # to avoid option-shaped names. Dolt permits directory names that shell
@@ -142,25 +283,28 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
     # as the patrol user. Not an external-attack surface today — data
     # directories are server-controlled — but fragile enough under
     # config drift that it's worth skipping rather than probing.
-    case "$name" in
-      [A-Za-z0-9_]*)
-        case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
-        ;;
-      *) continue ;;
-    esac
-    # Count commits via SQL (bounded). 0 on timeout or error — keep
-    # going rather than hang the whole report. Extract the first
-    # fully-numeric line rather than `sed -n '2p'`: future dolt builds
-    # may emit a status row for `USE` or a warning banner, in which
-    # case positional parsing silently collapses the count to 0 and the
-    # "empty repo" fallback masks the parse miss. Numeric-line grep
-    # gives a deterministic result or clearly-failed parse.
+    db_name_is_safe "$name" || continue
+    # Count commits via SQL (bounded). Extract the first fully-numeric
+    # line rather than `sed -n '2p'`: future dolt builds may emit a
+    # status row for `USE` or a warning banner, in which case positional
+    # parsing silently collapses the count to 0 and the "empty repo"
+    # fallback masks the parse miss. Numeric-line grep gives a
+    # deterministic result or clearly-failed parse.
     commits_csv=$(run_bounded 5 dolt $conn_args sql --result-format csv \
       -q "USE \`$name\`; SELECT COUNT(*) FROM dolt_log;" 2>/dev/null || true)
     commits=$(printf '%s\n' "$commits_csv" | grep -E '^[0-9]+$' | head -1)
-    # JSON consumers (deacon patrol) require a number; use 0 on failure.
+    # JSON consumers (deacon patrol) require a number, so failures still
+    # emit commits=0 — but they are flagged probe_ok=false and counted,
+    # never silently conflated with an empty repo. During the 2026-06
+    # wedge every per-database count timed out and the report showed a
+    # plausible-looking inventory of zeros.
+    db_probe_ok=true
     case "$commits" in
-      ''|*[!0-9]*) commits=0 ;;
+      ''|*[!0-9]*)
+        commits=0
+        db_probe_ok=false
+        db_probe_failures=$((db_probe_failures + 1))
+        ;;
     esac
     # Count open beads (best-effort).
     open_beads=0
@@ -175,9 +319,22 @@ if [ -d "$data_dir" ] && [ "$server_reachable" = true ]; then
         break
       fi
     done < "$_meta_cache"
-    db_info="$db_info$name|$commits|$open_beads
+    db_info="$db_info$name|$commits|$open_beads|$db_probe_ok
 "
   done
+fi
+
+# Degraded: the server answered (reachable) but fresh clients are not
+# getting clean service — failed verdict attempts, a saturated pool, a
+# failed pool-stats probe, or failing per-database probes. Reachable
+# consumers treat this as a warning, not an outage.
+if [ "$server_reachable" = true ]; then
+  if [ "$probe_successes" -lt "$probe_attempts" ] \
+    || [ "$pool_saturated" = true ] \
+    || [ "$pool_probe_ok" != true ] \
+    || [ "$db_probe_failures" -gt 0 ]; then
+    server_degraded=true
+  fi
 fi
 
 # Check backup freshness.
@@ -299,28 +456,50 @@ fi
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 if [ "$json_output" = true ]; then
-  # Build JSON output. `server.reachable` reports whether the SQL
-  # handshake actually succeeded (port listening AND server answering
-  # SELECT 1). Consumers (deacon patrol) should key health off
-  # `server.reachable`, not `server.running`, because a process can
-  # hold the port while its goroutines are wedged.
+  # Build JSON output. `server.reachable` reports whether a strict
+  # majority of connect-fresh representative-query probes succeeded.
+  # Consumers (deacon patrol) should key health off `server.reachable`,
+  # not `server.running`, because a process can hold the port while its
+  # goroutines are wedged — and should treat `server.degraded` /
+  # `server.pool.saturated` as early warning that real clients are
+  # already failing even though the verdict is still reachable.
+  #
+  # Scalar server fields stay ahead of the nested probe/pool objects:
+  # the jq-less fallback parser in `gc dolt health-check` extracts them
+  # from the range between `"server":` and the first `}`.
   cat <<JSONEOF
 {
   "timestamp": "$timestamp",
   "server": {
     "running": $server_running,
     "reachable": $server_reachable,
+    "degraded": $server_degraded,
     "pid": $server_pid,
     "port": $GC_DOLT_PORT,
-    "latency_ms": $server_latency
+    "latency_ms": $server_latency,
+    "probe": {
+      "attempts": $probe_attempts,
+      "successes": $probe_successes,
+      "rejected": $probe_rejected,
+      "timeouts": $probe_timeouts,
+      "errors": $probe_errors,
+      "database": "$(json_escape "$probe_db")",
+      "last_error": "$(json_escape "$probe_last_error")"
+    },
+    "pool": {
+      "active_connections": $pool_active,
+      "max_connections": $pool_max,
+      "saturated": $pool_saturated,
+      "probe_ok": $pool_probe_ok
+    }
   },
   "databases": [
 JSONEOF
   first=true
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads db_ok; do
     [ -z "$name" ] && continue
     if [ "$first" = true ]; then first=false; else echo ","; fi
-    printf '    {"name": "%s", "commits": %s, "open_beads": %s}' "$name" "$commits" "$open_beads"
+    printf '    {"name": "%s", "commits": %s, "open_beads": %s, "probe_ok": %s}' "$name" "$commits" "$open_beads" "${db_ok:-true}"
   done
   cat <<JSONEOF
 
@@ -364,12 +543,34 @@ else
   echo "Server: not running"
 fi
 
+if [ "$probe_attempts" -gt 0 ]; then
+  probe_target_label="${probe_db:-SELECT 1}"
+  probe_detail=""
+  if [ "$probe_successes" -lt "$probe_attempts" ]; then
+    probe_detail=" [rejected=$probe_rejected timeouts=$probe_timeouts errors=$probe_errors]"
+    [ -n "$probe_last_error" ] && probe_detail="$probe_detail $probe_last_error"
+  fi
+  echo "Probe: $probe_successes/$probe_attempts attempts ok ($probe_target_label)$probe_detail"
+fi
+
+if [ "$pool_probe_ok" = true ]; then
+  pool_flag=""
+  [ "$pool_saturated" = true ] && pool_flag=" [SATURATED]"
+  echo "Pool: $pool_active/$pool_max active connections$pool_flag"
+elif [ "$pool_saturated" = true ]; then
+  echo "Pool: stats unavailable [SATURATED: wait-queue rejections observed]"
+fi
+
 if [ -n "$db_info" ]; then
   echo ""
   echo "Databases:"
-  echo "$db_info" | while IFS='|' read -r name commits open_beads; do
+  echo "$db_info" | while IFS='|' read -r name commits open_beads db_ok; do
     [ -z "$name" ] && continue
-    echo "  $name: $commits commits, $open_beads open beads"
+    if [ "$db_ok" = "false" ]; then
+      echo "  $name: probe failed"
+    else
+      echo "  $name: $commits commits, $open_beads open beads"
+    fi
   done
 fi
 
@@ -398,10 +599,11 @@ if [ "$zombie_count" -gt 0 ]; then
 fi
 
 # Exit status (human mode only): 0 when the data plane is healthy
-# (server running AND answering SQL). Non-zero signals a CLI caller
-# that something is wrong — server not running, or port in use by a
-# process that isn't speaking MySQL. Stale backups, orphans, and
-# zombies are informational and do not fail the exit code.
+# (server running AND a majority of representative probes answered).
+# Non-zero signals a CLI caller that something is wrong — server not
+# running, port in use by a process that isn't speaking MySQL, or a
+# pool rejecting fresh clients. Degraded-but-reachable, stale backups,
+# orphans, and zombies are informational and do not fail the exit code.
 #
 # JSON mode is unconditionally exit 0 (see above) — programmatic
 # consumers read `server.reachable` from the payload instead.

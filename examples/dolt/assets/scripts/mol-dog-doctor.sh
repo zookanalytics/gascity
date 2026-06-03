@@ -15,7 +15,13 @@ PORT="$GC_DOLT_PORT"
 HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
 LATENCY_WARN_S="${GC_DOCTOR_LATENCY_WARN_S:-1}"
-CONN_MAX="${GC_DOCTOR_CONN_MAX:-50}"
+# Connection-limit denominator: operator override only. When unset, the
+# live @@GLOBAL.max_connections is read from the server (below). The old
+# hardcoded default of 50 silently mislabeled the advisory — it matched
+# the listener's back_log while the managed config sets max_connections
+# to 1000, so "Connections: N/50" both misreported the limit and warned
+# at 80% of the wrong number.
+CONN_MAX_OVERRIDE="${GC_DOCTOR_CONN_MAX:-}"
 CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
@@ -144,12 +150,37 @@ fi
 
 # --- Step 2: Check resource conditions ---
 
+# Resolve the connection-limit denominator: explicit operator override
+# wins; otherwise read the live server value so the advisory reports the
+# actual configured limit.
+if [ -n "$CONN_MAX_OVERRIDE" ]; then
+    CONN_MAX="$CONN_MAX_OVERRIDE"
+else
+    CONN_MAX=$(dolt_sql -r csv -q "SELECT @@GLOBAL.max_connections" 2>/dev/null \
+        | grep -E '^[0-9]+$' | head -1 || true)
+fi
+
+# Connection count. A failed probe on a reachable server must surface as
+# an explicit unknown plus a WARN — during the 2026-06 pool wedge this
+# query was itself rejected and the old `|| echo 0` fallback reported
+# "Connections: 0/50", masking total pool saturation as an idle server.
 CONN_COUNT=$(dolt_sql -r csv -q "SELECT COUNT(*) FROM information_schema.PROCESSLIST" 2>/dev/null \
-    | tail -1 || echo "0")
+    | grep -E '^[0-9]+$' | head -1 || true)
 CONN_WARN=""
-CONN_WARN_AT=$(( (CONN_MAX * CONN_WARN_PCT) / 100 ))
-if [ "${CONN_COUNT:-0}" -ge "$CONN_WARN_AT" ]; then
-    CONN_WARN=" [WARN: ${CONN_COUNT} connections >= ${CONN_WARN_PCT}% of max ${CONN_MAX}]"
+if [ -z "$CONN_COUNT" ]; then
+    CONN_COUNT="unknown"
+    CONN_WARN=" [WARN: connection-count probe failed on a reachable server — possible pool saturation]"
+elif [ -z "$CONN_MAX" ]; then
+    CONN_MAX="unknown"
+    CONN_WARN=" [WARN: max_connections probe failed; cannot evaluate pool headroom]"
+else
+    CONN_WARN_AT=$(( (CONN_MAX * CONN_WARN_PCT) / 100 ))
+    if [ "$CONN_COUNT" -ge "$CONN_WARN_AT" ]; then
+        CONN_WARN=" [WARN: ${CONN_COUNT} connections >= ${CONN_WARN_PCT}% of max ${CONN_MAX}]"
+    fi
+fi
+if [ -z "$CONN_MAX" ]; then
+    CONN_MAX="unknown"
 fi
 
 # Disk usage of Dolt data directory.
