@@ -702,6 +702,185 @@ func TestConfigDrift_AttachedSessionPersistsAcrossCycles(t *testing.T) {
 	}
 }
 
+func TestConfigDrift_ManualSessionPersistsAcrossCycles(t *testing.T) {
+	// An operator-owned manual shadow has no standing wake reason, so a
+	// config-drift drain would be an unrecoverable kill (named sessions
+	// restart-in-place; manual shadows can't). It must be exempted from
+	// config-drift drains — drift accepted — the same as the pool sweep
+	// already exempts manual sessions.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	sessionName := "worker-thread-adhoc-abc123"
+	env.desiredState[sessionName] = TemplateParams{
+		TemplateName: "worker",
+		InstanceName: sessionName,
+		Alias:        sessionName,
+		Command:      "new-cmd",
+	}
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	oldStartedHash := runtime.CoreFingerprint(oldRuntime)
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// Deliberately NOT attached: a shadow the operator has detached from.
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"session_origin":      "manual",
+		"session_key":         "old-provider-conversation",
+		"started_config_hash": oldStartedHash,
+		"started_live_hash":   runtime.LiveFingerprint(oldRuntime),
+	})
+
+	// Multiple reconcile cycles — the shadow must survive all of them.
+	for i := 0; i < 5; i++ {
+		env.clk.Time = env.clk.Now().Add(10 * time.Second)
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get(%s): %v", i, session.ID, err)
+		}
+		env.reconcile([]beads.Bead{got})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("cycle %d: manual shadow was stopped during config-drift", i)
+		}
+		got, err = env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get after reconcile: %v", i, err)
+		}
+		if got.Metadata["state"] == "creating" {
+			t.Fatalf("cycle %d: state = creating; want drift accepted (no restart)", i)
+		}
+		if got.Metadata["session_key"] != "old-provider-conversation" {
+			t.Fatalf("cycle %d: session_key = %q; want conversation preserved", i, got.Metadata["session_key"])
+		}
+	}
+
+	// The drift was accepted (hash rebaselined), not left to re-drain.
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("final Get: %v", err)
+	}
+	if got.Metadata["started_config_hash"] == oldStartedHash {
+		t.Fatal("started_config_hash unchanged; want rebaselined to current (drift accepted)")
+	}
+	if got.Metadata["started_config_hash"] == "" {
+		t.Fatal("started_config_hash cleared; want rebaselined, not cleared")
+	}
+}
+
+func TestConfigDrift_ManualSessionAppliesLiveDriftWithoutRestart(t *testing.T) {
+	// A manual shadow whose config edit changed BOTH a core field and
+	// session_live must keep running (core drift accepted, no drain) AND still
+	// get the live change applied via RunLive. Accepting core drift by stamping
+	// every fingerprint field — started_live_hash included — would make the next
+	// tick believe session_live was already applied when RunLive never ran, so
+	// the live commands would be silently dropped while the metadata claims they
+	// landed. Regression for the codex review on PR#25: rebaseline only the core
+	// hash so the live-drift path re-applies session_live on the next tick.
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "new-cmd",
+			MaxActiveSessions: intPtr(4),
+		}},
+	}
+
+	sessionName := "worker-thread-adhoc-live1"
+	// Desired state drifts on BOTH core (command) and live (session_live).
+	tp := TemplateParams{
+		TemplateName: "worker",
+		InstanceName: sessionName,
+		Alias:        sessionName,
+		Command:      "new-cmd",
+	}
+	tp.Hints.SessionLive = []string{"echo new-live"}
+	env.desiredState[sessionName] = tp
+
+	oldRuntime := runtime.Config{Command: "old-cmd"}
+	oldStartedHash := runtime.CoreFingerprint(oldRuntime)
+	oldLiveHash := runtime.LiveFingerprint(oldRuntime)
+	if err := env.sp.Start(context.Background(), sessionName, oldRuntime); err != nil {
+		t.Fatalf("Start(old runtime): %v", err)
+	}
+	// Deliberately NOT attached: a shadow the operator has detached from.
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"session_origin":      "manual",
+		"session_key":         "old-provider-conversation",
+		"started_config_hash": oldStartedHash,
+		"started_live_hash":   oldLiveHash,
+	})
+
+	// The live hash the running shadow must converge to once session_live is
+	// re-applied. Guard the setup: the test is meaningless without live drift.
+	wantLive := runtime.LiveFingerprint(templateParamsToConfig(tp))
+	if wantLive == oldLiveHash {
+		t.Fatal("test setup: desired live hash matches old; no live drift to exercise")
+	}
+
+	// Multiple reconcile cycles — the shadow survives all of them and the live
+	// change reaches it via RunLive (no restart, conversation preserved).
+	for i := 0; i < 5; i++ {
+		env.clk.Time = env.clk.Now().Add(10 * time.Second)
+		got, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get(%s): %v", i, session.ID, err)
+		}
+		env.reconcile([]beads.Bead{got})
+
+		if !env.sp.IsRunning(sessionName) {
+			t.Fatalf("cycle %d: manual shadow was stopped during config-drift", i)
+		}
+		got, err = env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("cycle %d: Get after reconcile: %v", i, err)
+		}
+		if got.Metadata["state"] == "creating" {
+			t.Fatalf("cycle %d: state = creating; want drift accepted (no restart)", i)
+		}
+		if got.Metadata["session_key"] != "old-provider-conversation" {
+			t.Fatalf("cycle %d: session_key = %q; want conversation preserved", i, got.Metadata["session_key"])
+		}
+	}
+
+	// THE regression guard: the live change must have been applied to the
+	// running shadow. Without the core-only rebaseline, started_live_hash is
+	// stamped to current on the same tick the drift is accepted, so the
+	// live-drift path never fires and RunLive is never called (count 0).
+	if n := env.sp.CountCalls("RunLive", sessionName); n == 0 {
+		t.Fatal("RunLive never called: session_live silently dropped (manual core-drift rebaseline masked the concurrent live drift)")
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("final Get: %v", err)
+	}
+	// Core drift was accepted (rebaselined), not left to re-drain.
+	if got.Metadata["started_config_hash"] == oldStartedHash {
+		t.Fatal("started_config_hash unchanged; want rebaselined to current (core drift accepted)")
+	}
+	// Live baseline converged to the desired config — the claim that the live
+	// config is applied is now true because RunLive actually ran.
+	if got.Metadata["started_live_hash"] != wantLive {
+		t.Fatalf("started_live_hash = %q; want %q (session_live applied)", got.Metadata["started_live_hash"], wantLive)
+	}
+}
+
 func TestConfigDrift_AttachedSessionSurvivesTransientFalseNegative(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
