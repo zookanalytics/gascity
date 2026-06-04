@@ -1036,6 +1036,10 @@ func TestMailInboxSeesHistoricalAliasSessionAddedAfterInitialMiss(t *testing.T) 
 	if _, err := state.cityMailProv.Send("human", "worker", "Fresh session", "visible after initial miss"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
+	// Production handlers emit events on these mutations (session lifecycle,
+	// mail send), bumping the response-cache index. The test bypasses the
+	// handler for setup, so we record an event explicitly to mirror that.
+	state.eventProv.Record(events.Event{Type: events.MailSent, Actor: "test"})
 
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, "/mail?agent=old-worker"), nil))

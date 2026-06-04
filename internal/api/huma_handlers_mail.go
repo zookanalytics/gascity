@@ -196,22 +196,46 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 		pp.IsPaging = true
 	}
 
+	index := s.latestIndex()
+	cacheAge := cacheAgeSeconds(cityStore)
+
+	// Skip caching for paginated requests: the unpaginated branch returns a
+	// truncated list with Total reflecting the full match, while cursor-mode
+	// returns a page slice with NextCursor — the bodies are different shapes
+	// and would otherwise share a cache key when Cursor is the empty string.
+	cacheKey := ""
+	if !pp.IsPaging {
+		cacheKey = cacheKeyFor("mail", input)
+		if body, ok := cachedResponseAs[MailListBody](s, cacheKey, index); ok {
+			return &MailListOutput{
+				Index:     index,
+				CacheAgeS: cacheAge,
+				Body:      body,
+			}, nil
+		}
+	}
+
 	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
 	status := input.Status
 	rig := input.Rig
-	index := s.latestIndex()
-	cacheAge := cacheAgeSeconds(cityStore)
+
+	respond := func(body MailListBody) (*MailListOutput, error) {
+		if cacheKey != "" {
+			s.storeResponse(cacheKey, index, body)
+		}
+		return &MailListOutput{
+			Index:     index,
+			CacheAgeS: cacheAge,
+			Body:      body,
+		}, nil
+	}
 
 	switch status {
 	case "", "unread":
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
-				}, nil
+				return respond(MailListBody{Items: []mail.Message{}, Total: 0})
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
 				return mailInboxForRecipients(mp, agents)
@@ -228,21 +252,13 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				if pp.Limit < len(msgs) {
 					msgs = msgs[:pp.Limit]
 				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
+				return respond(MailListBody{Items: msgs, Total: total})
 			}
 			page, total, nextCursor := paginate(msgs, pp)
 			if page == nil {
 				page = []mail.Message{}
 			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
-			}, nil
+			return respond(MailListBody{Items: page, Total: total, NextCursor: nextCursor})
 		}
 
 		providers := s.state.MailProviders()
@@ -272,31 +288,19 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			if pp.Limit < len(allMsgs) {
 				allMsgs = allMsgs[:pp.Limit]
 			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
+			return respond(MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs})
 		}
 		page, total, nextCursor := paginate(allMsgs, pp)
 		if page == nil {
 			page = []mail.Message{}
 		}
-		return &MailListOutput{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
-		}, nil
+		return respond(MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs})
 
 	case "all":
 		if rig != "" {
 			mp := s.state.MailProvider(rig)
 			if mp == nil {
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: []mail.Message{}, Total: 0},
-				}, nil
+				return respond(MailListBody{Items: []mail.Message{}, Total: 0})
 			}
 			msgs, err := withMailReadDeadline(ctx, func() ([]mail.Message, error) {
 				return mailAllForRecipients(mp, agents)
@@ -313,21 +317,13 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 				if pp.Limit < len(msgs) {
 					msgs = msgs[:pp.Limit]
 				}
-				return &MailListOutput{
-					Index:     index,
-					CacheAgeS: cacheAge,
-					Body:      MailListBody{Items: msgs, Total: total},
-				}, nil
+				return respond(MailListBody{Items: msgs, Total: total})
 			}
 			page, total, nextCursor := paginate(msgs, pp)
 			if page == nil {
 				page = []mail.Message{}
 			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor},
-			}, nil
+			return respond(MailListBody{Items: page, Total: total, NextCursor: nextCursor})
 		}
 
 		providers := s.state.MailProviders()
@@ -357,21 +353,13 @@ func (s *Server) humaHandleMailList(ctx context.Context, input *MailListInput) (
 			if pp.Limit < len(allMsgs) {
 				allMsgs = allMsgs[:pp.Limit]
 			}
-			return &MailListOutput{
-				Index:     index,
-				CacheAgeS: cacheAge,
-				Body:      MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs},
-			}, nil
+			return respond(MailListBody{Items: allMsgs, Total: total, Partial: partial, PartialErrors: partialErrs})
 		}
 		page, total, nextCursor := paginate(allMsgs, pp)
 		if page == nil {
 			page = []mail.Message{}
 		}
-		return &MailListOutput{
-			Index:     index,
-			CacheAgeS: cacheAge,
-			Body:      MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs},
-		}, nil
+		return respond(MailListBody{Items: page, Total: total, NextCursor: nextCursor, Partial: partial, PartialErrors: partialErrs})
 
 	default:
 		return nil, huma.Error400BadRequest("unsupported status filter: " + status + "; supported: unread, all")
@@ -480,17 +468,26 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	if err := cacheLiveOr503(cityStore); err != nil {
 		return nil, err
 	}
+	cacheAge := cacheAgeSeconds(cityStore)
+	index := s.latestIndex()
+
+	cacheKey := cacheKeyFor("mail-count", input)
+	if body, ok := cachedResponseAs[MailCountOutputBody](s, cacheKey, index); ok {
+		return &MailCountOutput{CacheAgeS: cacheAge, Body: body}, nil
+	}
+
 	agents := s.resolveMailQueryRecipientsWithContext(ctx, input.Agent)
 	rig := input.Rig
-	cacheAge := cacheAgeSeconds(cityStore)
+
+	respond := func(body MailCountOutputBody) (*MailCountOutput, error) {
+		s.storeResponse(cacheKey, index, body)
+		return &MailCountOutput{CacheAgeS: cacheAge, Body: body}, nil
+	}
 
 	if rig != "" {
 		mp := s.state.MailProvider(rig)
 		if mp == nil {
-			resp := &MailCountOutput{CacheAgeS: cacheAge}
-			resp.Body.Total = 0
-			resp.Body.Unread = 0
-			return resp, nil
+			return respond(MailCountOutputBody{})
 		}
 		counts, err := withMailReadDeadline(ctx, func() (mailReadCounts, error) {
 			total, unread, err := mailCountForRecipients(mp, agents)
@@ -499,10 +496,7 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 		if err != nil {
 			return nil, mailReadAPIError(err)
 		}
-		resp := &MailCountOutput{CacheAgeS: cacheAge}
-		resp.Body.Total = counts.Total
-		resp.Body.Unread = counts.Unread
-		return resp, nil
+		return respond(MailCountOutputBody{Total: counts.Total, Unread: counts.Unread})
 	}
 
 	// Aggregate across all rigs (deduplicated by provider identity).
@@ -528,12 +522,12 @@ func (s *Server) humaHandleMailCount(ctx context.Context, input *MailCountInput)
 	if len(partialErrs) == len(providers) && len(providers) > 0 {
 		return nil, allMailProvidersFailedError(partialErrs, partialStoreSlow)
 	}
-	resp := &MailCountOutput{CacheAgeS: cacheAge}
-	resp.Body.Total = totalAll
-	resp.Body.Unread = unreadAll
-	resp.Body.Partial = len(partialErrs) > 0
-	resp.Body.PartialErrors = partialErrs
-	return resp, nil
+	return respond(MailCountOutputBody{
+		Total:         totalAll,
+		Unread:        unreadAll,
+		Partial:       len(partialErrs) > 0,
+		PartialErrors: partialErrs,
+	})
 }
 
 // humaHandleMailThread is the Huma-typed handler for GET /v0/mail/thread/{id}.
