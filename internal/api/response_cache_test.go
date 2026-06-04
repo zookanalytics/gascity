@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 type countingStore struct {
@@ -25,7 +26,9 @@ func (s *countingStore) ListOpen(status ...string) ([]beads.Bead, error) {
 
 func (s *countingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	switch {
-	case query.Assignee != "":
+	// Assignees (plural) is the bulk-load shape beadmail's single message
+	// scan uses; both forms are recipient-scoped reads.
+	case query.Assignee != "" || len(query.Assignees) > 0:
 		s.listByAssigneeCalls++
 	case query.Label != "":
 		s.listByLabelCalls++
@@ -148,6 +151,135 @@ func TestHandleSessionListCachesUntilIndexChanges(t *testing.T) {
 	}
 	if store.listByLabelCalls != 2 {
 		t.Fatalf("ListByLabel calls after index change = %d, want 2", store.listByLabelCalls)
+	}
+}
+
+func TestHandleMailListCachesUntilIndexChanges(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.cityBeadStore = store
+	state.cityMailProv = beadmail.New(store)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/mail?agent=myrig/worker"), nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first mail = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if store.listByAssigneeCalls == 0 {
+		t.Fatalf("first mail: ListByAssignee calls = 0, want >0 (uncached path)")
+	}
+	firstAssignee := store.listByAssigneeCalls
+	firstLabel := store.listByLabelCalls
+	firstList := store.listCalls
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second mail = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != firstAssignee {
+		t.Fatalf("ListByAssignee calls after cached repeat = %d, want %d", store.listByAssigneeCalls, firstAssignee)
+	}
+	if store.listByLabelCalls != firstLabel {
+		t.Fatalf("ListByLabel calls after cached repeat = %d, want %d", store.listByLabelCalls, firstLabel)
+	}
+	if store.listCalls != firstList {
+		t.Fatalf("List calls after cached repeat = %d, want %d", store.listCalls, firstList)
+	}
+
+	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("third mail = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls <= firstAssignee {
+		t.Fatalf("ListByAssignee calls after index change = %d, want >%d", store.listByAssigneeCalls, firstAssignee)
+	}
+}
+
+func TestHandleMailCountCachesUntilIndexChanges(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.cityBeadStore = store
+	state.cityMailProv = beadmail.New(store)
+	h := newTestCityHandler(t, state)
+
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/mail/count?agent=myrig/worker"), nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first count = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if store.listByAssigneeCalls == 0 {
+		t.Fatalf("first count: ListByAssignee calls = 0, want >0 (uncached path)")
+	}
+	firstAssignee := store.listByAssigneeCalls
+	firstLabel := store.listByLabelCalls
+	firstList := store.listCalls
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second count = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls != firstAssignee {
+		t.Fatalf("ListByAssignee calls after cached repeat = %d, want %d", store.listByAssigneeCalls, firstAssignee)
+	}
+	if store.listByLabelCalls != firstLabel {
+		t.Fatalf("ListByLabel calls after cached repeat = %d, want %d", store.listByLabelCalls, firstLabel)
+	}
+	if store.listCalls != firstList {
+		t.Fatalf("List calls after cached repeat = %d, want %d", store.listCalls, firstList)
+	}
+
+	state.eventProv.Record(events.Event{Type: events.BeadCreated, Actor: "human"})
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("third count = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls <= firstAssignee {
+		t.Fatalf("ListByAssignee calls after index change = %d, want >%d", store.listByAssigneeCalls, firstAssignee)
+	}
+}
+
+func TestHandleMailListSkipsCacheForPaginated(t *testing.T) {
+	state := newFakeState(t)
+	store := &countingStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+	state.cityBeadStore = store
+	state.cityMailProv = beadmail.New(store)
+	h := newTestCityHandler(t, state)
+
+	// Cursor-mode request: cache should be bypassed entirely so repeated
+	// calls always hit the store (paginated responses carry NextCursor
+	// and would collide in the cache with the unpaginated body shape).
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/mail?agent=myrig/worker&cursor=0"), nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first paginated mail = %d, want 200, body: %s", rec.Code, rec.Body.String())
+	}
+	if store.listByAssigneeCalls == 0 {
+		t.Fatalf("first paginated mail: ListByAssignee calls = 0, want >0")
+	}
+	firstAssignee := store.listByAssigneeCalls
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("second paginated mail = %d, want 200", rec.Code)
+	}
+	if store.listByAssigneeCalls <= firstAssignee {
+		t.Fatalf("ListByAssignee calls on second paginated request = %d, want >%d (cache should be skipped)", store.listByAssigneeCalls, firstAssignee)
 	}
 }
 
