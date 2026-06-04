@@ -192,6 +192,17 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
+	// Point git's global/system config at /dev/null so child `git commit`
+	// invocations in tests do not inherit the developer's signing config
+	// (commit.gpgsign + gpg.format=ssh). `make test` strips SSH_AUTH_SOCK
+	// via env -i, so signed commits would otherwise fail with
+	// "Couldn't get agent socket" in tests that exec git for setup.
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
+		panic(err)
+	}
 	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
 	sweepOrphanPIDPrefixedDirs(os.TempDir(), testCmdGCTempRootPrefix)
 	testTempRoot, err := os.MkdirTemp("/tmp", pidPrefixedTempPattern(testCmdGCTempRootPrefix))
