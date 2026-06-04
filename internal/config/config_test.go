@@ -252,6 +252,86 @@ func TestEffectiveDefaultBranch_EmptyWhenUnset(t *testing.T) {
 	}
 }
 
+func TestParseRigDefaultMergeStrategy(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "lights"
+
+[[rigs]]
+name = "scamper"
+path = "/scamper"
+default_merge_strategy = "pr"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(cfg.Rigs) != 1 {
+		t.Fatalf("len(Rigs) = %d, want 1", len(cfg.Rigs))
+	}
+	if got := cfg.Rigs[0].DefaultMergeStrategy; got != "pr" {
+		t.Errorf("DefaultMergeStrategy = %q, want %q", got, "pr")
+	}
+	if got := cfg.Rigs[0].EffectiveDefaultMergeStrategy(cfg); got != "pr" {
+		t.Errorf("EffectiveDefaultMergeStrategy = %q, want %q", got, "pr")
+	}
+}
+
+func TestParseCityDefaultMergeStrategy(t *testing.T) {
+	data := []byte(`
+default_merge_strategy = "mr"
+
+[workspace]
+name = "loomington"
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.DefaultMergeStrategy; got != "mr" {
+		t.Errorf("City.DefaultMergeStrategy = %q, want %q", got, "mr")
+	}
+}
+
+func TestEffectiveDefaultMergeStrategy_EmptyWhenUnset(t *testing.T) {
+	r := Rig{Name: "rig"}
+	cfg := &City{}
+	if got := r.EffectiveDefaultMergeStrategy(cfg); got != "" {
+		t.Errorf("EffectiveDefaultMergeStrategy() = %q, want empty", got)
+	}
+	if got := r.EffectiveDefaultMergeStrategy(nil); got != "" {
+		t.Errorf("EffectiveDefaultMergeStrategy(nil) = %q, want empty", got)
+	}
+}
+
+func TestEffectiveDefaultMergeStrategy_FallsBackToCity(t *testing.T) {
+	r := Rig{Name: "rig"}
+	cfg := &City{DefaultMergeStrategy: "mr"}
+	if got := r.EffectiveDefaultMergeStrategy(cfg); got != "mr" {
+		t.Errorf("EffectiveDefaultMergeStrategy() = %q, want %q (city fallback)", got, "mr")
+	}
+}
+
+func TestEffectiveDefaultMergeStrategy_RigOverridesCity(t *testing.T) {
+	r := Rig{Name: "rig", DefaultMergeStrategy: "direct"}
+	cfg := &City{DefaultMergeStrategy: "mr"}
+	if got := r.EffectiveDefaultMergeStrategy(cfg); got != "direct" {
+		t.Errorf("EffectiveDefaultMergeStrategy() = %q, want %q (rig wins)", got, "direct")
+	}
+}
+
+func TestEffectiveDefaultMergeStrategy_TrimsWhitespace(t *testing.T) {
+	r := Rig{Name: "rig", DefaultMergeStrategy: "  pr  "}
+	if got := r.EffectiveDefaultMergeStrategy(nil); got != "pr" {
+		t.Errorf("EffectiveDefaultMergeStrategy() = %q, want %q (trimmed)", got, "pr")
+	}
+	r2 := Rig{Name: "rig"}
+	cfg := &City{DefaultMergeStrategy: "  mr  "}
+	if got := r2.EffectiveDefaultMergeStrategy(cfg); got != "mr" {
+		t.Errorf("EffectiveDefaultMergeStrategy() = %q, want %q (city trimmed)", got, "mr")
+	}
+}
+
 func TestParseAgentSkillsAndMCP(t *testing.T) {
 	data := []byte(`
 [workspace]

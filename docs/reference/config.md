@@ -20,6 +20,7 @@ City is the top-level configuration for a Gas City instance.
 | `agent` | []Agent |  |  | Agents lists all configured agents in this city. Optional: PackV2 cities compose agents through [imports.*] and ship without any [[agent]] block. |
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the city-wide default merge strategy ("direct" or "pr") that refinery formulas resolve when a work bead does not carry an explicit `metadata.merge_strategy` and the originating rig does not set Rig.DefaultMergeStrategy. Empty defers to the formula's own default. Set this on a downstream city (e.g., loomington) to require PR review for every refinery merge without touching the upstream pack's formula defaults. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
@@ -673,6 +674,7 @@ Rig defines an external project registered in the city.
 | `path` | string |  |  | Path is the absolute filesystem path to the rig's repository. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
 | `default_branch` | string |  |  | DefaultBranch is the rig repository's mainline branch (e.g. "main", "master", "develop"). When set, routing formulas use this as the default merge target instead of probing origin/HEAD at sling time. Captured by `gc rig add` from the rig's git config; set manually for rigs whose mainline isn't reachable via origin/HEAD. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the rig-scoped default merge strategy ("direct" or "pr") that refinery formulas resolve when a work bead does not carry an explicit `metadata.merge_strategy`. Empty defers to the city-level default (City.DefaultMergeStrategy), then to the formula's own default. Set this on a single rig to override the city-wide policy. |
 | `suspended` | boolean |  |  | Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
 | `includes` | []string |  |  | Includes lists pack directories or URLs for this rig (V1 mechanism). Each entry is a local path, a git source//sub#ref URL, or a GitHub tree URL. |
@@ -696,6 +698,7 @@ RigPatch modifies an existing rig identified by Name.
 | `path` | string |  |  | Path overrides the rig's filesystem path. |
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy overrides the rig-scoped default merge strategy resolved by refinery formulas. See Rig.DefaultMergeStrategy. |
 | `suspended` | boolean |  |  | Suspended overrides the rig's suspended state. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |
 

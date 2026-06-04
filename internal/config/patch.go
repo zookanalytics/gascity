@@ -196,6 +196,9 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
+	// DefaultMergeStrategy overrides the rig-scoped default merge strategy
+	// resolved by refinery formulas. See Rig.DefaultMergeStrategy.
+	DefaultMergeStrategy *string `toml:"default_merge_strategy,omitempty"`
 	// Suspended overrides the rig's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
@@ -612,6 +615,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.DefaultBranch != nil {
 				r.DefaultBranch = *patch.DefaultBranch
+			}
+			if patch.DefaultMergeStrategy != nil {
+				r.DefaultMergeStrategy = *patch.DefaultMergeStrategy
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
