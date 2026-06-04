@@ -1306,6 +1306,11 @@
           },
           "type": "array",
           "description": "Checks holds city-local inline doctor checks declared via\n[[doctor.check]] in city.toml."
+        },
+        "pack_script_timeout_secs": {
+          "type": "integer",
+          "description": "PackScriptTimeoutSecs bounds how long any single pack doctor\nscript (`gc doctor` Run or `gc doctor --fix`) is allowed to\ntake before it is killed and reported as an error. Nil, zero,\nor negative values fall back to the package default (30s). A\nper-script bound is the load-bearing safety against a wedged\npack tool (eg `bd --version` hung on a contended lock) blocking\nthe whole doctor run indefinitely. Pointer so the unset value\nstays empty for TOML marshaling (mirrors DaemonConfig.MaxRestarts).",
+          "default": 30
         }
       },
       "additionalProperties": false,
