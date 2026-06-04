@@ -351,6 +351,49 @@ When multiple packs are imported, formulas layer by priority (lowest to highest)
 
 The importing pack always wins over its imports.
 
+#### Order scope
+
+Orders default to rig scope: a pack imported by N rigs contributes
+each of its `orders/*.toml` once per importing rig. For maintenance
+orders that only make sense city-wide (e.g. ones that target a
+city-only pool), pack authors pin the order to a single city-wide
+registration with `scope`:
+
+```toml
+# orders/digest-generate.toml
+[order]
+formula = "mol-digest-generate"
+trigger = "cooldown"
+interval = "24h"
+pool = "dog"
+scope = "city"   # registered exactly once, however many rigs import the pack
+```
+
+- `scope = "city"` — instantiated exactly once during pack expansion,
+  regardless of how many rigs import the pack. A rig-imported copy is
+  promoted to one city-wide registration (deduplicated by name across
+  rigs; a city-local order of the same name wins over the promotion).
+- `scope = "rig"` — the explicit spelling of the default: the order
+  registers once per importing rig, stamped with that rig's name.
+- omitted — same as `scope = "rig"`.
+
+The field mirrors the Pack V2 agent and named-session `scope` field.
+Unlike agents, an order's omitted `scope` does not inherit from
+`agent_defaults` — there is no order-defaults analogue.
+
+**Convention for new pack authors.** Declare `scope` explicitly on
+every order. The bundled packs do — `TestBundledOrdersDeclareScope`
+in `internal/builtinpacks/registry_test.go` keeps them honest. Pool-
+bound orders almost always want `scope = "city"` (the pool typically
+lives at one scope). Exec-based and event-triggered maintenance
+orders that touch shared city infrastructure (Dolt, the bead store,
+the city-wide event stream, cross-rig branches) also want
+`scope = "city"` — per-rig copies are harmful at best, duplicate work
+at worst. Only leave `scope` omitted if once-per-importing-rig
+genuinely is the right behavior for that order, and pair that
+decision with a one-line `# scope:` comment so a future reader sees
+the intent rather than oversight.
+
 ### Pack identity and qualified names
 
 After composition, every agent, formula, and prompt retains its pack provenance.
