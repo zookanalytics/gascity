@@ -384,6 +384,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 
 	// Pack doctor checks — scripts shipped with packs.
 	if cfgErr == nil && cfg != nil {
+		packScriptTimeout := doctorCfg.PackScriptTimeout()
 		for _, entry := range cfg.PackDoctors {
 			register(&doctor.PackScriptCheck{
 				CheckName: entry.PackName + ":" + entry.Name,
@@ -392,6 +393,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				PackDir:   entry.PackDir,
 				PackName:  entry.PackName,
 				Warmup:    entry.Warmup,
+				Timeout:   packScriptTimeout,
 			})
 		}
 		registerLocalDoctorChecksTo(register, cityPath, cfg.Doctor.Checks)
