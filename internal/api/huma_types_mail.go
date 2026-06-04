@@ -120,17 +120,24 @@ type MailCountInput struct {
 	Rig   string `query:"rig" required:"false" doc:"Filter by rig name."`
 }
 
-// MailCountOutput is the response body for GET /v0/mail/count.
+// MailCountOutputBody is the response body for GET /v0/mail/count.
+// Extracted from MailCountOutput.Body so the response-cache typed
+// retrieval (cachedResponseAs[MailCountOutputBody]) can name it. The
+// schema name matches the original Huma-generated name for the inline
+// anonymous body, so the wire and generated clients are unchanged.
+type MailCountOutputBody struct {
+	Total         int      `json:"total" doc:"Total message count."`
+	Unread        int      `json:"unread" doc:"Unread message count."`
+	Partial       bool     `json:"partial,omitempty" doc:"True when one or more rig providers failed and the counts are not authoritative."`
+	PartialErrors []string `json:"partial_errors,omitempty" doc:"Per-provider errors when partial is true."`
+}
+
+// MailCountOutput is the response envelope for GET /v0/mail/count.
 // Partial/PartialErrors mirror MailListBody: when one rig provider
 // fails but others succeed, we return the partial counts and flag
 // the shortfall rather than returning 500 and losing the count
 // entirely.
 type MailCountOutput struct {
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
-	Body      struct {
-		Total         int      `json:"total" doc:"Total message count."`
-		Unread        int      `json:"unread" doc:"Unread message count."`
-		Partial       bool     `json:"partial,omitempty" doc:"True when one or more rig providers failed and the counts are not authoritative."`
-		PartialErrors []string `json:"partial_errors,omitempty" doc:"Per-provider errors when partial is true."`
-	}
+	Body      MailCountOutputBody
 }
