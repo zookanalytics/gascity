@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -97,6 +98,62 @@ func TestValidateSkillCollisions(t *testing.T) {
 		}}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("intra-agent same name from two roots collides", func(t *testing.T) {
+		tmp := t.TempDir()
+		conventionSkills := makeAgentSkillsDir(t, tmp, "mayor")
+		patchSkills := filepath.Join(tmp, "keeper-skills")
+		writeAgentSkill(t, conventionSkills, "plan")
+		writeAgentSkill(t, patchSkills, "plan")
+
+		cfg := &config.City{
+			Agents: []config.Agent{{
+				Name:       "mayor",
+				Provider:   "claude",
+				Scope:      "city",
+				SkillsDir:  conventionSkills,
+				SkillsDirs: []string{patchSkills},
+			}},
+		}
+		got := ValidateSkillCollisions(cfg)
+		// Sources are returned sorted for stable output.
+		wantSources := []string{conventionSkills, patchSkills}
+		sort.Strings(wantSources)
+		want := []SkillCollision{{
+			ScopeRoot:  "<city>",
+			Vendor:     "claude",
+			SkillName:  "plan",
+			AgentNames: []string{"mayor"},
+			Sources:    wantSources,
+		}}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v, want %+v", got, want)
+		}
+		if len(got) == 1 && !got[0].IsIntraAgent() {
+			t.Errorf("expected IsIntraAgent() true for single-agent multi-root collision")
+		}
+	})
+
+	t.Run("intra-agent distinct names from two roots do not collide", func(t *testing.T) {
+		tmp := t.TempDir()
+		conventionSkills := makeAgentSkillsDir(t, tmp, "mayor")
+		patchSkills := filepath.Join(tmp, "keeper-skills")
+		writeAgentSkill(t, conventionSkills, "convention-skill")
+		writeAgentSkill(t, patchSkills, "git-merge-pull-request")
+
+		cfg := &config.City{
+			Agents: []config.Agent{{
+				Name:       "mayor",
+				Provider:   "claude",
+				Scope:      "city",
+				SkillsDir:  conventionSkills,
+				SkillsDirs: []string{patchSkills},
+			}},
+		}
+		if got := ValidateSkillCollisions(cfg); got != nil {
+			t.Fatalf("distinct names across roots must not collide, got %+v", got)
 		}
 	})
 
