@@ -2691,7 +2691,7 @@
         },
         "prefix": {
           "type": "string",
-          "description": "Prefix overrides the auto-derived HQ bead ID prefix. When empty,\nthe prefix is derived from the city Name via DeriveBeadsPrefix."
+          "description": "Prefix is the city's bead ID prefix: a first-class, version-controlled\ncity.toml field. Unlike Name it is NOT deprecated, and gc doctor --fix\nleaves it in place. The prefix namespaces every bead ID and is globally\ninvariant data identity that must match the city's beads store on every\nclone and host; pinning it here is the durable backstop against Name\nderivation producing a divergent prefix on a fresh clone. The optional\nmachine-local .gc/site.toml workspace_prefix overrides this when present\n(precedence: site.toml \u003e city.toml \u003e derived from Name via\nDeriveBeadsPrefix). When all are empty, the prefix is derived from Name."
         },
         "provider": {
           "type": "string",

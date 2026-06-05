@@ -300,8 +300,11 @@ path = "/legacy/frontend"
 	if len(warnings) != 1 {
 		t.Fatalf("warnings = %v, want one workspace identity warning", warnings)
 	}
-	if !strings.Contains(warnings[0], "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
-		t.Fatalf("warning = %q, want workspace identity guidance", warnings[0])
+	if !strings.Contains(warnings[0], "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name)") {
+		t.Fatalf("warning = %q, want workspace.name guidance", warnings[0])
+	}
+	if strings.Contains(warnings[0], "workspace.prefix") {
+		t.Fatalf("warning = %q, must not flag tracked workspace.prefix", warnings[0])
 	}
 }
 
@@ -351,13 +354,45 @@ schema = 2
 	}
 	var found bool
 	for _, warning := range prov.Warnings {
-		if strings.Contains(warning, "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name, workspace.prefix)") {
+		if strings.Contains(warning, "workspace identity fields are deprecated in v2; move them to .gc/site.toml (workspace.name)") {
 			found = true
-			break
+		}
+		if strings.Contains(warning, "workspace.prefix") {
+			t.Fatalf("warning = %q, must not flag tracked workspace.prefix", warning)
 		}
 	}
 	if !found {
-		t.Fatalf("warnings = %v, want legacy workspace identity guidance", prov.Warnings)
+		t.Fatalf("warnings = %v, want legacy workspace.name guidance", prov.Warnings)
+	}
+}
+
+func TestLoadWithIncludes_PrefixOnlyEmitsNoWorkspaceIdentityWarning(t *testing.T) {
+	// workspace.prefix is a first-class tracked city.toml field (globally
+	// invariant bead-ID identity). A city.toml that pins ONLY the prefix must
+	// not fire the legacy workspace-identity deprecation warning, even under
+	// schema=2 enforcement, and the tracked prefix must still resolve.
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+prefix = "lx"
+`)
+	fs.Files["/city/pack.toml"] = []byte(`
+[pack]
+name = "city"
+schema = 2
+`)
+
+	cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	for _, warning := range prov.Warnings {
+		if strings.Contains(warning, "workspace identity") || strings.Contains(warning, "workspace.prefix") {
+			t.Fatalf("warnings = %v, want no workspace identity warning for prefix-only city.toml", prov.Warnings)
+		}
+	}
+	if got := EffectiveHQPrefix(cfg); got != "lx" {
+		t.Fatalf("EffectiveHQPrefix() = %q, want %q (tracked city.toml prefix)", got, "lx")
 	}
 }
 

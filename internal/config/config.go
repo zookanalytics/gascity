@@ -1140,8 +1140,15 @@ type Workspace struct {
 	// basename precedence instead; gc init writes the machine-local name to
 	// site.toml and omits it from city.toml.
 	Name string `toml:"name,omitempty"`
-	// Prefix overrides the auto-derived HQ bead ID prefix. When empty,
-	// the prefix is derived from the city Name via DeriveBeadsPrefix.
+	// Prefix is the city's bead ID prefix: a first-class, version-controlled
+	// city.toml field. Unlike Name it is NOT deprecated, and gc doctor --fix
+	// leaves it in place. The prefix namespaces every bead ID and is globally
+	// invariant data identity that must match the city's beads store on every
+	// clone and host; pinning it here is the durable backstop against Name
+	// derivation producing a divergent prefix on a fresh clone. The optional
+	// machine-local .gc/site.toml workspace_prefix overrides this when present
+	// (precedence: site.toml > city.toml > derived from Name via
+	// DeriveBeadsPrefix). When all are empty, the prefix is derived from Name.
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`

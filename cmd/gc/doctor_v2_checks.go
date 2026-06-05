@@ -1137,41 +1137,30 @@ func (v2WorkspaceNameCheck) Fix(ctx *doctor.CheckContext) error {
 	}
 
 	rawName := strings.TrimSpace(cfg.Workspace.Name)
-	rawPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
 	siteName := strings.TrimSpace(binding.WorkspaceName)
-	sitePrefix := strings.TrimSpace(binding.WorkspacePrefix)
 
-	var conflicts []string
+	// Only workspace.name migrates into machine-local site.toml.
+	// workspace.prefix is a tracked, version-controlled city.toml field
+	// (globally-invariant bead-ID identity) and stays where it is.
 	if rawName != "" && siteName != "" && rawName != siteName {
-		conflicts = append(conflicts, fmt.Sprintf("workspace.name=%q .gc/site.toml workspace_name=%q", rawName, siteName))
-	}
-	if rawPrefix != "" && sitePrefix != "" && rawPrefix != sitePrefix {
-		conflicts = append(conflicts, fmt.Sprintf("workspace.prefix=%q .gc/site.toml workspace_prefix=%q", rawPrefix, sitePrefix))
-	}
-	if len(conflicts) > 0 {
-		sort.Strings(conflicts)
-		return fmt.Errorf("refusing to migrate workspace identity — city.toml and .gc/site.toml disagree; resolve manually and re-run `gc doctor --fix`:\n  %s",
-			strings.Join(conflicts, "\n  "))
+		return fmt.Errorf("refusing to migrate workspace.name — city.toml workspace.name=%q and .gc/site.toml workspace_name=%q disagree; resolve manually and re-run `gc doctor --fix`",
+			rawName, siteName)
 	}
 
 	name := siteName
 	if name == "" {
 		name = rawName
 	}
-	prefix := sitePrefix
-	if prefix == "" {
-		prefix = rawPrefix
-	}
 
-	// Write the site binding first. If the city.toml rewrite fails
-	// afterwards, runtime identity remains stable and `gc doctor` will
-	// continue warning about the still-present legacy fields rather than
-	// silently losing the chosen name/prefix.
-	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, ctx.CityPath, name, prefix); err != nil {
+	// Write the site binding first. If the city.toml rewrite fails afterwards,
+	// runtime identity remains stable and `gc doctor` will continue warning
+	// about the still-present legacy name rather than silently losing it.
+	// Preserve any existing machine-local prefix override; never pull the
+	// tracked city.toml prefix into site.toml.
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, ctx.CityPath, name, strings.TrimSpace(binding.WorkspacePrefix)); err != nil {
 		return err
 	}
 	cfg.Workspace.Name = ""
-	cfg.Workspace.Prefix = ""
 	content, err := cfg.MarshalForWrite()
 	if err != nil {
 		return err
@@ -1183,24 +1172,19 @@ func (v2WorkspaceNameCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
 	cfg, ok := parseCityConfig(cityTomlPath)
 	if !ok {
-		return okCheck("v2-workspace-name", "workspace identity migration skipped until city.toml parses")
+		return okCheck("v2-workspace-name", "workspace name migration skipped until city.toml parses")
 	}
 	rawName := strings.TrimSpace(cfg.Workspace.Name)
-	rawPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	if rawName == "" && rawPrefix == "" {
-		return okCheck("v2-workspace-name", "workspace identity already absent from city.toml")
+	// workspace.prefix is a tracked city.toml field — only workspace.name is
+	// deprecated, so it alone drives this check.
+	if rawName == "" {
+		return okCheck("v2-workspace-name", "workspace name already absent from city.toml")
 	}
-	var details []string
 	locator := newDoctorConfigLocator(cityTomlPath)
-	if rawName != "" {
-		details = append(details, doctorKeyDetail(locator, "workspace", "name", "workspace.name="+rawName))
-	}
-	if rawPrefix != "" {
-		details = append(details, doctorKeyDetail(locator, "workspace", "prefix", "workspace.prefix="+rawPrefix))
-	}
+	details := []string{doctorKeyDetail(locator, "workspace", "name", "workspace.name="+rawName)}
 	return errorCheck("v2-workspace-name",
-		"workspace identity still lives in city.toml",
-		"run `gc doctor --fix` to migrate workspace.name/workspace.prefix into .gc/site.toml",
+		"workspace name still lives in city.toml",
+		"run `gc doctor --fix` to migrate workspace.name into .gc/site.toml",
 		details)
 }
 

@@ -65,24 +65,17 @@ func legacyWorkspaceIdentitySurfaceWarnings(cfg *City, source string) []string {
 		return nil
 	}
 
-	var warnings []string
-	var workspaceFields []string
-	if strings.TrimSpace(cfg.Workspace.Name) != "" {
-		workspaceFields = append(workspaceFields, "workspace.name")
+	// Only workspace.name is deprecated-from-city.toml. workspace.prefix is a
+	// tracked, version-controlled field (globally-invariant bead-ID identity)
+	// and must not be flagged for migration into machine-local site.toml.
+	if strings.TrimSpace(cfg.Workspace.Name) == "" {
+		return nil
 	}
-	if strings.TrimSpace(cfg.Workspace.Prefix) != "" {
-		workspaceFields = append(workspaceFields, "workspace.prefix")
-	}
-	if len(workspaceFields) > 0 {
-		warnings = append(warnings, fmt.Sprintf(
-			"%s: %s (%s); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
-			source,
-			legacyWorkspaceIdentityWarningFragment,
-			strings.Join(workspaceFields, ", "),
-		))
-	}
-
-	return warnings
+	return []string{fmt.Sprintf(
+		"%s: %s (workspace.name); move them to .gc/site.toml (run `gc doctor --fix` if this is the root city.toml; fragments must be updated by hand)",
+		source,
+		legacyWorkspaceIdentityWarningFragment,
+	)}
 }
 
 func legacyRigPathSurfaceWarnings(cfg *City, source string) []string {

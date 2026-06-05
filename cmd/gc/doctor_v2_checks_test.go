@@ -1408,18 +1408,17 @@ prefix = "lc"
 
 	out := buf.String()
 	if !strings.Contains(out, "v2-workspace-name") {
-		t.Fatalf("doctor output missing workspace identity warning:\n%s", out)
+		t.Fatalf("doctor output missing workspace name warning:\n%s", out)
 	}
 	if !strings.Contains(out, ".gc/site.toml") {
 		t.Fatalf("doctor output missing site binding guidance:\n%s", out)
 	}
-	for _, want := range []string{
-		"city.toml:2: workspace.name=legacy-city",
-		"city.toml:3: workspace.prefix=lc",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("doctor output missing source coordinate %q:\n%s", want, out)
-		}
+	if !strings.Contains(out, "city.toml:2: workspace.name=legacy-city") {
+		t.Fatalf("doctor output missing workspace.name source coordinate:\n%s", out)
+	}
+	// workspace.prefix is a tracked field now — doctor must not flag it.
+	if strings.Contains(out, "workspace.prefix=lc") {
+		t.Fatalf("doctor must not flag tracked workspace.prefix:\n%s", out)
 	}
 
 	buf.Reset()
@@ -1429,23 +1428,77 @@ prefix = "lc"
 	if err != nil {
 		t.Fatalf("ReadFile(city.toml): %v", err)
 	}
-	if strings.Contains(string(rawData), `name = "legacy-city"`) || strings.Contains(string(rawData), `prefix = "lc"`) {
-		t.Fatalf("city.toml should no longer store workspace identity:\n%s", rawData)
+	if strings.Contains(string(rawData), `name = "legacy-city"`) {
+		t.Fatalf("city.toml should no longer store workspace.name:\n%s", rawData)
+	}
+	// The tracked prefix must survive `gc doctor --fix`.
+	if !strings.Contains(string(rawData), `prefix = "lc"`) {
+		t.Fatalf("city.toml should retain tracked workspace.prefix:\n%s", rawData)
 	}
 
 	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
 	if err != nil {
 		t.Fatalf("LoadSiteBinding: %v", err)
 	}
-	if binding.WorkspaceName != "legacy-city" || binding.WorkspacePrefix != "lc" {
-		t.Fatalf("binding = %+v, want workspace_name=legacy-city workspace_prefix=lc", binding)
+	if binding.WorkspaceName != "legacy-city" {
+		t.Fatalf("binding = %+v, want workspace_name=legacy-city", binding)
+	}
+	// prefix must NOT be migrated into machine-local site.toml.
+	if binding.WorkspacePrefix != "" {
+		t.Fatalf("binding = %+v, want workspace_prefix empty (prefix stays tracked in city.toml)", binding)
 	}
 
 	buf.Reset()
 	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
 	out = buf.String()
-	if strings.Contains(out, "⚠ v2-workspace-name") {
-		t.Fatalf("workspace identity warning should clear after fix:\n%s", out)
+	if strings.Contains(out, "v2-workspace-name — workspace name still lives") {
+		t.Fatalf("workspace name warning should clear after fix:\n%s", out)
+	}
+}
+
+func TestV2WorkspaceNameCheckLeavesTrackedPrefixInPlace(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeDoctorFile(t, cityDir, "city.toml", `
+[workspace]
+prefix = "lx"
+`)
+
+	var buf bytes.Buffer
+	d := &doctor.Doctor{}
+	registerV2DeprecationChecks(d)
+
+	// A prefix-only city.toml must produce no v2-workspace-name finding:
+	// workspace.prefix is a tracked, version-controlled field.
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, false)
+	out := buf.String()
+	if strings.Contains(out, "workspace name still lives in city.toml") {
+		t.Fatalf("prefix-only city.toml should not trigger v2-workspace-name:\n%s", out)
+	}
+	if strings.Contains(out, "workspace.prefix=lx") {
+		t.Fatalf("doctor must not flag tracked workspace.prefix:\n%s", out)
+	}
+
+	// gc doctor --fix must leave the tracked prefix in city.toml untouched and
+	// must not migrate it into machine-local site.toml.
+	buf.Reset()
+	d.Run(&doctor.CheckContext{CityPath: cityDir, Verbose: true}, &buf, true)
+
+	rawData, err := os.ReadFile(filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile(city.toml): %v", err)
+	}
+	if !strings.Contains(string(rawData), `prefix = "lx"`) {
+		t.Fatalf("doctor --fix stripped tracked workspace.prefix:\n%s", rawData)
+	}
+
+	binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityDir)
+	if err != nil {
+		t.Fatalf("LoadSiteBinding: %v", err)
+	}
+	if binding.WorkspacePrefix != "" {
+		t.Fatalf("binding = %+v, want workspace_prefix empty (prefix stays tracked in city.toml)", binding)
 	}
 }
 
