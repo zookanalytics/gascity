@@ -14,3 +14,5 @@ dolt.auto-commit: "batch"
 import.auto: false
 
 sync.remote: "git+ssh://git@github.com/zookanalytics/gascity.git"
+dolt:
+  disable-event-flush: true
