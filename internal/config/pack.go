@@ -1455,8 +1455,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// overlay that lives in the importing pack. (gc-5uepp)
 	discoverSkip := agentNameSet(tc.Agents)
 	overlayTargets := importedOverlayAttachTargets(fs, includedAgents, tc.Patches.Agents, topoDir)
-	for name := range overlayTargets {
-		discoverSkip[name] = true
+	for idx := range overlayTargets {
+		discoverSkip[includedAgents[idx].Name] = true
 	}
 	discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, discoverSkip)
 	if dErr != nil {
@@ -2370,25 +2370,29 @@ func agentPatchTargets(p *AgentPatch, a *Agent) bool {
 	return binding == "" || a.BindingName == binding
 }
 
-// importedOverlayAttachTargets returns the set of imported agent names for
-// which this pack both (a) declares a [[patches.agent]] customizing the
-// imported agent and (b) carries an agents/<name>/ asset overlay on disk.
-// Such overlays attach agent-local assets to the imported agent rather than
-// minting a colliding phantom native agent.
+// importedOverlayAttachTargets returns the indices into imported of the
+// specific imported agents for which this pack both (a) declares a
+// [[patches.agent]] customizing the imported agent and (b) carries an
+// agents/<name>/ asset overlay on disk. Such overlays attach agent-local
+// assets to that exact imported agent rather than minting a colliding
+// phantom native agent.
+//
+// Targets are keyed by slice index — the imported agent's identity — not by
+// bare name. When two bindings import the same bare agent name and only one
+// is patched, only the patched import may receive the importing pack's
+// private assets; keying by name would leak the overlay onto the unpatched
+// sibling. (gc-5uepp, gc-fbt9c)
 //
 // Requiring the patch keeps the change conservative: an agents/<name>/ dir
 // that collides with an import but carries no customizing patch still fails
-// as a genuine duplicate-agent definition. (gc-5uepp)
-func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentPatch, packDir string) map[string]bool {
+// as a genuine duplicate-agent definition.
+func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentPatch, packDir string) map[int]bool {
 	if len(imported) == 0 || len(patches) == 0 {
 		return nil
 	}
-	var out map[string]bool
+	var out map[int]bool
 	for i := range imported {
 		a := &imported[i]
-		if out[a.Name] {
-			continue
-		}
 		overlayDir := filepath.Join(packDir, "agents", a.Name)
 		if info, err := fs.Stat(overlayDir); err != nil || !info.IsDir() {
 			continue
@@ -2396,9 +2400,9 @@ func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentP
 		for j := range patches {
 			if agentPatchTargets(&patches[j], a) {
 				if out == nil {
-					out = map[string]bool{}
+					out = map[int]bool{}
 				}
-				out[a.Name] = true
+				out[i] = true
 				break
 			}
 		}
@@ -2407,32 +2411,36 @@ func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentP
 }
 
 // attachImportedAgentOverlays redirects an importing pack's agents/<name>/
-// asset overlays (skills, mcp) onto the imported agents named in targets.
-// Imported agents resolve agent-local assets relative to their own pack's
-// SourceDir, so the SourceDir-keyed populateAgentLocalAssetDirs pass cannot
-// reach an overlay that lives in the importing pack — this wires it
-// explicitly. Only empty asset fields are filled, so an imported agent that
-// already carries its own agent-local catalog is never clobbered. (gc-5uepp)
-func attachImportedAgentOverlays(fs fsys.FS, imported []Agent, targets map[string]bool, packDir string) {
+// asset overlays (skills, mcp) onto the imported agents identified by index
+// in targets. Imported agents resolve agent-local assets relative to their
+// own pack's SourceDir, so the SourceDir-keyed populateAgentLocalAssetDirs
+// pass cannot reach an overlay that lives in the importing pack — this wires
+// it explicitly.
+//
+// The importing pack's overlay is a deliberate, scoped customization of the
+// imported agent (it both patches the agent and ships the overlay), so it
+// takes precedence over any agent-local catalog the imported agent carried
+// from its defining pack. The asset model holds a single SkillsDir/MCPDir per
+// agent, so precedence — the overlay wins — is the composition rule. Filling
+// only an empty field silently dropped the overlay whenever the imported
+// agent already had its own catalog, which the single-dir consumers
+// (LoadAgentCatalog, MCP dir sources) never loaded. (gc-5uepp, gc-fbt9c)
+func attachImportedAgentOverlays(fs fsys.FS, imported []Agent, targets map[int]bool, packDir string) {
 	if len(targets) == 0 {
 		return
 	}
 	for i := range imported {
-		a := &imported[i]
-		if !targets[a.Name] {
+		if !targets[i] {
 			continue
 		}
-		if a.SkillsDir == "" {
-			skillsDir := filepath.Join(packDir, "agents", a.Name, "skills")
-			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
-				a.SkillsDir = skillsDir
-			}
+		a := &imported[i]
+		skillsDir := filepath.Join(packDir, "agents", a.Name, "skills")
+		if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
+			a.SkillsDir = skillsDir
 		}
-		if a.MCPDir == "" {
-			mcpDir := filepath.Join(packDir, "agents", a.Name, "mcp")
-			if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
-				a.MCPDir = mcpDir
-			}
+		mcpDir := filepath.Join(packDir, "agents", a.Name, "mcp")
+		if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
+			a.MCPDir = mcpDir
 		}
 	}
 }
