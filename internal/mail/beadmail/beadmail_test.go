@@ -26,14 +26,33 @@ func (s noListScanStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	return s.MemStore.List(query)
 }
 
-type noBroadSessionRouteStore struct {
+// listCallCounter records the number of List calls broken out by shape so
+// route-resolution tests can pin that the per-recipient metadata fanout has
+// been collapsed into a single bulk session load.
+type listCallCounter struct {
 	*beads.MemStore
-	t *testing.T
+	aliasMetadataLists       int
+	sessionNameMetadataLists int
+	typeSessionLists         int
+	labelSessionLists        int
+	assigneeMessageLists     int
 }
 
-func (s noBroadSessionRouteStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+func (s *listCallCounter) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if v := strings.TrimSpace(query.Metadata["alias"]); v != "" {
+		s.aliasMetadataLists++
+	}
+	if v := strings.TrimSpace(query.Metadata["session_name"]); v != "" {
+		s.sessionNameMetadataLists++
+	}
+	if query.Type == session.BeadType && query.Label == "" && len(query.Metadata) == 0 {
+		s.typeSessionLists++
+	}
 	if query.Label == session.LabelSession && len(query.Metadata) == 0 {
-		s.t.Fatalf("recipient routing used broad session scan: %+v", query)
+		s.labelSessionLists++
+	}
+	if query.Assignee != "" && query.Type == "message" {
+		s.assigneeMessageLists++
 	}
 	return s.MemStore.List(query)
 }
@@ -281,6 +300,9 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		if strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field") {
 			return []byte(`[]`), nil
 		}
+		if strings.Contains(cmd, "bd list --json") && (strings.Contains(cmd, "--type=session") || strings.Contains(cmd, "--label=gc:session")) {
+			return []byte(`[]`), nil
+		}
 		if strings.Contains(cmd, "bd query --json") {
 			return []byte(`[]`), nil
 		}
@@ -310,7 +332,7 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			return nil, errors.New("not found")
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+		case strings.Contains(cmd, "bd list --json") && (strings.Contains(cmd, "--type=session") || strings.Contains(cmd, "--label=gc:session")):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=message") && strings.Contains(cmd, "--status=open"):
 			if !strings.Contains(cmd, "--assignee="+recipient) {
@@ -349,7 +371,7 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 			return nil, errors.New("not found")
 		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--metadata-field"):
 			return []byte(`[]`), nil
-		case strings.Contains(cmd, "bd list --json") && strings.Contains(cmd, "--type=session"):
+		case strings.Contains(cmd, "bd list --json") && (strings.Contains(cmd, "--type=session") || strings.Contains(cmd, "--label=gc:session")):
 			return []byte(`[]`), nil
 		case strings.Contains(cmd, "bd query --json"):
 			return []byte(`[]`), nil
@@ -1714,104 +1736,59 @@ func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
 	}
 }
 
-func TestInboxByCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
-	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
+// TestRecipientRoutesCollapseStoreListFanout pins the fanout-collapse
+// guarantee for route resolution: a multi-recipient CountRecipients does
+// NOT issue per-recipient metadata-keyed List queries. Sessions are
+// matched in-memory against a single bulk load (Type=session + Label=
+// gc:session via session.ListAllSessionBeads).
+//
+// Old behavior: ~4 metadata List calls per recipient × N recipients.
+// New behavior: 0 metadata List calls; up to one type+label union per call.
+func TestRecipientRoutesCollapseStoreListFanout(t *testing.T) {
+	base := beads.NewMemStore()
+	recipients := []string{"worker-a", "worker-b", "worker-c"}
+	for _, alias := range recipients {
+		if _, err := base.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"alias":        alias,
+				"session_name": "wf__" + alias,
+			},
+		}); err != nil {
+			t.Fatalf("Create session %q: %v", alias, err)
+		}
+	}
+	store := &listCallCounter{MemStore: base}
 	p := New(store)
 
-	closed, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"alias":         "old-worker",
-			"alias_history": "worker",
-			"session_name":  "workflows__codex-min-mc-old",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create closed session: %v", err)
-	}
-	if err := store.Close(closed.ID); err != nil {
-		t.Fatalf("Close session: %v", err)
-	}
-	live, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"alias":        "worker",
-			"session_name": "workflows__codex-min-mc-live",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create live session: %v", err)
-	}
-	closedReply, err := store.Create(beads.Bead{
-		Title:    "old reply",
-		Type:     "message",
-		Assignee: closed.ID,
-		From:     "human",
-	})
-	if err != nil {
-		t.Fatalf("Create closed reply: %v", err)
-	}
-	liveMail, err := store.Create(beads.Bead{
-		Title:    "live mail",
-		Type:     "message",
-		Assignee: live.ID,
-		From:     "human",
-	})
-	if err != nil {
-		t.Fatalf("Create live mail: %v", err)
+	for _, alias := range recipients {
+		if _, err := p.Send("human", alias, "", "msg for "+alias); err != nil {
+			t.Fatalf("Send to %q: %v", alias, err)
+		}
 	}
 
-	msgs, err := p.Inbox("worker")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
-	}
-	if msgs[0].ID != liveMail.ID {
-		t.Fatalf("Inbox returned %s, want live message %s; closed reply was %s", msgs[0].ID, liveMail.ID, closedReply.ID)
-	}
-}
+	store.aliasMetadataLists = 0
+	store.sessionNameMetadataLists = 0
+	store.typeSessionLists = 0
+	store.labelSessionLists = 0
 
-func TestInboxByClosedCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
-	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
-	p := New(store)
-
-	closed, err := store.Create(beads.Bead{
-		Type:   session.BeadType,
-		Labels: []string{session.LabelSession},
-		Metadata: map[string]string{
-			"alias":        "worker",
-			"session_name": "workflows__codex-min-mc-closed",
-		},
-	})
+	total, _, err := p.CountRecipients(recipients)
 	if err != nil {
-		t.Fatalf("Create closed session: %v", err)
+		t.Fatalf("CountRecipients: %v", err)
 	}
-	if err := store.Close(closed.ID); err != nil {
-		t.Fatalf("Close session: %v", err)
-	}
-	closedMail, err := store.Create(beads.Bead{
-		Title:    "closed mail",
-		Type:     "message",
-		Assignee: closed.ID,
-		From:     "human",
-	})
-	if err != nil {
-		t.Fatalf("Create closed mail: %v", err)
+	if total != len(recipients) {
+		t.Fatalf("CountRecipients total = %d, want %d", total, len(recipients))
 	}
 
-	msgs, err := p.Inbox("worker")
-	if err != nil {
-		t.Fatalf("Inbox: %v", err)
+	if store.aliasMetadataLists != 0 {
+		t.Errorf("alias metadata Lists = %d, want 0 (per-recipient fanout must be collapsed)", store.aliasMetadataLists)
 	}
-	if len(msgs) != 1 {
-		t.Fatalf("Inbox returned %d messages, want 1", len(msgs))
+	if store.sessionNameMetadataLists != 0 {
+		t.Errorf("session_name metadata Lists = %d, want 0 (per-recipient fanout must be collapsed)", store.sessionNameMetadataLists)
 	}
-	if msgs[0].ID != closedMail.ID {
-		t.Fatalf("Inbox returned %s, want closed mail %s", msgs[0].ID, closedMail.ID)
+	if got := store.typeSessionLists + store.labelSessionLists; got > 2 {
+		t.Errorf("broad session Lists = %d, want <=2 (one Type+Label union per call)", got)
 	}
 }
 
