@@ -1720,6 +1720,64 @@ func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
 	}
 }
 
+// TestWorktreeSetupHandlesWhitespacePaths guards the branch-create path
+// against a rig-root or target-dir containing whitespace. The buggy version
+// assembled the `git worktree add` invocation into a single string and then
+// expanded it unquoted, so word-splitting broke a spaced path into multiple
+// argv words and worktree creation failed. Both the origin/HEAD (DEFAULT_REF)
+// branch and the no-origin fallback interpolated the unquoted command string,
+// so this covers both.
+func TestWorktreeSetupHandlesWhitespacePaths(t *testing.T) {
+	script := filepath.Join(exampleDir(), "packs", "gastown", "assets", "scripts", "worktree-setup.sh")
+	for _, tc := range []struct {
+		name      string
+		hasOrigin bool
+	}{
+		{name: "origin head default ref", hasOrigin: true},
+		{name: "no origin fallback", hasOrigin: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			neutralizeUserGitConfig(t)
+			tmp := t.TempDir()
+			// Spaces in both the rig root and the city dir exercise the
+			// word-splitting bug on the first-time (branch-create) path.
+			rig := filepath.Join(tmp, "rig root")
+			city := filepath.Join(tmp, "city dir")
+
+			if tc.hasOrigin {
+				// Clone from a remote so refs/remotes/origin/HEAD is set,
+				// exercising the DEFAULT_REF interpolation (the cited line).
+				remote := filepath.Join(tmp, "remote repo")
+				runCmd(t, tmp, "git", "init", remote)
+				runCmd(t, remote, "git", "config", "user.email", "test@example.com")
+				runCmd(t, remote, "git", "config", "user.name", "Gastown Test")
+				if err := os.WriteFile(filepath.Join(remote, "README.md"), []byte("hello\n"), 0o644); err != nil {
+					t.Fatalf("writing remote README: %v", err)
+				}
+				runCmd(t, remote, "git", "add", ".")
+				runCmd(t, remote, "git", "commit", "-m", "init")
+				runCmd(t, tmp, "git", "clone", remote, rig)
+			} else {
+				runCmd(t, tmp, "git", "init", rig)
+				runCmd(t, rig, "git", "config", "user.email", "test@example.com")
+				runCmd(t, rig, "git", "config", "user.name", "Gastown Test")
+				if err := os.WriteFile(filepath.Join(rig, "README.md"), []byte("hello\n"), 0o644); err != nil {
+					t.Fatalf("writing rig README: %v", err)
+				}
+				runCmd(t, rig, "git", "add", ".")
+				runCmd(t, rig, "git", "commit", "-m", "init")
+			}
+
+			worktree := filepath.Join(city, ".gc", "worktrees", filepath.Base(rig), "polecat")
+			runCmd(t, tmp, "sh", script, rig, worktree, "polecat")
+
+			if got := runCmd(t, tmp, "git", "-C", worktree, "rev-parse", "--is-inside-work-tree"); got != "true" {
+				t.Fatalf("worktree not created at whitespace path, got %q", got)
+			}
+		})
+	}
+}
+
 func TestPromptGuidanceUsesConfiguredRigRootsAndNamespacedWorktrees(t *testing.T) {
 	dir := exampleDir()
 
