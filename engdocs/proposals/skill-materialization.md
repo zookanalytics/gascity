@@ -236,7 +236,37 @@ Per `engdocs/design/packv2/doc-agent-v2.md:191`:
 > name collision.
 
 Every agent's materialization set = (entire city catalog) ∪
-(that agent's `agents/<name>/skills/`). No filtering by attachment list.
+(that agent's agent-local skill roots). No filtering by attachment list.
+
+#### Additive agent-local skill sources (`skills_dirs`)
+
+An agent's **agent-local roots** are not limited to the single
+convention-discovered `agents/<name>/skills/` directory. A
+`[[patches.agent]]` block may attach additional roots via an additive
+`skills_dirs` list (or the singular `skills_dir` alias). This is what lets
+an *importing* pack scope an agent-local skill to an *imported*,
+bare-name-patched agent — e.g. attaching a merge-gate skill to the gastown
+`mayor` from the gc-toolkit pack — without manufacturing a phantom local
+agent (which would collide as a duplicate agent name and abort city load).
+The roots are pack-safe: relative paths resolve against the declaring
+config dir and `//` against the city root, exactly like `overlay_dir`.
+
+The mechanism is **additive — multiple sources contribute, never clobber**
+(operator decision, 2026-06-05): the singular convention root plus every
+patch-supplied root coexist. `config.Agent.AgentLocalSkillRoots()` returns
+the precedence-ordered set, lowest-first: the convention `SkillsDir`, then
+the patch `SkillsDirs` in declaration order. Materialization layers them so
+later (patch) sources take precedence over the convention root, and the
+city-shared-vs-agent-local override is unchanged (agent-local wins).
+
+Because the per-name sink slot holds exactly one symlink target, a skill
+**name** supplied by more than one of a single agent's own roots is a hard
+collision — flagged by the startup/`gc doctor` validator (an *intra-agent*
+collision; see "Collision validation" below) — rather than silently
+shadowed. Distinct names across an agent's roots union additively and do
+not collide. This honors the "never clobber" half of the additive-list
+decision: an ambiguous name is surfaced for the operator to rename, not
+resolved behind their back.
 
 The existing attachment-list surfaces (introduced in v0.15.0, commits
 `7572464a` and `710bd3b5`) are dead code relative to the design doc and
@@ -427,14 +457,21 @@ targets.
 
 This is a **startup validator** — a new check function in the config/doctor
 layer that runs at `gc start` and at every supervisor tick before
-materialization. The validator:
+materialization. Each agent contributes the union of skill names across
+**all** its agent-local roots (`AgentLocalSkillRoots()`), so the multi-root
+`skills_dirs` model is fully accounted for. The validator flags two
+collision shapes, both hard errors:
 
-- For each `(scope-root, vendor)` pair, groups agents that materialize
-  into it.
-- For each group, builds the multi-map
-  `agent-local-skill-name → [agent-names]`.
-- Emits a hard error for any key with more than one agent in its value
-  list.
+- **Inter-agent.** For each `(scope-root, vendor)` pair, group agents that
+  materialize into it and build `agent-local-skill-name → [agent-names]`.
+  More than one agent under a name is a collision: they would write the
+  same `<scope-root>/.<vendor>/skills/<name>` symlink with different
+  targets into a shared sink.
+- **Intra-agent.** A single agent supplying the same skill name from two or
+  more of its own roots (the convention root plus a patch `skills_dirs`).
+  Its own sources would shadow each other in its one sink slot. This is the
+  "never clobber" guard for the additive-source model — the ambiguity is
+  surfaced rather than resolved silently by precedence.
 
 The same validator is also exposed as a `gc doctor` check
 (`internal/doctor/skill_checks.go`), so operators can catch collisions
@@ -443,11 +480,17 @@ same function; the validator is the single source of truth. `gc doctor`
 surfacing does **not** introduce a new "doctor runs at start" gate — the
 supervisor invokes the validator directly and blocks on its error.
 
-Example error text:
+Example error text (inter-agent, then intra-agent):
 
 ```
 gc start: agent-local skill collision at scope root /path/to/rig (claude):
   "plan" is provided by both "mayor" and "supervisor"
+  rename one of the colliding skills to resolve
+
+agent-local skill collision at scope root /path/to/city (claude):
+  "plan" is provided to mayor by multiple skill sources:
+    /city/.gc/system/packs/gastown/agents/mayor/skills
+    /city/packs/gascity-keeper/merge-skills
   rename one of the colliding skills to resolve
 ```
 
@@ -694,8 +737,15 @@ That is not part of this release.
 4. **MCP activation.** Lands on main post-v0.15.1.
 5. **Skill promotion (`gc skill promote`).** Not in this hotfix. Tracked
    in `engdocs/design/packv2/doc-agent-v2.md:207`.
-6. **Imported-pack skill catalogs.** Still current-city-pack-only. Tracked
-   in `engdocs/design/packv2/doc-pack-v2.md:59`.
+6. **Imported-pack skill catalogs.** The *shared* (city-wide) catalog is
+   still current-city-pack-only. The *agent-local* gap is closed: a
+   `[[patches.agent]]` block can attach additional agent-local skill roots
+   to an imported, bare-name-patched agent via the additive `skills_dirs`
+   list (see "Additive agent-local skill sources" above). This is what
+   scopes a skill to a single imported agent (e.g. the gastown `mayor`)
+   without manufacturing a phantom local agent. Walking a third-party
+   imported pack's whole `skills/` into the shared catalog remains future
+   work. Tracked in `engdocs/design/packv2/doc-pack-v2.md:59`.
 7. **Per-pool PreStart caching.** Optional perf improvement if pool
    scale-up invocation cost becomes noticeable.
 8. **`CoreFingerprintBreakdown` per-skill drift log.** Small ergonomic
