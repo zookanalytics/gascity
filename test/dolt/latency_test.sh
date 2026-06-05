@@ -24,6 +24,21 @@ bad()  { echo "FAIL: $1"; fail=1; }
 command -v now_ms >/dev/null 2>&1 || { echo "FAIL: now_ms not defined"; exit 1; }
 command -v latency_should_warn >/dev/null 2>&1 || { echo "FAIL: latency_should_warn not defined"; exit 1; }
 
+# now_ms emits epoch-milliseconds (13 digits through 2286) — never raw
+# nanoseconds. Guards the uutils-date regression where a %3N width spec is
+# treated as printf minimum-width and the output is unpadded nanoseconds at
+# variable width, so consecutive samples land on different scales and the
+# latency subtraction goes wild (gc-9n4v5n).
+v=$(now_ms)
+case "$v" in
+  *[!0-9]*|'') bad "now_ms emitted non-digits: '$v'" ;;
+  *) if [ "${#v}" -eq 13 ]; then
+       pass "now_ms is ms-scale (13 digits)"
+     else
+       bad "now_ms scale: ${#v} digits ('$v'), want 13 (epoch-ms)"
+     fi ;;
+esac
+
 # now_ms has sub-second resolution. A 50ms sleep must measure in a sub-second
 # band; a whole-second clock yields 0 or 1000 — both fail this.
 s=$(now_ms); sleep 0.05; e=$(now_ms); d=$((e - s))
