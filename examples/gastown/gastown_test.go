@@ -561,6 +561,7 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 // authority (a net-zero branch carrying commits is still "empty"), and a
 // tool error fails closed (exit 2) rather than reading as "safe to merge".
 func TestRefineryBranchHasRealChangeExec(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	fn := extractBetween(t, refineryMergePushDescription(t),
 		"branch_has_real_change() {", "\nhalt_false_completion() {")
 
