@@ -731,9 +731,24 @@ func ensureBeadsProvider(cityPath string) error {
 	return nil
 }
 
+// stopManagedDoltProcessForShutdown reaps the managed Dolt sql-server during
+// city teardown. It is a package var so tests can stub the process-terminating
+// syscalls; production wiring is stopManagedDoltProcess, which discovers the
+// live PID from the process table rather than trusting runtime state files.
+var stopManagedDoltProcessForShutdown = stopManagedDoltProcess
+
 // shutdownBeadsProvider stops the bead store's backing service.
 // Called by gc stop after agents have been terminated.
 // For exec providers, fires "stop". For file providers, always available.
+//
+// When the city owns its managed Dolt lifecycle (endpoint_origin=managed_city),
+// the provider "stop" op terminates the sql-server only through a shell
+// round-trip (gc-beads-bd.sh -> gc dolt-state stop-managed) that can silently
+// miss a Dolt started outside the normal lifecycle (e.g. dolt.auto-start=false
+// plus a manual `gc dolt start`), leaking the sql-server past teardown
+// (bead gc-wf0f6o). shutdownBeadsProvider therefore follows the
+// provider stop with a direct, idempotent reap that discovers the live PID from
+// the process table; it is a no-op when the process is already gone.
 func shutdownBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
 		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
@@ -742,26 +757,40 @@ func shutdownBeadsProvider(cityPath string) error {
 		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 	}
 	provider := beadsProvider(cityPath)
-	if strings.HasPrefix(provider, "exec:") {
-		if providerUsesBdStoreContract(provider) {
-			owned, err := managedDoltLifecycleOwned(cityPath)
-			if err != nil {
-				return err
-			}
-			if !owned {
-				return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
-			}
-		}
-		script := strings.TrimPrefix(provider, "exec:")
-		providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if !strings.HasPrefix(provider, "exec:") {
+		return nil
+	}
+	ownsManagedDolt := false
+	if providerUsesBdStoreContract(provider) {
+		owned, err := managedDoltLifecycleOwned(cityPath)
 		if err != nil {
 			return err
 		}
-		if err := runProviderOpWithEnv(script, providerEnv, "stop"); err != nil {
-			return err
+		if !owned {
+			return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
 		}
-		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
-			return err
+		ownsManagedDolt = true
+	}
+	// Capture the managed Dolt port before the provider stop op clears runtime
+	// state, so the post-stop reap can still target the port holder directly.
+	managedDoltPort := ""
+	if ownsManagedDolt {
+		managedDoltPort = currentResolvableManagedDoltPort(cityPath)
+	}
+	script := strings.TrimPrefix(provider, "exec:")
+	providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+	if err != nil {
+		return err
+	}
+	if err := runProviderOpWithEnv(script, providerEnv, "stop"); err != nil {
+		return err
+	}
+	if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+		return err
+	}
+	if ownsManagedDolt {
+		if _, err := stopManagedDoltProcessForShutdown(cityPath, managedDoltPort); err != nil {
+			return fmt.Errorf("reap managed dolt process for %s: %w", cityPath, err)
 		}
 	}
 	return nil
