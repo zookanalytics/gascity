@@ -24,6 +24,7 @@ import {
   type DashboardResource,
 } from "./state";
 import { renderSupervisorOverview } from "./panels/supervisor";
+import { installMayorTtyInteractions, renderMayorTty } from "./panels/mayor_tty";
 import { installSharedModals } from "./modals";
 import { createRefreshScheduler } from "./refresh_scheduler";
 
@@ -116,6 +117,7 @@ function installInteractions(): void {
   installConvoyInteractions();
   installActivityInteractions();
   installAdminInteractions();
+  installMayorTtyInteractions();
   installCommandPalette({ refreshAll });
 }
 
@@ -124,6 +126,7 @@ async function boot(): Promise<void> {
   logInfo("dashboard", "Boot start", { city: cityScope(), href: window.location.href });
   installInteractions();
   installCityScopeNavigation();
+  renderMayorTty();
   // Catch up when the last pause lifts: renders deferred-while-paused
   // resources so the UI isn't stale after modals close.
   setPopPauseListener(() => {
