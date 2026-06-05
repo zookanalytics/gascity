@@ -10583,6 +10583,109 @@ dolt.auto-start: false
 	}
 }
 
+// TestShutdownBeadsProviderReapsOwnedManagedDoltProcess verifies that tearing
+// down a city that owns its managed Dolt lifecycle (endpoint_origin=managed_city)
+// follows the provider "stop" op with a direct stopManagedDoltProcess reap. The
+// provider stop alone terminates the sql-server through a shell round-trip that
+// can miss a Dolt started outside the normal lifecycle (dolt.auto-start=false
+// plus a manual `gc dolt start`); the reap guarantees the process is gone.
+// Regression test for the gc stop managed-Dolt leak (bead gc-wf0f6o).
+func TestShutdownBeadsProviderReapsOwnedManagedDoltProcess(t *testing.T) {
+	cityPath := t.TempDir()
+	callLog := filepath.Join(cityPath, "op-calls.log")
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$1\" >> "+callLog+"\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_database":"hq","dolt_mode":"server"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var reapCalls int
+	var reapCity string
+	old := stopManagedDoltProcessForShutdown
+	stopManagedDoltProcessForShutdown = func(cp, _ string) (managedDoltStopReport, error) {
+		reapCalls++
+		reapCity = cp
+		return managedDoltStopReport{}, nil
+	}
+	t.Cleanup(func() { stopManagedDoltProcessForShutdown = old })
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("shutdownBeadsProvider() error = %v", err)
+	}
+
+	// The provider stop op must still run for the owned managed city.
+	if got := string(mustReadFile(t, callLog)); !strings.Contains(got, "stop") {
+		t.Fatalf("provider stop op not invoked; op log = %q", got)
+	}
+	// And the direct process reap must follow it.
+	if reapCalls != 1 {
+		t.Fatalf("managed dolt reap calls = %d, want 1", reapCalls)
+	}
+	if reapCity != cityPath {
+		t.Fatalf("reap cityPath = %q, want %q", reapCity, cityPath)
+	}
+}
+
+// TestShutdownBeadsProviderSkipsReapForExternalTarget confines the managed-Dolt
+// reap to cities that own their Dolt lifecycle: a city pointed at an external
+// canonical endpoint must not have someone else's sql-server reaped.
+func TestShutdownBeadsProviderSkipsReapForExternalTarget(t *testing.T) {
+	cityPath := t.TempDir()
+	script := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: gc
+gc.endpoint_origin: city_canonical
+gc.endpoint_status: verified
+dolt.host: 127.0.0.1
+dolt.port: "4406"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	reapCalled := false
+	old := stopManagedDoltProcessForShutdown
+	stopManagedDoltProcessForShutdown = func(string, string) (managedDoltStopReport, error) {
+		reapCalled = true
+		return managedDoltStopReport{}, nil
+	}
+	t.Cleanup(func() { stopManagedDoltProcessForShutdown = old })
+
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+	if err := shutdownBeadsProvider(cityPath); err != nil {
+		t.Fatalf("shutdownBeadsProvider() error = %v", err)
+	}
+	if reapCalled {
+		t.Fatal("managed dolt reap must not run for an external canonical endpoint")
+	}
+}
+
 // ── startBeadsLifecycle skips provider for external ───────────────────
 
 func TestStartBeadsLifecycleSkipsProviderForExternalHost(t *testing.T) {
