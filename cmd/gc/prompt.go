@@ -24,17 +24,23 @@ const (
 
 // PromptContext holds template data for prompt rendering.
 type PromptContext struct {
-	CityRoot                string
-	AgentName               string // qualified: "rig/polecat-1" or "mayor"
-	TemplateName            string // config name: "polecat" (template) or "mayor" (named backing template)
-	BindingName             string
-	BindingPrefix           string
-	RigName                 string
-	RigRoot                 string
-	WorkDir                 string
-	IssuePrefix             string
-	Branch                  string
-	DefaultBranch           string // e.g. "main" — from git symbolic-ref origin/HEAD
+	CityRoot      string
+	AgentName     string // qualified: "rig/polecat-1" or "mayor"
+	TemplateName  string // config name: "polecat" (template) or "mayor" (named backing template)
+	BindingName   string
+	BindingPrefix string
+	RigName       string
+	RigRoot       string
+	WorkDir       string
+	IssuePrefix   string
+	Branch        string
+	DefaultBranch string // e.g. "main" — from git symbolic-ref origin/HEAD
+	// ConfigDir is the directory where the agent's config was defined — the
+	// pack source dir for pack-imported agents, the city dir for inline
+	// agents. Templates use {{ .ConfigDir }} to reference pack-relative
+	// assets (scripts, fragments, docs). Mirrors the field of the same name
+	// on SessionSetupContext.
+	ConfigDir               string
 	WorkQuery               string // command to find available work (from Agent.EffectiveWorkQuery)
 	AssignedInProgressQuery string // command to find assigned in-progress work (from Agent.EffectiveAssignedInProgressQuery)
 	AssignedReadyQuery      string // command to find pre-assigned ready work (from Agent.EffectiveAssignedReadyQuery)
@@ -332,6 +338,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["IssuePrefix"] = ctx.IssuePrefix
 	m["Branch"] = ctx.Branch
 	m["DefaultBranch"] = ctx.DefaultBranch
+	m["ConfigDir"] = ctx.ConfigDir
 	m["WorkQuery"] = ctx.WorkQuery
 	m["AssignedInProgressQuery"] = ctx.AssignedInProgressQuery
 	m["AssignedReadyQuery"] = ctx.AssignedReadyQuery
