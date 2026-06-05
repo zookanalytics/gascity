@@ -1444,12 +1444,27 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	// V2 convention-based agent discovery: scan agents/ directory.
 	// Convention-discovered agents are appended AFTER TOML-declared agents
 	// so [[agent]] tables take precedence when both exist.
-	discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, agentNameSet(tc.Agents))
+	//
+	// An agents/<name>/ overlay whose <name> matches an imported agent that
+	// this pack customizes via a bare-name [[patches.agent]] is an
+	// asset-attachment overlay, not a new native agent. Discovering it would
+	// manufacture a phantom <pack>.<name> that collides with the import and
+	// aborts the load. Suppress the mint for those names and redirect the
+	// overlay's agent-local asset dirs onto the imported agent instead, since
+	// the SourceDir-keyed populateAgentLocalAssetDirs pass cannot reach an
+	// overlay that lives in the importing pack. (gc-5uepp)
+	discoverSkip := agentNameSet(tc.Agents)
+	overlayTargets := importedOverlayAttachTargets(fs, includedAgents, tc.Patches.Agents, topoDir)
+	for name := range overlayTargets {
+		discoverSkip[name] = true
+	}
+	discovered, dErr := DiscoverPackAgents(fs, topoDir, tc.Pack.Name, discoverSkip)
 	if dErr != nil {
 		return nil, nil, nil, nil, nil, nil, nil, dErr
 	}
 	tc.Agents = append(tc.Agents, discovered...)
 	applyInheritedPackAgentDefaults(tc.Agents, tc.AgentDefaults)
+	attachImportedAgentOverlays(fs, includedAgents, overlayTargets, topoDir)
 
 	commands, err := DiscoverPackCommands(fs, topoDir, tc.Pack.Name)
 	if err != nil {
@@ -2321,37 +2336,105 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 // Returns an error if a patch targets a nonexistent agent.
 func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 	for i, p := range patches {
-		target := qualifiedNameFromPatch(p.Dir, p.Name)
-		binding, bare := "", p.Name
-		if p.Dir == "" {
-			if dot := strings.LastIndex(p.Name, "."); dot >= 0 {
-				binding, bare = p.Name[:dot], p.Name[dot+1:]
-			}
-		}
 		found := false
 		for j := range agents {
-			if p.Dir == "" {
-				if agents[j].Name != bare {
-					continue
-				}
-				if binding != "" && agents[j].BindingName != binding {
-					continue
-				}
-				applyAgentPatchFields(&agents[j], &patches[i])
-				found = true
-				break
-			}
-			if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
+			if agentPatchTargets(&patches[i], &agents[j]) {
 				applyAgentPatchFields(&agents[j], &patches[i])
 				found = true
 				break
 			}
 		}
 		if !found {
+			target := qualifiedNameFromPatch(p.Dir, p.Name)
 			return fmt.Errorf("patches.agent[%d]: agent %q not found in pack", i, target)
 		}
 	}
 	return nil
+}
+
+// agentPatchTargets reports whether patch p targets agent a. It mirrors the
+// matching rules applyPackAgentPatches applies: a bare-name patch (empty
+// Dir) matches by Name and an optional "binding." prefix; a dir-qualified
+// patch matches on (Dir, Name) exactly.
+func agentPatchTargets(p *AgentPatch, a *Agent) bool {
+	if p.Dir != "" {
+		return a.Dir == p.Dir && a.Name == p.Name
+	}
+	binding, bare := "", p.Name
+	if dot := strings.LastIndex(p.Name, "."); dot >= 0 {
+		binding, bare = p.Name[:dot], p.Name[dot+1:]
+	}
+	if a.Name != bare {
+		return false
+	}
+	return binding == "" || a.BindingName == binding
+}
+
+// importedOverlayAttachTargets returns the set of imported agent names for
+// which this pack both (a) declares a [[patches.agent]] customizing the
+// imported agent and (b) carries an agents/<name>/ asset overlay on disk.
+// Such overlays attach agent-local assets to the imported agent rather than
+// minting a colliding phantom native agent.
+//
+// Requiring the patch keeps the change conservative: an agents/<name>/ dir
+// that collides with an import but carries no customizing patch still fails
+// as a genuine duplicate-agent definition. (gc-5uepp)
+func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentPatch, packDir string) map[string]bool {
+	if len(imported) == 0 || len(patches) == 0 {
+		return nil
+	}
+	var out map[string]bool
+	for i := range imported {
+		a := &imported[i]
+		if out[a.Name] {
+			continue
+		}
+		overlayDir := filepath.Join(packDir, "agents", a.Name)
+		if info, err := fs.Stat(overlayDir); err != nil || !info.IsDir() {
+			continue
+		}
+		for j := range patches {
+			if agentPatchTargets(&patches[j], a) {
+				if out == nil {
+					out = map[string]bool{}
+				}
+				out[a.Name] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
+// attachImportedAgentOverlays redirects an importing pack's agents/<name>/
+// asset overlays (skills, mcp) onto the imported agents named in targets.
+// Imported agents resolve agent-local assets relative to their own pack's
+// SourceDir, so the SourceDir-keyed populateAgentLocalAssetDirs pass cannot
+// reach an overlay that lives in the importing pack — this wires it
+// explicitly. Only empty asset fields are filled, so an imported agent that
+// already carries its own agent-local catalog is never clobbered. (gc-5uepp)
+func attachImportedAgentOverlays(fs fsys.FS, imported []Agent, targets map[string]bool, packDir string) {
+	if len(targets) == 0 {
+		return
+	}
+	for i := range imported {
+		a := &imported[i]
+		if !targets[a.Name] {
+			continue
+		}
+		if a.SkillsDir == "" {
+			skillsDir := filepath.Join(packDir, "agents", a.Name, "skills")
+			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
+				a.SkillsDir = skillsDir
+			}
+		}
+		if a.MCPDir == "" {
+			mcpDir := filepath.Join(packDir, "agents", a.Name, "mcp")
+			if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
+				a.MCPDir = mcpDir
+			}
+		}
+	}
 }
 
 // validatePackMeta checks the [pack] header for required fields
