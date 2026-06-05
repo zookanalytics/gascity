@@ -27,8 +27,8 @@ fi
 # Count pending work items (non-empty lines from gc hook).
 w=$(gc hook "$agent" 2>/dev/null | grep -c . || true)
 
-# Count unread mail (first word of gc mail check output is the count).
-m=$(gc mail check "$agent" 2>/dev/null | awk '{print $1+0}' || true)
+# Count unread mail via the count-only endpoint (cheaper than mail check).
+m=$(gc mail count "$agent" --json 2>/dev/null | jq -r '.unread // 0' 2>/dev/null || echo 0)
 
 # Format: agent | hook-icon N | mail-icon N  (omit segments that are 0)
 printf '%s' "$agent"
