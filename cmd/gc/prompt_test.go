@@ -334,6 +334,22 @@ func TestRenderPromptDefaultBranch(t *testing.T) {
 	}
 }
 
+// TestRenderPromptConfigDirResolves pins the wiring documented in commit
+// 0f64ea4 (the {{ .ConfigDir }} migration): templates that reference
+// {{ .ConfigDir }} must resolve to the pack source directory, not the
+// empty string. Without this field, missingkey=zero silently renders
+// {{ .ConfigDir }}/assets/scripts/foo.sh as /assets/scripts/foo.sh.
+func TestRenderPromptConfigDirResolves(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.template.md"] = []byte("Watcher: {{ .ConfigDir }}/assets/scripts/gc-bd-watch.sh\n")
+	ctx := PromptContext{ConfigDir: "/home/user/packs/gc-toolkit"}
+	got := renderPrompt(f, "/city", "", "prompts/test.template.md", ctx, "", io.Discard, nil, nil, nil)
+	want := "Watcher: /home/user/packs/gc-toolkit/assets/scripts/gc-bd-watch.sh\n"
+	if got != want {
+		t.Errorf("renderPrompt(ConfigDir) = %q, want %q", got, want)
+	}
+}
+
 func TestDefaultBranchForRig_PrefersStoredValue(t *testing.T) {
 	rigs := []config.Rig{
 		{Name: "scamper", Path: "/scamper", DefaultBranch: "master"},
