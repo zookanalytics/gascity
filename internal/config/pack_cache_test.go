@@ -384,3 +384,90 @@ schema = 2
 		t.Errorf("expected one Extras entry ending in 'ext', got %v", p.Extras)
 	}
 }
+
+// scaffoldZeroPointerCity writes a city whose config carries explicit
+// zero-valued pointer fields. gob omits zero values from struct fields and
+// flattens pointers, so without the zero-pointer sidecar these fields
+// round-trip the cache as nil — silently turning "explicitly zero/false"
+// into "unset" on every warm load (gc-9n4v5n: upstream's
+// TestCmdSlingDefaultFormulaDoesNotMaterializePoolSession exposed this via
+// min_active_sessions = 0 flipping SupportsInstanceExpansion).
+func scaffoldZeroPointerCity(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	writeTestFile(t, root, "city.toml", `
+[workspace]
+name = "test"
+
+[doctor]
+pack_script_timeout_secs = 0
+
+[[agent]]
+name = "worker"
+start_command = "true"
+min_active_sessions = 0
+max_active_sessions = 0
+inject_assigned_skills = false
+`)
+	if err := os.MkdirAll(filepath.Join(root, ".gc"), 0o755); err != nil {
+		t.Fatalf("mkdir .gc: %v", err)
+	}
+	return root
+}
+
+// TestPackCache_PreservesExplicitZeroPointerFields locks in pointer
+// fidelity across the cache: a pointer field whose pointee is the zero
+// value (min_active_sessions = 0, inject_assigned_skills = false) must
+// decode as a pointer-to-zero, not nil. nil-vs-zero is semantically
+// load-bearing for tri-state config (SupportsInstanceExpansion treats
+// explicit MinActiveSessions as pool intent; InjectAssignedSkills nil
+// means inherit, false means disable).
+func TestPackCache_PreservesExplicitZeroPointerFields(t *testing.T) {
+	t.Setenv(packCacheEnvVar, "")
+	cityRoot := scaffoldZeroPointerCity(t)
+
+	cold, _ := mustLoadCity(t, cityRoot)
+	if _, err := os.Stat(packCacheFilePath(cityRoot)); err != nil {
+		t.Fatalf("expected cache file after first load: %v", err)
+	}
+	warm, _ := mustLoadCity(t, cityRoot)
+
+	checkAgent := func(label string, cfg *City) {
+		t.Helper()
+		var a *Agent
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == "worker" {
+				a = &cfg.Agents[i]
+				break
+			}
+		}
+		if a == nil {
+			t.Fatalf("%s: agent worker not found", label)
+		}
+		if a.MinActiveSessions == nil || *a.MinActiveSessions != 0 {
+			t.Errorf("%s: MinActiveSessions = %v, want pointer to 0", label, a.MinActiveSessions)
+		}
+		if a.MaxActiveSessions == nil || *a.MaxActiveSessions != 0 {
+			t.Errorf("%s: MaxActiveSessions = %v, want pointer to 0", label, a.MaxActiveSessions)
+		}
+		if a.InjectAssignedSkills == nil || *a.InjectAssignedSkills != false {
+			t.Errorf("%s: InjectAssignedSkills = %v, want pointer to false", label, a.InjectAssignedSkills)
+		}
+		if a.SupportsInstanceExpansion() != cold.Agents[0].SupportsInstanceExpansion() && label == "warm" {
+			t.Errorf("%s: SupportsInstanceExpansion diverged from cold load", label)
+		}
+	}
+	checkAgent("cold", cold)
+	checkAgent("warm", warm)
+
+	if cold.Doctor.PackScriptTimeoutSecs == nil || *cold.Doctor.PackScriptTimeoutSecs != 0 {
+		t.Errorf("cold: Doctor.PackScriptTimeoutSecs = %v, want pointer to 0", cold.Doctor.PackScriptTimeoutSecs)
+	}
+	if warm.Doctor.PackScriptTimeoutSecs == nil || *warm.Doctor.PackScriptTimeoutSecs != 0 {
+		t.Errorf("warm: Doctor.PackScriptTimeoutSecs = %v, want pointer to 0", warm.Doctor.PackScriptTimeoutSecs)
+	}
+
+	if !reflect.DeepEqual(cold.Agents, warm.Agents) {
+		t.Errorf("Agents mismatch between cold and warm load:\n cold=%+v\n warm=%+v", cold.Agents, warm.Agents)
+	}
+}
