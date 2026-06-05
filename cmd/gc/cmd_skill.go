@@ -130,9 +130,18 @@ func listVisibleSkillEntries(cityPath string, cfg *config.City, store beads.Stor
 		return nil, err
 	}
 	// Every agent sees the entire shared catalog plus its own agent-local
-	// skills. No attachment filtering.
+	// skills. No attachment filtering. Agent-local skills come from the
+	// convention root (agents/<name>/skills/) AND any patch-supplied
+	// skills_dirs roots, so the listing matches what the materializer
+	// delivers into the agent's sink.
 	entries = append(entries, discoverImportedSkillEntries(sharedSkillCatalogInputs(cfg, agentRigScopeName(agent, cfg.Rigs)))...)
 	entries = append(entries, discoverAgentSkillEntries(agentAssetRoot(cityPath, agent), agent.Name, "agent")...)
+	for _, root := range agent.SkillsDirs {
+		if root == "" {
+			continue
+		}
+		entries = append(entries, discoverSkillDirEntries(root, root, "agent")...)
+	}
 	sortVisibilityEntries(entries)
 	return entries, nil
 }

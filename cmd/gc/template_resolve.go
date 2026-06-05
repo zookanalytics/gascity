@@ -383,13 +383,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 			stage2Delivers := isStage2EligibleSession(p.sessionProvider, cfgAgent)
 			if stage1Delivers || stage2Delivers {
 				var agentCat materialize.AgentCatalog
-				if cfgAgent.SkillsDir != "" {
+				if roots := cfgAgent.AgentLocalSkillRoots(); len(roots) > 0 {
 					// Best-effort: a transient I/O failure loading the
 					// agent catalog shouldn't break the prompt render.
 					// The error is already surfaced via
 					// effectiveSkillsForAgent's stderr path earlier in
 					// the call graph.
-					if c, err := materialize.LoadAgentCatalog(cfgAgent.SkillsDir); err == nil {
+					if c, err := materialize.LoadAgentCatalogs(roots); err == nil {
 						agentCat = c
 					}
 				}

@@ -170,7 +170,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 		cityCat = cat
 	}
 
-	agentCat, err := materialize.LoadAgentCatalog(agent.SkillsDir)
+	agentCat, err := materialize.LoadAgentCatalogs(agent.AgentLocalSkillRoots())
 	if err != nil {
 		fmt.Fprintf(stderr, "gc internal materialize-skills: %v\n", err) //nolint:errcheck // best-effort stderr
 		return errExit
@@ -178,9 +178,7 @@ func materializeSkillsIntoWorkdir(cfg *config.City, agent *config.Agent, workdir
 	desired := materialize.EffectiveSet(cityCat, agentCat)
 
 	owned := append([]string{}, cityCat.OwnedRoots...)
-	if agentCat.OwnedRoot != "" {
-		owned = append(owned, agentCat.OwnedRoot)
-	}
+	owned = append(owned, agentCat.OwnedRoots...)
 
 	absWorkdir, err := filepath.Abs(workdir)
 	if err != nil {

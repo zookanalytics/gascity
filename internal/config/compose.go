@@ -847,6 +847,17 @@ func populateAgentLocalAssetDirs(fs fsys.FS, root *City, cityRoot string) {
 				a.SkillsDir = skillsDir
 			}
 		}
+		// Normalize patch-supplied skill roots to absolute. adjustPatchPaths
+		// resolves them to city-root-relative (pack-safe, like overlay_dir);
+		// the convention SkillsDir above is absolute, so make SkillsDirs
+		// absolute too. A uniform set lets AgentLocalSkillRoots consumers
+		// (materializer, collision validator, prompt render) read the roots
+		// without re-threading the city root.
+		for j, dir := range a.SkillsDirs {
+			if dir != "" && !filepath.IsAbs(dir) {
+				a.SkillsDirs[j] = filepath.Join(cityRoot, dir)
+			}
+		}
 		if a.MCPDir == "" {
 			mcpDir := filepath.Join(base, "agents", a.Name, "mcp")
 			if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
