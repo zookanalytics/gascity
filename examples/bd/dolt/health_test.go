@@ -1589,6 +1589,19 @@ done
 exit 1
 `, mainPort, mainPID))
 
+	// Fake ss: maps the city port to mainPID so server_pid resolves on
+	// Linux test hosts, where ss-first listener detection runs before
+	// lsof (Go's MPTCP listening sockets are invisible to lsof).
+	writeExecutable(t, filepath.Join(fakeBin, "ss"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    "sport = :%s") printf 'pid=%s\n'; exit 0 ;;
+  esac
+done
+exit 0
+`, mainPort, mainPID))
+
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// foreign PID's args line WITH `--config <path>` so the awk pass extracts
 	// it; the others are plain sql-servers. Also answer the `-p <pid> -o pid=`
@@ -1696,6 +1709,18 @@ for arg in "$@"; do
   esac
 done
 exit 1
+`, mainPort, mainPID))
+	// Fake ss: maps the city port to mainPID so server_pid resolves on
+	// Linux test hosts, where ss-first listener detection runs before
+	// lsof (Go's MPTCP listening sockets are invisible to lsof).
+	writeExecutable(t, filepath.Join(fakeBin, "ss"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    "sport = :%s") printf 'pid=%s\n'; exit 0 ;;
+  esac
+done
+exit 0
 `, mainPort, mainPID))
 	// Bounded `ps -eo` pass: the suspect PID carries `--config <path>` but
 	// its sibling dolt.pid records a different PID, so the foreign-managed
