@@ -884,9 +884,10 @@ func newInitPackConfig(cityName string) initPackConfig {
 //   - city.toml keeps only runtime-local deployment settings (e.g.
 //     workspace.provider, workspace.start_command, agent_defaults,
 //     default-rig imports, rig/provider patches, api, daemon, beads).
-//   - workspace.name and workspace.prefix migrate to .gc/site.toml via
-//     persistInitWorkspaceIdentity, so they are cleared here to avoid
-//     duplicating the city's machine-local identity in city.toml.
+//   - workspace.name migrates to .gc/site.toml via persistInitWorkspaceIdentity,
+//     so it is cleared here to avoid duplicating the city's machine-local name
+//     in city.toml. workspace.prefix is a tracked, version-controlled city.toml
+//     field (globally-invariant bead-ID identity) and is preserved.
 func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.City) {
 	packCfg := newInitPackConfig(cityName)
 	if cfg == nil {
@@ -906,7 +907,6 @@ func splitInitConfig(cityName string, cfg *config.City) (initPackConfig, config.
 	cityCfg.AgentsDefaults = config.AgentDefaults{}
 	cityCfg.Defaults = config.PackDefaults{}
 	cityCfg.Workspace.Name = ""
-	cityCfg.Workspace.Prefix = ""
 
 	packCfg.Agents = append([]config.Agent(nil), cfg.Agents...)
 	packCfg.NamedSessions = append([]config.NamedSession(nil), cfg.NamedSessions...)
@@ -1716,8 +1716,10 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 		}
 		return cfg, cityName, cityPrefix, false, nil
 	}
+	// Only workspace.name migrates to .gc/site.toml. workspace.prefix is a
+	// tracked, version-controlled city.toml field (globally-invariant bead-ID
+	// identity) and is preserved in the copied city.toml.
 	cfg.Workspace.Name = ""
-	cfg.Workspace.Prefix = ""
 	var rigSiteBindings []config.Rig
 	if hasInitRigSiteBindings(cfg.Rigs) {
 		rigSiteBindings = append([]config.Rig(nil), cfg.Rigs...)
@@ -1944,7 +1946,12 @@ func tomlInlineCommentSuffix(line string) string {
 }
 
 func persistInitWorkspaceIdentity(fs fsys.FS, cityPath, cityTomlPath string, cfg *config.City, cityName, cityPrefix string) error {
-	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, cityPrefix); err != nil {
+	// Only workspace.name moves into machine-local .gc/site.toml. workspace.prefix
+	// is a tracked, version-controlled city.toml field (globally-invariant bead-ID
+	// identity); never pull it into the gitignored site binding, or a fresh clone
+	// would rederive the wrong prefix. On site-binding failure, the legacy restore
+	// path re-pins both name and prefix in city.toml so identity is never lost.
+	if err := config.PersistWorkspaceSiteBinding(fs, cityPath, cityName, ""); err != nil {
 		if restoreErr := restoreLegacyWorkspaceIdentity(fs, cityTomlPath, cfg, cityName, cityPrefix); restoreErr != nil {
 			return errors.Join(err, fmt.Errorf("restoring legacy workspace identity: %w", restoreErr))
 		}
