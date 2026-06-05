@@ -836,6 +836,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		SleepAfterIdleSource:         "agent",
 		InstallAgentHooks:            []string{"claude"},
 		SkillsDir:                    "/skills",
+		SkillsDirs:                   []string{"/skills-extra"},
 		MCPDir:                       "/mcp",
 		HooksInstalled:               &trueVal,
 		InjectAssignedSkills:         &trueVal,
