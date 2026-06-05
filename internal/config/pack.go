@@ -2377,11 +2377,14 @@ func agentPatchTargets(p *AgentPatch, a *Agent) bool {
 // assets to that exact imported agent rather than minting a colliding
 // phantom native agent.
 //
-// Targets are keyed by slice index — the imported agent's identity — not by
-// bare name. When two bindings import the same bare agent name and only one
-// is patched, only the patched import may receive the importing pack's
-// private assets; keying by name would leak the overlay onto the unpatched
-// sibling. (gc-5uepp, gc-fbt9c)
+// Target selection mirrors applyPackAgentPatches: a patch binds to the FIRST
+// agent it targets and stops, so the overlay attaches to that same single
+// import — keyed by slice index, the agent's identity. When two bindings
+// import the same bare agent name and an unqualified [[patches.agent]]
+// targets both, only the first — the one applyPackAgentPatches actually
+// patches — may receive the importing pack's private assets. Marking every
+// same-name match leaked the overlay onto the unpatched sibling.
+// (gc-5uepp, gc-fbt9c, gc-de5wp)
 //
 // Requiring the patch keeps the change conservative: an agents/<name>/ dir
 // that collides with an import but carries no customizing patch still fails
@@ -2391,20 +2394,23 @@ func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentP
 		return nil
 	}
 	var out map[int]bool
-	for i := range imported {
-		a := &imported[i]
-		overlayDir := filepath.Join(packDir, "agents", a.Name)
-		if info, err := fs.Stat(overlayDir); err != nil || !info.IsDir() {
-			continue
-		}
-		for j := range patches {
-			if agentPatchTargets(&patches[j], a) {
+	for j := range patches {
+		// Mirror applyPackAgentPatches' first-match-then-break: bind the patch
+		// to the first import it targets and stop. Falling through to a later
+		// same-bare-name sibling would attach the overlay to an import that the
+		// patch never reached.
+		for i := range imported {
+			if !agentPatchTargets(&patches[j], &imported[i]) {
+				continue
+			}
+			overlayDir := filepath.Join(packDir, "agents", imported[i].Name)
+			if info, err := fs.Stat(overlayDir); err == nil && info.IsDir() {
 				if out == nil {
 					out = map[int]bool{}
 				}
 				out[i] = true
-				break
 			}
+			break
 		}
 	}
 	return out

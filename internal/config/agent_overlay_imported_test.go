@@ -205,6 +205,57 @@ func TestImportedOverlayAttachTargetsKeyedByIdentity(t *testing.T) {
 	}
 }
 
+// TestImportedOverlayAttachTargetsBarePatchFirstMatchOnly locks in the
+// gc-de5wp fix for the codex re-review finding on PR#37. The earlier
+// gc-fbt9c fix only proved the BINDING-QUALIFIED patch path
+// (TestImportedOverlayAttachTargetsKeyedByIdentity, patch "base1.mayor"),
+// where agentPatchTargets matches a single import. The UNQUALIFIED bare
+// patch path stayed broken: a legacy [[patches.agent]] name = "mayor"
+// targets BOTH same-bare-name imports, but applyPackAgentPatches binds it to
+// the FIRST match and stops (first-wins legacy semantics). The overlay attach
+// targeting must mirror that identity and attach the importing pack's private
+// skills/mcp to the first import ONLY — marking every same-name match leaked
+// the assets onto the sibling that never received the patch.
+func TestImportedOverlayAttachTargetsBarePatchFirstMatchOnly(t *testing.T) {
+	packDir := t.TempDir()
+	// The importing pack carries an agents/mayor/{skills,mcp}/ overlay.
+	writeTestFile(t, packDir, "agents/mayor/skills/git-merge-pull-request/SKILL.md", `# git-merge-pull-request`)
+	writeTestFile(t, packDir, "agents/mayor/mcp/private.toml", `command = ["helper-mcp"]`)
+
+	// Two imported agents share the bare name "mayor" from distinct bindings.
+	// The patch is UNQUALIFIED (no "binding." prefix), so agentPatchTargets
+	// matches both by name — but applyPackAgentPatches patches only the first.
+	imported := []Agent{
+		{Name: "mayor", BindingName: "base1", SourceDir: filepath.Join(packDir, "base1")},
+		{Name: "mayor", BindingName: "base2", SourceDir: filepath.Join(packDir, "base2")},
+	}
+	patches := []AgentPatch{{Name: "mayor"}}
+
+	fs := fsys.OSFS{}
+	targets := importedOverlayAttachTargets(fs, imported, patches, packDir)
+	attachImportedAgentOverlays(fs, imported, targets, packDir)
+
+	// The first import — the one applyPackAgentPatches actually patches —
+	// receives the importing pack's overlay.
+	wantSkills := filepath.Join(packDir, "agents", "mayor", "skills")
+	if imported[0].SkillsDir != wantSkills {
+		t.Errorf("first mayor import SkillsDir = %q, want %q", imported[0].SkillsDir, wantSkills)
+	}
+	wantMCP := filepath.Join(packDir, "agents", "mayor", "mcp")
+	if imported[0].MCPDir != wantMCP {
+		t.Errorf("first mayor import MCPDir = %q, want %q", imported[0].MCPDir, wantMCP)
+	}
+
+	// The second same-bare-name import never received the patch, so the
+	// overlay must NOT attach to it — this is the asset leak the fix closes.
+	if imported[1].SkillsDir != "" {
+		t.Errorf("second mayor import SkillsDir = %q, want empty — overlay leaked to an unpatched same-bare-name import via the unqualified-patch path", imported[1].SkillsDir)
+	}
+	if imported[1].MCPDir != "" {
+		t.Errorf("second mayor import MCPDir = %q, want empty — overlay leaked to an unpatched same-bare-name import via the unqualified-patch path", imported[1].MCPDir)
+	}
+}
+
 // TestImportingPackOverlayTakesPrecedenceOverImportedCatalog locks in the
 // gc-fbt9c fix for codex finding 2: when the imported+patched agent already
 // carries its own agent-local skills/mcp catalog from its defining pack, the
