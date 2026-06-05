@@ -167,6 +167,48 @@ func TestSkillListAgentCityScopedDirMatchingRigDoesNotShowRigSharedSkills(t *tes
 	}
 }
 
+// TestSkillListAgentShowsPatchSkillsDirs verifies `gc skill list --agent`
+// surfaces a patch-attached skills_dirs root, scoped to the patched agent
+// only (acceptance criterion 1's check path). mayor carries the patch root;
+// polecat does not.
+func TestSkillListAgentShowsPatchSkillsDirs(t *testing.T) {
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	patchSkills := filepath.Join(cityDir, "keeper-skills")
+	writeCatalogFile(t, patchSkills, "git-merge-pull-request/SKILL.md", "merge gate skill")
+
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "claude", SkillsDirs: []string{patchSkills}},
+			{Name: "polecat", Scope: "city", Provider: "claude"},
+		},
+	}
+
+	mayorEntries, err := listVisibleSkillEntries(cityDir, cfg, nil, "mayor", "")
+	if err != nil {
+		t.Fatalf("listVisibleSkillEntries(mayor): %v", err)
+	}
+	var found bool
+	for _, e := range mayorEntries {
+		if e.Name == "git-merge-pull-request" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("mayor skill list missing patch skills_dirs skill: %+v", mayorEntries)
+	}
+
+	polecatEntries, err := listVisibleSkillEntries(cityDir, cfg, nil, "polecat", "")
+	if err != nil {
+		t.Fatalf("listVisibleSkillEntries(polecat): %v", err)
+	}
+	for _, e := range polecatEntries {
+		if e.Name == "git-merge-pull-request" {
+			t.Fatalf("polecat must not list the mayor-scoped patch skill: %+v", polecatEntries)
+		}
+	}
+}
+
 func TestSkillListSessionCatalog(t *testing.T) {
 	clearGCEnv(t)
 	cityDir := t.TempDir()
