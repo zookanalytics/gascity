@@ -57,6 +57,7 @@ run-target-routed-to-backfill
 backlog-depth
 order-tracking-retention
 session-model
+session-stuck-creating
 dolt-server
 dolt-noms-size
 dolt-config
