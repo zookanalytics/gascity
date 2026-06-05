@@ -656,13 +656,17 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 
 // buildPrimeContext constructs a PromptContext for gc prime. Uses GC_*
 // environment variables when running inside a managed session, falls back
-// to currentRigContext when run manually. `cfg` is the loaded City config
-// and may be nil in tests; it supplies the city-level fallback for fields
-// like DefaultMergeStrategy.
-func buildPrimeContext(cityPath, cityName string, a *config.Agent, cfg *config.City, rigs []config.Rig, stderr io.Writer) PromptContext {
-	return buildPrimeContextForBeads(cityPath, cityName, a, cfg, rigs, config.BeadsConfig{}, stderr)
+// to currentRigContext when run manually. It passes a nil City config to
+// buildPrimeContextForBeads; callers that need the city-level fallback for
+// fields like DefaultMergeStrategy call buildPrimeContextForBeads directly.
+func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
+	return buildPrimeContextForBeads(cityPath, cityName, a, nil, rigs, config.BeadsConfig{}, stderr)
 }
 
+// buildPrimeContextForBeads constructs a PromptContext for gc prime with an
+// explicit beads config. `cfg` is the loaded City config and may be nil in
+// tests; it supplies the city-level fallback for fields like
+// DefaultMergeStrategy.
 func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, cfg *config.City, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
 	configDir := cityPath
 	if a.SourceDir != "" {
