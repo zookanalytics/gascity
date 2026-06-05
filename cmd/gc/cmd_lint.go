@@ -417,6 +417,10 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		qualifiedName = "lint-agent"
 	}
 	providerKey := agentCfg.Provider
+	configDir := packDir
+	if agentCfg.SourceDir != "" {
+		configDir = agentCfg.SourceDir
+	}
 	return PromptContext{
 		CityRoot:                packDir,
 		AgentName:               qualifiedName,
@@ -429,6 +433,7 @@ func lintPromptContext(packDir string, agentCfg config.Agent, providers map[stri
 		IssuePrefix:             "lint",
 		Branch:                  "feature/lint",
 		DefaultBranch:           "main",
+		ConfigDir:               configDir,
 		AssignedInProgressQuery: agentCfg.EffectiveAssignedInProgressQueryForBeads(config.BeadsConfig{}),
 		AssignedReadyQuery:      agentCfg.EffectiveAssignedReadyQueryForBeads(config.BeadsConfig{}),
 		RoutedPoolQuery:         agentCfg.EffectiveRoutedPoolQueryForBeads(config.BeadsConfig{}),
