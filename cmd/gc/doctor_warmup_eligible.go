@@ -34,6 +34,10 @@ func (c *sessionModelDoctorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *stuckCreatingDoctorCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *v2RoutedToNamespaceCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
