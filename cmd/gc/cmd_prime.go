@@ -648,11 +648,16 @@ func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config
 }
 
 func buildPrimeContextForBeads(cityPath, cityName string, a *config.Agent, rigs []config.Rig, beadsCfg config.BeadsConfig, stderr io.Writer) PromptContext {
+	configDir := cityPath
+	if a.SourceDir != "" {
+		configDir = a.SourceDir
+	}
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		TemplateName:  a.Name,
 		BindingName:   a.BindingName,
 		BindingPrefix: a.BindingPrefix(),
+		ConfigDir:     configDir,
 		Env:           a.Env,
 	}
 
