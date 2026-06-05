@@ -446,6 +446,21 @@
               "null"
             ]
           },
+          "SkillsDir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "SkillsDirs": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "SleepAfterIdle": {
             "type": [
               "string",
@@ -515,6 +530,8 @@
           "SessionSetupScript",
           "SessionLive",
           "OverlayDir",
+          "SkillsDirs",
+          "SkillsDir",
           "DefaultSlingFormula",
           "InjectFragments",
           "AppendFragments",

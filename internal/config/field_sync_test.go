@@ -42,6 +42,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"SharedSkills":                 "runtime-only legacy tombstone field retained for backwards compatibility",
 		"SharedMCP":                    "runtime-only legacy tombstone field retained for backwards compatibility",
 		"SkillsDir":                    "runtime-only, set during agent discovery from agents/<name>/skills/",
+		"SkillsDirs":                   "runtime-only, appended during patch apply from AgentPatch.skills_dirs/skills_dir",
 		"MCPDir":                       "runtime-only, set during agent discovery from agents/<name>/mcp/",
 		"Fallback":                     "pack composition hint, not overridable at runtime",
 		"PoolName":                     "internal field set during pool expansion, not user-configurable",
@@ -194,6 +195,8 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		SessionSetupScript:      strVal("scripts/setup.sh"),
 		SessionLive:             []string{"live-cmd"},
 		OverlayDir:              strVal("overlays/test"),
+		SkillsDirs:              []string{"agents/worker/skills"},
+		SkillsDir:               strVal("agents/worker/extra-skills"),
 		DefaultSlingFormula:     strVal("mol-work"),
 		InjectFragments:         Fragments("frag1"),
 		AppendFragments:         []string{"append1"},
@@ -248,6 +251,10 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 		"MCP":          true,
 		"SkillsAppend": true,
 		"MCPAppend":    true,
+		// Singular skills_dir alias appends to Agent.SkillsDirs (not the
+		// same-named Agent.SkillsDir convention field) — verified explicitly
+		// below rather than by the same-name auto-check.
+		"SkillsDir": true,
 	}
 
 	// Check that all non-targeting, non-modifier fields were applied.
@@ -307,6 +314,12 @@ func TestApplyAgentPatchCoversAllFields(t *testing.T) {
 	}
 	if len(agent.InjectFragments) != 2 || agent.InjectFragments[1] != "frag2" {
 		t.Errorf("InjectFragmentsAppend not applied: %v", agent.InjectFragments)
+	}
+	// Both the singular skills_dir alias and the plural skills_dirs append
+	// to Agent.SkillsDirs additively, with skills_dir layering first.
+	wantSkillsDirs := []string{"agents/worker/extra-skills", "agents/worker/skills"}
+	if !reflect.DeepEqual(agent.SkillsDirs, wantSkillsDirs) {
+		t.Errorf("SkillsDirs append = %v, want %v", agent.SkillsDirs, wantSkillsDirs)
 	}
 }
 

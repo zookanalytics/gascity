@@ -781,6 +781,16 @@ func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 			v := adjustFragmentPath(*p.OverlayDir, declDir, cityRoot)
 			p.OverlayDir = &v
 		}
+		if p.SkillsDir != nil && *p.SkillsDir != "" {
+			v := adjustFragmentPath(*p.SkillsDir, declDir, cityRoot)
+			p.SkillsDir = &v
+		}
+		for j := range p.SkillsDirs {
+			if p.SkillsDirs[j] == "" {
+				continue
+			}
+			p.SkillsDirs[j] = adjustFragmentPath(p.SkillsDirs[j], declDir, cityRoot)
+		}
 	}
 }
 

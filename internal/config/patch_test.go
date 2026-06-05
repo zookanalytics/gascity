@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -919,6 +920,97 @@ func TestApplyPatches_AgentOverlayDirClear(t *testing.T) {
 	}
 	if cfg.Agents[0].OverlayDir != "" {
 		t.Errorf("OverlayDir = %q, want empty", cfg.Agents[0].OverlayDir)
+	}
+}
+
+func TestApplyPatches_AgentSkillsDirsAdditive(t *testing.T) {
+	// An agent with a convention-discovered SkillsDir plus two patches
+	// that each add skill roots: every source must coexist (never clobber).
+	cfg := &City{
+		Agents: []Agent{{Name: "mayor", SkillsDir: "agents/mayor/skills"}},
+	}
+	err := ApplyPatches(cfg, Patches{
+		Agents: []AgentPatch{
+			{Name: "mayor", SkillsDirs: []string{"packs/keeper/merge-skills"}},
+			{Name: "mayor", SkillsDir: ptrStr("packs/extra/skills")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	// SkillsDir (convention) is untouched; patches append to SkillsDirs in
+	// declaration order (first patch's skills_dirs, then second patch's
+	// skills_dir alias).
+	if cfg.Agents[0].SkillsDir != "agents/mayor/skills" {
+		t.Errorf("SkillsDir = %q, want convention root unchanged", cfg.Agents[0].SkillsDir)
+	}
+	wantDirs := []string{"packs/keeper/merge-skills", "packs/extra/skills"}
+	if !reflect.DeepEqual(cfg.Agents[0].SkillsDirs, wantDirs) {
+		t.Errorf("SkillsDirs = %v, want %v", cfg.Agents[0].SkillsDirs, wantDirs)
+	}
+	// The merged accessor layers convention first, then patches; later
+	// (patch) roots take precedence.
+	wantRoots := []string{"agents/mayor/skills", "packs/keeper/merge-skills", "packs/extra/skills"}
+	if got := cfg.Agents[0].AgentLocalSkillRoots(); !reflect.DeepEqual(got, wantRoots) {
+		t.Errorf("AgentLocalSkillRoots = %v, want %v", got, wantRoots)
+	}
+}
+
+func TestAdjustPatchPaths_SkillsDirs(t *testing.T) {
+	declDir := "/city/packs/keeper"
+	cityRoot := "/city"
+	patches := &Patches{
+		Agents: []AgentPatch{{
+			Name:       "mayor",
+			SkillsDir:  ptrStr("merge-skills"),
+			SkillsDirs: []string{"more/skills", "//abs/from/city/root", "/already/absolute"},
+		}},
+	}
+	adjustPatchPaths(patches, declDir, cityRoot)
+	p := patches.Agents[0]
+	// Relative singular alias resolves against the declaring config dir,
+	// then re-expressed city-root-relative (mirrors overlay_dir).
+	if p.SkillsDir == nil || *p.SkillsDir != "packs/keeper/merge-skills" {
+		t.Errorf("SkillsDir = %v, want packs/keeper/merge-skills", p.SkillsDir)
+	}
+	want := []string{"packs/keeper/more/skills", "abs/from/city/root", "/already/absolute"}
+	if !reflect.DeepEqual(p.SkillsDirs, want) {
+		t.Errorf("SkillsDirs = %v, want %v", p.SkillsDirs, want)
+	}
+}
+
+func TestAgentLocalSkillRoots(t *testing.T) {
+	tests := []struct {
+		name  string
+		agent *Agent
+		want  []string
+	}{
+		{"nil", nil, nil},
+		{"empty", &Agent{}, nil},
+		{"convention only", &Agent{SkillsDir: "/a/skills"}, []string{"/a/skills"}},
+		{"patches only", &Agent{SkillsDirs: []string{"/b", "/c"}}, []string{"/b", "/c"}},
+		{
+			"convention plus patches",
+			&Agent{SkillsDir: "/a/skills", SkillsDirs: []string{"/b", "/c"}},
+			[]string{"/a/skills", "/b", "/c"},
+		},
+		{
+			"deduplicates repeated roots, first occurrence wins position",
+			&Agent{SkillsDir: "/a", SkillsDirs: []string{"/b", "/a", "/b"}},
+			[]string{"/a", "/b"},
+		},
+		{
+			"skips empty strings",
+			&Agent{SkillsDir: "", SkillsDirs: []string{"", "/b", ""}},
+			[]string{"/b"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.agent.AgentLocalSkillRoots(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("AgentLocalSkillRoots() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

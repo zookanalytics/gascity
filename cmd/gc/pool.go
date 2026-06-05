@@ -309,6 +309,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		copy(dst.InstallAgentHooks, src.InstallAgentHooks)
 	}
 	dst.SkillsDir = src.SkillsDir
+	if len(src.SkillsDirs) > 0 {
+		dst.SkillsDirs = make([]string, len(src.SkillsDirs))
+		copy(dst.SkillsDirs, src.SkillsDirs)
+	}
 	dst.MCPDir = src.MCPDir
 	if src.MaxActiveSessions != nil {
 		v := *src.MaxActiveSessions
