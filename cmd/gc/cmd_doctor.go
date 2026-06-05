@@ -285,6 +285,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
 		register(newBacklogDepthCheck(cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
+		register(&stuckCreatingDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
