@@ -950,6 +950,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		"SharedSkills": true,
 		"SharedMCP":    true,
 		"SkillsDir":    true, // runtime-only (discovered from agents/<n>/skills/)
+		"SkillsDirs":   true, // runtime-only (appended from [[patches.agent]] skills_dirs)
 		"MCPDir":       true, // runtime-only (discovered from agents/<n>/mcp/)
 	}
 
