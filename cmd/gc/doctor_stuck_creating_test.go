@@ -122,6 +122,42 @@ func TestStuckCreatingCheckFailsPastTwiceThreshold(t *testing.T) {
 	}
 }
 
+// TestStuckCreatingCheckRespectsConfiguredStartupTimeout verifies that a slow
+// start still within a configured [session].startup_timeout is not flagged
+// (gc-c1rpx review P2): the fixed 3m/6m bands shift to begin at the timeout so
+// the reconciler's valid-create window is honored before warn/fail fire.
+func TestStuckCreatingCheckRespectsConfiguredStartupTimeout(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{Session: config.SessionConfig{StartupTimeout: "12m"}}
+
+	t.Run("within startup_timeout is not flagged", func(t *testing.T) {
+		store := beads.NewMemStore()
+		// 7m would fail at the fixed 6m band, but the 12m startup_timeout means
+		// the reconciler still considers this start valid.
+		createStuckCreatingSessionBead(t, store, map[string]string{
+			"template":                  "gascity/worker",
+			"pending_create_started_at": now.Add(-7 * time.Minute).Format(time.RFC3339),
+		})
+		r := newStuckCreatingCheck(store, cfg, now).Run(nil)
+		if r.Status != doctor.StatusOK {
+			t.Fatalf("Run() status = %v, want StatusOK (start within 12m startup_timeout); message %q", r.Status, r.Message)
+		}
+	})
+
+	t.Run("past startup_timeout plus grace fails", func(t *testing.T) {
+		store := beads.NewMemStore()
+		// 16m exceeds startup_timeout (12m) + the warn grace (3m) = 15m fail band.
+		createStuckCreatingSessionBead(t, store, map[string]string{
+			"template":                  "gascity/worker",
+			"pending_create_started_at": now.Add(-16 * time.Minute).Format(time.RFC3339),
+		})
+		r := newStuckCreatingCheck(store, cfg, now).Run(nil)
+		if r.Status != doctor.StatusError {
+			t.Fatalf("Run() status = %v, want StatusError (past 12m+3m); message %q", r.Status, r.Message)
+		}
+	})
+}
+
 // TestStuckCreatingCheckPrefersPendingCreateMarker pins the age anchor to the
 // per-attempt pending_create_started_at marker, not bead CreatedAt — the same
 // preference the reconciler's staleness logic uses. A bead created long ago

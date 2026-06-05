@@ -30,7 +30,7 @@ const stuckCreatingMessageNameCap = 5
 // stuckCreatingDoctorCheck reports sessions wedged in state=creating. The
 // reconciler auto-recovers the common cases (reapStaleSessionBeads); this
 // check is the visibility net for the variants that don't auto-recover, so
-// an operator or deacon sees the stuck template without hand-rolling
+// an operator or monitoring agent sees the stuck template without hand-rolling
 // `gc session list --json` queries.
 type stuckCreatingDoctorCheck struct {
 	cfg      *config.City
@@ -86,6 +86,19 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 		now = c.now()
 	}
 
+	// Respect a configured startup_timeout larger than the default bands: the
+	// reconciler still treats a start within that window as valid, so neither
+	// warn nor fail until it has elapsed. Without this a city with a long
+	// startup_timeout (e.g. 12m) would see gc doctor block-fail healthy slow
+	// starts at the fixed 6m threshold.
+	warnAfter, failAfter := stuckCreatingWarnAfter, stuckCreatingFailAfter
+	if c.cfg != nil {
+		if st := c.cfg.Session.StartupTimeoutDuration(); st > warnAfter {
+			warnAfter = st
+			failAfter = st + stuckCreatingWarnAfter
+		}
+	}
+
 	var failed, warned []stuckCreatingFinding
 	var allowlisted []string
 	for _, b := range sessions {
@@ -113,9 +126,9 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 			// Nothing can ever age this bead out; mirror the reconciler's
 			// zero-CreatedAt handling and treat it as stuck now.
 			failed = append(failed, f)
-		case f.age >= stuckCreatingFailAfter:
+		case f.age >= failAfter:
 			failed = append(failed, f)
-		case f.age >= stuckCreatingWarnAfter:
+		case f.age >= warnAfter:
 			warned = append(warned, f)
 		}
 	}
@@ -135,13 +148,13 @@ func (c *stuckCreatingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	switch {
 	case len(failed) > 0:
 		r.Status = doctor.StatusError
-		r.Message = fmt.Sprintf("%d session(s) stuck in creating > %s: %s", len(failed), stuckCreatingFailAfter, stuckCreatingNameList(failed))
+		r.Message = fmt.Sprintf("%d session(s) stuck in creating > %s: %s", len(failed), failAfter, stuckCreatingNameList(failed))
 		if len(warned) > 0 {
-			r.Message += fmt.Sprintf("; %d more > %s: %s", len(warned), stuckCreatingWarnAfter, stuckCreatingNameList(warned))
+			r.Message += fmt.Sprintf("; %d more > %s: %s", len(warned), warnAfter, stuckCreatingNameList(warned))
 		}
 	case len(warned) > 0:
 		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("%d session(s) in creating > %s: %s", len(warned), stuckCreatingWarnAfter, stuckCreatingNameList(warned))
+		r.Message = fmt.Sprintf("%d session(s) in creating > %s: %s", len(warned), warnAfter, stuckCreatingNameList(warned))
 	}
 	if r.Status != doctor.StatusOK {
 		r.FixHint = "inspect stuck sessions with `gc session list --json`; see engdocs/contributors/reconciler-debugging.md for the reconciler diagnosis workflow"
