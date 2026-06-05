@@ -8,7 +8,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -30,7 +33,7 @@ const (
 	packCacheEnvVar  = "GC_PACK_CACHE"
 	packCacheOff     = "off"
 	packCacheFile    = "pack-tree.gob"
-	packCacheVersion = 1
+	packCacheVersion = 2
 )
 
 // packCachePayload is the on-disk cache representation.
@@ -42,6 +45,14 @@ type packCachePayload struct {
 	City    *City
 	Agents  []packCacheAgentState
 	Prov    packCacheProvenance
+	// ZeroPtrs records the paths of pointer fields in City whose pointee
+	// is the zero value for its type. gob flattens pointers and omits
+	// zero-valued struct fields, so ptr-to-zero (min_active_sessions = 0,
+	// inject_assigned_skills = false, ...) would otherwise round-trip as
+	// nil — silently turning "explicitly zero/false" into "unset" on warm
+	// loads. Collected by collectZeroPointers at save, re-materialized by
+	// restoreZeroPointers at load. See zeroPtrSegment for path encoding.
+	ZeroPtrs [][]string
 }
 
 // packCacheAgentState carries the unexported Agent fields that gob cannot
@@ -157,6 +168,7 @@ func loadPackCache(cachePath, buildID string, extras []string, fs fsys.FS) (*Cit
 			p.City.Agents[i].layout = agentLayout(p.Agents[i].Layout)
 		}
 	}
+	restoreZeroPointers(reflect.ValueOf(p.City), p.ZeroPtrs)
 
 	prov := &Provenance{
 		Root:      p.Prov.Root,
@@ -193,12 +205,13 @@ func savePackCache(cachePath, buildID string, extras []string, sources []packCac
 		}
 	}
 	payload := &packCachePayload{
-		Version: packCacheVersion,
-		BuildID: buildID,
-		Extras:  append([]string(nil), extras...),
-		Sources: sources,
-		City:    city,
-		Agents:  agents,
+		Version:  packCacheVersion,
+		BuildID:  buildID,
+		Extras:   append([]string(nil), extras...),
+		Sources:  sources,
+		City:     city,
+		Agents:   agents,
+		ZeroPtrs: collectZeroPointers(reflect.ValueOf(city)),
 		Prov: packCacheProvenance{
 			Root:      prov.Root,
 			Sources:   append([]string(nil), prov.Sources...),
@@ -417,4 +430,147 @@ func equalStringSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Zero-pointer fidelity. gob's wire format omits zero-valued struct fields
+// and flattens pointers, so a pointer field whose pointee is the zero value
+// (*int → 0, *bool → false, *string → "") decodes as nil. nil-vs-zero is
+// semantically load-bearing across the config tree (tri-state knobs like
+// Agent.MinActiveSessions and Agent.InjectAssignedSkills distinguish
+// "explicitly zero/false" from "unset/inherit"), so the cache records the
+// paths of all such pointers at save time and re-materializes them after
+// decode. The walk is generic over the City tree: new pointer fields are
+// covered automatically with no per-field maintenance.
+//
+// Path encoding (zeroPtrSegment): each path is a []string of typed
+// segments — "f:<FieldName>" (struct field), "i:<index>" (slice/array
+// element), "k:<key>" (string-keyed map entry). Navigation auto-derefs
+// non-nil pointers between segments on restore, mirroring the collect
+// walk's descent through pointers.
+
+const (
+	zeroPtrFieldSeg = "f:"
+	zeroPtrIndexSeg = "i:"
+	zeroPtrMapSeg   = "k:"
+)
+
+// collectZeroPointers walks v and returns the paths of every reachable
+// pointer whose pointee is the zero value of its type. Nil pointers are
+// NOT recorded — they must stay nil after a cache round-trip. Unexported
+// fields are skipped (gob does not serialize them; the packCacheAgentState
+// sidecar carries the two that matter). Interface values are skipped (the
+// config tree has none; defensive).
+func collectZeroPointers(v reflect.Value) [][]string {
+	var out [][]string
+	var walk func(v reflect.Value, path []string)
+	walk = func(v reflect.Value, path []string) {
+		if !v.IsValid() {
+			return
+		}
+		switch v.Kind() {
+		case reflect.Pointer:
+			if v.IsNil() {
+				return
+			}
+			if v.Elem().IsZero() {
+				out = append(out, append([]string(nil), path...))
+				return
+			}
+			walk(v.Elem(), path)
+		case reflect.Struct:
+			t := v.Type()
+			for i := 0; i < t.NumField(); i++ {
+				if t.Field(i).PkgPath != "" {
+					continue // unexported: not in the gob payload either
+				}
+				walk(v.Field(i), append(path, zeroPtrFieldSeg+t.Field(i).Name))
+			}
+		case reflect.Slice, reflect.Array:
+			for i := 0; i < v.Len(); i++ {
+				walk(v.Index(i), append(path, zeroPtrIndexSeg+strconv.Itoa(i)))
+			}
+		case reflect.Map:
+			if v.Type().Key().Kind() != reflect.String {
+				return // config maps are string-keyed; skip anything else
+			}
+			for _, k := range v.MapKeys() {
+				walk(v.MapIndex(k), append(path, zeroPtrMapSeg+k.String()))
+			}
+		}
+	}
+	walk(v, nil)
+	return out
+}
+
+// restoreZeroPointers re-materializes pointer-to-zero values at the
+// recorded paths after a gob decode left them nil. Paths that no longer
+// navigate (renamed field, shorter slice) are skipped silently: the cache
+// is keyed by binary identity, so structural drift means a stale payload
+// that the BuildID check rejects anyway.
+func restoreZeroPointers(root reflect.Value, paths [][]string) {
+	for _, path := range paths {
+		applyZeroPointer(root, path)
+	}
+}
+
+// applyZeroPointer navigates one collected path from root and sets the
+// terminal nil pointer to a fresh pointer-to-zero. Returns true when the
+// value it visited (or a descendant) was modified, which map handling uses
+// to know when to write a mutated copy back via SetMapIndex.
+func applyZeroPointer(v reflect.Value, path []string) bool {
+	if !v.IsValid() {
+		return false
+	}
+	if len(path) == 0 {
+		if v.Kind() != reflect.Pointer || !v.IsNil() || !v.CanSet() {
+			return false
+		}
+		v.Set(reflect.New(v.Type().Elem()))
+		return true
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return false
+		}
+		return applyZeroPointer(v.Elem(), path)
+	}
+	seg := path[0]
+	switch {
+	case strings.HasPrefix(seg, zeroPtrFieldSeg):
+		if v.Kind() != reflect.Struct {
+			return false
+		}
+		fld := v.FieldByName(strings.TrimPrefix(seg, zeroPtrFieldSeg))
+		if !fld.IsValid() {
+			return false
+		}
+		return applyZeroPointer(fld, path[1:])
+	case strings.HasPrefix(seg, zeroPtrIndexSeg):
+		if v.Kind() != reflect.Slice && v.Kind() != reflect.Array {
+			return false
+		}
+		idx, err := strconv.Atoi(strings.TrimPrefix(seg, zeroPtrIndexSeg))
+		if err != nil || idx < 0 || idx >= v.Len() {
+			return false
+		}
+		return applyZeroPointer(v.Index(idx), path[1:])
+	case strings.HasPrefix(seg, zeroPtrMapSeg):
+		if v.Kind() != reflect.Map || v.Type().Key().Kind() != reflect.String {
+			return false
+		}
+		key := reflect.ValueOf(strings.TrimPrefix(seg, zeroPtrMapSeg)).Convert(v.Type().Key())
+		val := v.MapIndex(key)
+		if !val.IsValid() {
+			return false
+		}
+		// Map values are not addressable: mutate a copy, store it back.
+		cp := reflect.New(val.Type()).Elem()
+		cp.Set(val)
+		if !applyZeroPointer(cp, path[1:]) {
+			return false
+		}
+		v.SetMapIndex(key, cp)
+		return true
+	}
+	return false
 }
