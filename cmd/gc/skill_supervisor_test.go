@@ -10,6 +10,54 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// TestRunStage1MaterializesAgentLocalPatchSkillsDirs proves the additive
+// skills_dirs path end-to-end at stage 1: an agent with a convention
+// SkillsDir AND a patch-supplied SkillsDirs root materializes BOTH skills
+// into its sink (acceptance criterion 2 — sees both, no clobber).
+func TestRunStage1MaterializesAgentLocalPatchSkillsDirs(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_HOME", t.TempDir())
+
+	conventionDir := filepath.Join(cityPath, "agents", "mayor", "skills")
+	patchDir := filepath.Join(cityPath, "keeper-skills")
+	writeSkillSource(t, filepath.Join(conventionDir, "convention-skill"))
+	writeSkillSource(t, filepath.Join(patchDir, "git-merge-pull-request"))
+
+	cfg := &config.City{
+		Session: config.SessionConfig{Provider: "tmux"},
+		Agents: []config.Agent{{
+			Name:       "mayor",
+			Scope:      "city",
+			Provider:   "claude",
+			SkillsDir:  conventionDir,
+			SkillsDirs: []string{patchDir},
+		}},
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("runStage1SkillMaterialization: %v", err)
+	}
+
+	checkLink := func(name, wantTarget string) {
+		t.Helper()
+		link := filepath.Join(cityPath, ".claude", "skills", name)
+		info, err := os.Lstat(link)
+		if err != nil {
+			t.Fatalf("lstat %q: %v", link, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("%q is not a symlink", link)
+		}
+		if tgt, _ := os.Readlink(link); tgt != wantTarget {
+			t.Errorf("symlink %q target = %q, want %q", name, tgt, wantTarget)
+		}
+	}
+	checkLink("convention-skill", filepath.Join(conventionDir, "convention-skill"))
+	checkLink("git-merge-pull-request", filepath.Join(patchDir, "git-merge-pull-request"))
+}
+
 // TestRunStage1SkillMaterialization exercises the happy path of the
 // Phase 4A supervisor-tick helper: a tmux city with a claude-provider
 // city-scoped agent receives skills materialized at

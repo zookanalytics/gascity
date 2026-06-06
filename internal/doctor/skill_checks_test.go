@@ -92,6 +92,43 @@ func TestSkillCollisionCheck_CityCollisionMessage(t *testing.T) {
 	}
 }
 
+func TestSkillCollisionCheck_IntraAgentMessage(t *testing.T) {
+	tmp := t.TempDir()
+	conventionSkills := mkSkillsDir(t, tmp, "mayor")
+	patchSkills := filepath.Join(tmp, "keeper-skills")
+	writeSkillMD(t, conventionSkills, "plan")
+	writeSkillMD(t, patchSkills, "plan")
+
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name:       "mayor",
+			Provider:   "claude",
+			Scope:      "city",
+			SkillsDir:  conventionSkills,
+			SkillsDirs: []string{patchSkills},
+		}},
+	}
+
+	chk := NewSkillCollisionCheck(cfg, "/path/to/city")
+	res := chk.Run(&CheckContext{CityPath: "/path/to/city"})
+	if res.Status != StatusError {
+		t.Fatalf("status = %v, want Error; msg=%q", res.Status, res.Message)
+	}
+	msg := res.Message
+	wantSubstrings := []string{
+		"agent-local skill collision at scope root /path/to/city (claude)",
+		`"plan" is provided to mayor by multiple skill sources:`,
+		conventionSkills,
+		patchSkills,
+		"rename one of the colliding skills to resolve",
+	}
+	for _, s := range wantSubstrings {
+		if !strings.Contains(msg, s) {
+			t.Errorf("message missing %q\nfull message:\n%s", s, msg)
+		}
+	}
+}
+
 func TestSkillCollisionCheck_RigCollisionUsesRigPath(t *testing.T) {
 	tmp := t.TempDir()
 	aSkills := mkSkillsDir(t, tmp, "a")

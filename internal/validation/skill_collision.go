@@ -31,8 +31,20 @@ var supportedSkillVendors = map[string]struct{}{
 // a real path (e.g. the doctor check) can do so when formatting errors.
 const citySentinel = "<city>"
 
-// SkillCollision describes an agent-local skill name provided by two
-// or more agents sharing the same scope root and vendor.
+// SkillCollision describes an agent-local skill name that cannot be
+// materialized unambiguously. Two shapes exist:
+//
+//   - Inter-agent: two or more agents sharing the same (ScopeRoot, Vendor)
+//     sink each supply the same skill name. AgentNames lists the colliding
+//     agents; Sources is empty.
+//   - Intra-agent: a single agent supplies the same skill name from two or
+//     more of its own local roots (the convention agents/<name>/skills/
+//     plus patch-supplied skills_dirs). AgentNames holds that one agent;
+//     Sources lists the colliding roots.
+//
+// Both shapes are hard errors: the per-name sink slot holds exactly one
+// symlink target, so an ambiguous name must be renamed rather than
+// silently shadowed.
 type SkillCollision struct {
 	// ScopeRoot is the scope root the colliding agents materialize
 	// into. For rig-scoped agents this is the rig's configured path
@@ -46,13 +58,33 @@ type SkillCollision struct {
 	SkillName string
 	// AgentNames lists, in sorted order, every agent providing the
 	// same agent-local skill name into this (ScopeRoot, Vendor) sink.
+	// An intra-agent collision lists exactly the one offending agent.
 	AgentNames []string
+	// Sources lists, in sorted order, the agent-local skill roots that a
+	// single agent uses to supply SkillName more than once. Non-empty only
+	// for an intra-agent collision; nil for the inter-agent case.
+	Sources []string
 }
 
-// ValidateSkillCollisions groups agents by (scope-root, vendor), builds
-// the multi-map agent-local-skill-name → [agent-names], and returns one
-// SkillCollision entry per name with more than one agent. Returns nil
-// when there are no collisions.
+// IsIntraAgent reports whether this collision is a single agent supplying
+// the same skill name from more than one of its own roots (Sources set),
+// as opposed to two distinct agents colliding at a shared sink.
+func (c SkillCollision) IsIntraAgent() bool { return len(c.Sources) > 0 }
+
+// ValidateSkillCollisions groups agents by (scope-root, vendor) and
+// returns every agent-local skill name that cannot be materialized
+// unambiguously. Two collision shapes are detected (see SkillCollision):
+//
+//   - Inter-agent: two or more agents at the same (scope-root, vendor)
+//     sink each supply the same skill name. They would fight over one
+//     symlink slot in the shared sink.
+//   - Intra-agent: a single agent supplies the same name from two or more
+//     of its own local roots (the convention agents/<name>/skills/ plus
+//     patch-supplied skills_dirs). Its own sources would shadow each other.
+//
+// Each agent contributes the union of skill names across ALL its local
+// roots (config.Agent.AgentLocalSkillRoots), so multi-source agents are
+// fully accounted for. Returns nil when there are no collisions.
 //
 // Scope-root derivation mirrors the spec:
 //   - agent.Scope == "city" → scope root = city sentinel
@@ -63,10 +95,11 @@ type SkillCollision struct {
 //
 // Agents whose provider is not in the skill-sink vendor set contribute
 // nothing — they have no sink, so they cannot collide. Agents with no
-// SkillsDir or whose SkillsDir holds no skills also contribute nothing.
+// local skill roots, or whose roots hold no skills, also contribute
+// nothing.
 //
-// Collisions are returned sorted by (ScopeRoot, Vendor, SkillName) so
-// tests and user-facing output are stable.
+// Collisions are returned sorted by (ScopeRoot, Vendor, SkillName, shape)
+// so tests and user-facing output are stable.
 func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 	if cfg == nil || len(cfg.Agents) == 0 {
 		return nil
@@ -77,9 +110,11 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 		rigPath[rig.Name] = rig.Path
 	}
 
-	type bucketKey struct{ scope, vendor string }
-	// buckets: scope+vendor → skillName → set of agent names.
-	buckets := make(map[bucketKey]map[string]map[string]struct{})
+	type nameKey struct{ scope, vendor, name string }
+	// providers: (scope, vendor, name) → agentQualifiedName → set of the
+	// agent's own roots that supply that name. The agent dimension lets us
+	// split inter-agent (≥2 agents) from intra-agent (1 agent, ≥2 roots).
+	providers := make(map[nameKey]map[string]map[string]struct{})
 
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
@@ -107,43 +142,57 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 			continue
 		}
 
-		names := listAgentLocalSkills(a.SkillsDir)
-		if len(names) == 0 {
-			continue
-		}
-
-		key := bucketKey{scope: scope, vendor: vendor}
-		bucket := buckets[key]
-		if bucket == nil {
-			bucket = make(map[string]map[string]struct{})
-			buckets[key] = bucket
-		}
-		for _, name := range names {
-			agents := bucket[name]
-			if agents == nil {
-				agents = make(map[string]struct{})
-				bucket[name] = agents
+		qn := a.QualifiedName()
+		for name, roots := range agentLocalSkillSources(a) {
+			key := nameKey{scope: scope, vendor: vendor, name: name}
+			byAgent := providers[key]
+			if byAgent == nil {
+				byAgent = make(map[string]map[string]struct{})
+				providers[key] = byAgent
 			}
-			agents[a.QualifiedName()] = struct{}{}
+			rootSet := byAgent[qn]
+			if rootSet == nil {
+				rootSet = make(map[string]struct{})
+				byAgent[qn] = rootSet
+			}
+			for _, root := range roots {
+				rootSet[root] = struct{}{}
+			}
 		}
 	}
 
 	var collisions []SkillCollision
-	for key, bucket := range buckets {
-		for skillName, agents := range bucket {
-			if len(agents) < 2 {
-				continue
-			}
-			names := make([]string, 0, len(agents))
-			for n := range agents {
+	for key, byAgent := range providers {
+		// Inter-agent: more than one distinct agent supplies this name.
+		if len(byAgent) >= 2 {
+			names := make([]string, 0, len(byAgent))
+			for n := range byAgent {
 				names = append(names, n)
 			}
 			sort.Strings(names)
 			collisions = append(collisions, SkillCollision{
 				ScopeRoot:  key.scope,
 				Vendor:     key.vendor,
-				SkillName:  skillName,
+				SkillName:  key.name,
 				AgentNames: names,
+			})
+		}
+		// Intra-agent: a single agent supplies this name from ≥2 roots.
+		for qn, rootSet := range byAgent {
+			if len(rootSet) < 2 {
+				continue
+			}
+			roots := make([]string, 0, len(rootSet))
+			for r := range rootSet {
+				roots = append(roots, r)
+			}
+			sort.Strings(roots)
+			collisions = append(collisions, SkillCollision{
+				ScopeRoot:  key.scope,
+				Vendor:     key.vendor,
+				SkillName:  key.name,
+				AgentNames: []string{qn},
+				Sources:    roots,
 			})
 		}
 	}
@@ -155,9 +204,25 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 		if collisions[i].Vendor != collisions[j].Vendor {
 			return collisions[i].Vendor < collisions[j].Vendor
 		}
-		return collisions[i].SkillName < collisions[j].SkillName
+		if collisions[i].SkillName != collisions[j].SkillName {
+			return collisions[i].SkillName < collisions[j].SkillName
+		}
+		// Stable tiebreak: inter-agent (no Sources) before intra-agent,
+		// then by first agent name.
+		if collisions[i].IsIntraAgent() != collisions[j].IsIntraAgent() {
+			return !collisions[i].IsIntraAgent()
+		}
+		return firstOrEmpty(collisions[i].AgentNames) < firstOrEmpty(collisions[j].AgentNames)
 	})
 	return collisions
+}
+
+// firstOrEmpty returns the first element of s, or "" when s is empty.
+func firstOrEmpty(s []string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	return s[0]
 }
 
 // scopeRootFor returns the scope-root key for an agent. Empty scope is
@@ -191,6 +256,28 @@ func scopeRootFor(a *config.Agent, rigPath map[string]string) string {
 		// bucketing.
 		return a.Dir
 	}
+}
+
+// agentLocalSkillSources returns, for one agent, a map of skill name → the
+// agent-local roots that supply it, reading across every root in
+// AgentLocalSkillRoots (convention + patch-supplied). A name appearing in
+// two roots yields a two-element slice — the signal for an intra-agent
+// collision. Returns nil when the agent has no local skills.
+func agentLocalSkillSources(a *config.Agent) map[string][]string {
+	roots := a.AgentLocalSkillRoots()
+	if len(roots) == 0 {
+		return nil
+	}
+	out := make(map[string][]string)
+	for _, root := range roots {
+		for _, name := range listAgentLocalSkills(root) {
+			out[name] = append(out[name], root)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // listAgentLocalSkills returns the sorted list of skill names under the

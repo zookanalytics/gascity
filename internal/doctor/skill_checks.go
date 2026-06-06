@@ -9,8 +9,10 @@ import (
 )
 
 // SkillCollisionCheck surfaces agent-local skill-name collisions that
-// the materializer cannot satisfy — two agents sharing a scope-root
-// sink that both want to write the same skill name.
+// the materializer cannot satisfy: two agents sharing a scope-root sink
+// that both want to write the same skill name (inter-agent), or one agent
+// supplying the same name from two of its own roots — its convention
+// agents/<name>/skills/ plus a patch-supplied skills_dirs (intra-agent).
 //
 // The check is a thin wrapper around validation.ValidateSkillCollisions;
 // the validator is the single source of truth. The same function is
@@ -31,8 +33,9 @@ func NewSkillCollisionCheck(cfg *config.City, cityPath string) *SkillCollisionCh
 // Name returns the check identifier.
 func (c *SkillCollisionCheck) Name() string { return "skill-collision" }
 
-// Run reports a hard error when any two agents share the same
-// (scope-root, vendor) sink and the same agent-local skill name.
+// Run reports a hard error when two agents share the same (scope-root,
+// vendor) sink and the same agent-local skill name, or when one agent
+// supplies the same name from more than one of its own skill roots.
 func (c *SkillCollisionCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if c.cfg == nil {
@@ -64,10 +67,19 @@ func (c *SkillCollisionCheck) Fix(_ *CheckContext) error { return nil }
 // describing every collision. cityPath substitutes for the "<city>"
 // sentinel when non-empty.
 //
-// Format per collision (matches engdocs/proposals/skill-materialization.md):
+// Format per collision (matches engdocs/proposals/skill-materialization.md).
+// Inter-agent:
 //
 //	agent-local skill collision at scope root <path> (<vendor>):
 //	  "<name>" is provided by both <agent1> and <agent2>
+//	  rename one of the colliding skills to resolve
+//
+// Intra-agent (one agent, two of its own roots):
+//
+//	agent-local skill collision at scope root <path> (<vendor>):
+//	  "<name>" is provided to <agent> by multiple skill sources:
+//	    <root1>
+//	    <root2>
 //	  rename one of the colliding skills to resolve
 func FormatSkillCollisions(collisions []validation.SkillCollision, cityPath string) string {
 	if len(collisions) == 0 {
@@ -83,7 +95,14 @@ func FormatSkillCollisions(collisions []validation.SkillCollision, cityPath stri
 			scope = cityPath
 		}
 		fmt.Fprintf(&b, "agent-local skill collision at scope root %s (%s):\n", scope, c.Vendor)
-		fmt.Fprintf(&b, "  %q is provided by %s\n", c.SkillName, joinAgentsHuman(c.AgentNames))
+		if c.IsIntraAgent() {
+			fmt.Fprintf(&b, "  %q is provided to %s by multiple skill sources:\n", c.SkillName, joinAgentsHuman(c.AgentNames))
+			for _, src := range c.Sources {
+				fmt.Fprintf(&b, "    %s\n", src)
+			}
+		} else {
+			fmt.Fprintf(&b, "  %q is provided by %s\n", c.SkillName, joinAgentsHuman(c.AgentNames))
+		}
 		b.WriteString("  rename one of the colliding skills to resolve")
 	}
 	return b.String()

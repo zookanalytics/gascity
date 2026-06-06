@@ -2972,9 +2972,19 @@ type Agent struct {
 	// Runtime-only compatibility data — not persisted to TOML or JSON, and
 	// not consumed by the active MCP materializer.
 	SharedMCP []string `toml:"-" json:"-"`
-	// SkillsDir is the agent-local private skills catalog root.
+	// SkillsDir is the agent-local private skills catalog root discovered
+	// by convention (agents/<name>/skills/). It is the agent's primary,
+	// convention-sourced skill root. Additional roots contributed by
+	// patches live in SkillsDirs; AgentLocalSkillRoots merges them.
 	// Runtime-only — not persisted to TOML or JSON.
 	SkillsDir string `toml:"-" json:"-"`
+	// SkillsDirs holds additional agent-local skill catalog roots layered
+	// on top of SkillsDir by [[patches.agent]] skills_dirs/skills_dir
+	// overrides. Multiple sources append additively (never clobber); later
+	// entries take precedence. Use AgentLocalSkillRoots to read the full,
+	// precedence-ordered set. Runtime-only — populated during patch apply,
+	// not persisted to TOML or JSON.
+	SkillsDirs []string `toml:"-" json:"-"`
 	// MCPDir is the agent-local private MCP catalog root.
 	// Runtime-only — not persisted to TOML or JSON.
 	MCPDir string `toml:"-" json:"-"`
@@ -3187,6 +3197,42 @@ func (a *Agent) MouseModeOn() bool {
 // AttachEnabled reports whether the agent supports interactive attachment.
 func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
+}
+
+// AgentLocalSkillRoots returns the agent's local skill catalog roots in
+// precedence order, lowest first: the convention-discovered SkillsDir
+// followed by every patch-supplied SkillsDirs entry in declaration
+// order. Later roots take precedence — explicit patch sources layer on
+// top of the convention root, and among patches the last-declared wins.
+//
+// Duplicate paths are collapsed (first occurrence kept) so a directory
+// named in both SkillsDir and SkillsDirs contributes a single root. The
+// result never contains empty strings. Returns nil for a nil receiver or
+// an agent with no local skill roots.
+func (a *Agent) AgentLocalSkillRoots() []string {
+	if a == nil {
+		return nil
+	}
+	roots := make([]string, 0, 1+len(a.SkillsDirs))
+	seen := make(map[string]struct{}, 1+len(a.SkillsDirs))
+	add := func(dir string) {
+		if dir == "" {
+			return
+		}
+		if _, dup := seen[dir]; dup {
+			return
+		}
+		seen[dir] = struct{}{}
+		roots = append(roots, dir)
+	}
+	add(a.SkillsDir)
+	for _, dir := range a.SkillsDirs {
+		add(dir)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	return roots
 }
 
 // bdReadyPoolDemandShell returns the canonical bd ready predicate for

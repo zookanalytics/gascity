@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -353,6 +354,117 @@ scope = "city"
 		}
 	}
 	t.Error("mayor agent not found")
+}
+
+// TestImport_BareNamePatchSkillsDirsScopesToImportedAgent productizes the
+// tk-24gdht spike: an importing pack (here "mypk", standing in for
+// gc-toolkit) attaches an agent-local skill to an IMPORTED + bare-name-
+// patched agent (the gastown-defined mayor) via a skills_dirs patch,
+// WITHOUT manufacturing a phantom toolkit.mayor (the duplicate-agent error
+// the spike proved is the only other route). The skill must land on mayor
+// ONLY — the imported polecat must not see it — and the patch path must
+// resolve pack-safe to an absolute root.
+func TestImport_BareNamePatchSkillsDirsScopesToImportedAgent(t *testing.T) {
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "city", "mypk")
+	mustMkdirAll(t, packDir, 0o755)
+
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+provider = "claude"
+includes = ["mypk"]
+
+[providers.claude]
+base = "builtin:claude"
+`)
+
+	// The importing pack imports gastown (mayor + polecat) and attaches a
+	// merge skill to mayor by bare name — exactly the gc-toolkit shape.
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "mypk"
+schema = 1
+
+[imports.gs]
+source = "../gastown"
+
+[[patches.agent]]
+name = "mayor"
+skills_dirs = ["merge-skills"]
+`)
+	// The scoped skill the patch points at.
+	writeTestFile(t, packDir, "merge-skills/git-merge-pull-request/SKILL.md",
+		"---\nname: git-merge-pull-request\ndescription: land the PR\n---\nbody\n")
+
+	gasDir := filepath.Join(dir, "city", "gastown")
+	mustMkdirAll(t, gasDir, 0o755)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "mayor"
+scope = "city"
+
+[[agent]]
+name = "polecat"
+scope = "city"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		// A phantom toolkit.mayor (the rejected alternative) surfaces here
+		// as `packs define duplicate agent`. Loading cleanly is half the
+		// acceptance.
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	var mayor, polecat *Agent
+	for i := range cfg.Agents {
+		switch cfg.Agents[i].Name {
+		case "mayor":
+			mayor = &cfg.Agents[i]
+		case "polecat":
+			polecat = &cfg.Agents[i]
+		}
+	}
+	if mayor == nil || polecat == nil {
+		t.Fatalf("imported agents missing: mayor=%v polecat=%v", mayor != nil, polecat != nil)
+	}
+
+	// The patch root resolves pack-safe to an absolute path under the pack.
+	wantRoot := filepath.Join(packDir, "merge-skills")
+	if !reflect.DeepEqual(mayor.SkillsDirs, []string{wantRoot}) {
+		t.Errorf("mayor.SkillsDirs = %v, want [%q]", mayor.SkillsDirs, wantRoot)
+	}
+	if roots := mayor.AgentLocalSkillRoots(); !contains(roots, wantRoot) {
+		t.Errorf("mayor.AgentLocalSkillRoots() = %v, want to contain %q", roots, wantRoot)
+	}
+
+	// Scoping: the imported polecat does NOT see the merge skill.
+	if len(polecat.SkillsDirs) != 0 {
+		t.Errorf("polecat.SkillsDirs = %v, want empty (skill scoped to mayor)", polecat.SkillsDirs)
+	}
+	if roots := polecat.AgentLocalSkillRoots(); contains(roots, wantRoot) {
+		t.Errorf("polecat.AgentLocalSkillRoots() = %v, must not contain the mayor-scoped root", roots)
+	}
+
+	// The scoped skill is materializable: its SKILL.md lives at the root.
+	if _, statErr := os.Stat(filepath.Join(wantRoot, "git-merge-pull-request", "SKILL.md")); statErr != nil {
+		t.Errorf("scoped skill not found at resolved root: %v", statErr)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestImport_QualifiedNameWithRig(t *testing.T) {

@@ -108,6 +108,20 @@ type AgentPatch struct {
 	// Relative paths resolve against the declaring config file's directory
 	// (pack-safe). Paths prefixed with "//" resolve against the city root.
 	OverlayDir *string `toml:"overlay_dir,omitempty"`
+	// SkillsDirs appends additional agent-local skill catalog roots to the
+	// target agent (on top of its convention-discovered agents/<name>/skills/
+	// root). The mechanism is additive — multiple patches, and the singular
+	// skills_dir alias below, all append; nothing is clobbered. Later-declared
+	// entries take precedence at materialization. Each path is pack-safe:
+	// relative paths resolve against the declaring config file's directory,
+	// and a "//" prefix resolves against the city root (same rule as
+	// overlay_dir). See engdocs/proposals/skill-materialization.md.
+	SkillsDirs []string `toml:"skills_dirs,omitempty"`
+	// SkillsDir is a convenience alias for SkillsDirs that appends a single
+	// agent-local skill catalog root. Resolved pack-safe exactly like
+	// skills_dirs. When both skills_dir and skills_dirs appear in one patch
+	// block, skills_dir layers first (lowest precedence among the two).
+	SkillsDir *string `toml:"skills_dir,omitempty"`
 	// DefaultSlingFormula overrides the default sling formula.
 	DefaultSlingFormula *string `toml:"default_sling_formula,omitempty"`
 	// InjectFragments overrides the agent's inject_fragments list. Leave this
@@ -495,6 +509,15 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	}
 	if p.OverlayDir != nil {
 		a.OverlayDir = *p.OverlayDir
+	}
+	// Skill roots append additively (never assign) so multiple patches and
+	// the convention-discovered root all coexist. The singular skills_dir
+	// alias layers before skills_dirs within a single patch block.
+	if p.SkillsDir != nil && *p.SkillsDir != "" {
+		a.SkillsDirs = append(a.SkillsDirs, *p.SkillsDir)
+	}
+	if len(p.SkillsDirs) > 0 {
+		a.SkillsDirs = append(a.SkillsDirs, p.SkillsDirs...)
 	}
 	if p.DefaultSlingFormula != nil {
 		a.DefaultSlingFormula = p.DefaultSlingFormula

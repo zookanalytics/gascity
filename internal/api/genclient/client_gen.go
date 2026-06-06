@@ -389,6 +389,8 @@ type AgentPatch struct {
 	SessionSetupScript      *string           `json:"SessionSetupScript"`
 	Skills                  *[]string         `json:"Skills"`
 	SkillsAppend            *[]string         `json:"SkillsAppend"`
+	SkillsDir               *string           `json:"SkillsDir"`
+	SkillsDirs              *[]string         `json:"SkillsDirs"`
 	SleepAfterIdle          *string           `json:"SleepAfterIdle"`
 	StartCommand            *string           `json:"StartCommand"`
 	Suspended               *bool             `json:"Suspended"`

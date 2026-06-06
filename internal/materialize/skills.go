@@ -135,17 +135,22 @@ type CityCatalog struct {
 	Shadowed []ShadowedEntry
 }
 
-// AgentCatalog is one agent's private skill catalog
-// (agents/<name>/skills/). It overlays the CityCatalog at materialization
-// time, with agent-local entries winning on name collision.
+// AgentCatalog is one agent's private skill catalog, merged across every
+// agent-local root (the convention-discovered agents/<name>/skills/ plus
+// any patch-supplied skills_dirs). It overlays the CityCatalog at
+// materialization time, with agent-local entries winning on name collision
+// against the shared city catalog.
 type AgentCatalog struct {
-	// Entries is the agent's local skill list, sorted by Name.
+	// Entries is the agent's merged local skill list, sorted by Name. When
+	// more than one of the agent's roots supplies the same name, the later
+	// (higher-precedence) root wins.
 	Entries []SkillEntry
-	// OwnedRoot is the absolute path of the agent's local skills
-	// directory, or empty when the agent has no local catalog. Used
-	// alongside CityCatalog.OwnedRoots so cleanup can prune symlinks
-	// pointing at this agent's old skill dir.
-	OwnedRoot string
+	// OwnedRoots holds the absolute paths of every agent-local skills root
+	// that contributed to this catalog, in precedence order (lowest first).
+	// Empty when the agent has no local catalog. Used alongside
+	// CityCatalog.OwnedRoots so cleanup can prune symlinks pointing at any
+	// of this agent's skill dirs.
+	OwnedRoots []string
 }
 
 // LoadCityCatalog discovers the shared skill catalog for a city.
@@ -260,23 +265,62 @@ func LoadCityCatalog(packSkillsDir string, imported ...config.DiscoveredSkillCat
 	return cat, nil
 }
 
-// LoadAgentCatalog reads the agent's local skills directory, returning
-// an AgentCatalog with one SkillEntry per `<dir>/<name>/SKILL.md`.
-// Pass "" when the agent has no local skills; the result is a
-// zero-value AgentCatalog.
+// LoadAgentCatalog reads a single agent-local skills directory. It is a
+// thin wrapper over LoadAgentCatalogs for callers with exactly one root.
+// Pass "" when the agent has no local skills; the result is a zero-value
+// AgentCatalog.
 func LoadAgentCatalog(agentSkillsDir string) (AgentCatalog, error) {
 	if agentSkillsDir == "" {
 		return AgentCatalog{}, nil
 	}
-	entries, err := readSkillDir(agentSkillsDir, "agent")
-	if err != nil {
-		return AgentCatalog{}, fmt.Errorf("reading agent skills %q: %w", agentSkillsDir, err)
+	return LoadAgentCatalogs([]string{agentSkillsDir})
+}
+
+// LoadAgentCatalogs reads the agent's local skills directories in
+// precedence order (lowest first) and returns one merged AgentCatalog with
+// one SkillEntry per distinct `<dir>/<name>/SKILL.md`. When more than one
+// root supplies the same skill name, the later (higher-precedence) root
+// wins — explicit patch sources layer on top of the convention-discovered
+// root. Empty paths are skipped; a duplicate path contributes a single
+// owned root. Pass nil or an empty slice for an agent with no local
+// skills; the result is a zero-value AgentCatalog.
+//
+// OwnedRoots lists every non-empty contributing root (absolute, precedence
+// order) so the materializer's cleanup pass recognizes symlinks targeting
+// any of the agent's roots as gc-managed.
+func LoadAgentCatalogs(agentSkillsDirs []string) (AgentCatalog, error) {
+	var (
+		cat       AgentCatalog
+		nameIndex = make(map[string]int) // name → index into cat.Entries
+		seenRoots = make(map[string]struct{})
+	)
+	for _, dir := range agentSkillsDirs {
+		if dir == "" {
+			continue
+		}
+		entries, err := readSkillDir(dir, "agent")
+		if err != nil {
+			return AgentCatalog{}, fmt.Errorf("reading agent skills %q: %w", dir, err)
+		}
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			abs = dir
+		}
+		if _, dup := seenRoots[abs]; !dup {
+			seenRoots[abs] = struct{}{}
+			cat.OwnedRoots = append(cat.OwnedRoots, abs)
+		}
+		for _, e := range entries {
+			if idx, ok := nameIndex[e.Name]; ok {
+				cat.Entries[idx] = e // later root wins
+				continue
+			}
+			nameIndex[e.Name] = len(cat.Entries)
+			cat.Entries = append(cat.Entries, e)
+		}
 	}
-	abs, err := filepath.Abs(agentSkillsDir)
-	if err != nil {
-		abs = agentSkillsDir
-	}
-	return AgentCatalog{Entries: entries, OwnedRoot: abs}, nil
+	sort.Slice(cat.Entries, func(i, j int) bool { return cat.Entries[i].Name < cat.Entries[j].Name })
+	return cat, nil
 }
 
 // EffectiveSet merges the shared city catalog and an agent's local

@@ -212,6 +212,68 @@ func TestEffectiveSkillsForAgentFourBranches(t *testing.T) {
 	})
 }
 
+// TestEffectiveSkillsForAgentMultiSource exercises the additive
+// skills_dirs mechanism end-to-end at the desired-set/fingerprint layer:
+// an agent with a convention SkillsDir PLUS a patch-supplied SkillsDirs
+// entry sees BOTH (acceptance criterion 2), and a single-source agent's
+// desired set / fingerprint entries are unchanged (acceptance criterion 4).
+func TestEffectiveSkillsForAgentMultiSource(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	sharedSkill := filepath.Join(tmp, "shared", "plan")
+	mustCreateSkill(t, sharedSkill)
+	shared := materialize.CityCatalog{
+		Entries:    []materialize.SkillEntry{{Name: "plan", Source: sharedSkill, Origin: "city"}},
+		OwnedRoots: []string{filepath.Dir(sharedSkill)},
+	}
+
+	conventionDir := filepath.Join(tmp, "agents", "mayor", "skills")
+	mustCreateSkill(t, filepath.Join(conventionDir, "convention-skill"))
+	patchDir := filepath.Join(tmp, "packs", "keeper", "merge-skills")
+	mustCreateSkill(t, filepath.Join(patchDir, "git-merge-pull-request"))
+
+	t.Run("convention plus patch skills_dirs sees both, additively", func(t *testing.T) {
+		t.Parallel()
+		a := &config.Agent{
+			Name:       "mayor",
+			Provider:   "claude",
+			SkillsDir:  conventionDir,
+			SkillsDirs: []string{patchDir},
+		}
+		desired := effectiveSkillsForAgent(&shared, a, "", nil, nil)
+		// City "plan" + convention "convention-skill" + patch
+		// "git-merge-pull-request", all materialized (no clobber).
+		if got := namesOf(desired); !reflect.DeepEqual(got, []string{"convention-skill", "git-merge-pull-request", "plan"}) {
+			t.Fatalf("names = %v, want all three sources present", got)
+		}
+	})
+
+	t.Run("single-source desired set and fingerprint stay stable", func(t *testing.T) {
+		t.Parallel()
+		// Same agent identity, NO patch skills_dirs. The desired set and
+		// the resulting fingerprint entries must match what a
+		// convention-only agent produced before skills_dirs existed.
+		single := &config.Agent{Name: "mayor", Provider: "claude", SkillsDir: conventionDir}
+		desired := effectiveSkillsForAgent(&shared, single, "", nil, nil)
+		if got := namesOf(desired); !reflect.DeepEqual(got, []string{"convention-skill", "plan"}) {
+			t.Fatalf("single-source names = %v, want [convention-skill plan]", got)
+		}
+		fp := mergeSkillFingerprintEntries(nil, desired)
+		// Exactly one entry per skill, keyed skills:<name>; nothing from a
+		// phantom patch root drifts the fingerprint.
+		if len(fp) != 2 {
+			t.Fatalf("fingerprint entries = %v, want 2 (one per skill)", fp)
+		}
+		if _, ok := fp["skills:convention-skill"]; !ok {
+			t.Errorf("missing skills:convention-skill fingerprint entry: %v", fp)
+		}
+		if _, ok := fp["skills:plan"]; !ok {
+			t.Errorf("missing skills:plan fingerprint entry: %v", fp)
+		}
+	})
+}
+
 func TestSharedSkillCatalogForAgentDoesNotFallBackWhenRigCatalogFails(t *testing.T) {
 	t.Parallel()
 

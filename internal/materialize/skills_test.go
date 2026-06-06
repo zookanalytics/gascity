@@ -374,7 +374,7 @@ func TestLoadCityCatalogIgnoresUnknownImplicitImport(t *testing.T) {
 func TestLoadAgentCatalogEmpty(t *testing.T) {
 	t.Parallel()
 	cat, err := LoadAgentCatalog("")
-	if err != nil || cat.OwnedRoot != "" || len(cat.Entries) != 0 {
+	if err != nil || len(cat.OwnedRoots) != 0 || len(cat.Entries) != 0 {
 		t.Fatalf("empty agent catalog: got %+v err %v", cat, err)
 	}
 }
@@ -391,8 +391,69 @@ func TestLoadAgentCatalogLists(t *testing.T) {
 		t.Fatalf("agent catalog: %+v", cat)
 	}
 	abs, _ := filepath.Abs(dir)
-	if cat.OwnedRoot != abs {
-		t.Fatalf("OwnedRoot = %q, want %q", cat.OwnedRoot, abs)
+	if len(cat.OwnedRoots) != 1 || cat.OwnedRoots[0] != abs {
+		t.Fatalf("OwnedRoots = %v, want [%q]", cat.OwnedRoots, abs)
+	}
+}
+
+func TestLoadAgentCatalogsMultiRootMergePrecedence(t *testing.T) {
+	t.Parallel()
+	// Two roots: a convention root and a higher-precedence patch root.
+	// "shared" exists in both; "patch-only"/"conv-only" exist in one each.
+	convRoot := t.TempDir()
+	patchRoot := t.TempDir()
+	mkSkill(t, convRoot, "conv-only")
+	mkSkill(t, convRoot, "shared")
+	mkSkill(t, patchRoot, "shared")
+	mkSkill(t, patchRoot, "patch-only")
+
+	cat, err := LoadAgentCatalogs([]string{convRoot, patchRoot})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// All three distinct names present, sorted.
+	gotNames := make([]string, len(cat.Entries))
+	for i, e := range cat.Entries {
+		gotNames[i] = e.Name
+	}
+	wantNames := []string{"conv-only", "patch-only", "shared"}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("entry names = %v, want %v", gotNames, wantNames)
+	}
+
+	// The later (patch) root wins for "shared".
+	absPatch, _ := filepath.Abs(patchRoot)
+	for _, e := range cat.Entries {
+		if e.Name == "shared" && filepath.Dir(e.Source) != absPatch {
+			t.Errorf("shared resolved to %q, want under patch root %q (later wins)", e.Source, absPatch)
+		}
+	}
+
+	// Both roots are owned, in precedence order.
+	absConv, _ := filepath.Abs(convRoot)
+	wantRoots := []string{absConv, absPatch}
+	if !reflect.DeepEqual(cat.OwnedRoots, wantRoots) {
+		t.Errorf("OwnedRoots = %v, want %v", cat.OwnedRoots, wantRoots)
+	}
+}
+
+func TestLoadAgentCatalogsSkipsEmptyAndDedupsRoots(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	mkSkill(t, root, "only")
+	// Empty strings are skipped; a repeated root contributes a single
+	// owned-root entry (and does not duplicate its skills).
+	cat, err := LoadAgentCatalogs([]string{"", root, "", root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 || cat.Entries[0].Name != "only" {
+		t.Fatalf("entries = %+v, want single 'only'", cat.Entries)
+	}
+	abs, _ := filepath.Abs(root)
+	if len(cat.OwnedRoots) != 1 || cat.OwnedRoots[0] != abs {
+		t.Fatalf("OwnedRoots = %v, want [%q]", cat.OwnedRoots, abs)
 	}
 }
 

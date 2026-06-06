@@ -2112,6 +2112,8 @@ export interface components {
             SessionSetupScript: string | null;
             Skills: string[] | null;
             SkillsAppend: string[] | null;
+            SkillsDir: string | null;
+            SkillsDirs: string[] | null;
             SleepAfterIdle: string | null;
             StartCommand: string | null;
             Suspended: boolean | null;

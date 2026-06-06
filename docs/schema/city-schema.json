@@ -833,6 +833,17 @@
           "type": "string",
           "description": "OverlayDir overrides the agent's overlay_dir path. Copies contents\nadditively into the agent's working directory at startup.\nRelative paths resolve against the declaring config file's directory\n(pack-safe). Paths prefixed with \"//\" resolve against the city root."
         },
+        "skills_dirs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "SkillsDirs appends additional agent-local skill catalog roots to the\ntarget agent (on top of its convention-discovered agents/\u003cname\u003e/skills/\nroot). The mechanism is additive — multiple patches, and the singular\nskills_dir alias below, all append; nothing is clobbered. Later-declared\nentries take precedence at materialization. Each path is pack-safe:\nrelative paths resolve against the declaring config file's directory,\nand a \"//\" prefix resolves against the city root (same rule as\noverlay_dir). See engdocs/proposals/skill-materialization.md."
+        },
+        "skills_dir": {
+          "type": "string",
+          "description": "SkillsDir is a convenience alias for SkillsDirs that appends a single\nagent-local skill catalog root. Resolved pack-safe exactly like\nskills_dirs. When both skills_dir and skills_dirs appear in one patch\nblock, skills_dir layers first (lowest precedence among the two)."
+        },
         "default_sling_formula": {
           "type": "string",
           "description": "DefaultSlingFormula overrides the default sling formula."

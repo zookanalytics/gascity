@@ -781,6 +781,16 @@ func adjustPatchPaths(patches *Patches, declDir, cityRoot string) {
 			v := adjustFragmentPath(*p.OverlayDir, declDir, cityRoot)
 			p.OverlayDir = &v
 		}
+		if p.SkillsDir != nil && *p.SkillsDir != "" {
+			v := adjustFragmentPath(*p.SkillsDir, declDir, cityRoot)
+			p.SkillsDir = &v
+		}
+		for j := range p.SkillsDirs {
+			if p.SkillsDirs[j] == "" {
+				continue
+			}
+			p.SkillsDirs[j] = adjustFragmentPath(p.SkillsDirs[j], declDir, cityRoot)
+		}
 	}
 }
 
@@ -835,6 +845,17 @@ func populateAgentLocalAssetDirs(fs fsys.FS, root *City, cityRoot string) {
 			skillsDir := filepath.Join(base, "agents", a.Name, "skills")
 			if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
 				a.SkillsDir = skillsDir
+			}
+		}
+		// Normalize patch-supplied skill roots to absolute. adjustPatchPaths
+		// resolves them to city-root-relative (pack-safe, like overlay_dir);
+		// the convention SkillsDir above is absolute, so make SkillsDirs
+		// absolute too. A uniform set lets AgentLocalSkillRoots consumers
+		// (materializer, collision validator, prompt render) read the roots
+		// without re-threading the city root.
+		for j, dir := range a.SkillsDirs {
+			if dir != "" && !filepath.IsAbs(dir) {
+				a.SkillsDirs[j] = filepath.Join(cityRoot, dir)
 			}
 		}
 		if a.MCPDir == "" {

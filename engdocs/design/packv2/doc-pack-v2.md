@@ -59,6 +59,17 @@ The top level of a pack is **controlled surface area** — standard directory na
 For the first skills/MCP slice, only the current city pack contributes
 `skills/` and `mcp/` catalogs; imported-pack catalogs are a later wave.
 
+One agent-local exception already exists for skills: a `[[patches.agent]]`
+block may attach additional agent-local skill roots to an agent — including
+an **imported, bare-name-patched** agent — via the additive `skills_dirs`
+list (or the singular `skills_dir` alias). The roots layer on top of the
+agent's convention-discovered `agents/<name>/skills/` without clobbering it;
+multiple patches all append. This is how an importing pack scopes a skill to
+a single imported agent (e.g. the gastown `mayor`) without manufacturing a
+phantom local agent. See
+[skill-materialization.md](../../proposals/skill-materialization.md) for the
+precedence and collision rules.
+
 Embedded packs (if needed) live under `assets/` and are referenced by explicit import path:
 
 ```toml

@@ -224,13 +224,13 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 	}
 
 	var agentCat materialize.AgentCatalog
-	if agent.SkillsDir != "" {
-		c, err := materialize.LoadAgentCatalog(agent.SkillsDir)
+	if roots := agent.AgentLocalSkillRoots(); len(roots) > 0 {
+		c, err := materialize.LoadAgentCatalogs(roots)
 		switch {
 		case err != nil:
 			if stderr != nil {
-				fmt.Fprintf(stderr, "buildDesiredState: LoadAgentCatalog %q for agent %q: %v (agent-local skills will not contribute to fingerprints this tick)\n", //nolint:errcheck // best-effort stderr
-					agent.SkillsDir, agent.QualifiedName(), err)
+				fmt.Fprintf(stderr, "buildDesiredState: LoadAgentCatalogs %v for agent %q: %v (agent-local skills will not contribute to fingerprints this tick)\n", //nolint:errcheck // best-effort stderr
+					roots, agent.QualifiedName(), err)
 			}
 		default:
 			agentCat = c
