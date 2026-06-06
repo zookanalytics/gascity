@@ -58,7 +58,9 @@ export function installCommandPalette(deps: { refreshAll: () => Promise<void> })
           desc: "Show current sessions JSON",
           category: "Status",
           run: () => read("sessions", api.GET("/v0/city/{cityName}/sessions", {
-            params: { path: { cityName: city }, query: { state: "active", peek: true } },
+            // view=full: this inspector shows the enriched session JSON
+            // (running/active_bead/...), which the summary default omits.
+            params: { path: { cityName: city }, query: { state: "active", peek: true, view: "full" } },
           })),
         },
         {
