@@ -36,10 +36,15 @@ template = "deacon"
 scope = "city"
 mode = "always"
 
+# Boot is woken on demand by the boot-gate exec order (orders/boot-gate.toml),
+# which files a wake bead assigned to boot only when the deacon's patrol wisp
+# goes stale. mode = "always" would revive boot every patrol tick and write a
+# session bead each time — the dominant source of city-store churn on an idle
+# town. on_demand keeps boot dormant until there is something to judge.
 [[named_session]]
 template = "boot"
 scope = "city"
-mode = "always"
+mode = "on_demand"
 
 [[named_session]]
 template = "witness"
