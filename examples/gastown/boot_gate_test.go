@@ -21,10 +21,14 @@ func rfc3339Ago(d time.Duration) string {
 }
 
 // writeBootGateGCStub installs a fake `gc` on PATH that logs every call to
-// $GC_CALL_LOG and answers the two `bd list` shapes the gate issues plus
-// `bd create`. wispsJSON is returned for the in-progress wisp discovery
-// query; existingJSON is returned for the idempotency query (boot's
-// outstanding gate beads). Both default to an empty JSON array.
+// $GC_CALL_LOG and answers the shapes the gate issues: `bd query` for the
+// in-progress wisp discovery (ephemeral tier), `bd list --label` for the
+// idempotency query, and `bd create`. wispsJSON is returned for discovery;
+// existingJSON is returned for the idempotency query (boot's outstanding gate
+// beads). Both default to an empty JSON array. The legacy `bd list --type=wisp`
+// shape is rejected with the real CLI's error and a non-zero exit, so a gate
+// that regresses to it fails loud (no wisp discovered) instead of silently
+// no-opping — the exact contract the previous stub masked.
 func writeBootGateGCStub(t *testing.T, binDir, wispsJSON, existingJSON string) {
 	t.Helper()
 	if strings.TrimSpace(wispsJSON) == "" {
@@ -35,18 +39,21 @@ func writeBootGateGCStub(t *testing.T, binDir, wispsJSON, existingJSON string) {
 	}
 	body := fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$GC_CALL_LOG"
-if [ "$1" = "bd" ] && [ "$2" = "list" ]; then
-  case "$*" in
-    *"--type=wisp"*)
-      cat <<'WISPS'
+if [ "$1" = "bd" ] && [ "$2" = "query" ]; then
+  cat <<'WISPS'
 %s
 WISPS
-      exit 0 ;;
+  exit 0
+fi
+if [ "$1" = "bd" ] && [ "$2" = "list" ]; then
+  case "$*" in
     *"--label=boot-gate"*)
       cat <<'EXISTING'
 %s
 EXISTING
       exit 0 ;;
+    *"--type=wisp"*)
+      echo 'invalid issue type "wisp"' >&2 ; exit 1 ;;
     *)
       printf '[]\n' ; exit 0 ;;
   esac
@@ -191,5 +198,30 @@ func TestBootGateHonorsIdentityOverrides(t *testing.T) {
 
 	if !strings.Contains(log, "--assignee=town.boot") {
 		t.Fatalf("identity overrides must be honored; gc calls:\n%s", log)
+	}
+}
+
+// TestBootGateUsesValidWispQuery is a source-level regression guard for the
+// codex finding on PR#44. Patrol wisps are ephemeral beads and `bd` has no
+// "wisp" issue type, so `bd list --type=wisp` exits non-zero; combined with the
+// gate's `2>/dev/null ... || exit 0` read-failure resilience, that shape
+// silently no-ops the gate and leaves a mode=on_demand boot with no wake
+// source. The behavioral tests run against a stub, so this static check guards
+// the real CLI contract directly: discovery must use the ephemeral query tier,
+// never the invalid `--type=wisp` list shape.
+func TestBootGateUsesValidWispQuery(t *testing.T) {
+	src, err := os.ReadFile(bootGateScript())
+	if err != nil {
+		t.Fatalf("reading boot-gate.sh: %v", err)
+	}
+	script := string(src)
+	if strings.Contains(script, "--type=wisp") {
+		t.Errorf("boot-gate.sh discovers wisps with the invalid `--type=wisp` shape; " +
+			"`bd` has no \"wisp\" issue type, so that query exits non-zero and the " +
+			"gate silently no-ops. Use the ephemeral query tier instead.")
+	}
+	if !strings.Contains(script, "ephemeral=true") {
+		t.Errorf("boot-gate.sh must discover patrol wisps via the ephemeral query tier " +
+			"(`gc bd query ... ephemeral=true ...`); none found.")
 	}
 }

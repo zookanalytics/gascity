@@ -56,8 +56,13 @@ BOOT_OVERRIDE="${GC_BOOT_GATE_BOOT:-}"
 # Step 1: discover the deacon's in-progress patrol wisp. Patrol iterations are
 # wisps (mol-deacon-patrol pours and burns one per cycle), so the in-progress
 # wisp set is bounded by the number of live patrol agents — a cheap query.
-# A read failure (API down) must not crash the controller's order loop.
-WISPS_JSON="$(gc bd list --status=in_progress --type=wisp --json --limit=0 2>/dev/null)" || exit 0
+# Wisps are ephemeral beads and `bd` has no "wisp" issue type — filtering a
+# bead list by that nonexistent type exits non-zero, which combined with the
+# `|| exit 0` below would silently no-op the gate and leave on_demand boot with
+# no wake source. Discover via the ephemeral query tier instead and let the jq
+# below narrow the rows to the deacon's patrol. A read failure (API down) must
+# not crash the controller's order loop.
+WISPS_JSON="$(gc bd query --json 'ephemeral=true AND status=in_progress' --limit=0 2>/dev/null)" || exit 0
 [ -n "$WISPS_JSON" ] || exit 0
 
 # Select the freshest matching wisp and emit "<assignee>\t<id>\t<age_seconds>".
