@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sling"
+	"golang.org/x/sync/singleflight"
 )
 
 // extmsgNotifyTimeout bounds fire-and-forget goroutines spawned from
@@ -83,6 +84,15 @@ type Server struct {
 	storeHealthEntry    *StatusStoreHealth
 	storeHealthExpires  time.Time
 	storeHealthComputer func() *StatusStoreHealth
+
+	// sessionLive warm-caches the view=full per-session live-observation fields
+	// (running, active_bead, attached, last_active, state) so GET
+	// /sessions?view=full forks no tmux on the request path. sessionLiveSnapshot
+	// is served stale-while-revalidate; sessionLiveGroup coalesces concurrent
+	// refreshes into one runtime sweep. See session_live_cache.go (gc-tnvok).
+	sessionLiveMu       sync.Mutex
+	sessionLiveSnapshot *sessionLiveSnapshot
+	sessionLiveGroup    singleflight.Group
 
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
