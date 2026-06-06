@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
@@ -1152,7 +1153,16 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 			labels = []string{"exec-failed"}
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
-				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, execenv.RedactText(string(output), redactionEnv))
+				redactedOutput := execenv.RedactText(string(output), redactionEnv)
+				logDispatchError(m.stderr, "gc: order exec %s output: %s", scoped, redactedOutput)
+				// Fold a bounded tail of the command's own output into the
+				// failure message so the order.failed event records the
+				// actionable cause, not just the bare "exit status N". Exec
+				// orders (e.g. `gc dolt compact`) print the real reason and
+				// then exit non-zero; without this the event is undiagnosable.
+				if excerpt := orderExecOutputExcerpt(redactedOutput); excerpt != "" {
+					execErrMsg = execErrMsg + "; output: " + excerpt
+				}
 			}
 		}
 	}
@@ -1190,6 +1200,50 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		Actor:   "controller",
 		Subject: scoped,
 	})
+}
+
+// orderExecOutputExcerptMaxLines and orderExecOutputExcerptMaxBytes bound the
+// trailing excerpt of an exec order's combined output that is folded into the
+// order.failed event message. The tail is what matters for a failed exec — the
+// failing command's own error is the last thing it prints before exiting — so
+// the excerpt keeps the final lines and caps total size to keep event payloads
+// and tracking-bead history small.
+const (
+	orderExecOutputExcerptMaxLines = 20
+	orderExecOutputExcerptMaxBytes = 2000
+)
+
+// orderExecOutputExcerpt returns a bounded, trailing excerpt of an exec order's
+// (already redacted) combined output, suitable for embedding in failure
+// diagnostics. It keeps at most the last orderExecOutputExcerptMaxLines lines
+// and caps the result at orderExecOutputExcerptMaxBytes bytes, always keeping
+// the tail. A leading "…" marks content dropped by either bound. The byte cap
+// never splits a multibyte rune, so the result stays valid UTF-8 for JSON event
+// encoding. Returns "" when the trimmed output is empty.
+func orderExecOutputExcerpt(output string) string {
+	trimmed := strings.TrimRight(output, "\r\n \t")
+	if trimmed == "" {
+		return ""
+	}
+	truncated := false
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > orderExecOutputExcerptMaxLines {
+		lines = lines[len(lines)-orderExecOutputExcerptMaxLines:]
+		truncated = true
+	}
+	excerpt := strings.Join(lines, "\n")
+	if len(excerpt) > orderExecOutputExcerptMaxBytes {
+		excerpt = excerpt[len(excerpt)-orderExecOutputExcerptMaxBytes:]
+		// Advance past any partial leading rune so the excerpt stays valid UTF-8.
+		for len(excerpt) > 0 && !utf8.RuneStart(excerpt[0]) {
+			excerpt = excerpt[1:]
+		}
+		truncated = true
+	}
+	if truncated {
+		excerpt = "…" + excerpt
+	}
+	return excerpt
 }
 
 func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string) (*formula.Recipe, error) {
