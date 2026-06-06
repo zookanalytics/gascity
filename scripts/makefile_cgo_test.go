@@ -142,6 +142,61 @@ exit 0
 	}
 }
 
+// TestMakefilePrintTargetsDoNotInvokeGoList guards the module-cache leak from
+// gc-8p5wc. Lightweight Makefile targets (print-cgo-flags, help, ...) must not
+// trigger `go list ./...` at parse time. When UNIT_COVER_PKGS was an immediate
+// `:=` assignment, every `make` invocation ran `go list ./...`; the CGO tests
+// redirect HOME, so that parse-time list re-downloaded the entire module cache
+// (~1.5G of read-only files) into each test's t.TempDir(), filling the /tmp
+// tmpfs whenever a run was killed before cleanup. Keeping UNIT_COVER_PKGS lazy
+// confines `go list` to the coverage recipe that actually consumes it.
+func TestMakefilePrintTargetsDoNotInvokeGoList(t *testing.T) {
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("locate go toolchain: %v", err)
+	}
+
+	repoRoot := repoRoot(t)
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+
+	// Shim `go` so `go list` records a marker and becomes a cheap no-op while
+	// every other subcommand — notably the parse-time `go env` calls — delegates
+	// to the real toolchain. The marker's presence after the make run is the
+	// signal that a parse-time `go list ./...` fired.
+	marker := filepath.Join(tmp, "go-list.ran")
+	writeExecutable(t, filepath.Join(binDir, "go"), `#!/usr/bin/env sh
+if [ "$1" = "list" ]; then
+  : > "`+marker+`"
+  exit 0
+fi
+exec `+realGo+` "$@"
+`)
+
+	// Point system-include detection at an empty dir so the Linux CGO probe
+	// short-circuits before touching cc/dpkg; this test only cares about the
+	// parse-time go list, not CGO flag computation.
+	emptyInclude := filepath.Join(tmp, "noinclude")
+	if err := os.MkdirAll(emptyInclude, 0o755); err != nil {
+		t.Fatalf("mkdir noinclude: %v", err)
+	}
+
+	runMakefileCGOPrintTarget(t, repoRoot, tmp, binDir,
+		"SYS_USR_INCLUDE="+emptyInclude,
+	)
+
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("`make print-cgo-flags` ran `go list ./...` at parse time; " +
+			"UNIT_COVER_PKGS must be lazily evaluated (= not :=) so lightweight " +
+			"targets don't populate the module cache")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat go-list marker: %v", err)
+	}
+}
+
 func runMakefileCGOPrintTarget(t *testing.T, repoRoot, tmp, binDir string, args ...string) string {
 	t.Helper()
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))

@@ -515,7 +515,12 @@ check-docs:
 # Packages for coverage — exclude noise:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
-UNIT_COVER_PKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
+# Lazily evaluated (`=`, not `:=`) on purpose: `go list ./...` is expensive and
+# populates the module cache, so an immediate assignment would run it at parse
+# time for *every* make invocation — including lightweight targets like
+# print-cgo-flags whose CGO tests redirect HOME, leaking ~1.5G into /tmp.
+# Deferring keeps `go list` confined to the test-cover recipe that uses it.
+UNIT_COVER_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep
 ## The skipped cmd/gc process-backed scenarios remain covered by
