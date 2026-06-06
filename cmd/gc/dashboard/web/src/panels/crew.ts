@@ -33,7 +33,10 @@ export async function renderCrew(): Promise<void> {
   clear(crewBody);
 
   const { data, error } = await api.GET("/v0/city/{cityName}/sessions", {
-    params: { path: { cityName: city }, query: { state: "active", peek: true } },
+    // view=full: crew reads the enriched running/active_bead/attached/last_active
+    // fields, which the (now summary) default omits. Enriched consumers must opt
+    // in explicitly after the default flip.
+    params: { path: { cityName: city }, query: { state: "active", peek: true, view: "full" } },
   });
   if (error || !data?.items) {
     crewLoading.textContent = "Failed to load crew";
