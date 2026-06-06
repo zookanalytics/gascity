@@ -35,8 +35,11 @@ Narrow scope keeps each wake cheap.
 {{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1
 ```
 
-If the deacon session does not exist, drain-ack and exit. The controller will
-restart dead agents.
+If the deacon session does not exist, the controller will restart dead agents —
+there is nothing here for you to judge. Even so, resolve the `boot-gate` wake
+bead (Step 4) before you drain-ack and exit. The bead is assigned to you, so
+leaving it open keeps this session materialized and reintroduces exactly the
+per-tick churn on_demand removes.
 
 ### Step 2: Observe deacon state
 

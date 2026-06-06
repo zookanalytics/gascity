@@ -1863,6 +1863,33 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+// TestBootPromptMissingDeaconExitResolvesWakeBead guards the on_demand churn
+// invariant: every boot exit path must resolve the boot-gate wake bead before
+// draining. The Step 1 early exit — taken when the deacon session is gone — is
+// the easy one to miss. An open wake bead assigned to boot keeps the
+// controller's on_demand demand check satisfied and rematerializes boot on
+// every gate tick, exactly the churn the on_demand redesign removes.
+func TestBootPromptMissingDeaconExitResolvesWakeBead(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "boot", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading boot prompt: %v", err)
+	}
+	step1 := extractBetween(t, string(data),
+		"### Step 1: Check if deacon session exists",
+		"### Step 2:")
+	// Collapse markdown soft-wrap whitespace so the assertions match what the
+	// agent actually reads, not where the source happens to break lines.
+	normalized := strings.Join(strings.Fields(step1), " ")
+	if !strings.Contains(normalized, "wake bead") {
+		t.Errorf("boot Step 1 missing-deacon exit must resolve the wake bead before draining (an open bead rematerializes boot); section:\n%s", step1)
+	}
+	if !strings.Contains(normalized, "Step 4") {
+		t.Errorf("boot Step 1 missing-deacon exit must route through the Step 4 wake-bead closure path; section:\n%s", step1)
+	}
+}
+
 func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
