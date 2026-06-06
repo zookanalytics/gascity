@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -697,6 +698,104 @@ func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("exec calls after second dispatch = %d, want 1", calls)
 	}
+}
+
+func TestOrderDispatchExecFailureIncludesOutputInFailedEvent(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	var rec memRecorder
+
+	// Real exec orders (e.g. `gc dolt compact`) print the actionable cause to
+	// stdout/stderr and then exit non-zero. The bare exec error ("exit status
+	// 1") is useless on its own; the order.failed event must carry the captured
+	// output so operators can diagnose the failure from `gc` tooling alone.
+	output := "compact: db=sl flatten ok\ncompact: db=sl table=mail value hash changed after flatten — quarantine and investigate before GC"
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		return []byte(output + "\n"), fmt.Errorf("exit status 1")
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:    "dolt-compact",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "scripts/compact.sh",
+	}}, store, eventLog, execRun, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	ad.drain(context.Background())
+
+	msg := recordedOrderFailedMessage(t, &rec, "dolt-compact")
+	if !strings.Contains(msg, "exit status 1") {
+		t.Fatalf("order.failed message = %q, want it to retain the exec error", msg)
+	}
+	if !strings.Contains(msg, "value hash changed after flatten") {
+		t.Fatalf("order.failed message = %q, want it to include the captured command output", msg)
+	}
+}
+
+func TestOrderExecOutputExcerpt(t *testing.T) {
+	t.Run("empty input yields empty excerpt", func(t *testing.T) {
+		if got := orderExecOutputExcerpt(""); got != "" {
+			t.Fatalf("orderExecOutputExcerpt(%q) = %q, want empty", "", got)
+		}
+		if got := orderExecOutputExcerpt("\n\n  \n"); got != "" {
+			t.Fatalf("orderExecOutputExcerpt(blank) = %q, want empty", got)
+		}
+	})
+
+	t.Run("short output passes through trimmed", func(t *testing.T) {
+		got := orderExecOutputExcerpt("compact: db=gc failed\n")
+		if got != "compact: db=gc failed" {
+			t.Fatalf("orderExecOutputExcerpt = %q, want trailing newline trimmed and no marker", got)
+		}
+	})
+
+	t.Run("keeps trailing lines when line bound exceeded", func(t *testing.T) {
+		var sb strings.Builder
+		for i := 0; i < orderExecOutputExcerptMaxLines+10; i++ {
+			fmt.Fprintf(&sb, "line %d\n", i)
+		}
+		got := orderExecOutputExcerpt(sb.String())
+		if !strings.HasPrefix(got, "…") {
+			t.Fatalf("orderExecOutputExcerpt = %q, want a leading truncation marker", got)
+		}
+		lastLine := fmt.Sprintf("line %d", orderExecOutputExcerptMaxLines+9)
+		if !strings.HasSuffix(got, lastLine) {
+			t.Fatalf("orderExecOutputExcerpt = %q, want it to end with the final line %q", got, lastLine)
+		}
+		if strings.Contains(got, "line 0\n") {
+			t.Fatalf("orderExecOutputExcerpt = %q, want early lines dropped", got)
+		}
+	})
+
+	t.Run("byte bound keeps tail and stays valid utf8", func(t *testing.T) {
+		// A single oversized line full of multibyte runes — the byte cap must
+		// not split a rune (the order.failed message is JSON-encoded).
+		got := orderExecOutputExcerpt(strings.Repeat("—", orderExecOutputExcerptMaxBytes))
+		if len(got) > orderExecOutputExcerptMaxBytes+len("…") {
+			t.Fatalf("excerpt length = %d, want <= %d", len(got), orderExecOutputExcerptMaxBytes+len("…"))
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("excerpt is not valid UTF-8: %q", got)
+		}
+	})
+}
+
+func recordedOrderFailedMessage(t *testing.T, rec *memRecorder, subject string) string {
+	t.Helper()
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, e := range rec.events {
+		if e.Type == events.OrderFailed && e.Subject == subject {
+			return e.Message
+		}
+	}
+	t.Fatalf("no order.failed event for subject %q among %d recorded events", subject, len(rec.events))
+	return ""
 }
 
 func TestOrderDispatchEventExecLatestSeqErrorDoesNotRunExec(t *testing.T) {
