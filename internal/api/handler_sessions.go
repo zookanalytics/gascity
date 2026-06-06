@@ -234,15 +234,72 @@ func writeResolveError(w http.ResponseWriter, err error) {
 	}
 }
 
+// sessionListItems builds the response rows for a session listing, shared by
+// the legacy (handleSessionList) and Huma (humaHandleSessionList) handlers.
+//
+// Both the summary default and view=full build their rows from the metadata-only
+// ListSummaryFromBeads projection, so the request path forks no tmux. view=full
+// then overlays the per-session live-observation fields (running, active_bead,
+// attached, last_active, state) from the stale-while-revalidate warm cache
+// (sessionLiveFieldsSnapshot). The one exception is view=full&peek=true: a peek
+// is an inherently live terminal capture, so it keeps the per-request live
+// enrichment (ListFullFromBeads + enrichSessionResponse) the caller explicitly
+// opted into.
+//
+// The reason field is liveness-gated only for reset-pending sessions
+// (lifecycleResetPendingReasonVisible short-circuits before probing for every
+// other session), so view=full passes the live provider — keeping reset-pending
+// visible while forking tmux only for the rare reset case — and the summary
+// default passes nil so its reason never touches the runtime.
+func (s *Server) sessionListItems(store beads.Store, all []beads.Bead, cfg *config.City, full, wantPeek bool, stateFilter, templateFilter string) []sessionResponse {
+	mgr := s.sessionManager(store)
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+
+	livePeek := full && wantPeek
+
+	var listResult *session.ListResult
+	if livePeek {
+		listResult = mgr.ListFullFromBeads(all, stateFilter, templateFilter)
+	} else {
+		listResult = mgr.ListSummaryFromBeads(all, stateFilter, templateFilter)
+	}
+	sessions := listResult.Sessions
+
+	// Build bead index for reason enrichment.
+	beadIndex := make(map[string]*beads.Bead, len(listResult.Beads))
+	for i := range listResult.Beads {
+		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
+	}
+
+	reasonProvider := s.state.SessionProvider()
+	if !full {
+		reasonProvider = nil
+	}
+
+	var warm map[string]sessionLiveFields
+	if full && !livePeek {
+		warm = s.sessionLiveFieldsSnapshot()
+	}
+
+	items := make([]sessionResponse, len(sessions))
+	for i, sess := range sessions {
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, reasonProvider, hasDeferredQueue)
+		switch {
+		case livePeek:
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), true, false, false, 0)
+		case full:
+			if lf, ok := warm[sess.ID]; ok {
+				applySessionLiveFields(&items[i], lf)
+			}
+		}
+	}
+	return items
+}
+
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
-		return
-	}
-	catalog, err := s.workerSessionCatalog(store)
-	if err != nil {
-		writeSessionManagerError(w, err)
 		return
 	}
 	cfg := s.state.Config()
@@ -261,44 +318,7 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	// The default (summary) listing must not observe live runtime state:
-	// ListFullFromBeads expands each bead through infoFromBead, which probes the
-	// provider (IsRunning/IsAttached/GetLastActivity) for active sessions — a
-	// tmux fork on the tmux provider, violating the cheap-default "no live probe"
-	// contract. ListSummaryFromBeads is the metadata-only projection; only
-	// view=full pays for the live expansion.
-	var listResult *worker.SessionListResult
-	if full {
-		listResult = catalog.ListFullFromBeads(all, stateFilter, templateFilter)
-	} else {
-		listResult = catalog.ListSummaryFromBeads(all, stateFilter, templateFilter)
-	}
-	sessions := listResult.Sessions
-
-	// Build bead index for reason enrichment.
-	beadIndex := make(map[string]*beads.Bead)
-	for i := range listResult.Beads {
-		beadIndex[listResult.Beads[i].ID] = &listResult.Beads[i]
-	}
-
-	items := make([]sessionResponse, len(sessions))
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	// In the default (summary) listing the reason must come from the pure,
-	// no-liveness projection: the reset-pending branch probes provider IsRunning
-	// (a live tmux fork for the tmux provider), which violates the cheap-default
-	// "no live probe" contract. A nil provider makes
-	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
-	// metadata-only reason.
-	reasonProvider := s.state.SessionProvider()
-	if !full {
-		reasonProvider = nil
-	}
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, reasonProvider, hasDeferredQueue)
-		if full {
-			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
-		}
-	}
+	items := s.sessionListItems(store, all, cfg, full, wantPeek, stateFilter, templateFilter)
 
 	pp := parsePagination(r, maxPaginationLimit)
 	if !pp.IsPaging {
