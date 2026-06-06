@@ -44,7 +44,10 @@ export async function renderStatus(): Promise<void> {
     "sessions",
     city,
     (signal) => api.GET("/v0/city/{cityName}/sessions", {
-      params: { path: { cityName: city }, query: { state: "active", peek: true } },
+      // view=full: status reads the enriched running/last_active fields, which
+      // the (now summary) default omits. The flip made summary the default, so
+      // enriched consumers must opt in explicitly.
+      params: { path: { cityName: city }, query: { state: "active", peek: true, view: "full" } },
       signal,
     }) as Promise<APIResult<SessionList>>,
   );
