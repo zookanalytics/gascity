@@ -38,7 +38,11 @@ var docTreeDirs = []string{"contrib", "docs", "engdocs", "release-gates", "specs
 
 // docTreeIgnored lists directories that contain markdown but are not
 // documentation trees (e.g., embedded prompt templates, test fixtures,
-// gitignored scratch space for local work).
+// gitignored scratch space for local work). "tmp" and "worktrees" are
+// gitignored scratch: "worktrees" is the polecat-home layout where the
+// checkout is itself a worktree and nested per-bead worktrees (each carrying
+// their own markdown) live under ./worktrees, so the coverage scan must skip
+// it even though a clean rig checkout never has it.
 var docTreeIgnored = []string{"cmd", "examples", "internal", "plans", "scripts", "test", "tmp", "worktrees"}
 
 // knownBrokenLinks lists links to docs that do not exist yet. These are
