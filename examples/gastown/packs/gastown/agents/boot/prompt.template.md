@@ -13,9 +13,17 @@ from wisps, pane output, and mail.
 
 ## Your Lifecycle
 
-`mode = "always"` keeps the `boot` identity present. `wake_mode = "fresh"`
-gives each wake a new provider context. Observe, decide, act, drain-ack, exit.
-Do not rely on prior conversation context or handoff mail. Narrow scope keeps each wake cheap.
+`mode = "on_demand"` keeps the `boot` identity dormant until there is work to
+judge. The `boot-gate` exec order (a cheap, no-LLM timer check in
+`orders/boot-gate.toml`) files a wake bead **assigned to you** only when the
+deacon's patrol wisp goes stale; the controller then materializes this session
+on the assignee match. `wake_mode = "fresh"`
+gives each wake a new provider context. Observe, decide, act, **resolve the
+wake bead**, drain-ack, exit. Do not rely on prior conversation context or
+handoff mail. A healthy, idle town files no wake bead, so you never spawn —
+that absence is the point: it is what keeps boot from writing a session bead on
+every patrol tick.
+Narrow scope keeps each wake cheap.
 
 ---
 
@@ -67,34 +75,50 @@ Use judgment; there are no hardcoded thresholds. Consider:
 | Stale wisp, no output, ambiguous | Possibly stuck | Nudge |
 | Very stale wisp, errors visible | Clearly stuck | File warrant |
 
-Healthy or idle: drain-ack and exit. Possibly stuck: nudge once, then let the
-next Boot tick re-evaluate.
+Healthy or idle: resolve the wake bead (Step 4), drain-ack, and exit.
+Possibly stuck: nudge once, then let the next gate-driven Boot wake re-evaluate.
 
 ```bash
 {{ cmd }} session nudge {{ .BindingPrefix }}deacon "Boot check: are you making progress?"
 ```
-Drain-ack and exit. Next Boot wake will re-evaluate.
+Then resolve the wake bead and exit (Step 4). Next Boot wake will re-evaluate.
 
-Clearly stuck: file a warrant for the dog pool.
+Clearly stuck: file a warrant for the dog pool. First check you have not
+already filed one — while the dog works, the gate may wake you again every
+cooldown, and you must not pile on a second warrant for the same deacon.
 
 ```bash
-gc bd create --type=task \
-  --title="Stuck: {{ .BindingPrefix }}deacon" \
-  --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"Stale patrol wisp, no activity","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
-  --label=warrant
+EXISTING_WARRANT=$(gc bd list --label=warrant --status=open,in_progress --json --limit=0 \
+  | jq -r '.[] | select(.metadata.target == "{{ .BindingPrefix }}deacon") | .id' | head -n1)
+if [ -z "$EXISTING_WARRANT" ]; then
+  gc bd create --type=task \
+    --title="Stuck: {{ .BindingPrefix }}deacon" \
+    --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"Stale patrol wisp, no activity","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}' \
+    --label=warrant
+fi
 ```
 The dog pool picks up the warrant and runs the shutdown dance.
 
-### Step 4: Signal done and exit
+### Step 4: Resolve the wake bead, then exit
+
+Close the `boot-gate` wake bead(s) assigned to you. This is mandatory on
+**every** exit path (healthy, nudged, or warrant-filed): the bead is what the
+controller's on_demand demand check keys on, so leaving it open would hold this
+session materialized and reintroduce exactly the per-tick churn on_demand
+removes. The next stale wisp files a fresh wake bead.
 
 ```bash
+for bead in $(gc bd list --assignee={{ .BindingPrefix }}boot --label=boot-gate --status=open,in_progress --json --limit=0 | jq -r '.[].id'); do
+  gc bd close "$bead" --reason "boot watchdog check complete"
+done
+
 {{ cmd }} runtime drain-ack
 exit
 ```
 
 `drain-ack` tells the controller you're finished. The controller cleans
-up this provider session and can wake the configured `boot` identity again
-with a fresh provider context.
+up this provider session; with the wake bead resolved, it will not
+re-materialize `boot` until the gate files a new one.
 
 ---
 
@@ -115,6 +139,7 @@ with a fresh provider context.
 | Check deacon work | `gc bd list --assignee={{ .BindingPrefix }}deacon --status=in_progress --json` |
 | Nudge deacon | `{{ cmd }} session nudge {{ .BindingPrefix }}deacon "message"` |
 | File stuck warrant | `gc bd create --type=task --label=warrant --metadata '{"target":"{{ .BindingPrefix }}deacon","reason":"...","requester":"boot","gc.routed_to":"{{ .BindingPrefix }}dog"}'` |
+| Resolve wake bead | `gc bd close <id> --reason "boot watchdog check complete"` |
 | Check active sessions | `{{ cmd }} session list` |
 
 Working directory: {{ .WorkDir }}

@@ -3067,8 +3067,8 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 	if bootSession == nil {
 		t.Fatal("boot named_session missing; prompt documents its lifecycle")
 	}
-	if got := bootSession.ModeOrDefault(); got != "always" {
-		t.Fatalf("boot named_session mode = %q, want %q because prompt documents that lifecycle", got, "always")
+	if got := bootSession.ModeOrDefault(); got != "on_demand" {
+		t.Fatalf("boot named_session mode = %q, want %q because prompt documents that lifecycle", got, "on_demand")
 	}
 	bootAgent := config.FindAgent(cfg, bootSession.TemplateQualifiedName())
 	if bootAgent == nil {
@@ -3105,11 +3105,16 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1",
 		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30",
 		"configured `boot` named session",
-		"`mode = \"always\"` keeps the `boot` identity present",
+		"`mode = \"on_demand\"` keeps the `boot` identity dormant",
+		"`boot-gate` exec order",
 		"`wake_mode = \"fresh\"`",
 		"gives each wake a new provider context",
 		"Narrow scope keeps each wake cheap.",
 		"Next Boot wake will re-evaluate.",
+		// on_demand demand only clears when the wake bead is resolved, so the
+		// prompt MUST close it on every exit path.
+		"gc bd list --assignee={{ .BindingPrefix }}boot --label=boot-gate --status=open,in_progress",
+		"gc bd close \"$bead\"",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("boot prompt missing current lifecycle or command guidance %q:\n%s", want, body)
