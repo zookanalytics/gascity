@@ -11205,6 +11205,10 @@ export type GetV0CityByCityNameSessionsData = {
          * Include last output preview.
          */
         peek?: boolean;
+        /**
+         * Response detail level. "summary" returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, last_active, attached, options, metadata) and skips per-session enrichment (live running probe, active-bead lookup, model/context transcript read); it takes precedence over peek. Empty or "full" (the default, and any unrecognized value) returns the enriched response.
+         */
+        view?: string;
     };
     url: '/v0/city/{cityName}/sessions';
 };

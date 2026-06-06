@@ -807,6 +807,154 @@ func TestHandleSessionListPagination(t *testing.T) {
 	}
 }
 
+// listSessionsForViewTest issues GET against a session-list URL and returns
+// the decoded items. Used by the view= tests to assert which response fields
+// are populated under each detail level. Accepts any http.Handler so it can
+// drive both the city-scoped Huma handler and the legacy mux.
+func listSessionsForViewTest(t *testing.T, h http.Handler, url string) []sessionResponse {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", url, nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s: status %d, body=%s", url, w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode %s: %v", url, err)
+	}
+	return resp.Items
+}
+
+// TestHandleSessionListSummaryViewSkipsEnrichment verifies that view=summary
+// returns only the cheap read-model fields and skips enrichSessionResponse
+// (no live State() probe, active-bead lookup, or transcript I/O), while the
+// default view still enriches.
+func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Session")
+
+	// Precondition: the default (full) view enriches. Running is derived from
+	// a live State() probe, so it is true for this active session. If this
+	// stopped holding, the summary assertions below would pass vacuously.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Fatalf("full: running=false, want true (default view must enrich)")
+	}
+
+	// view=summary must skip enrichment entirely: the live State() probe never
+	// runs, so the enriched fields keep their zero values.
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	item := sum[0]
+	if item.Running {
+		t.Errorf("summary: running=true, want false (enrichment must be skipped)")
+	}
+	if item.ActiveBead != "" {
+		t.Errorf("summary: active_bead=%q, want empty", item.ActiveBead)
+	}
+	if item.Model != "" {
+		t.Errorf("summary: model=%q, want empty", item.Model)
+	}
+	if item.ContextPct != nil {
+		t.Errorf("summary: context_pct=%d, want nil", *item.ContextPct)
+	}
+	// Cheap read-model fields the status bar needs stay populated.
+	if item.Title != "Summary Session" {
+		t.Errorf("summary: title=%q, want %q", item.Title, "Summary Session")
+	}
+	if item.State != "active" {
+		t.Errorf("summary: state=%q, want active", item.State)
+	}
+	if item.ID == "" {
+		t.Error("summary: id empty, want populated")
+	}
+}
+
+// TestHandleSessionListFullViewStillEnriches guards the default contract: no
+// view param, view=full, and any unrecognized view value all run enrichment
+// (Running is set from the live probe).
+func TestHandleSessionListFullViewStillEnriches(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Full Session")
+
+	for _, path := range []string{
+		"/sessions?state=active",            // default (no view)
+		"/sessions?state=active&view=full",  // explicit full
+		"/sessions?state=active&view=other", // unknown value falls through to full
+	} {
+		items := listSessionsForViewTest(t, h, cityURL(fs, path))
+		if len(items) != 1 {
+			t.Fatalf("%s: got %d items, want 1", path, len(items))
+		}
+		if !items[0].Running {
+			t.Errorf("%s: running=false, want true (must enrich)", path)
+		}
+	}
+}
+
+// TestHandleSessionListSummaryViewWinsOverPeek verifies that view=summary
+// takes precedence over peek=true: skipping enrichment also skips the peek
+// preview, so last_output stays empty.
+func TestHandleSessionListSummaryViewWinsOverPeek(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
+
+	items := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary&peek=true"))
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Running {
+		t.Errorf("running=true, want false (summary wins over peek)")
+	}
+	if items[0].LastOutput != "" {
+		t.Errorf("last_output=%q, want empty (summary wins over peek)", items[0].LastOutput)
+	}
+}
+
+// TestLegacyHandleSessionListSummaryView verifies the legacy (non-city-scoped)
+// GET /v0/sessions handler honors view=summary identically to the city-scoped
+// Huma handler.
+func TestLegacyHandleSessionListSummaryView(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	legacy := srv.legacySessionHandler()
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Legacy Session")
+
+	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active")
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Fatalf("full: running=false, want true (default must enrich)")
+	}
+
+	sum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if sum[0].Running {
+		t.Errorf("summary: running=true, want false (enrichment must be skipped)")
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

@@ -20,12 +20,31 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
+// humaHandleSessionList is the Huma-typed handler for GET
+// /v0/city/{cityName}/sessions.
+//
+// The "view" query parameter selects how much per-session detail the response
+// carries:
+//
+//   - view=summary returns only the cheap read-model + bead-metadata fields
+//     (id, alias, title, state, rig, pool, agent_kind, reason, last_active,
+//     attached, options, metadata, submission_capabilities). These come from
+//     the cache-first read model with no fan-out. The enrichment fields stay
+//     at their zero values: running=false, active_bead="", model="",
+//     context_pct=null, last_output="". summary takes precedence over peek.
+//   - view=full, empty (the default), or any unrecognized value runs
+//     enrichSessionResponse per session: running is a live State() probe,
+//     active_bead is a per-rig bead lookup, and model/context_pct come from
+//     transcript I/O. last_output is added only when peek=true.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.CityBeadStore()
 	if store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	wantPeek := input.Peek
+	// view=summary returns only the cheap read-model fields and skips
+	// enrichSessionResponse for every session; it takes precedence over peek.
+	summary := input.View == sessionViewSummary
+	wantPeek := input.Peek && !summary
 	index := s.latestIndex()
 	cacheKey := ""
 	// Skip caching for peek (terminal text is too volatile) and for
@@ -64,7 +83,9 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		if !summary {
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		}
 	}
 
 	// Pagination support.

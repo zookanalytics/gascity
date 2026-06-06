@@ -18,6 +18,13 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
+// sessionViewSummary is the value of the session-list "view" query parameter
+// that requests the cheap, read-model-only projection: the handler skips
+// enrichSessionResponse (live State() probe, active-bead lookup, and
+// transcript I/O) for every session. Any other value — including empty and
+// "full" — keeps the default enriched projection.
+const sessionViewSummary = "summary"
+
 // sessionResponse is the JSON representation of a chat session.
 type sessionResponse struct {
 	ID          string `json:"id"`
@@ -238,7 +245,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
 	templateFilter := q.Get("template")
-	wantPeek := q.Get("peek") == "true"
+	// view=summary returns only the cheap read-model fields and skips
+	// enrichSessionResponse for every session; it takes precedence over peek.
+	summary := q.Get("view") == sessionViewSummary
+	wantPeek := q.Get("peek") == "true" && !summary
 
 	all, partialErrors, err := sessionReadModelRows(store)
 	if err != nil {
@@ -258,7 +268,9 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		if !summary {
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		}
 	}
 
 	pp := parsePagination(r, maxPaginationLimit)
