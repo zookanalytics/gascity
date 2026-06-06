@@ -649,8 +649,13 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 	}
 
-	// Model + context usage (best-effort).
-	if resp.Running && info.WorkDir != "" {
+	// Model + context usage (best-effort). This transcript tier is detail-only:
+	// the session LIST never computes it. No list consumer reads
+	// model/context_pct/context_window/input_tokens/activity, and
+	// DiscoverTranscript+TailMeta is per-session filesystem I/O that dominated
+	// the list's latency. Only the per-session detail endpoint (which passes
+	// allowWorkdirTranscriptDiscovery=true) pays for the transcript read.
+	if resp.Running && info.WorkDir != "" && allowWorkdirTranscriptDiscovery {
 		workDir := info.WorkDir
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
@@ -665,9 +670,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if strings.TrimSpace(provider) == "" && cfg != nil {
 			provider, _ = resolveProviderInfo(provider, cfg)
 		}
-		if !allowWorkdirTranscriptDiscovery && !canUseCheapTranscriptLookup(provider, info.SessionKey) {
-			return
-		}
 		sessionFile := factory.DiscoverTranscript(provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
@@ -681,17 +683,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
-}
-
-func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
-	if strings.TrimSpace(sessionKey) == "" {
-		return false
-	}
-	p := strings.ToLower(strings.TrimSpace(provider))
-	if strings.Contains(p, "codex") || strings.Contains(p, "gemini") {
-		return false
-	}
-	return true
 }
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.

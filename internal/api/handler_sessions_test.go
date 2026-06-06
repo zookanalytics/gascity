@@ -1219,6 +1219,68 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	}
 }
 
+// TestHandleSessionListOmitsTranscriptTierWhileDetailKeepsIt locks the
+// detail-only contract for the transcript tier (model/context_pct/...). Before
+// this change the session LIST performed a "cheap" session-key transcript
+// lookup for non-Codex providers, paying per-session filesystem I/O
+// (DiscoverTranscript + TailMeta) that no list consumer reads. The enriched
+// list (view=full) must now leave the transcript fields zero, while the
+// per-session detail endpoint still surfaces them. The session is running and
+// has a discoverable keyed transcript, so a model="" on the list proves the
+// tier was deliberately skipped rather than absent.
+func TestHandleSessionListOmitsTranscriptTierWhileDetailKeepsIt(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Claude Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if info.SessionKey == "" {
+		t.Fatalf("SessionKey empty; the cheap session-key lookup would not have run, making this test vacuous")
+	}
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q must be running or the transcript block is skipped regardless of view", info.SessionName)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","usage":{"input_tokens":10000,"cache_read_input_tokens":5000,"cache_creation_input_tokens":2000}}}`,
+	)
+
+	// Enriched LIST (view=full): transcript tier must stay zero even though the
+	// keyed transcript is discoverable. Running proves enrichment ran.
+	listItems := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
+	if len(listItems) != 1 || listItems[0].ID != info.ID {
+		t.Fatalf("list items = %#v, want one session %s", listItems, info.ID)
+	}
+	if !listItems[0].Running {
+		t.Fatal("list: running=false, want true (view=full must enrich; otherwise model='' is vacuous)")
+	}
+	if listItems[0].Model != "" || listItems[0].ContextPct != nil {
+		t.Fatalf("list surfaced transcript tier: model=%q context_pct=%v, want empty (detail-only)", listItems[0].Model, listItems[0].ContextPct)
+	}
+
+	// DETAIL endpoint must still surface the transcript tier.
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var detail sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.Model != "claude-opus-4-5-20251101" {
+		t.Fatalf("detail model = %q, want claude-opus-4-5-20251101 (detail must keep the transcript tier)", detail.Model)
+	}
+}
+
 func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T) {
 	fs := newSessionFakeState(t)
 	home := t.TempDir()
