@@ -1,0 +1,21 @@
+# Boot's deacon-staleness check is a mechanical timer comparison: read the
+# deacon's in-progress patrol wisp, compare its age to a threshold. No LLM
+# judgment is needed to decide *whether to look*, so the controller runs it
+# directly via exec instead of reviving an always-on boot session every tick.
+#
+# When the wisp is stale this order creates one work bead assigned to boot,
+# and the controller's on_demand named-session demand check wakes boot to
+# apply the judgment ZFC keeps out of Go (wedged vs. legitimate backoff).
+# A healthy, idle town keeps the wisp fresh, so the gate creates nothing and
+# boot never spawns — eliminating the per-tick session-bead churn.
+#
+# Threshold and identities are configurable via the script's env
+# (GC_BOOT_GATE_STALENESS, GC_BOOT_GATE_DEACON, GC_BOOT_GATE_BOOT); the
+# defaults auto-adapt to the binding prefix and stay conservative (~2x the
+# deacon's 300s backoff cap).
+[order]
+description = "Wake boot on_demand when the deacon's patrol wisp goes stale"
+trigger = "cooldown"
+interval = "90s"
+exec = "$PACK_DIR/assets/scripts/boot-gate.sh"
+scope = "city"
