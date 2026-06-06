@@ -578,6 +578,47 @@ sync_database_cli() {
   return 1
 }
 
+# Concurrency guard: a second `gc dolt sync` must not run while one is already
+# in flight. The dolt-remotes-patrol order fires on a 15m cooldown, so a slow or
+# hung push lets each tick stack another concurrent DOLT_PUSH — the 2026-06-05
+# incident stacked 16 pushes (load 62) via a git cat-file enumeration storm.
+# flock gives a crash-safe mutex: the kernel drops the lock when the holding
+# process exits (even on SIGKILL), so unlike a PID/status file it never goes
+# stale. The lock lives beside the other dolt runtime artifacts (dolt.pid,
+# dolt.log) under DOLT_STATE_DIR. --dry-run performs no push, so it neither
+# needs the lock nor should be blocked by an in-flight sync.
+sync_lock_file="$DOLT_STATE_DIR/dolt-sync.lock"
+
+# acquire_sync_lock — take the non-blocking sync lock on fd 9, held until this
+# process exits. Returns 0 when we hold the lock (or the guard is unavailable
+# and we deliberately proceed unguarded); returns 1 only when another sync
+# already holds it, in which case the caller skips this run.
+acquire_sync_lock() {
+  # flock is util-linux; it is absent on stock macOS. Degrade loudly rather than
+  # failing the sync: the patrol that motivates this guard runs on Linux, and a
+  # single-operator dev box has no 15m patrol to stack pushes.
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "gc dolt sync: WARN: flock not found; running without a concurrency guard" >&2
+    return 0
+  fi
+  # A bare `exec 9>BAD` aborts a non-interactive dash outright — even inside an
+  # `if` — so prove the lock file is creatable/writable with non-fatal commands
+  # BEFORE the exec. If we cannot, warn and proceed unguarded rather than dying.
+  if ! { mkdir -p "$DOLT_STATE_DIR" 2>/dev/null && : >>"$sync_lock_file" 2>/dev/null; }; then
+    echo "gc dolt sync: WARN: cannot create lock file $sync_lock_file; running without a concurrency guard" >&2
+    return 0
+  fi
+  exec 9>>"$sync_lock_file"
+  flock -n 9
+}
+
+if [ "$dry_run" != true ]; then
+  if ! acquire_sync_lock; then
+    echo "gc dolt sync: another sync is already in flight; skipping this run"
+    exit 0
+  fi
+fi
+
 # Optional GC phase: purge closed ephemerals while server is still up.
 if [ "$do_gc" = true ] && [ -d "$data_dir" ]; then
   for d in "$data_dir"/*/; do
