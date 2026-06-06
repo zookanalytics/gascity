@@ -839,15 +839,15 @@ func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Session")
 
-	// Precondition: the default (full) view enriches. Running is derived from
-	// a live State() probe, so it is true for this active session. If this
-	// stopped holding, the summary assertions below would pass vacuously.
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	// Precondition: view=full enriches. Running is derived from a live State()
+	// probe, so it is true for this active session. If this stopped holding, the
+	// summary assertions below would pass vacuously.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
 	if !full[0].Running {
-		t.Fatalf("full: running=false, want true (default view must enrich)")
+		t.Fatalf("full: running=false, want true (view=full must enrich)")
 	}
 
 	// view=summary must skip enrichment entirely: the live State() probe never
@@ -881,27 +881,38 @@ func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
 	}
 }
 
-// TestHandleSessionListFullViewStillEnriches guards the default contract: no
-// view param, view=full, and any unrecognized view value all run enrichment
-// (Running is set from the live probe).
-func TestHandleSessionListFullViewStillEnriches(t *testing.T) {
+// TestHandleSessionListDefaultIsSummaryOnlyFullEnriches guards the flipped
+// default contract: only view=full runs enrichment (Running set from the live
+// probe). The default (no view param) and any unrecognized value fall through
+// to the cheap summary projection, leaving the live-observation fields zero —
+// the symmetry that keeps unknown values from returning 422.
+func TestHandleSessionListDefaultIsSummaryOnlyFullEnriches(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Full Session")
 
+	// Only view=full enriches.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
+	if len(full) != 1 {
+		t.Fatalf("view=full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Error("view=full: running=false, want true (must enrich)")
+	}
+
+	// The default and any unrecognized value get the cheap summary projection.
 	for _, path := range []string{
 		"/sessions?state=active",            // default (no view)
-		"/sessions?state=active&view=full",  // explicit full
-		"/sessions?state=active&view=other", // unknown value falls through to full
+		"/sessions?state=active&view=other", // unknown value falls through to summary
 	} {
 		items := listSessionsForViewTest(t, h, cityURL(fs, path))
 		if len(items) != 1 {
 			t.Fatalf("%s: got %d items, want 1", path, len(items))
 		}
-		if !items[0].Running {
-			t.Errorf("%s: running=false, want true (must enrich)", path)
+		if items[0].Running {
+			t.Errorf("%s: running=true, want false (must use the cheap summary default)", path)
 		}
 	}
 }
@@ -938,12 +949,12 @@ func TestLegacyHandleSessionListSummaryView(t *testing.T) {
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Legacy Session")
 
-	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active")
+	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=full")
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
 	if !full[0].Running {
-		t.Fatalf("full: running=false, want true (default must enrich)")
+		t.Fatalf("full: running=false, want true (view=full must enrich)")
 	}
 
 	sum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
@@ -1029,7 +1040,7 @@ func TestHandleSessionListSummaryViewSkipsLiveProvider(t *testing.T) {
 	// wired through the manager and an active session would otherwise trigger
 	// live probes. Without this a green summary assertion could be vacuous.
 	spy.reset()
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
@@ -2222,8 +2233,10 @@ func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 		t.Fatalf("set reset metadata: %v", err)
 	}
 
+	// reset-pending is liveness-gated, so it surfaces only under the enriched
+	// view=full projection; the summary default deliberately skips the live probe.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?view=full"), nil)
 	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -2269,10 +2282,10 @@ func TestHandleSessionListSummaryViewReasonSkipsLiveness(t *testing.T) {
 		t.Fatalf("set reset metadata: %v", err)
 	}
 
-	// Precondition: the full view consults liveness and surfaces reset-pending.
+	// Precondition: view=full consults liveness and surfaces reset-pending.
 	// Without this the summary assertion below could pass vacuously (e.g. if the
 	// reset marker stopped being liveness-gated).
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
