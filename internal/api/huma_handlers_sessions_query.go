@@ -80,9 +80,19 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	// In summary mode the reason must come from the pure, no-liveness
+	// projection: the reset-pending branch probes provider IsRunning (a live
+	// tmux fork for the tmux provider), which violates the view=summary
+	// "no live probe" contract. A nil provider makes
+	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
+	// metadata-only reason.
+	reasonProvider := s.state.SessionProvider()
+	if summary {
+		reasonProvider = nil
+	}
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
+		items[i] = sessionResponseWithReason(sess, beadIndex[sess.ID], cfg, reasonProvider, hasDeferredQueue)
 		if !summary {
 			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 		}

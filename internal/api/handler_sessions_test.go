@@ -2077,6 +2077,54 @@ func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 	}
 }
 
+// TestHandleSessionListSummaryViewReasonSkipsLiveness guards the codex finding
+// on PR#43: view=summary must derive a session's reason from the pure,
+// no-liveness projection, never from a live runtime probe. The reset-pending
+// reason is liveness-gated — lifecycleResetPendingReasonVisible calls provider
+// IsRunning to confirm the reset marker is still live, which for the tmux
+// provider can fork/refresh tmux state. For a reset-pending session whose
+// runtime is live, the full view surfaces "reset-pending" (liveness consulted);
+// the summary view must instead surface the metadata-only reason, proving the
+// reason path did not consult provider liveness.
+func TestHandleSessionListSummaryViewReasonSkipsLiveness(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Reset Pending Summary")
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should be running in fake provider", info.SessionName)
+	}
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"restart_requested": "true",
+		"sleep_reason":      "user-hold",
+	}); err != nil {
+		t.Fatalf("set reset metadata: %v", err)
+	}
+
+	// Precondition: the full view consults liveness and surfaces reset-pending.
+	// Without this the summary assertion below could pass vacuously (e.g. if the
+	// reset marker stopped being liveness-gated).
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if full[0].Reason != "reset-pending" {
+		t.Fatalf("full: reason = %q, want reset-pending (liveness-gated)", full[0].Reason)
+	}
+
+	// Summary must NOT consult liveness for the reason: it falls back to the
+	// metadata-only projection (sleep_reason). A "reset-pending" reason here
+	// would mean the reason path reached a live runtime probe.
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if sum[0].Reason != "user-hold" {
+		t.Errorf("summary: reason = %q, want user-hold (non-liveness projection; reset-pending would mean a live probe)", sum[0].Reason)
+	}
+}
+
 func TestHandleSessionListShowsCircuitOpenReason(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
