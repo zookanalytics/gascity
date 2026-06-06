@@ -27,11 +27,13 @@ import (
 // carries:
 //
 //   - view=summary returns only the cheap read-model + bead-metadata fields
-//     (id, alias, title, state, rig, pool, agent_kind, reason, last_active,
-//     attached, options, metadata, submission_capabilities). These come from
-//     the cache-first read model with no fan-out. The enrichment fields stay
-//     at their zero values: running=false, active_bead="", model="",
-//     context_pct=null, last_output="". summary takes precedence over peek.
+//     (id, alias, title, state, rig, pool, agent_kind, reason, options,
+//     metadata, submission_capabilities). These come from the cache-first read
+//     model via ListSummaryFromBeads with no fan-out and no live runtime probe.
+//     The enrichment and live-observation fields stay at their zero values:
+//     running=false, active_bead="", model="", context_pct=null,
+//     last_output="", attached=false, last_active="". summary takes precedence
+//     over peek.
 //   - view=full, empty (the default), or any unrecognized value runs
 //     enrichSessionResponse per session: running is a live State() probe,
 //     active_bead is a per-rig bead lookup, and model/context_pct come from
@@ -70,7 +72,17 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	listResult := mgr.ListFullFromBeads(all, input.State, input.Template)
+	// In summary mode the listing itself must not observe live runtime state:
+	// ListFullFromBeads expands each bead through infoFromBead, which probes the
+	// provider (IsRunning/IsAttached/GetLastActivity) for active sessions — a
+	// tmux fork on the tmux provider, violating the view=summary "no live probe"
+	// contract. ListSummaryFromBeads is the metadata-only projection.
+	var listResult *session.ListResult
+	if summary {
+		listResult = mgr.ListSummaryFromBeads(all, input.State, input.Template)
+	} else {
+		listResult = mgr.ListFullFromBeads(all, input.State, input.Template)
+	}
 	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.

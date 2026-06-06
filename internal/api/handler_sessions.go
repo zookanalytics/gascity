@@ -255,7 +255,17 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	listResult := catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	// In summary mode the listing itself must not observe live runtime state:
+	// ListFullFromBeads expands each bead through infoFromBead, which probes the
+	// provider (IsRunning/IsAttached/GetLastActivity) for active sessions — a
+	// tmux fork on the tmux provider, violating the view=summary "no live probe"
+	// contract. ListSummaryFromBeads is the metadata-only projection.
+	var listResult *worker.SessionListResult
+	if summary {
+		listResult = catalog.ListSummaryFromBeads(all, stateFilter, templateFilter)
+	} else {
+		listResult = catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	}
 	sessions := listResult.Sessions
 
 	// Build bead index for reason enrichment.

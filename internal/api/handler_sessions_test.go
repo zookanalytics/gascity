@@ -955,6 +955,111 @@ func TestLegacyHandleSessionListSummaryView(t *testing.T) {
 	}
 }
 
+// summarySpyProvider wraps the fake runtime provider and records the live
+// observation calls infoFromBead makes for active sessions (IsRunning,
+// IsAttached, GetLastActivity). The view=summary listing must reach none of
+// them — it builds responses from stored metadata via ListSummaryFromBeads —
+// so any recorded call means the summary path forked back to live runtime
+// observation, the regression codex flagged on PR#43. These three are the only
+// Provider methods the summary list path can reach: the fake does not
+// implement the transport-detector or ACP-registrar interfaces, and peek and
+// per-session enrichment are gated off for summary.
+type summarySpyProvider struct {
+	*runtime.Fake
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *summarySpyProvider) record(method string) {
+	s.mu.Lock()
+	s.calls = append(s.calls, method)
+	s.mu.Unlock()
+}
+
+func (s *summarySpyProvider) reset() {
+	s.mu.Lock()
+	s.calls = nil
+	s.mu.Unlock()
+}
+
+func (s *summarySpyProvider) recorded() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+func (s *summarySpyProvider) IsRunning(name string) bool {
+	s.record("IsRunning")
+	return s.Fake.IsRunning(name)
+}
+
+func (s *summarySpyProvider) IsAttached(name string) bool {
+	s.record("IsAttached")
+	return s.Fake.IsAttached(name)
+}
+
+func (s *summarySpyProvider) GetLastActivity(name string) (time.Time, error) {
+	s.record("GetLastActivity")
+	return s.Fake.GetLastActivity(name)
+}
+
+// TestHandleSessionListSummaryViewSkipsLiveProvider guards the codex finding on
+// PR#43: view=summary must build its listing from stored metadata only, never
+// reaching a live runtime probe. The full listing expands each bead through
+// infoFromBead, which for an active session calls the provider's IsRunning,
+// IsAttached, and GetLastActivity — tmux forks on the tmux provider. The
+// summary listing must instead use the metadata-only ListSummaryFromBeads
+// projection, so a spy provider records zero calls on the summary request.
+func TestHandleSessionListSummaryViewSkipsLiveProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	spy := &summarySpyProvider{Fake: fs.sp}
+	state := &stateWithSessionProvider{fakeState: fs, provider: spy}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// infoFromBead only probes the provider for ACTIVE sessions, so the session
+	// must be active or the assertions below pass vacuously. createTestSession
+	// drives the raw fake directly, bypassing the spy's recorder.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Spy")
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should be running in fake provider", info.SessionName)
+	}
+
+	// Precondition: the full view DOES reach the provider, proving the spy is
+	// wired through the manager and an active session would otherwise trigger
+	// live probes. Without this a green summary assertion could be vacuous.
+	spy.reset()
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if len(spy.recorded()) == 0 {
+		t.Fatal("full view recorded no provider calls; spy not wired or session inactive (summary assertion would be vacuous)")
+	}
+
+	// view=summary must not touch the provider at all.
+	spy.reset()
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if calls := spy.recorded(); len(calls) != 0 {
+		t.Errorf("summary view reached live provider methods %v, want none (must use the metadata-only projection)", calls)
+	}
+
+	// The legacy (non-city-scoped) handler routes through the worker catalog,
+	// the other call site codex flagged. It must skip the provider too.
+	legacy := srv.legacySessionHandler()
+	spy.reset()
+	legacySum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
+	if len(legacySum) != 1 {
+		t.Fatalf("legacy summary: got %d items, want 1", len(legacySum))
+	}
+	if calls := spy.recorded(); len(calls) != 0 {
+		t.Errorf("legacy summary view reached live provider methods %v, want none (must use the metadata-only projection)", calls)
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
