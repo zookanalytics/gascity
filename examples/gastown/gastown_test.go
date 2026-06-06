@@ -1887,6 +1887,33 @@ func TestGastownWarrantCreateCommandsUseCreateMetadata(t *testing.T) {
 	}
 }
 
+// TestBootPromptMissingDeaconExitResolvesWakeBead guards the on_demand churn
+// invariant: every boot exit path must resolve the boot-gate wake bead before
+// draining. The Step 1 early exit — taken when the deacon session is gone — is
+// the easy one to miss. An open wake bead assigned to boot keeps the
+// controller's on_demand demand check satisfied and rematerializes boot on
+// every gate tick, exactly the churn the on_demand redesign removes.
+func TestBootPromptMissingDeaconExitResolvesWakeBead(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "boot", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading boot prompt: %v", err)
+	}
+	step1 := extractBetween(t, string(data),
+		"### Step 1: Check if deacon session exists",
+		"### Step 2:")
+	// Collapse markdown soft-wrap whitespace so the assertions match what the
+	// agent actually reads, not where the source happens to break lines.
+	normalized := strings.Join(strings.Fields(step1), " ")
+	if !strings.Contains(normalized, "wake bead") {
+		t.Errorf("boot Step 1 missing-deacon exit must resolve the wake bead before draining (an open bead rematerializes boot); section:\n%s", step1)
+	}
+	if !strings.Contains(normalized, "Step 4") {
+		t.Errorf("boot Step 1 missing-deacon exit must route through the Step 4 wake-bead closure path; section:\n%s", step1)
+	}
+}
+
 func TestDogAndDigestVaporFormulasHaveNoCompilerRequirement(t *testing.T) {
 	dir := exampleDir()
 	checks := []struct {
@@ -3166,8 +3193,8 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 	if bootSession == nil {
 		t.Fatal("boot named_session missing; prompt documents its lifecycle")
 	}
-	if got := bootSession.ModeOrDefault(); got != "always" {
-		t.Fatalf("boot named_session mode = %q, want %q because prompt documents that lifecycle", got, "always")
+	if got := bootSession.ModeOrDefault(); got != "on_demand" {
+		t.Fatalf("boot named_session mode = %q, want %q because prompt documents that lifecycle", got, "on_demand")
 	}
 	bootAgent := config.FindAgent(cfg, bootSession.TemplateQualifiedName())
 	if bootAgent == nil {
@@ -3204,11 +3231,16 @@ func TestBootPromptMatchesNamedSessionLifecycle(t *testing.T) {
 		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 1",
 		"{{ cmd }} session peek {{ .BindingPrefix }}deacon --lines 30",
 		"configured `boot` named session",
-		"`mode = \"always\"` keeps the `boot` identity present",
+		"`mode = \"on_demand\"` keeps the `boot` identity dormant",
+		"`boot-gate` exec order",
 		"`wake_mode = \"fresh\"`",
 		"gives each wake a new provider context",
 		"Narrow scope keeps each wake cheap.",
 		"Next Boot wake will re-evaluate.",
+		// on_demand demand only clears when the wake bead is resolved, so the
+		// prompt MUST close it on every exit path.
+		"gc bd list --assignee={{ .BindingPrefix }}boot --label=boot-gate --status=open,in_progress",
+		"gc bd close \"$bead\"",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("boot prompt missing current lifecycle or command guidance %q:\n%s", want, body)
