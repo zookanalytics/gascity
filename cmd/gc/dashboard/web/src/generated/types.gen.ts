@@ -104,6 +104,8 @@ export type AgentPatch = {
     SessionSetupScript: string | null;
     Skills: Array<string> | null;
     SkillsAppend: Array<string> | null;
+    SkillsDir: string | null;
+    SkillsDirs: Array<string> | null;
     SleepAfterIdle: string | null;
     StartCommand: string | null;
     Suspended: boolean | null;
