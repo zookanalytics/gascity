@@ -323,3 +323,152 @@ source = "../toolkit"
 		t.Errorf("mayor MCPDir = %q, want suffix %q (importing overlay must win over imported catalog, not be silently skipped)", mayor.MCPDir, wantMCP)
 	}
 }
+
+// TestImportedOverlayAttachTargetsRequiresAssetOnlyDir locks in the gc-l0t8a
+// fix for the codex re-review finding on PR#37. importedOverlayAttachTargets
+// suppresses convention discovery for the agents/<name>/ dirs it marks, but
+// attachImportedAgentOverlays only re-homes the asset subdirs (skills, mcp).
+// So a dir may be marked a target ONLY when it contains exclusively those
+// asset subdirs. A dir that also carries a native-agent convention marker —
+// agent.toml, a prompt file, overlay/, or namepool.txt — must NOT be marked:
+// suppressing discovery for it would silently drop that marker instead of
+// attaching it or colliding on it.
+func TestImportedOverlayAttachTargetsRequiresAssetOnlyDir(t *testing.T) {
+	patches := []AgentPatch{{Name: "mayor"}}
+
+	assetOnly := func(t *testing.T, packDir string) {
+		writeTestFile(t, packDir, "agents/mayor/skills/git-merge-pull-request/SKILL.md", `# git-merge-pull-request`)
+		writeTestFile(t, packDir, "agents/mayor/mcp/private.toml", `command = ["helper-mcp"]`)
+	}
+
+	cases := []struct {
+		name    string
+		seed    func(t *testing.T, packDir string)
+		wantHit bool
+	}{
+		{
+			name:    "skills and mcp only attaches",
+			seed:    assetOnly,
+			wantHit: true,
+		},
+		{
+			name: "incidental dotfile alongside assets still attaches",
+			seed: func(t *testing.T, packDir string) {
+				assetOnly(t, packDir)
+				writeTestFile(t, packDir, "agents/mayor/.DS_Store", "junk")
+			},
+			wantHit: true,
+		},
+		{
+			name: "agent.toml native definition disqualifies",
+			seed: func(t *testing.T, packDir string) {
+				assetOnly(t, packDir)
+				writeTestFile(t, packDir, "agents/mayor/agent.toml", `scope = "city"`)
+			},
+			wantHit: false,
+		},
+		{
+			name: "prompt template disqualifies",
+			seed: func(t *testing.T, packDir string) {
+				assetOnly(t, packDir)
+				writeTestFile(t, packDir, "agents/mayor/prompt.template.md", `Custom mayor.`)
+			},
+			wantHit: false,
+		},
+		{
+			name: "namepool disqualifies",
+			seed: func(t *testing.T, packDir string) {
+				assetOnly(t, packDir)
+				writeTestFile(t, packDir, "agents/mayor/namepool.txt", "alpha\nbeta\n")
+			},
+			wantHit: false,
+		},
+		{
+			name: "overlay dir disqualifies",
+			seed: func(t *testing.T, packDir string) {
+				assetOnly(t, packDir)
+				writeTestFile(t, packDir, "agents/mayor/overlay/note.md", `overlay asset`)
+			},
+			wantHit: false,
+		},
+		{
+			name: "no asset subdir at all disqualifies",
+			seed: func(t *testing.T, packDir string) {
+				writeTestFile(t, packDir, "agents/mayor/agent.toml", `scope = "city"`)
+			},
+			wantHit: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			packDir := t.TempDir()
+			tc.seed(t, packDir)
+			imported := []Agent{{Name: "mayor", BindingName: "base", SourceDir: filepath.Join(packDir, "base")}}
+
+			targets := importedOverlayAttachTargets(fsys.OSFS{}, imported, patches, packDir)
+			if got := targets[0]; got != tc.wantHit {
+				t.Fatalf("importedOverlayAttachTargets marked mayor=%v, want %v", got, tc.wantHit)
+			}
+		})
+	}
+}
+
+// TestImportingPackOverlayWithNativeDefinitionStillCollides locks in the
+// gc-l0t8a fix end-to-end. An importing pack that patches an imported agent
+// AND ships an agents/<name>/agent.toml native definition (alongside an asset
+// overlay) is NOT a pure asset overlay. The native definition must not be
+// silently dropped: the phantom mint is allowed through, collides with the
+// import, and aborts the load — the conservative duplicate-agent behavior. The
+// previous predicate keyed on mere directory existence and silently dropped
+// the agent.toml (and any prompt/overlay/namepool) it never attached.
+func TestImportingPackOverlayWithNativeDefinitionStillCollides(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	dir := t.TempDir()
+
+	base := filepath.Join(dir, "base")
+	writeTestFile(t, base, "pack.toml", `
+[pack]
+name = "base"
+schema = 2
+`)
+	writeTestFile(t, base, "agents/mayor/agent.toml", `scope = "city"`)
+	writeTestFile(t, base, "agents/mayor/prompt.template.md", `Base mayor.`)
+
+	// toolkit imports base and bare-name-patches mayor (signaling intent to
+	// customize the import), but its agents/mayor/ overlay carries a full
+	// agent.toml native definition alongside the skills overlay — not a pure
+	// asset overlay. The agent.toml must not be silently dropped.
+	toolkit := filepath.Join(dir, "toolkit")
+	writeTestFile(t, toolkit, "pack.toml", `
+[pack]
+name = "toolkit"
+schema = 2
+
+[imports.base]
+source = "../base"
+
+[[patches.agent]]
+name = "mayor"
+nudge = "go"
+`)
+	writeTestFile(t, toolkit, "agents/mayor/agent.toml", `scope = "city"`)
+	writeTestFile(t, toolkit, "agents/mayor/skills/git-merge-pull-request/SKILL.md", `# git-merge-pull-request`)
+
+	city := filepath.Join(dir, "city")
+	writeTestFile(t, city, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.toolkit]
+source = "../toolkit"
+`)
+
+	_, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(city, "city.toml"))
+	if err == nil {
+		t.Fatal("expected a duplicate-agent error: an agents/<name>/agent.toml native definition must not be silently dropped by the overlay-attach path")
+	}
+	if !strings.Contains(err.Error(), "duplicate agent") {
+		t.Errorf("error = %q, want it to mention 'duplicate agent'", err.Error())
+	}
+}

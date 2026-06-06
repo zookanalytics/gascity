@@ -2370,12 +2370,82 @@ func agentPatchTargets(p *AgentPatch, a *Agent) bool {
 	return binding == "" || a.BindingName == binding
 }
 
+// importedOverlayAsset is an agent-local asset subdirectory that an importing
+// pack's agents/<name>/ overlay may carry and attachImportedAgentOverlays
+// re-homes onto an imported+patched agent.
+type importedOverlayAsset struct {
+	// dir is the subdirectory name under agents/<name>/.
+	dir string
+	// set points the Agent's corresponding asset-dir field at resolved.
+	set func(a *Agent, resolved string)
+}
+
+// importedOverlayAssets is the single source of truth for the agent-local
+// asset dirs an importing-pack overlay attaches to an imported+patched agent.
+// Both attachImportedAgentOverlays (what it re-homes) and overlayDirIsAssetOnly
+// (what an asset-only overlay may contain) read it, so the predicate never
+// suppresses convention discovery for an overlay whose contents this code does
+// not actually attach. It deliberately excludes the rest of the agent-local
+// convention surface that applyAgentConventionDefaults / DiscoverPackAgents
+// own (agent.toml, prompt files, overlay/, namepool.txt): an overlay carrying
+// one of those is a native-agent definition that must reach discovery (and its
+// duplicate-agent guard), not be silently dropped. (gc-l0t8a)
+var importedOverlayAssets = []importedOverlayAsset{
+	{dir: "skills", set: func(a *Agent, resolved string) { a.SkillsDir = resolved }},
+	{dir: "mcp", set: func(a *Agent, resolved string) { a.MCPDir = resolved }},
+}
+
+// isImportedOverlayAsset reports whether name is an attachable agent-local
+// asset subdirectory (see importedOverlayAssets).
+func isImportedOverlayAsset(name string) bool {
+	for i := range importedOverlayAssets {
+		if importedOverlayAssets[i].dir == name {
+			return true
+		}
+	}
+	return false
+}
+
+// overlayDirIsAssetOnly reports whether the agents/<name>/ directory at dir is
+// a pure asset-attachment overlay: it exists, contains at least one attachable
+// asset subdirectory (importedOverlayAssets), and contains nothing else. A
+// directory that also holds agent.toml, a prompt file, overlay/, namepool.txt,
+// or any other entry is NOT asset-only — it carries part of a native agent
+// definition that convention discovery must still process (and collide on), so
+// the caller must not suppress discovery for it. The allowlist (rather than
+// denying known native markers) fails safe as the convention surface grows:
+// any future agents/<name>/ asset this code does not attach disqualifies the
+// overlay automatically rather than being silently dropped. (gc-l0t8a)
+func overlayDirIsAssetOnly(fs fsys.FS, dir string) bool {
+	entries, err := fs.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	sawAsset := false
+	for _, entry := range entries {
+		name := entry.Name()
+		// Skip incidental dot/underscore entries (e.g. .DS_Store), mirroring
+		// DiscoverPackAgents' agent-name convention. No agent-local convention
+		// marker (agent.toml, prompt files, overlay/, namepool.txt) is
+		// dot/underscore-prefixed, so skipping these never hides a native
+		// definition the predicate must reject.
+		if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+			continue
+		}
+		if !entry.IsDir() || !isImportedOverlayAsset(name) {
+			return false
+		}
+		sawAsset = true
+	}
+	return sawAsset
+}
+
 // importedOverlayAttachTargets returns the indices into imported of the
 // specific imported agents for which this pack both (a) declares a
 // [[patches.agent]] customizing the imported agent and (b) carries an
-// agents/<name>/ asset overlay on disk. Such overlays attach agent-local
-// assets to that exact imported agent rather than minting a colliding
-// phantom native agent.
+// asset-only agents/<name>/ overlay on disk (see overlayDirIsAssetOnly). Such
+// overlays attach agent-local assets to that exact imported agent rather than
+// minting a colliding phantom native agent.
 //
 // Target selection mirrors applyPackAgentPatches: a patch binds to the FIRST
 // agent it targets and stops, so the overlay attaches to that same single
@@ -2386,9 +2456,15 @@ func agentPatchTargets(p *AgentPatch, a *Agent) bool {
 // same-name match leaked the overlay onto the unpatched sibling.
 // (gc-5uepp, gc-fbt9c, gc-de5wp)
 //
-// Requiring the patch keeps the change conservative: an agents/<name>/ dir
-// that collides with an import but carries no customizing patch still fails
-// as a genuine duplicate-agent definition.
+// Requiring both the patch AND an asset-only overlay keeps the change
+// conservative. A marked target's convention discovery is suppressed (see the
+// caller), but attachImportedAgentOverlays only re-homes the asset subdirs, so
+// marking a dir that also carries a native-agent definition would silently
+// drop it. An agents/<name>/ dir that collides with an import but carries no
+// customizing patch — or that carries agent.toml, a prompt, overlay/, or
+// namepool.txt rather than only attachable assets — therefore falls through to
+// convention discovery and fails as a genuine duplicate-agent definition.
+// (gc-l0t8a)
 func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentPatch, packDir string) map[int]bool {
 	if len(imported) == 0 || len(patches) == 0 {
 		return nil
@@ -2404,7 +2480,7 @@ func importedOverlayAttachTargets(fs fsys.FS, imported []Agent, patches []AgentP
 				continue
 			}
 			overlayDir := filepath.Join(packDir, "agents", imported[i].Name)
-			if info, err := fs.Stat(overlayDir); err == nil && info.IsDir() {
+			if overlayDirIsAssetOnly(fs, overlayDir) {
 				if out == nil {
 					out = map[int]bool{}
 				}
@@ -2440,13 +2516,11 @@ func attachImportedAgentOverlays(fs fsys.FS, imported []Agent, targets map[int]b
 			continue
 		}
 		a := &imported[i]
-		skillsDir := filepath.Join(packDir, "agents", a.Name, "skills")
-		if info, err := fs.Stat(skillsDir); err == nil && info.IsDir() {
-			a.SkillsDir = skillsDir
-		}
-		mcpDir := filepath.Join(packDir, "agents", a.Name, "mcp")
-		if info, err := fs.Stat(mcpDir); err == nil && info.IsDir() {
-			a.MCPDir = mcpDir
+		for _, asset := range importedOverlayAssets {
+			assetDir := filepath.Join(packDir, "agents", a.Name, asset.dir)
+			if info, err := fs.Stat(assetDir); err == nil && info.IsDir() {
+				asset.set(a, assetDir)
+			}
 		}
 	}
 }
