@@ -215,6 +215,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))
 		}
+		register(doctor.NewCitySuspendedCheck(cfg))
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
