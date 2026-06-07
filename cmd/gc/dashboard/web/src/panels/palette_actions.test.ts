@@ -118,7 +118,7 @@ describe("command palette action flows", () => {
       beads: [{ id: "gc-1", title: "Example" }],
       fetchedAt: Date.now(),
       mail: [],
-      rigs: ["city"],
+      rigs: [{ name: "city", prefix: "ci" }],
       sessions: [{ id: "mc-vv8", label: "mayor", recipient: "mayor" }],
     });
   });
