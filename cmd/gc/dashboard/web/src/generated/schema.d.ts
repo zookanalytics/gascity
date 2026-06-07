@@ -3868,6 +3868,7 @@ export interface components {
         };
         RigPatch: {
             DefaultBranch: string | null;
+            DefaultMergeStrategy: string | null;
             FormulaVars: {
                 [key: string]: string;
             };
