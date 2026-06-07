@@ -5888,6 +5888,12 @@
               "null"
             ]
           },
+          "DefaultMergeStrategy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "FormulaVars": {
             "additionalProperties": {
               "type": "string"
@@ -5927,6 +5933,7 @@
           "Path",
           "Prefix",
           "DefaultBranch",
+          "DefaultMergeStrategy",
           "Suspended",
           "SuspendedOnStart",
           "FormulaVars"
