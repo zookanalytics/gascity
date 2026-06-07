@@ -20,6 +20,7 @@ City is the top-level configuration for a Gas City instance.
 | `agent` | []Agent |  |  | Agents lists all configured agents in this city. Optional: PackV2 cities compose agents through [imports.*] and ship without any [[agent]] block. |
 | `named_session` | []NamedSession |  |  | NamedSessions lists canonical alias-backed sessions built from reusable agent templates. |
 | `rigs` | []Rig |  |  | Rigs lists external projects registered in the city. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the city-wide default merge strategy ("direct" or "pr") that refinery formulas resolve when a work bead does not carry an explicit `metadata.merge_strategy` and the originating rig does not set Rig.DefaultMergeStrategy. Empty defers to the formula's own default. Set this on a downstream city (e.g., loomington) to require PR review for every refinery merge without touching the upstream pack's formula defaults. |
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
@@ -681,6 +682,7 @@ Rig defines an external project registered in the city.
 | `path` | string |  |  | Path is the absolute filesystem path to the rig's repository. |
 | `prefix` | string |  |  | Prefix overrides the auto-derived bead ID prefix for this rig. |
 | `default_branch` | string |  |  | DefaultBranch is the rig repository's mainline branch (e.g. "main", "master", "develop"). When set, routing formulas use this as the default merge target instead of probing origin/HEAD at sling time. Captured by `gc rig add` from the rig's git config; set manually for rigs whose mainline isn't reachable via origin/HEAD. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy is the rig-scoped default merge strategy ("direct" or "pr") that refinery formulas resolve when a work bead does not carry an explicit `metadata.merge_strategy`. Empty defers to the city-level default (City.DefaultMergeStrategy), then to the formula's own default. Set this on a single rig to override the city-wide policy. |
 | `suspended` | boolean |  |  | Suspended is the deprecated pre-runtime-state suspension flag. Parsed for backwards compatibility and treated as an alias for SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing cities with `suspended = true` continue to start their rigs suspended after upgrade. Live suspend/resume commands no longer write this field. `gc doctor` flags it and offers `--fix` to rename to suspended_on_start. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart is the rig's desired suspension state at city start. When true and no explicit entry exists for this rig in .gc/runtime/suspension-state.json, the rig is treated as suspended. Once the user has explicitly suspended or resumed the rig via `gc rig suspend/resume`, the runtime state wins. |
 | `formulas_dir` | string |  |  | FormulasDir is a rig-local formula directory (Layer 4). Overrides pack formulas for this rig by filename. Relative paths resolve against the city directory. |
@@ -705,6 +707,7 @@ RigPatch modifies an existing rig identified by Name.
 | `path` | string |  |  | Path overrides the rig's filesystem path. |
 | `prefix` | string |  |  | Prefix overrides the bead ID prefix. |
 | `default_branch` | string |  |  | DefaultBranch overrides the rig's recorded mainline branch. |
+| `default_merge_strategy` | string |  |  | DefaultMergeStrategy overrides the rig-scoped default merge strategy resolved by refinery formulas. See Rig.DefaultMergeStrategy. |
 | `suspended` | boolean |  |  | Suspended is the deprecated, pre-runtime-state suspension override. Parsed for backwards compatibility; `gc doctor` surfaces it as a warning and recommends the rename to SuspendedOnStart. No behavioral code path reads it. |
 | `suspended_on_start` | boolean |  |  | SuspendedOnStart overrides the rig's desired suspension state at city start. Mirrors Rig.SuspendedOnStart. |
 | `formula_vars` | map[string]string |  |  | FormulaVars adds or overrides rig-scoped formula var defaults. Additive merge: patch keys win over existing rig keys, unspecified keys are preserved. |

@@ -390,6 +390,23 @@ func TestApplyPatches_RigDefaultBranch(t *testing.T) {
 	}
 }
 
+func TestApplyPatches_RigDefaultMergeStrategy(t *testing.T) {
+	cfg := &City{
+		Rigs: []Rig{{Name: "scamper", Path: "/scamper", DefaultMergeStrategy: "direct"}},
+	}
+	err := ApplyPatches(cfg, Patches{
+		Rigs: []RigPatch{
+			{Name: "scamper", DefaultMergeStrategy: ptrStr("pr")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyPatches: %v", err)
+	}
+	if cfg.Rigs[0].DefaultMergeStrategy != "pr" {
+		t.Errorf("DefaultMergeStrategy = %q, want %q", cfg.Rigs[0].DefaultMergeStrategy, "pr")
+	}
+}
+
 func TestApplyPatches_RigSuspend(t *testing.T) {
 	cfg := &City{
 		Rigs: []Rig{{Name: "hw", Path: "/path"}},
