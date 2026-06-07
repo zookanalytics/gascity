@@ -48,6 +48,17 @@ case "$*" in
     printf 'active_branch()\nmain\n'
     exit 0
     ;;
+  *"CALL DOLT_FETCH("*)
+    exit 0
+    ;;
+  *"..remotes/origin/"*)
+    printf 'n\n0\n'
+    exit 0
+    ;;
+  *"dolt_log('remotes/origin/"*)
+    printf 'n\n1\n'
+    exit 0
+    ;;
   *DOLT_PUSH*)
     : > "` + startMarker + `"
     i=0
