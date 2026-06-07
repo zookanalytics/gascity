@@ -8,18 +8,28 @@ The loop runs **inside the supervisor process** when opted in via
 
 ## Current wiring status
 
-**Observe-only mode (as of this release).** The SQL connection to Dolt
-(`OpenDoltOps`) and the backup runner (`OpenDoltBackup`) are not yet
-wired in the production controller. When `[maintenance.dolt]
-enabled=true`, the loop runs on schedule, emits events, and records
-history — but steps 2 (snapshot) and 3 (compaction) below are no-ops.
-The supervisor logs `store-maintenance: enabled in observe-only mode
-(snapshot and DOLT_GC not yet wired)` at startup.
+**Compaction wired; snapshot not (as of this release).** The SQL
+connection (`OpenDoltOps`) is wired in the production controller: when
+`[maintenance.dolt] enabled=true`, each cycle runs `CALL DOLT_GC()`
+against the managed Dolt server, so a `gc.store.maintenance.done` event
+**does** imply compaction occurred. Because this fork runs a
+multi-database managed server, the GC iterates every managed user
+database (the bd ledgers) and compacts each in turn — `CALL DOLT_GC()`
+only compacts the session's selected database, so a single call would
+leave every database but the default at its peak on-disk size. The
+factory resolves the Dolt port per cycle, so the loop recovers
+automatically if Dolt had not finished publishing its port at startup.
 
-Production wiring of the snapshot and GC factories will land in a
-follow-up. Until then, `gc maintenance status` and the events are
-meaningful for scheduling/alert testing, but a `gc.store.maintenance.done`
-event does **not** imply compaction occurred.
+The pre-GC snapshot (`OpenDoltBackup`, step 2 below) is **not** wired.
+The snapshot layout in `internal/supervisor` assumes a single Dolt
+store, which does not fit this fork's per-database directory layout
+(`<city>/.beads/dolt/<db>`); multi-database snapshotting is tracked
+separately. The supervisor logs `store-maintenance: DOLT_GC enabled;
+pre-GC snapshot not wired (multi-database snapshot tracked in gc-thnww)`
+at startup. `CALL DOLT_GC()` is online and safe to run without a
+pre-GC snapshot; the post-gc smoke test guards readability, and
+operators can still take manual backups (see
+`docs/troubleshooting/dolt-bloat-recovery.md`).
 
 ## What this runs
 
@@ -30,10 +40,13 @@ For each scheduled cycle the supervisor:
 2. **Snapshot** — `dolt backup sync` to
    `<city>/.beads/dolt-backups/current/`, then atomically rotates
    `current/` to `success/<timestamp>/` (see *Snapshot layout* below).
-3. **Compaction** — `CALL DOLT_GC()` against the managed Dolt server,
-   bounded by `gc_timeout` (default `10m`).
-4. **Smoke test** — `SELECT COUNT(*) FROM issues` (5 s timeout) to
-   confirm the store is readable.
+3. **Compaction** — `CALL DOLT_GC()` against **each** managed user
+   database on the Dolt server (the loop selects each in turn), bounded
+   collectively by `gc_timeout` (default `10m`). The compaction fails
+   fast, naming the database, if any one cannot be GC'd; databases
+   compacted before the failure keep their reclaimed space.
+4. **Smoke test** — `SELECT COUNT(*) FROM issues` per managed database,
+   summed (5 s timeout), to confirm the stores are readable after GC.
 5. **Prune** — keep the 3 newest successful snapshots and the most
    recent failed snapshot; older entries are removed. Prune errors
    are logged but do not regress a successful run.
