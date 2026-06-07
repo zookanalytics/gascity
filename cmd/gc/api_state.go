@@ -439,10 +439,43 @@ func (cs *controllerState) startMaintenanceLoop(ctx context.Context) {
 		DiskMinFreeBytes:  doltDiskMinFreeBytes(),
 		DiskWarnFreeBytes: doltDiskWarnFreeBytes(),
 	}
-	active := deps.OpenDoltOps != nil && deps.OpenDoltBackup != nil
+	// Wire CALL DOLT_GC() against the managed Dolt server. The factory
+	// resolves the port lazily — each maintenance cycle reads the
+	// currently-published port — so the loop recovers automatically if Dolt
+	// had not finished publishing when the controller started. An
+	// unresolvable port or open failure surfaces as a stage="gc" failure for
+	// that cycle (classified the same as "Dolt unreachable") and is retried
+	// on the next tick. managedDoltMaintenanceOps iterates every managed user
+	// database because DOLT_GC compacts only the session's selected database.
+	deps.OpenDoltOps = func(_ context.Context) (supervisor.DoltOps, error) {
+		port := currentResolvableManagedDoltPort(cityPath)
+		if port == "" {
+			return nil, fmt.Errorf("managed Dolt port not resolvable for store maintenance")
+		}
+		ops, err := newManagedDoltMaintenanceOps(managedDoltConnectHost(""), port, "root")
+		if err != nil {
+			return nil, err
+		}
+		return ops, nil
+	}
 	// Always log the loop's startup so operators can confirm initialization
 	// (and its mode) from the supervisor log, not just the observe-only case.
+	// active gates on the GC opener, not upstream's both-openers test: this
+	// fork wires DOLT_GC (OpenDoltOps) but intentionally leaves OpenDoltBackup
+	// unwired (multi-database snapshot tracked in gc-thnww), so a both-wired
+	// test would mislabel a GC-active loop "observe-only".
+	active := deps.OpenDoltOps != nil
 	fmt.Fprintln(os.Stderr, maintenanceStartupLine(cfg.Maintenance.Dolt.IntervalOrDefault(), active)) //nolint:errcheck // best-effort stderr
+	// OpenDoltBackup (pre-GC snapshot) stays unwired: internal/supervisor's
+	// snapshot layout assumes a single Dolt store, but this fork runs a
+	// multi-database managed server (.beads/dolt/<db>). Wiring a single-dir
+	// backup here would fail runSnapshot every cycle and — because
+	// executeCycleLocked runs the snapshot before the gc — block DOLT_GC
+	// entirely. Multi-database snapshotting is tracked in gc-thnww. CALL
+	// DOLT_GC() is online and safe to run without it.
+	if deps.OpenDoltBackup == nil {
+		fmt.Fprintln(os.Stderr, "store-maintenance: DOLT_GC enabled; pre-GC snapshot not wired (multi-database snapshot tracked in gc-thnww)")
+	}
 	loop := supervisor.NewStoreMaintenanceLoop(deps)
 	// Retain the handle so the API layer can expose
 	// /v0/city/{city}/maintenance/* (status reads + manual trigger)
