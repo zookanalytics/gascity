@@ -47,11 +47,15 @@ type stateCityResolver struct {
 }
 
 func (r *stateCityResolver) ListCities() []CityInfo {
-	return []CityInfo{{
+	ci := CityInfo{
 		Name:    r.state.CityName(),
 		Path:    r.state.CityPath(),
 		Running: true,
-	}}
+	}
+	if cfg := r.state.Config(); cfg != nil {
+		ci.Suspended = cfg.Workspace.Suspended
+	}
+	return []CityInfo{ci}
 }
 
 func (r *stateCityResolver) CityState(name string) State {

@@ -17,6 +17,7 @@ implicit-import-cache
 deprecated-attachment-fields
 dolt-topology
 dolt-drift
+city-suspended
 config-valid
 legacy-suspended-field
 config-refs
