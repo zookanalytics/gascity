@@ -263,7 +263,13 @@ func managedDoltPassword() string {
 	return strings.TrimSpace(os.Getenv("GC_DOLT_PASSWORD"))
 }
 
-func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+// managedDoltBaseConfig builds the shared go-sql-driver config for the
+// managed Dolt server (host/port/user normalization, password, native
+// auth, 5 s dial timeout). Callers layer per-operation socket deadlines
+// on top: managedDoltOpenDB adds 5 s read/write deadlines for quick
+// probes, while openManagedDoltMaintenanceDB leaves them unset for
+// long-running maintenance.
+func managedDoltBaseConfig(host, port, user string) (*mysql.Config, error) {
 	host = managedDoltConnectHost(host)
 	port = strings.TrimSpace(port)
 	if port == "" {
@@ -279,9 +285,32 @@ func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
 	cfg.Net = "tcp"
 	cfg.Addr = host + ":" + port
 	cfg.Timeout = 5 * time.Second
+	cfg.AllowNativePasswords = true
+	return cfg, nil
+}
+
+func managedDoltOpenDB(host, port, user string) (*sql.DB, error) {
+	cfg, err := managedDoltBaseConfig(host, port, user)
+	if err != nil {
+		return nil, err
+	}
 	cfg.ReadTimeout = 5 * time.Second
 	cfg.WriteTimeout = 5 * time.Second
-	cfg.AllowNativePasswords = true
+	return sql.Open("mysql", cfg.FormatDSN())
+}
+
+// openManagedDoltMaintenanceDB opens a pooled connection to the managed
+// Dolt server tuned for long-running maintenance. Unlike managedDoltOpenDB
+// (5 s read/write deadlines suited to quick health probes), it leaves the
+// per-read/write socket deadlines unset so a multi-minute CALL DOLT_GC()
+// is bounded by the caller's context (the maintenance loop's gc_timeout)
+// rather than killed after 5 s. The dial timeout stays short so an
+// unreachable server fails fast.
+func openManagedDoltMaintenanceDB(host, port, user string) (*sql.DB, error) {
+	cfg, err := managedDoltBaseConfig(host, port, user)
+	if err != nil {
+		return nil, err
+	}
 	return sql.Open("mysql", cfg.FormatDSN())
 }
 
