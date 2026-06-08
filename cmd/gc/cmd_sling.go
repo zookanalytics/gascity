@@ -1580,6 +1580,27 @@ func pokeController(cityPath string) error {
 	return pokeSupervisor()
 }
 
+// pokeControllerForBead behaves like pokeController but asks the controller to
+// pull beadID from the backing store into its in-memory city store cache
+// before waking the reconciler. `gc session new` uses this after creating a
+// deferred session bead so the reconciler tick sees the new bead even when the
+// background reconcile and bd-hook event freshness paths are lagging — the
+// failure mode where a post-boot session sat in start-pending indefinitely. A
+// blank beadID degrades to a bare poke.
+func pokeControllerForBead(cityPath, beadID string) error {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return pokeController(cityPath)
+	}
+	_, err := sendControllerCommand(cityPath, "poke:"+beadID)
+	if err == nil {
+		return nil
+	}
+	// Fall back to supervisor reload (no targeted refresh, but still wakes the
+	// reconciler).
+	return pokeSupervisor()
+}
+
 // reloadControllerConfig asks the controller to reload config immediately.
 // If the per-city controller socket doesn't exist (supervisor model), falls
 // back to sending "reload" to the supervisor socket.

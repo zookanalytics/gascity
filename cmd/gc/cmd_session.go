@@ -323,8 +323,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(store, info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Poke again after bead creation to trigger immediate reconciler tick.
-			_ = pokeController(cityPath)
+			// Poke again after bead creation to trigger an immediate reconciler
+			// tick. Carry the new session bead's ID so the controller pulls it
+			// into the city store cache before the tick reads it — otherwise a
+			// stale cache (lagging reconcile / dropped bd-hook event) leaves the
+			// session stuck in start-pending until the next full reconcile.
+			_ = pokeControllerForBead(cityPath, info.ID)
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{

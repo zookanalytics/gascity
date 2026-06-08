@@ -244,7 +244,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh, nil)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -1300,7 +1300,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh, nil)
 		close(done)
 	}()
 
@@ -2249,3 +2249,71 @@ func TestTryReloadConfig_IncludesBuiltinPackOrders(t *testing.T) {
 }
 
 func (osFS) Chmod(name string, mode os.FileMode) error { return os.Chmod(name, mode) }
+
+// TestControllerSocketPokeWithBeadID verifies the "poke:<id>" command pulls
+// the named bead through the bound refresher (synchronously, before the ack)
+// and still enqueues a reconciler wake, while a bare "poke" leaves the
+// refresher untouched.
+func TestControllerSocketPokeWithBeadID(t *testing.T) {
+	cityPath := shortSocketTempDir(t, "gc-controller-poke-bead-")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := controllerSocketPath(cityPath)
+
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pokeCh := make(chan struct{}, 1)
+
+	var mu sync.Mutex
+	var refreshed []string
+	refresher := &beadRefresher{}
+	refresher.bind(func(id string) error {
+		mu.Lock()
+		refreshed = append(refreshed, id)
+		mu.Unlock()
+		return nil
+	})
+
+	lis, err := startControllerSocket(
+		cityPath, cancel, nil, &atomic.Bool{},
+		make(chan reloadRequest), make(chan convergenceRequest, 1),
+		pokeCh, make(chan struct{}, 1), refresher,
+	)
+	if err != nil {
+		t.Fatalf("startControllerSocket: %v", err)
+	}
+	defer lis.Close()         //nolint:errcheck
+	defer os.Remove(sockPath) //nolint:errcheck
+
+	resp, err := sendControllerCommand(cityPath, "poke:lx-wisp-abc123")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(poke:id): %v", err)
+	}
+	if strings.TrimSpace(string(resp)) != "ok" {
+		t.Fatalf("poke:id response = %q, want ok", resp)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), refreshed...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "lx-wisp-abc123" {
+		t.Fatalf("refresher invoked with %v, want [lx-wisp-abc123]", got)
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatal("poke:id did not enqueue a reconciler wake")
+	}
+
+	// A bare poke must not invoke the refresher.
+	if _, err := sendControllerCommand(cityPath, "poke"); err != nil {
+		t.Fatalf("sendControllerCommand(poke): %v", err)
+	}
+	mu.Lock()
+	after := len(refreshed)
+	mu.Unlock()
+	if after != 1 {
+		t.Fatalf("bare poke invoked refresher; refreshed=%v", refreshed)
+	}
+}

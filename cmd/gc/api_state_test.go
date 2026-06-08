@@ -3511,3 +3511,61 @@ func TestStoreMetadataSignatureChangesOnRigSuspensionFlip(t *testing.T) {
 		t.Fatalf("signature unchanged across rig suspension flip:\n%s", before)
 	}
 }
+
+// TestControllerStateRefreshBeadByID covers the controller side of the
+// post-boot session-start fix: a session bead written to the city store's
+// backing by another process (e.g. `gc session new`) is invisible to the live
+// city cache until RefreshBeadByID pulls it in. This is the routing+landing
+// path the controller socket's "poke:<id>" command drives before waking the
+// session reconciler.
+func TestControllerStateRefreshBeadByID(t *testing.T) {
+	backing := beads.NewMemStore()
+	cityStore := beads.NewCachingStoreForTest(backing, nil)
+	if err := cityStore.PrimeActive(); err != nil {
+		t.Fatalf("PrimeActive: %v", err)
+	}
+	cs := &controllerState{
+		cfg:           &config.City{},
+		cityBeadStore: cityStore,
+		cityName:      "city1",
+		cityPath:      t.TempDir(),
+	}
+
+	cacheHas := func(id string) bool {
+		items, ok := cityStore.CachedList(beads.ListQuery{Status: "open", TierMode: beads.TierBoth})
+		if !ok {
+			t.Fatalf("CachedList not serving from cache (state not live/partial+clean)")
+		}
+		for _, b := range items {
+			if b.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Cross-process create: lands in the backing, not the cache.
+	created, err := backing.Create(beads.Bead{Title: "deferred session", Type: "task"})
+	if err != nil {
+		t.Fatalf("backing create: %v", err)
+	}
+	if cacheHas(created.ID) {
+		t.Fatalf("precondition failed: stale cache already has %s", created.ID)
+	}
+
+	if err := cs.RefreshBeadByID(created.ID); err != nil {
+		t.Fatalf("RefreshBeadByID: %v", err)
+	}
+
+	if !cacheHas(created.ID) {
+		t.Fatalf("RefreshBeadByID did not land %s into the city cache", created.ID)
+	}
+
+	// Blank and unknown IDs are no-ops returning nil.
+	if err := cs.RefreshBeadByID(""); err != nil {
+		t.Fatalf("RefreshBeadByID(blank): %v", err)
+	}
+	if err := cs.RefreshBeadByID("nope-123"); err != nil {
+		t.Fatalf("RefreshBeadByID(unknown): %v", err)
+	}
+}

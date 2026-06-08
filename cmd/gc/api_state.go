@@ -520,6 +520,55 @@ func (cs *controllerState) beadEventConfiguredStoreLocked(id string) (beads.Stor
 	return matchedStore, matchedLen >= 0
 }
 
+// cachingStoreFor unwraps any bead-policy wrapper and returns the underlying
+// *beads.CachingStore, or nil when the store is not (or does not wrap) one.
+func cachingStoreFor(store beads.Store) *beads.CachingStore {
+	for store != nil {
+		if cached, ok := store.(*beads.CachingStore); ok {
+			return cached
+		}
+		base, _, ok := unwrapBeadPolicyStore(store)
+		if !ok {
+			return nil
+		}
+		store = base
+	}
+	return nil
+}
+
+// RefreshBeadByID pulls a single bead from the backing store of whichever
+// configured store owns its ID prefix into that store's in-memory cache,
+// independent of cache freshness. The controller socket's "poke:<id>" command
+// calls this before waking the session reconciler so a cross-process create
+// (e.g. `gc session new`, which writes a deferred session bead then pokes) is
+// visible to the reconciler tick even when the periodic reconcile and bd-hook
+// event paths have not — or cannot — land it. Returns nil when the ID is
+// blank, no configured store owns it, or the owning store is not a caching
+// store (nothing to refresh).
+func (cs *controllerState) RefreshBeadByID(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	cs.mu.RLock()
+	var store beads.Store
+	if cs.cfg != nil {
+		if owned, known := cs.beadEventConfiguredStoreLocked(id); known {
+			store = owned
+		}
+	}
+	if store == nil {
+		store = cs.cityBeadStore
+	}
+	cs.mu.RUnlock()
+
+	cached := cachingStoreFor(store)
+	if cached == nil {
+		return nil
+	}
+	return cached.RefreshID(id)
+}
+
 func beadEventID(evt events.Event) string {
 	id := strings.TrimSpace(evt.Subject)
 	if id == "" {
