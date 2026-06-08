@@ -115,10 +115,50 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 	return f, nil
 }
 
+// beadRefresher is a late-bound indirection that lets the controller socket
+// pull a specific bead from its store's backing into the in-memory cache
+// before waking the reconciler. The socket listener is started before the
+// controllerState exists (standalone path), so the refresh function is bound
+// once the state is constructed. A nil refresher, or one whose function is not
+// yet bound, makes "poke:<id>" degrade to a bare poke. Safe for concurrent use
+// by per-connection goroutines.
+type beadRefresher struct {
+	mu sync.RWMutex
+	fn func(id string) error
+}
+
+// bind installs the refresh function. Called once the controllerState exists.
+func (b *beadRefresher) bind(fn func(id string) error) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	b.fn = fn
+	b.mu.Unlock()
+}
+
+// refresh pulls id from its store's backing into the cache. It is a no-op
+// returning nil until a function is bound, so a poke racing controller startup
+// degrades to a bare poke rather than erroring.
+func (b *beadRefresher) refresh(id string) error {
+	if b == nil {
+		return nil
+	}
+	b.mu.RLock()
+	fn := b.fn
+	b.mu.RUnlock()
+	if fn == nil {
+		return nil
+	}
+	return fn(id)
+}
+
 // startControllerSocket listens on a Unix socket at .gc/controller.sock.
 // When a client sends "stop\n", cancelFn is called to shut down the
 // controller loop. convergenceReqCh is used to route convergence commands
-// to the event loop for serialized processing. Returns the listener for cleanup.
+// to the event loop for serialized processing. refresher (may be nil) handles
+// the "poke:<id>" targeted cache-refresh command. Returns the listener for
+// cleanup.
 func startControllerSocket(
 	cityPath string,
 	cancelFn context.CancelFunc,
@@ -128,6 +168,7 @@ func startControllerSocket(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	refresher *beadRefresher,
 ) (net.Listener, error) {
 	sockPath := controllerSocketPath(cityPath)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
@@ -145,7 +186,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, refresher)
 		}
 	}()
 	return lis, nil
@@ -165,6 +206,7 @@ func handleControllerConn(
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
 	controlDispatcherCh chan struct{},
+	refresher *beadRefresher,
 ) {
 	defer conn.Close()                                 //nolint:errcheck // best-effort cleanup
 	conn.SetDeadline(time.Now().Add(95 * time.Second)) //nolint:errcheck // symmetric read+write deadline; 5s margin over 30s enqueue + 60s reply
@@ -188,6 +230,22 @@ func handleControllerConn(
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.
+			select {
+			case pokeCh <- struct{}{}:
+			default: // poke already pending
+			}
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case strings.HasPrefix(line, "poke:"):
+			// Targeted-refresh wake: a cross-process writer created a bead
+			// (e.g. `gc session new`) and wants it pulled into the controller's
+			// in-memory cache before the reconciler tick reads it. Refresh
+			// synchronously so the bead is present when the poke fires, then
+			// signal the tick. A refresh failure is best-effort: the bare poke
+			// still runs and the periodic reconcile remains the backstop.
+			id := strings.TrimSpace(line[len("poke:"):])
+			if err := refresher.refresh(id); err != nil {
+				fmt.Fprintf(os.Stderr, "controller: refresh bead %q on poke: %v\n", id, err) //nolint:errcheck // best-effort stderr
+			}
 			select {
 			case pokeCh <- struct{}{}:
 			default: // poke already pending
@@ -1250,7 +1308,10 @@ func runController(
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	// Bound to cs.RefreshBeadByID once the controllerState exists below, so the
+	// socket's "poke:<id>" command can land a freshly-created bead in the cache.
+	refresher := &beadRefresher{}
+	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, refresher)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1315,6 +1376,7 @@ func runController(
 	cs.configDirty = configDirty
 	cs.services = cr.svc
 	cr.setControllerState(cs)
+	refresher.bind(cs.RefreshBeadByID)
 	cs.startBeadEventWatcher(ctx)
 	cs.startMaintenanceLoop(ctx)
 

@@ -1740,6 +1740,10 @@ func reconcileCities(
 		watchTargets := config.WatchTargets(prov, cfg, path)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
+		// Bound to cs.RefreshBeadByID once the controllerState exists, so the
+		// controller socket's "poke:<id>" command can land a freshly-created
+		// bead in the city cache before the reconciler tick reads it.
+		refresher := &beadRefresher{}
 		configDirty := &atomic.Bool{}
 		forceShutdown := &atomic.Bool{}
 		reloadReqCh := make(chan reloadRequest)
@@ -1811,6 +1815,7 @@ func reconcileCities(
 		cs.configDirty = configDirty
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
+		refresher.bind(cs.RefreshBeadByID)
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
 
@@ -1871,7 +1876,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh, refresher)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with

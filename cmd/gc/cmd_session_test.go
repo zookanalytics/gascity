@@ -2255,14 +2255,16 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 			t.Fatalf("timed out waiting for controller pokes, got %v", gotCommands)
 		}
 	}
-	wantCommands := []string{"ping\n", "poke\n", "poke\n"}
+	b := onlySessionBead(t, cityDir)
+	// The post-create poke carries the new session bead's ID so the controller
+	// pulls it into the city cache before the reconciler tick reads it.
+	wantCommands := []string{"ping\n", "poke\n", "poke:" + b.ID + "\n"}
 	for i, want := range wantCommands {
 		if gotCommands[i] != want {
 			t.Fatalf("controller command %d = %q, want %q", i, gotCommands[i], want)
 		}
 	}
 
-	b := onlySessionBead(t, cityDir)
 	if got := b.Metadata["alias"]; got != "mayor" {
 		t.Fatalf("alias = %q, want mayor", got)
 	}

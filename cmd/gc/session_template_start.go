@@ -196,7 +196,10 @@ func materializeSessionForTemplateWithOptions(
 					return createErr
 				})
 				if createErr == nil {
-					_ = pokeController(cityPath)
+					// Carry the new session bead's ID so the controller lands it
+					// in the city store cache before the reconciler tick reads it
+					// (stale cache would otherwise leave it in start-pending).
+					_ = pokeControllerForBead(cityPath, info.ID)
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -348,7 +351,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				return createErr
 			})
 			if createErr == nil {
-				_ = pokeController(cityPath)
+				// Carry the new session bead's ID so the controller lands it in
+				// the city store cache before the reconciler tick reads it
+				// (stale cache would otherwise leave it in start-pending).
+				_ = pokeControllerForBead(cityPath, info.ID)
 				return info.SessionName, nil
 			}
 			return "", createErr
