@@ -24,6 +24,21 @@ CONN_WARN_PCT="${GC_DOCTOR_CONN_WARN_PCT:-80}"
 BACKUP_STALE_S="${GC_DOCTOR_BACKUP_STALE_S:-43200}"  # 2x 6h backup interval
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 
+# Advisory coalescing. The doctor runs once per health-check tick (default
+# every 5m). Emitting the "Dolt health advisory" mail on every tick while a
+# borderline condition persists turns the monitor into a self-DoS: each mail
+# is a Dolt write, so a sustained latency event piles write load onto the data
+# plane precisely when it is already latency-stressed. Coalesce instead: alert
+# on the rising edge (a new/changed warning set), re-alert at most once per
+# cooldown window while the condition is unchanged, and announce recovery once.
+#
+# State lives in a small local JSON file, NOT the data plane: the whole point
+# is to avoid touching Dolt to decide whether to notify. This is notification
+# cooldown state, not a process-liveness status file — if it is lost the script
+# fails open (sends), which is safe and self-correcting.
+ADVISORY_COOLDOWN_S="${GC_DOCTOR_ADVISORY_COOLDOWN_S:-3600}"
+ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state.json}"
+
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
         run_bounded 10 \
@@ -121,6 +136,25 @@ send_mayor_mail() {
             echo "doctor: mail send failed" >&2
         fi
         return 1
+    fi
+}
+
+# write_advisory_state SIGNATURE EPOCH_S — persist the last-sent advisory
+# signature and timestamp for cross-tick coalescing. Atomic (temp + rename)
+# and fail-soft: a write failure must never abort the read-only doctor probe.
+# SIGNATURE is built only from fixed [a-z,] category tokens, so no JSON
+# escaping is required.
+write_advisory_state() {
+    _adv_sig="$1"
+    _adv_ts="$2"
+    _adv_dir=$(dirname "$ADVISORY_STATE_FILE")
+    mkdir -p "$_adv_dir" 2>/dev/null || return 0
+    _adv_tmp="$ADVISORY_STATE_FILE.tmp.$$"
+    if printf '{"signature":"%s","last_sent_epoch_s":%s}\n' \
+        "$_adv_sig" "${_adv_ts:-0}" > "$_adv_tmp" 2>/dev/null; then
+        mv -f "$_adv_tmp" "$ADVISORY_STATE_FILE" 2>/dev/null || rm -f "$_adv_tmp" 2>/dev/null || true
+    else
+        rm -f "$_adv_tmp" 2>/dev/null || true
     fi
 }
 
@@ -238,14 +272,48 @@ fi
 # --- Step 3: Compose report and escalate if critical ---
 
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
+
+# Build a stable signature of WHICH warning categories are active (not their
+# exact values), so value jitter on a sustained condition (e.g. 1500ms vs
+# 1520ms latency) does not read as a new condition and re-alert.
+ADVISORY_SIGNATURE=""
+[ -n "$LATENCY_WARN" ] && ADVISORY_SIGNATURE="${ADVISORY_SIGNATURE}latency," || true
+[ -n "$CONN_WARN" ] && ADVISORY_SIGNATURE="${ADVISORY_SIGNATURE}conn," || true
+[ -n "$ORPHAN_WARN" ] && ADVISORY_SIGNATURE="${ADVISORY_SIGNATURE}orphan," || true
+[ -n "$BACKUP_STALE" ] && ADVISORY_SIGNATURE="${ADVISORY_SIGNATURE}backup," || true
+
+LAST_SIGNATURE=$(read_runtime_state_string "$ADVISORY_STATE_FILE" signature)
+LAST_SENT_S=$(read_runtime_state_number "$ADVISORY_STATE_FILE" last_sent_epoch_s)
+NOW_S=$(date +%s)
+
 if [ -n "$WARNINGS" ]; then
-    if ! send_mayor_mail \
-        -s "Dolt health advisory [MEDIUM]" \
-        -m "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
+    # Send on the rising/changed edge, or once per cooldown window while the
+    # same condition persists. Otherwise suppress to protect the data plane.
+    SEND_ADVISORY=0
+    if [ "$ADVISORY_SIGNATURE" != "$LAST_SIGNATURE" ]; then
+        SEND_ADVISORY=1
+    elif [ -z "$LAST_SENT_S" ] || [ "$(( NOW_S - LAST_SENT_S ))" -ge "$ADVISORY_COOLDOWN_S" ]; then
+        SEND_ADVISORY=1
+    fi
+    if [ "$SEND_ADVISORY" -eq 1 ]; then
+        if send_mayor_mail \
+            -s "Dolt health advisory [MEDIUM]" \
+            -m "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}
 Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
-        :
+            # Record only on success so a failed send retries next tick instead
+            # of starting the cooldown on a mail nobody received.
+            write_advisory_state "$ADVISORY_SIGNATURE" "$NOW_S"
+        fi
+    fi
+elif [ -n "$LAST_SIGNATURE" ]; then
+    # Falling edge: the condition cleared. Announce recovery exactly once, then
+    # reset state so the next onset re-triggers a fresh advisory.
+    if send_mayor_mail \
+        -s "Dolt health advisory cleared [OK]" \
+        -m "Dolt health recovered: latency ${LATENCY_MS}ms, connections ${CONN_COUNT}/${CONN_MAX}, disk ${DISK_USAGE}, orphan DBs ${ORPHAN_COUNT}."; then
+        write_advisory_state "" "$NOW_S"
     fi
 fi
 
