@@ -110,6 +110,17 @@ func SuspensionStateFile(cityRoot string) string {
 	return RuntimePath(cityRoot, "runtime", "suspension-state.json")
 }
 
+// AutocloseCursorFile returns the path to the controller's autoclose
+// event-consumer checkpoint file. It records the last event-stream
+// sequence whose bead.closed the autoclose watcher has processed, so a
+// controller restart resumes from that position instead of skipping
+// closes (and their convoy/wisp/molecule autoclose cascades) that
+// landed while it was down. Per-clone and gitignored like the
+// suspension-state file — it is transient runtime state, never config.
+func AutocloseCursorFile(cityRoot string) string {
+	return RuntimePath(cityRoot, "runtime", "autoclose-cursor.json")
+}
+
 // CityRuntimeEnv returns city runtime env vars rooted at the canonical runtime
 // directory for cityRoot.
 func CityRuntimeEnv(cityRoot string) []string {
