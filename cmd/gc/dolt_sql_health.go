@@ -311,7 +311,31 @@ func openManagedDoltMaintenanceDB(host, port, user string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	return sql.Open("mysql", cfg.FormatDSN())
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, err
+	}
+	tuneManagedDoltMaintenancePool(db)
+	return db, nil
+}
+
+// tuneManagedDoltMaintenancePool configures db so a connection is never reused
+// after CALL DOLT_GC(). Dolt's online GC invalidates every connection that was
+// open across it: the next statement on such a connection fails with Error 1105
+// ("...this connection can no longer be used. please reconnect."). Because
+// database/sql's Conn.Close() returns a connection to the idle pool for reuse,
+// an untuned pool hands the GC-poisoned connection straight back out, and the
+// next database's USE — or the post-gc smoke count — aborts the whole cycle.
+//
+// Retaining zero idle connections forces a fresh physical connection (i.e. a
+// reconnect) for every operation, which is exactly the remedy the 1105 error
+// asks for. Capping open connections at one matches the maintenance loop's
+// strictly sequential access (it GCs one database at a time and never holds two
+// connections at once) and guarantees the server never sees a second,
+// mid-GC-poisoned maintenance connection.
+func tuneManagedDoltMaintenancePool(db *sql.DB) {
+	db.SetMaxIdleConns(0)
+	db.SetMaxOpenConns(1)
 }
 
 func managedDoltQueryProbeDirect(host, port, user string) error {
