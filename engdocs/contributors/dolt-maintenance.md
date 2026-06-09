@@ -44,7 +44,13 @@ For each scheduled cycle the supervisor:
    database on the Dolt server (the loop selects each in turn), bounded
    collectively by `gc_timeout` (default `10m`). The compaction fails
    fast, naming the database, if any one cannot be GC'd; databases
-   compacted before the failure keep their reclaimed space.
+   compacted before the failure keep their reclaimed space. Each GC runs
+   on a freshly-opened connection: an online `CALL DOLT_GC()` invalidates
+   every connection that was open across it (the next statement on one
+   fails with Error 1105 "…please reconnect."), so the maintenance pool
+   retains no idle connection and reconnects between databases. Reusing a
+   GC-poisoned connection is what previously aborted the multi-database
+   run at the second database.
 4. **Smoke test** — `SELECT COUNT(*) FROM issues` per managed database,
    summed (5 s timeout), to confirm the stores are readable after GC.
 5. **Prune** — keep the 3 newest successful snapshots and the most
