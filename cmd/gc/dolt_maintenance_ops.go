@@ -94,9 +94,12 @@ func (o *managedDoltMaintenanceOps) Close() error {
 
 // sqlDoltMaintenanceClient is the production doltMaintenanceClient: it runs each
 // operation against the managed Dolt server over a *sql.DB pool. Each
-// database-scoped call takes a fresh connection, selects the database with USE,
-// then runs the statement — CALL DOLT_GC() may reset the session, so
-// connections are never reused across databases.
+// database-scoped call takes a connection, selects the database with USE, then
+// runs the statement. CALL DOLT_GC() invalidates every connection open across
+// it (Error 1105 "...please reconnect."), so a poisoned connection must never be
+// reused: the pool is built by openManagedDoltMaintenanceDB →
+// tuneManagedDoltMaintenancePool, which retains no idle connection and thereby
+// reconnects fresh for every operation.
 type sqlDoltMaintenanceClient struct {
 	db *sql.DB
 }
