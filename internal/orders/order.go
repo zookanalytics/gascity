@@ -12,6 +12,15 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// OrderTrackingLabel is the bead label the controller stamps on every
+// order-tracking bead it mints per dispatch. It is the canonical signal that
+// a bead is dispatch bookkeeping, not real work — used both by the retention
+// sweep (cmd/gc) and by event-trigger evaluation, which excludes bead events
+// carrying this label so a tracking bead's own create/update/close churn does
+// not make event orders Due (a self-amplifying loop). cmd/gc references this
+// constant for its dispatch-side label so the two never drift.
+const OrderTrackingLabel = "order-tracking"
+
 // Order is a parsed order definition from a discovered order file.
 type Order struct {
 	// Name is derived from the discovered filename or directory name (not from TOML).
@@ -56,6 +65,21 @@ type Order struct {
 	// (gastownhall/gascity#2893). Non-idempotent orders (the
 	// default, false) keep failing CLOSED on gate timeout.
 	Idempotent bool `toml:"idempotent,omitempty"`
+	// Track controls whether each dispatch mints a durable order-tracking
+	// bead. Defaults to true. Setting it false suppresses the per-fire
+	// tracking bead for fire-and-forget orders whose side effect is
+	// idempotent and whose run history is not worth retaining (e.g. an
+	// event-driven nudge that dedups via its own state). The controller
+	// keeps the order's run cursor (event seq for event triggers, last-run
+	// time for cooldown/cron) in memory instead of on a bead, so an
+	// untracked order does not re-scan or re-fire on the same trigger while
+	// the controller stays up. The trade-off is that an in-memory cursor
+	// does not survive a controller restart: an untracked event order may
+	// re-fire once after restart, so only mark orders whose dispatch is
+	// safe to repeat (see Idempotent) as untracked. Untracked orders never
+	// accumulate closed tracking beads, which is the point — high-cadence
+	// event orders otherwise mint one retained bead per fire.
+	Track *bool `toml:"track,omitempty"`
 	// Env is a map of environment variables exported into an exec
 	// order's child process. Use the `[order.env]` TOML table to
 	// override thresholds (e.g. GC_DOCTOR_LATENCY_WARN_S) without
@@ -97,6 +121,7 @@ type orderDecode struct {
 	Timeout     string            `toml:"timeout,omitempty"`
 	Enabled     *bool             `toml:"enabled,omitempty"`
 	Idempotent  bool              `toml:"idempotent,omitempty"`
+	Track       *bool             `toml:"track,omitempty"`
 	Env         map[string]string `toml:"env,omitempty"`
 }
 
@@ -119,6 +144,7 @@ func (d orderDecode) normalized() Order {
 		Timeout:     d.Timeout,
 		Enabled:     d.Enabled,
 		Idempotent:  d.Idempotent,
+		Track:       d.Track,
 		Env:         d.Env,
 	}
 }
@@ -134,6 +160,17 @@ func (a *Order) IsEnabled() bool {
 		return true
 	}
 	return *a.Enabled
+}
+
+// ShouldTrack reports whether a dispatch of this order mints a durable
+// order-tracking bead. Defaults to true if not set. Returns false for
+// orders that opt out via track = false, whose run cursor the controller
+// keeps in memory instead of on a retained bead.
+func (a *Order) ShouldTrack() bool {
+	if a.Track == nil {
+		return true
+	}
+	return *a.Track
 }
 
 // IsExec reports whether this order uses exec (script) dispatch

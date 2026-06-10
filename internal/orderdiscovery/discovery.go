@@ -290,6 +290,7 @@ func overridesFromConfig(cfgOverrides []config.OrderOverride) []orders.Override 
 			Pool:       override.Pool,
 			Timeout:    override.Timeout,
 			Idempotent: override.Idempotent,
+			Track:      override.Track,
 			Env:        override.Env,
 		}
 	}

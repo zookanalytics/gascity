@@ -1950,6 +1950,10 @@
           "type": "boolean",
           "description": "Idempotent overrides whether the order's dispatch is safe to repeat.\nIdempotent orders fail open when the open-work gate times out (#2893)."
         },
+        "track": {
+          "type": "boolean",
+          "description": "Track overrides whether each dispatch mints a durable order-tracking\nbead. Set false to suppress per-fire tracking beads for fire-and-forget\norders; the controller keeps the run cursor in memory instead."
+        },
         "env": {
           "additionalProperties": {
             "type": "string"

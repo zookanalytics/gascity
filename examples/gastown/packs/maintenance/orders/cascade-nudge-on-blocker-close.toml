@@ -10,9 +10,16 @@
 #
 # Resolving dependents and nudging is mechanical (dep lookup + session
 # nudge). No LLM judgment needed, so the controller runs it via exec.
+#
+# track = false: every order-tracking bead close re-fires this (on=bead.closed),
+# so a retained per-fire tracking bead would accumulate unbounded. The side
+# effect is idempotent (a given (blocker, dependent) pair is nudged at most
+# once), so the controller keeps the event cursor in memory instead of on a
+# bead. See gc-9hxxv.
 [order]
 description = "Nudge dependents' assignees when a blocker bead closes"
 trigger = "event"
 on = "bead.closed"
 exec = "$PACK_DIR/assets/scripts/cascade-nudge-on-blocker-close.sh"
 scope = "city"
+track = false

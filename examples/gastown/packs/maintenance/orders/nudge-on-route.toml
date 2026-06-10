@@ -7,9 +7,16 @@
 #
 # Routing is mechanical: read gc.routed_to from the event, nudge the named
 # session. No LLM judgment needed, so the controller runs it via exec.
+#
+# track = false: this fires on essentially every bead.updated, so a retained
+# per-fire tracking bead would accumulate unbounded — it was the single largest
+# source of closed-wisp growth. The side effect is idempotent (the script
+# dedups each (bead, routed_to) via its own state file), so the controller
+# keeps the event cursor in memory instead of on a bead. See gc-9hxxv.
 [order]
 description = "Nudge the target session when a bead is routed to it"
 trigger = "event"
 on = "bead.updated"
 exec = "$PACK_DIR/assets/scripts/nudge-on-route.sh"
 scope = "city"
+track = false

@@ -2,6 +2,7 @@ package orders
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -320,6 +321,87 @@ func TestCheckTriggerEventNotDue(t *testing.T) {
 	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
 	if result.Due {
 		t.Errorf("Due = true, want false (no matching events)")
+	}
+}
+
+func TestCheckTriggerEventExcludesOrderTrackingBeadEvents(t *testing.T) {
+	trackingPayload := json.RawMessage(`{"bead":{"labels":["order-run:nudge-on-route","order-tracking"]}}`)
+	realPayload := json.RawMessage(`{"bead":{"labels":["work"]}}`)
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.updated", Payload: trackingPayload},
+		{Type: "bead.updated", Payload: realPayload},
+		{Type: "bead.updated", Payload: trackingPayload},
+	})
+	a := Order{Name: "nudge-on-route", Trigger: "event", On: "bead.updated"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if !result.Due {
+		t.Fatalf("Due = false, want true (one real event present); reason: %s", result.Reason)
+	}
+	if result.Reason != "event: 1 bead.updated event(s)" {
+		t.Errorf("Reason = %q, want %q (tracking events excluded)", result.Reason, "event: 1 bead.updated event(s)")
+	}
+}
+
+func TestCheckTriggerEventOnlyOrderTrackingNotDue(t *testing.T) {
+	trackingPayload := json.RawMessage(`{"bead":{"labels":["order-run:beads-health","order-tracking"]}}`)
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.updated", Payload: trackingPayload},
+		{Type: "bead.updated", Payload: trackingPayload},
+	})
+	a := Order{Name: "nudge-on-route", Trigger: "event", On: "bead.updated"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if result.Due {
+		t.Errorf("Due = true, want false (only order-tracking bead churn); reason: %s", result.Reason)
+	}
+}
+
+func TestCheckTriggerEventValidNonBeadPayloadCountsAsReal(t *testing.T) {
+	// Valid JSON that isn't the bead-snapshot shape decodes with no labels →
+	// not order-tracking → counted as a real trigger (fail open).
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.closed", Payload: json.RawMessage(`{"unexpected":"shape"}`)},
+	})
+	a := Order{Name: "cascade", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (non-bead payload must fall open); reason: %s", result.Reason)
+	}
+}
+
+func TestEventIsOrderTrackingBead(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    bool
+	}{
+		{"wrapped order-tracking", `{"bead":{"labels":["order-run:x","order-tracking"]}}`, true},
+		{"legacy raw order-tracking", `{"labels":["order-tracking"]}`, true},
+		{"wrapped work bead", `{"bead":{"labels":["work"]}}`, false},
+		{"no labels", `{"bead":{}}`, false},
+		{"malformed json", `not json`, false},
+		{"empty payload", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := events.Event{Type: "bead.updated"}
+			if tc.payload != "" {
+				e.Payload = json.RawMessage(tc.payload)
+			}
+			if got := eventIsOrderTrackingBead(e); got != tc.want {
+				t.Errorf("eventIsOrderTrackingBead(%s) = %v, want %v", tc.payload, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCheckTriggerEventNoPayloadCountsAsReal(t *testing.T) {
+	ep := newEventsProvider(t, []events.Event{
+		{Type: "bead.closed"},
+	})
+	a := Order{Name: "cascade", Trigger: "event", On: "bead.closed"}
+	result := CheckTrigger(a, time.Time{}, neverRan, ep, nil)
+	if !result.Due {
+		t.Errorf("Due = false, want true (payloadless event is a real trigger); reason: %s", result.Reason)
 	}
 }
 

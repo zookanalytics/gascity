@@ -1907,6 +1907,10 @@ type OrderOverride struct {
 	// Idempotent overrides whether the order's dispatch is safe to repeat.
 	// Idempotent orders fail open when the open-work gate times out (#2893).
 	Idempotent *bool `toml:"idempotent,omitempty"`
+	// Track overrides whether each dispatch mints a durable order-tracking
+	// bead. Set false to suppress per-fire tracking beads for fire-and-forget
+	// orders; the controller keeps the run cursor in memory instead.
+	Track *bool `toml:"track,omitempty"`
 	// Env adds or overrides environment variables exported into an exec
 	// order's child process.
 	Env map[string]string `toml:"env,omitempty"`

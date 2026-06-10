@@ -91,6 +91,53 @@ func TestParseIdempotent(t *testing.T) {
 	}
 }
 
+func TestParseTrackDefault(t *testing.T) {
+	a, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"event\"\non = \"bead.updated\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.Track != nil {
+		t.Errorf("Track = %v, want nil (unset)", a.Track)
+	}
+	if !a.ShouldTrack() {
+		t.Error("ShouldTrack() = false, want true (default)")
+	}
+}
+
+func TestParseTrackExplicitFalse(t *testing.T) {
+	a, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"event\"\non = \"bead.updated\"\ntrack = false\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if a.ShouldTrack() {
+		t.Error("ShouldTrack() = true, want false")
+	}
+}
+
+func TestParseTrackExplicitTrue(t *testing.T) {
+	a, err := Parse([]byte("[order]\nexec = \"true\"\ntrigger = \"event\"\non = \"bead.updated\"\ntrack = true\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !a.ShouldTrack() {
+		t.Error("ShouldTrack() = false, want true")
+	}
+}
+
+func TestApplyOverrideTrack(t *testing.T) {
+	aa := []Order{{Name: "nudge", Exec: "true", Trigger: "event", On: "bead.updated"}}
+	if !aa[0].ShouldTrack() {
+		t.Fatal("precondition: ShouldTrack() = false, want true (default)")
+	}
+	off := false
+	if err := ApplyOverrides(aa, []Override{{Name: "nudge", Track: &off}}); err != nil {
+		t.Fatalf("ApplyOverrides: %v", err)
+	}
+	if aa[0].ShouldTrack() {
+		t.Error("ShouldTrack() = true after track=false override, want false")
+	}
+}
+
 func TestValidateCooldown(t *testing.T) {
 	a := Order{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h"}
 	if err := Validate(a); err != nil {

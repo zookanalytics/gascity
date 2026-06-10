@@ -29,6 +29,7 @@ type Override struct {
 	Pool       *string
 	Timeout    *string
 	Idempotent *bool
+	Track      *bool
 	Env        map[string]string
 }
 
@@ -154,6 +155,9 @@ func applyOverride(a *Order, ov *Override) {
 	}
 	if ov.Idempotent != nil {
 		a.Idempotent = *ov.Idempotent
+	}
+	if ov.Track != nil {
+		a.Track = ov.Track
 	}
 	if len(ov.Env) > 0 {
 		if a.Env == nil {

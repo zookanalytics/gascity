@@ -6303,6 +6303,61 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 	}
 }
 
+func TestOrderTrackingRetentionWatchdog_DeletesToTargetBeyondSingleBatch(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Seed a backlog larger than one batch (500) and far larger than the old
+	// fixed 100/invocation budget, so delete-to-target must loop batches.
+	const total = orderTrackingRetentionWatchdogBatchSize + 190 // 690
+	eligible := total - minClosedOrderTrackingRetained          // 680 past the retain floor
+	seed := make([]beads.Bead, 0, total)
+	for i := range total {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("drain-%04d", i),
+			Title:     "order:drain",
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:drain", labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	store := beads.NewMemStoreFrom(100, seed, nil)
+	var stderrBuf bytes.Buffer
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              &stderrBuf,
+		logPrefix:           "gc test",
+	}
+
+	// A single invocation drains the whole eligible backlog, not just one batch.
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	remaining, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+		Status:   "closed",
+		Label:    labelOrderTracking,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatalf("listing remaining: %v", err)
+	}
+	if len(remaining) != minClosedOrderTrackingRetained {
+		t.Fatalf("remaining closed order-tracking beads = %d, want %d (retain floor); drained %d of %d eligible in one invocation",
+			len(remaining), minClosedOrderTrackingRetained, total-len(remaining), eligible)
+	}
+	// The 10 newest (highest index) are the ones kept.
+	for i := total - minClosedOrderTrackingRetained; i < total; i++ {
+		if _, err := store.Get(fmt.Sprintf("drain-%04d", i)); err != nil {
+			t.Fatalf("drain-%04d should be preserved at retain floor: %v", i, err)
+		}
+	}
+	if got := stderrBuf.String(); !strings.Contains(got, fmt.Sprintf("pruned %d", eligible)) {
+		t.Fatalf("stderr = %q, want 'pruned %d closed bead(s)'", got, eligible)
+	}
+}
+
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
 	// 100 closed beads: at the threshold, no warning (fires only when > 100).
 	seed := make([]beads.Bead, 100)

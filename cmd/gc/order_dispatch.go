@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	labelOrderTracking    = "order-tracking"
+	labelOrderTracking    = orders.OrderTrackingLabel
 	labelTriggerEnvFailed = "trigger-env-failed"
 
 	orderTrackingSweepOrder                = "order-tracking-sweep"
@@ -82,9 +82,22 @@ const (
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
 	// effective cleanup against per-tick overhead.
 	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
-	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
-	// closed order-tracking beads deleted per watchdog invocation.
-	orderTrackingRetentionWatchdogDeleteBudget = 100
+	// orderTrackingRetentionWatchdogBatchSize bounds one delete pass of the
+	// retention watchdog. The watchdog deletes to target — it loops batches
+	// until caught up rather than capping total deletions per invocation, so
+	// deletion throughput is never pinned below the creation rate (a fixed
+	// per-invocation cap below creation can never drain a backlog; that was
+	// the flaw in the earlier raise-the-budget fix). The batch size is the
+	// backpressure: it bounds each list+delete pass's footprint.
+	orderTrackingRetentionWatchdogBatchSize = 500
+	// orderTrackingRetentionWatchdogMaxBatchesPerSweep guards a single
+	// invocation against a pathological non-terminating drain (e.g. deletes
+	// that report success but do not stick). It is a stall guard, not a
+	// throughput cap: at the batch size above it permits up to 100k deletions
+	// per invocation — orders of magnitude above any real creation rate — and
+	// any remainder drains on the next interval and is logged, never silently
+	// dropped.
+	orderTrackingRetentionWatchdogMaxBatchesPerSweep = 200
 )
 
 var (
@@ -279,6 +292,11 @@ type memoryOrderDispatcher struct {
 	cityPath             string
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
+	// cursorCache holds the in-memory event-seq cursor for untracked
+	// (track=false) event orders, which mint no tracking bead to carry the
+	// seq label. Keyed like lastRunCache. Lost on restart by design — an
+	// untracked order may re-fire once after a controller restart.
+	cursorCache map[string]uint64
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -535,6 +553,13 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 				continue
 			}
+			// Untracked event orders carry no seq-labeled bead, so the
+			// bd-derived cursor stays stale across fires. Fold in the
+			// in-memory cursor (advanced synchronously at dispatch) so the
+			// order does not re-scan the same events on the next tick.
+			if remembered, ok := m.rememberedCursor(scoped, storeKeysForGate); ok && remembered > cursor {
+				cursor = remembered
+			}
 			cursorFn = func(string) uint64 {
 				return cursor
 			}
@@ -608,25 +633,37 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		// Create tracking bead synchronously BEFORE dispatch goroutine.
-		// This prevents the cooldown trigger from re-firing on the next tick.
-		trackingBead, err := store.Create(beads.Bead{
-			Title:     "order:" + scoped,
-			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-			NoHistory: true,
-		})
-		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+		// Tracked orders mint a tracking bead synchronously BEFORE the
+		// dispatch goroutine so the cooldown/event cursor it carries
+		// prevents re-firing on the next tick. Untracked (track=false)
+		// orders mint no bead and instead advance an in-memory cursor —
+		// the same re-fire guard without the retained-bead overhead.
+		var trackingID string
+		if a.ShouldTrack() {
+			trackingBead, err := store.Create(beads.Bead{
+				Title:     "order:" + scoped,
+				Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+				NoHistory: true,
+			})
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+				continue
+			}
+			trackingID = trackingBead.ID
+			m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
+		} else if !m.advanceUntrackedCursor(scoped, storeKeysForGate, a, now) {
+			// Could not read the event head seq; skip this dispatch and
+			// retry next tick rather than fire without advancing the
+			// cursor (which would re-fire every tick).
 			continue
 		}
-		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
 		// Fire with timeout; inflight tracks the spawned goroutine so
 		// drain can wait for tracking-bead outcome persistence before
 		// controller exit or config reload.
 		m.addInflight()
 		inFlight.Add(1)
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -971,6 +1008,57 @@ func (m *memoryOrderDispatcher) rememberLastRun(orderName string, storeKeys []st
 	}
 }
 
+// rememberCursor records the in-memory event-seq cursor for an untracked
+// event order. It advances monotonically: a lower seq never overwrites a
+// higher one, mirroring rememberLastRun's last-writer-wins-by-recency rule.
+func (m *memoryOrderDispatcher) rememberCursor(orderName string, storeKeys []string, seq uint64) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.cursorCache == nil {
+		m.cursorCache = make(map[string]uint64)
+	}
+	if seq > m.cursorCache[key] {
+		m.cursorCache[key] = seq
+	}
+}
+
+// advanceUntrackedCursor advances the in-memory run cursor for an untracked
+// (track=false) order before dispatch, standing in for the seq label /
+// CreatedAt that a tracking bead would otherwise carry. For event orders it
+// records the current head event seq; for every other trigger it records now
+// as the last-run time. It returns false only when an event order's head seq
+// cannot be read, signaling the caller to skip this dispatch and retry next
+// tick rather than fire without advancing the cursor (which would re-fire
+// every tick).
+func (m *memoryOrderDispatcher) advanceUntrackedCursor(scoped string, storeKeys []string, a orders.Order, now time.Time) bool {
+	if a.Trigger == "event" {
+		if m.ep == nil {
+			logDispatchError(m.stderr, "gc: order dispatch: untracked event order %s has no events provider; skipping", scoped)
+			return false
+		}
+		headSeq, err := m.ep.LatestSeq()
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for untracked %s: %v", scoped, err)
+			return false
+		}
+		m.rememberCursor(scoped, storeKeys, headSeq)
+		return true
+	}
+	m.rememberLastRun(scoped, storeKeys, now)
+	return true
+}
+
+// rememberedCursor returns the in-memory event-seq cursor for an untracked
+// event order and whether one has been recorded this controller lifetime.
+func (m *memoryOrderDispatcher) rememberedCursor(orderName string, storeKeys []string) (uint64, bool) {
+	key := orderHistoryCacheKey(orderName, storeKeys)
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	seq, ok := m.cursorCache[key]
+	return seq, ok
+}
+
 func orderHistoryCacheKey(orderName string, storeKeys []string) string {
 	return orderName + "\x00" + strings.Join(storeKeys, "\x00")
 }
@@ -1015,6 +1103,17 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	} else {
 		m.dispatchWisp(childCtx, store, a, cityPath, trackingID)
 	}
+}
+
+// labelTrackingBead applies an outcome label update to a dispatch's tracking
+// bead, or no-ops when the order is untracked (track=false) and minted no bead
+// (empty trackingID). Untracked orders still emit order.fired/completed/failed
+// events; only the per-bead outcome label is skipped.
+func (m *memoryOrderDispatcher) labelTrackingBead(store beads.Store, trackingID string, opts beads.UpdateOpts) error {
+	if trackingID == "" {
+		return nil
+	}
+	return store.Update(trackingID, opts)
 }
 
 func closeOrderTrackingBead(ctx context.Context, store beads.Store, trackingID string) error {
@@ -1127,7 +1226,10 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	labels := []string{"exec"}
 	var headSeq uint64
 	var hasEventCursor bool
-	if a.Trigger == "event" && m.ep != nil {
+	// Untracked orders (trackingID == "") carry no bead to stamp; their event
+	// cursor was already advanced in memory by the dispatch loop, so skip the
+	// per-bead cursor-persist block entirely.
+	if trackingID != "" && a.Trigger == "event" && m.ep != nil {
 		var err error
 		headSeq, err = m.ep.LatestSeq()
 		if err != nil {
@@ -1196,8 +1298,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 	}
 
 	// Label tracking bead with outcome via store (not CLI). For event execs,
-	// cursor labels were already persisted before the command ran.
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+	// cursor labels were already persisted before the command ran. Untracked
+	// orders no-op here (no bead) but still emit the outcome event below.
+	if err := m.labelTrackingBead(store, trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
 		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
 		if hasEventCursor {
@@ -1307,7 +1410,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
+		m.labelTrackingBead(store, trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
 		return
 	}
 
@@ -1431,7 +1534,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	})
 
 	// Label tracking bead with outcome.
-	store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+	m.labelTrackingBead(store, trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
@@ -1454,6 +1557,11 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 }
 
 func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
+	// Untracked orders mint no tracking bead; the order.failed event is still
+	// recorded by the caller, so skipping the bead label here loses nothing.
+	if trackingID == "" {
+		return
+	}
 	labels := []string{"wisp", "wisp-failed"}
 	if a.Trigger == "event" && headSeq > 0 {
 		labels = append(labels, eventCursorLabels(scoped, headSeq)...)

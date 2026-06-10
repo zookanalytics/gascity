@@ -551,6 +551,7 @@ OrderOverride modifies a scanned order's scheduling fields and exec env.
 | `pool` | string |  |  | Pool overrides the target session config. |
 | `timeout` | string |  |  | Timeout overrides the per-order timeout. Go duration string. |
 | `idempotent` | boolean |  |  | Idempotent overrides whether the order's dispatch is safe to repeat. Idempotent orders fail open when the open-work gate times out (#2893). |
+| `track` | boolean |  |  | Track overrides whether each dispatch mints a durable order-tracking bead. Set false to suppress per-fire tracking beads for fire-and-forget orders; the controller keeps the run cursor in memory instead. |
 | `env` | map[string]string |  |  | Env adds or overrides environment variables exported into an exec order's child process. |
 
 ## OrdersConfig

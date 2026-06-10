@@ -51,8 +51,9 @@ func TestMaintenanceOrdersValidate(t *testing.T) {
 
 // assertEventExecOrder checks an event-triggered exec order: it must validate,
 // listen for the expected event type, dispatch via exec (not a formula/pool),
-// and point at a script that is actually embedded in the pack.
-func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string) {
+// point at a script that is actually embedded in the pack, and carry the
+// expected tracking disposition.
+func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string, wantTracked bool) {
 	t.Helper()
 	o := readOrder(t, orderFile)
 	if err := orders.Validate(o); err != nil {
@@ -70,6 +71,9 @@ func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string)
 	if o.Pool != "" {
 		t.Errorf("%s: exec orders must not set a pool, got %q", orderFile, o.Pool)
 	}
+	if o.ShouldTrack() != wantTracked {
+		t.Errorf("%s: ShouldTrack() = %v, want %v", orderFile, o.ShouldTrack(), wantTracked)
+	}
 	wantSuffix := "assets/scripts/" + scriptBase
 	if !strings.HasSuffix(o.Exec, wantSuffix) {
 		t.Errorf("%s: exec = %q, want suffix %q", orderFile, o.Exec, wantSuffix)
@@ -80,16 +84,18 @@ func assertEventExecOrder(t *testing.T, orderFile, eventType, scriptBase string)
 }
 
 // TestNudgeOnRouteOrder pins the nudge-on-route order's event contract: it wakes
-// on bead.updated and runs the nudge-on-route script.
+// on bead.updated, runs the nudge-on-route script, and is untracked — a retained
+// per-fire tracking bead on this high-cadence order was the dominant source of
+// closed-wisp accumulation (gc-9hxxv).
 func TestNudgeOnRouteOrder(t *testing.T) {
-	assertEventExecOrder(t, "nudge-on-route.toml", "bead.updated", "nudge-on-route.sh")
+	assertEventExecOrder(t, "nudge-on-route.toml", "bead.updated", "nudge-on-route.sh", false)
 }
 
 // TestCascadeNudgeOnBlockerCloseOrder pins the cascade-nudge order's event
 // contract: it wakes on bead.closed — the event the close transition actually
-// emits — and runs the cascade-nudge script.
+// emits — runs the cascade-nudge script, and is untracked (gc-9hxxv).
 func TestCascadeNudgeOnBlockerCloseOrder(t *testing.T) {
-	assertEventExecOrder(t, "cascade-nudge-on-blocker-close.toml", "bead.closed", "cascade-nudge-on-blocker-close.sh")
+	assertEventExecOrder(t, "cascade-nudge-on-blocker-close.toml", "bead.closed", "cascade-nudge-on-blocker-close.sh", false)
 }
 
 // TestCascadeNudgeRoutesCrossRig guards the cascade order's cross-rig

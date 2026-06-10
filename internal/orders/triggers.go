@@ -2,6 +2,7 @@ package orders
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -235,6 +236,15 @@ func mergeConditionEnv(environ, extra []string) []string {
 }
 
 // checkEvent checks if matching events exist after the last cursor position.
+//
+// Bead events describing an order-tracking bead are ignored. The controller
+// mints one order-tracking bead per dispatch, and minting/labeling/closing it
+// itself emits bead.created/updated/closed events. Without this exclusion an
+// event order that matches those types is made Due by its own (and every other
+// order's) tracking-bead churn on essentially every tick — a self-amplifying
+// loop that the order-tracking accumulation bug traced back to. Real work beads
+// never carry the order-tracking label, so a genuine trigger is never dropped;
+// an event whose payload cannot be inspected falls open (counts as a trigger).
 func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult {
 	if ep == nil {
 		return TriggerResult{Due: false, Reason: "event: no events provider"}
@@ -251,10 +261,48 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	if err != nil {
 		return TriggerResult{Due: false, Reason: fmt.Sprintf("event: read error: %v", err)}
 	}
-	if len(matched) == 0 {
+	relevant := 0
+	for _, e := range matched {
+		if eventIsOrderTrackingBead(e) {
+			continue
+		}
+		relevant++
+	}
+	if relevant == 0 {
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
-	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", len(matched), a.On)}
+	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", relevant, a.On)}
+}
+
+// eventIsOrderTrackingBead reports whether a bead.* event describes an
+// order-tracking bead, decoded from the bead snapshot the event carries in its
+// payload. It accepts both the current {"bead": {...}} envelope and the legacy
+// raw-bead shape older bd hooks emitted. It fails open (returns false) when the
+// payload is absent or unparseable, so an uninspectable event is treated as a
+// real trigger rather than silently dropped.
+func eventIsOrderTrackingBead(e events.Event) bool {
+	if len(e.Payload) == 0 {
+		return false
+	}
+	var p struct {
+		Labels []string `json:"labels"`
+		Bead   struct {
+			Labels []string `json:"labels"`
+		} `json:"bead"`
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return false
+	}
+	return labelsContainOrderTracking(p.Bead.Labels) || labelsContainOrderTracking(p.Labels)
+}
+
+func labelsContainOrderTracking(labels []string) bool {
+	for _, l := range labels {
+		if l == OrderTrackingLabel {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxSeqFromLabels extracts the highest seq:<N> value from bead labels.

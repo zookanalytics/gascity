@@ -689,6 +689,120 @@ func TestOrderDispatchEventExecAdvancesCursor(t *testing.T) {
 	}
 }
 
+func TestOrderDispatchUntrackedEventExecMintsNoBeadAndAdvancesCursor(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+
+	var calls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:    "nudge-on-route",
+		Trigger: "event",
+		On:      events.BeadClosed,
+		Exec:    "scripts/nudge.sh",
+		Track:   boolPtr(false),
+	}}, store, eventLog, execRun, events.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	// One stable cityPath for the dispatcher's lifetime, as in production: the
+	// in-memory cursor is keyed by store target (which includes the city path).
+	cityPath := t.TempDir()
+
+	ad.dispatch(context.Background(), cityPath, time.Now())
+	ad.drain(context.Background())
+
+	// Untracked: no order-run / order-tracking bead is ever minted.
+	if all := trackingBeads(t, store, "order-run:nudge-on-route"); len(all) != 0 {
+		t.Fatalf("order-run beads after untracked dispatch = %d, want 0", len(all))
+	}
+	if all := trackingBeads(t, store, labelOrderTracking); len(all) != 0 {
+		t.Fatalf("order-tracking beads after untracked dispatch = %d, want 0", len(all))
+	}
+	if calls != 1 {
+		t.Fatalf("exec calls after first dispatch = %d, want 1", calls)
+	}
+
+	// Re-dispatch with no new events: the in-memory cursor suppresses re-fire
+	// exactly as a seq-labeled tracking bead would have.
+	ad.dispatch(context.Background(), cityPath, time.Now().Add(10*time.Second))
+	ad.drain(context.Background())
+	if calls != 1 {
+		t.Fatalf("exec calls after no-new-event re-dispatch = %d, want 1 (cursor should suppress)", calls)
+	}
+	if all := trackingBeads(t, store, labelOrderTracking); len(all) != 0 {
+		t.Fatalf("order-tracking beads after re-dispatch = %d, want 0", len(all))
+	}
+
+	// A new matching event advances past the in-memory cursor and re-fires.
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	ad.dispatch(context.Background(), cityPath, time.Now().Add(20*time.Second))
+	ad.drain(context.Background())
+	if calls != 2 {
+		t.Fatalf("exec calls after new-event dispatch = %d, want 2", calls)
+	}
+	if all := trackingBeads(t, store, labelOrderTracking); len(all) != 0 {
+		t.Fatalf("order-tracking beads after new-event dispatch = %d, want 0 (still untracked)", len(all))
+	}
+}
+
+func TestOrderDispatchUntrackedCooldownMintsNoBeadAndHonorsInterval(t *testing.T) {
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+
+	var calls int
+	execRun := func(context.Context, string, string, []string) ([]byte, error) {
+		calls++
+		return []byte("ok"), nil
+	}
+
+	ad := buildOrderDispatcherFromListExec([]orders.Order{{
+		Name:     "sweep",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "scripts/sweep.sh",
+		Track:    boolPtr(false),
+	}}, store, eventLog, execRun, events.Discard)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	base := time.Now()
+
+	ad.dispatch(context.Background(), cityPath, base)
+	ad.drain(context.Background())
+	if calls != 1 {
+		t.Fatalf("exec calls after first dispatch = %d, want 1 (never run)", calls)
+	}
+	if all := trackingBeads(t, store, labelOrderTracking); len(all) != 0 {
+		t.Fatalf("order-tracking beads after untracked cooldown dispatch = %d, want 0", len(all))
+	}
+
+	// Within the interval: the in-memory last-run suppresses re-fire.
+	ad.dispatch(context.Background(), cityPath, base.Add(10*time.Minute))
+	ad.drain(context.Background())
+	if calls != 1 {
+		t.Fatalf("exec calls within cooldown = %d, want 1 (interval not elapsed)", calls)
+	}
+
+	// Past the interval: fires again.
+	ad.dispatch(context.Background(), cityPath, base.Add(2*time.Hour))
+	ad.drain(context.Background())
+	if calls != 2 {
+		t.Fatalf("exec calls after interval elapsed = %d, want 2", calls)
+	}
+	if all := trackingBeads(t, store, labelOrderTracking); len(all) != 0 {
+		t.Fatalf("order-tracking beads after untracked cooldown re-fire = %d, want 0", len(all))
+	}
+}
+
 func TestOrderDispatchEventExecFailureAdvancesCursor(t *testing.T) {
 	store := beads.NewMemStore()
 	eventLog := events.NewFake()

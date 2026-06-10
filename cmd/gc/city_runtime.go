@@ -1371,9 +1371,12 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 }
 
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
-// are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
-// most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
+// are past their TTL (defaulting to 7d) and beyond the retain-N floor, at most
+// once every orderTrackingRetentionWatchdogInterval. It deletes to target:
+// each invocation drains every eligible bead in bounded batches, looping until
+// caught up, so deletion throughput is never pinned below the creation rate.
+// A per-invocation batch ceiling guards only against a non-terminating drain;
+// any remainder drains on the next interval and is logged.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
@@ -1391,13 +1394,31 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	}
 
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
-	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+	totalDeleted := 0
+	var sweepErr error
+	caughtUp := false
+	for batch := 0; batch < orderTrackingRetentionWatchdogMaxBatchesPerSweep; batch++ {
+		deleted, err := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
+			stores, now, policy, nil, orderTrackingRetentionWatchdogBatchSize)
+		totalDeleted += deleted
+		if err != nil {
+			sweepErr = err
+		}
+		// A short batch means every remaining eligible bead was deleted (or no
+		// progress was made under a delete error) — caught up for this interval.
+		if deleted < orderTrackingRetentionWatchdogBatchSize {
+			caughtUp = true
+			break
+		}
+	}
+	if !caughtUp && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: hit per-sweep batch ceiling after pruning %d bead(s); remainder drains next interval\n", cr.logPrefix, totalDeleted) //nolint:errcheck // best-effort stderr
+	}
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
-	if deleted > 0 && cr.stderr != nil {
-		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, deleted) //nolint:errcheck // best-effort stderr
+	if totalDeleted > 0 && cr.stderr != nil {
+		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: pruned %d closed bead(s)\n", cr.logPrefix, totalDeleted) //nolint:errcheck // best-effort stderr
 	}
 }
 
