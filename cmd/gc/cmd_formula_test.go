@@ -385,7 +385,6 @@ func TestFormulaCatalogEntriesUseFormulaRefForDiscovery(t *testing.T) {
 	runGitForFormulaTest(t, root, "init", "-b", "main")
 	runGitForFormulaTest(t, root, "config", "user.email", "test@example.com")
 	runGitForFormulaTest(t, root, "config", "user.name", "test")
-	runGitForFormulaTest(t, root, "config", "commit.gpgsign", "false")
 
 	formulaDir := filepath.Join(root, "formulas")
 	writeFormulaTestFile(t, formulaDir, "from-ref", `formula = "from-ref"
