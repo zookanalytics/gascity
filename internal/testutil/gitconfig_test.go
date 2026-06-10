@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -122,6 +123,28 @@ func TestIsolatedGitConfigContents(t *testing.T) {
 		if !strings.Contains(contents, want) {
 			t.Errorf("IsolatedGitConfigContents() missing %q\n--- got ---\n%s", want, contents)
 		}
+	}
+}
+
+// TestSharedIsolatedGitConfigEnv verifies the once-per-binary env getter points
+// at a real, writable, signing-disabled config and is stable across calls.
+func TestSharedIsolatedGitConfigEnv(t *testing.T) {
+	requireGit(t)
+	first := SharedIsolatedGitConfigEnv()
+	if !reflect.DeepEqual(first, SharedIsolatedGitConfigEnv()) {
+		t.Fatalf("SharedIsolatedGitConfigEnv not stable across calls: %v vs %v", first, SharedIsolatedGitConfigEnv())
+	}
+	var globalPath string
+	for _, e := range first {
+		if strings.HasPrefix(e, "GIT_CONFIG_GLOBAL=") {
+			globalPath = strings.TrimPrefix(e, "GIT_CONFIG_GLOBAL=")
+		}
+	}
+	if globalPath == "" || globalPath == os.DevNull {
+		t.Fatalf("GIT_CONFIG_GLOBAL = %q, want a writable temp file", globalPath)
+	}
+	if out, err := execGitInherit(t, t.TempDir(), "config", "--file", globalPath, "--type=bool", "commit.gpgsign"); err != nil || out != "false" {
+		t.Fatalf("commit.gpgsign from %q = %q (err %v), want false", globalPath, out, err)
 	}
 }
 

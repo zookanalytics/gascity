@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // RED tests for RigRootBranchCheck (ga-l0jx0r). They fail to compile until
@@ -196,7 +197,7 @@ func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) {
 	// can't reach the test commit: without an SSH agent socket (CI, polecat
 	// worktrees) a signed commit fails with "failed to write commit object".
 	// Repo-local identity set via `git config` after init is unaffected.
-	cmd.Env = append(os.Environ(), isolatedGitConfigEnv()...)
+	cmd.Env = append(os.Environ(), testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)

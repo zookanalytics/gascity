@@ -5,29 +5,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
-
-// isolatedGitConfigEnv lazily creates one writable, isolated global git config
-// for this test binary and returns the env entries pointing git at it. Shared
-// by the doctor git helpers so commits don't attempt an SSH signature (the
-// make-test env -i sandbox strips SSH_AUTH_SOCK) without inheriting the host
-// commit.gpgsign / gpg.format=ssh config.
-var isolatedGitConfigEnv = sync.OnceValue(func() []string {
-	dir, err := os.MkdirTemp("", "gascity-doctor-isolated-cfg-")
-	if err != nil {
-		panic(err)
-	}
-	path, err := testutil.WriteIsolatedGitConfig(dir)
-	if err != nil {
-		panic(err)
-	}
-	return testutil.IsolatedGitConfigEnv(path)
-})
 
 func TestFormulaRequirementsCheckOK(t *testing.T) {
 	dir := t.TempDir()
@@ -353,7 +335,7 @@ func doctorRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), isolatedGitConfigEnv()...)
+	cmd.Env = append(os.Environ(), testutil.SharedIsolatedGitConfigEnv()...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}

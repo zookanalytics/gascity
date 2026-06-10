@@ -5,28 +5,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
-
-// isolatedGitConfigEnv lazily creates one writable, isolated global git config
-// for this test binary and returns the env entries pointing git at it. Shared
-// by mustGit so commits don't attempt an SSH signature (the make-test env -i
-// sandbox strips SSH_AUTH_SOCK) without inheriting the host config.
-var isolatedGitConfigEnv = sync.OnceValue(func() []string {
-	dir, err := os.MkdirTemp("", "gascity-config-isolated-cfg-")
-	if err != nil {
-		panic(err)
-	}
-	path, err := testutil.WriteIsolatedGitConfig(dir)
-	if err != nil {
-		panic(err)
-	}
-	return testutil.IsolatedGitConfigEnv(path)
-})
 
 // initBareRepo creates a bare git repo with a pack.toml file.
 // Returns the bare repo path.
@@ -165,7 +148,7 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	// Point GIT_CONFIG_GLOBAL/SYSTEM at the shared writable isolated config so
 	// the developer's commit.gpgsign / gpg.format=ssh config can't reach a
 	// stripped SSH_AUTH_SOCK when `make test` runs under env -i.
-	cmd.Env = append(cmd.Env, isolatedGitConfigEnv()...)
+	cmd.Env = append(cmd.Env, testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), string(out), err)

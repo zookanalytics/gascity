@@ -5,28 +5,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
-
-// isolatedGitConfigEnv lazily creates one writable, isolated global git config
-// for this test binary and returns the env entries pointing git at it. Shared
-// by every runGit call so commits don't attempt an SSH signature (the make-test
-// env -i sandbox strips SSH_AUTH_SOCK) and global writes still succeed — without
-// inheriting the host commit.gpgsign / gpg.format=ssh config.
-var isolatedGitConfigEnv = sync.OnceValue(func() []string {
-	dir, err := os.MkdirTemp("", "gascity-git-isolated-cfg-")
-	if err != nil {
-		panic(err)
-	}
-	path, err := testutil.WriteIsolatedGitConfig(dir)
-	if err != nil {
-		panic(err)
-	}
-	return testutil.IsolatedGitConfigEnv(path)
-})
 
 // initTestRepo creates a git repo with one commit in a temp directory.
 func initTestRepo(t *testing.T) string {
@@ -55,7 +37,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 		}
 		cmd.Env = append(cmd.Env, e)
 	}
-	cmd.Env = append(cmd.Env, isolatedGitConfigEnv()...)
+	cmd.Env = append(cmd.Env, testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)

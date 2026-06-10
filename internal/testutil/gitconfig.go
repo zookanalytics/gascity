@@ -3,6 +3,7 @@ package testutil
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -69,6 +70,35 @@ func IsolatedGitConfigEnv(path string) []string {
 		envGitConfigGlobal + "=" + path,
 		envGitConfigSystem + "=" + os.DevNull,
 	}
+}
+
+// sharedIsolatedGitConfigEnv creates one writable, isolated global git config
+// for the lifetime of the test binary and caches the env entries pointing git
+// at it. Because the config is read-only for callers that only need signing
+// disabled, a single instance is safely shared across every helper in the
+// binary.
+var sharedIsolatedGitConfigEnv = sync.OnceValue(func() []string {
+	dir, err := os.MkdirTemp("", "gascity-isolated-gitcfg-")
+	if err != nil {
+		panic(err)
+	}
+	path, err := WriteIsolatedGitConfig(dir)
+	if err != nil {
+		panic(err)
+	}
+	return IsolatedGitConfigEnv(path)
+})
+
+// SharedIsolatedGitConfigEnv returns the environment entries that point git's
+// global and system configuration at a single writable, isolated config created
+// once per test binary. It is the building block for test helpers that build a
+// subprocess environment explicitly (filtered env, env -i style) and only need
+// signing disabled — they append these entries instead of re-implementing the
+// "write a temp config once" dance. Tests that perform global config WRITES
+// should instead use IsolatedGitConfig for a per-test file so writes don't leak
+// between tests.
+func SharedIsolatedGitConfigEnv() []string {
+	return sharedIsolatedGitConfigEnv()
 }
 
 // IsolatedGitConfig writes the isolated global git config into a test temp dir
