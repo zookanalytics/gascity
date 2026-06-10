@@ -7,3 +7,4 @@ description = "Close stale order-tracking beads and prune expired tracking histo
 trigger = "cooldown"
 interval = "1m"
 exec = "gc order sweep-tracking --stale-after 10m --quiet"
+scope = "city"
