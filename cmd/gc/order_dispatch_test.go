@@ -3674,6 +3674,75 @@ func TestOrderTrackingRetentionPolicyUsesConfiguredDeleteAfterClose(t *testing.T
 	}
 }
 
+func TestOrderTrackingRetentionWatchdogParamsDefaults(t *testing.T) {
+	for _, cfg := range []*config.City{nil, {}} {
+		interval, budget := orderTrackingRetentionWatchdogParams(cfg)
+		if interval != defaultOrderTrackingRetentionWatchdogInterval {
+			t.Errorf("interval = %v, want default %v (cfg=%v)", interval, defaultOrderTrackingRetentionWatchdogInterval, cfg)
+		}
+		if budget != defaultOrderTrackingRetentionWatchdogDeleteBudget {
+			t.Errorf("budget = %d, want default %d (cfg=%v)", budget, defaultOrderTrackingRetentionWatchdogDeleteBudget, cfg)
+		}
+	}
+}
+
+func TestOrderTrackingRetentionWatchdogParamsUsesConfigured(t *testing.T) {
+	cfg := &config.City{
+		Beads: config.BeadsConfig{
+			Policies: map[string]config.BeadPolicyConfig{
+				orderTrackingBeadPolicyName: {
+					RetentionSweepInterval: "5m",
+					RetentionSweepBudget:   2500,
+				},
+			},
+		},
+	}
+	interval, budget := orderTrackingRetentionWatchdogParams(cfg)
+	if interval != 5*time.Minute {
+		t.Errorf("interval = %v, want 5m", interval)
+	}
+	if budget != 2500 {
+		t.Errorf("budget = %d, want 2500", budget)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdogParamsZeroAndInvalidFallBackToDefault(t *testing.T) {
+	// budget=0 (omitted TOML key) must defer to the default, NOT delete nothing;
+	// an unparseable interval likewise falls back to the default cadence.
+	cfg := &config.City{
+		Beads: config.BeadsConfig{
+			Policies: map[string]config.BeadPolicyConfig{
+				orderTrackingBeadPolicyName: {
+					RetentionSweepInterval: "nope",
+					RetentionSweepBudget:   0,
+				},
+			},
+		},
+	}
+	interval, budget := orderTrackingRetentionWatchdogParams(cfg)
+	if interval != defaultOrderTrackingRetentionWatchdogInterval {
+		t.Errorf("interval = %v, want default %v", interval, defaultOrderTrackingRetentionWatchdogInterval)
+	}
+	if budget != defaultOrderTrackingRetentionWatchdogDeleteBudget {
+		t.Errorf("budget = %d, want default %d", budget, defaultOrderTrackingRetentionWatchdogDeleteBudget)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdogDefaultBudgetOutpacesCreation(t *testing.T) {
+	// The default deletion throughput (budget per interval) must exceed typical
+	// tracking-bead creation so a busy town keeps up out of the box without a
+	// city.toml change. Production lx HQ store observed ~15-18k created/day
+	// (2026-06). This guards against a regression that lowers the default below
+	// the creation rate and re-introduces unbounded growth.
+	perDay := float64(defaultOrderTrackingRetentionWatchdogDeleteBudget) *
+		(float64(24*time.Hour) / float64(defaultOrderTrackingRetentionWatchdogInterval))
+	const observedCreationPerDay = 18000.0
+	if perDay <= observedCreationPerDay {
+		t.Fatalf("default deletion throughput %.0f beads/day must exceed observed creation %.0f beads/day",
+			perDay, observedCreationPerDay)
+	}
+}
+
 func TestSweepClosedOrderTrackingRetentionKeepsLatestTenPerOrderAcrossTiers(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	beadTime := now.Add(-48 * time.Hour)

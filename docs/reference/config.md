@@ -259,6 +259,8 @@ BeadPolicyConfig holds storage and retention defaults for a named bead use.
 |-------|------|----------|---------|-------------|
 | `storage` | string |  |  | Storage selects the intended persistence tier: "history", "no_history", or "ephemeral". Creation paths apply this incrementally as they opt in. Enum: `history`, `no_history`, `ephemeral` |
 | `delete_after_close` | string |  |  | DeleteAfterClose deletes matching GC-owned beads after they have been closed for this duration. Accepts Go duration syntax plus whole-day "d" units, e.g. "7d" or "1d12h". Empty defers to any controller-managed default for the policy type (e.g. order_tracking defaults to 7d). |
+| `retention_sweep_interval` | string |  |  | RetentionSweepInterval bounds how often the controller's retention watchdog runs for this policy. Accepts Go duration syntax plus whole-day "d" units, e.g. "15m" or "1h". Empty defers to the controller default (order_tracking: 15m). Together with RetentionSweepBudget this sets the steady-state deletion throughput: at most RetentionSweepBudget closed beads are pruned per interval. Consumed by the order_tracking retention watchdog today. |
+| `retention_sweep_budget` | integer |  |  | RetentionSweepBudget bounds how many closed beads the controller's retention watchdog deletes per invocation for this policy. 0 (the omitted default) defers to the controller default (order_tracking: 1000). Together with RetentionSweepInterval this sets the steady-state deletion throughput. Consumed by the order_tracking retention watchdog today. |
 
 ## BeadsConfig
 

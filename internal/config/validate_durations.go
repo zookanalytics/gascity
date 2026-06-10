@@ -81,6 +81,12 @@ func ValidateDurations(cfg *City, source string) []string {
 
 	for name, policy := range cfg.Beads.Policies {
 		checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose)
+		checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "retention_sweep_interval", policy.RetentionSweepInterval)
+		if policy.RetentionSweepBudget < 0 {
+			warnings = append(warnings, fmt.Sprintf(
+				"%s: [beads.policies.%s] retention_sweep_budget = %d must not be negative",
+				source, name, policy.RetentionSweepBudget))
+		}
 		if !ValidBeadPolicyStorage(policy.Storage) {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: [beads.policies.%s] storage = %q is not valid: must be one of %q, %q, or %q",
@@ -179,6 +185,13 @@ func ValidateNonNegativeDurations(cfg *City, source string) error {
 	for name, policy := range cfg.Beads.Policies {
 		if err := checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose); err != nil {
 			return err
+		}
+		if err := checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "retention_sweep_interval", policy.RetentionSweepInterval); err != nil {
+			return err
+		}
+		if policy.RetentionSweepBudget < 0 {
+			return fmt.Errorf("%s: [beads.policies.%s] retention_sweep_budget must not be negative: got %d",
+				source, name, policy.RetentionSweepBudget)
 		}
 	}
 	return nil

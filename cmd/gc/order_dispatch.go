@@ -78,13 +78,19 @@ const (
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
 
-	// orderTrackingRetentionWatchdogInterval is the minimum time between
-	// controller-driven closed-bead retention sweeps. 15 minutes balances
-	// effective cleanup against per-tick overhead.
-	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
-	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
-	// closed order-tracking beads deleted per watchdog invocation.
-	orderTrackingRetentionWatchdogDeleteBudget = 100
+	// defaultOrderTrackingRetentionWatchdogInterval is the default minimum time
+	// between controller-driven closed-bead retention sweeps. 15 minutes
+	// balances effective cleanup against per-tick overhead. Operators may
+	// override it via [beads.policies.order_tracking].retention_sweep_interval.
+	defaultOrderTrackingRetentionWatchdogInterval = 15 * time.Minute
+	// defaultOrderTrackingRetentionWatchdogDeleteBudget is the default cap on
+	// the number of closed order-tracking beads deleted per watchdog
+	// invocation. With the 15m default interval this yields a steady-state
+	// deletion ceiling of 1000 × (24h / 15m) = 96,000 beads/day — comfortably
+	// above the ~15-18k tracking beads/day a busy town creates, so a fresh city
+	// drains its backlog without a city.toml change. Operators may override it
+	// via [beads.policies.order_tracking].retention_sweep_budget.
+	defaultOrderTrackingRetentionWatchdogDeleteBudget = 1000
 )
 
 var (
@@ -1956,6 +1962,31 @@ func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetent
 		}
 	}
 	return policy
+}
+
+// orderTrackingRetentionWatchdogParams resolves the controller retention
+// watchdog's run cadence and per-invocation delete budget from config, falling
+// back to defaults. These tune deletion *throughput* (budget per interval),
+// distinct from orderTrackingRetentionPolicyForConfig which resolves deletion
+// *eligibility*. A zero or non-positive configured value defers to the default:
+// budget 0 is the omitted-key zero value (and a literal 0 budget passed to the
+// sweep would delete nothing), and a non-positive interval would disable the
+// cadence gate — neither is a useful operator intent.
+func orderTrackingRetentionWatchdogParams(cfg *config.City) (interval time.Duration, budget int) {
+	interval = defaultOrderTrackingRetentionWatchdogInterval
+	budget = defaultOrderTrackingRetentionWatchdogDeleteBudget
+	if cfg == nil {
+		return interval, budget
+	}
+	if configured, ok := cfg.Beads.Policies[orderTrackingBeadPolicyName]; ok {
+		if d := configured.RetentionSweepIntervalDuration(); d > 0 {
+			interval = d
+		}
+		if b := configured.RetentionSweepBudget; b > 0 {
+			budget = b
+		}
+	}
+	return interval, budget
 }
 
 // sweepStaleOrderTracking closes open order-tracking beads whose creation

@@ -6303,6 +6303,118 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 	}
 }
 
+// seedClosedOrderTracking returns n closed order-tracking beads for one order,
+// all older than the 7d default TTL and ordered oldest-first by creation time.
+func seedClosedOrderTracking(prefix string, n int, now time.Time) []beads.Bead {
+	seed := make([]beads.Bead, 0, n)
+	for i := range n {
+		seed = append(seed, beads.Bead{
+			ID:        fmt.Sprintf("%s-%03d", prefix, i),
+			Title:     "order:" + prefix,
+			Status:    "closed",
+			Type:      "task",
+			CreatedAt: now.Add(-8*24*time.Hour + time.Duration(i)*time.Minute),
+			Labels:    []string{"order-run:" + prefix, labelOrderTracking},
+			Ephemeral: true,
+		})
+	}
+	return seed
+}
+
+func TestOrderTrackingRetentionWatchdog_DefaultBudgetExceedsLegacy100Cap(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 130 closed beads, same order: the retain-10 floor keeps the 10 newest, so
+	// 120 are eligible — more than the legacy 100/invocation cap. The raised
+	// default budget must clear all 120 in a single window.
+	const total = 130
+	store := beads.NewMemStoreFrom(1000, seedClosedOrderTracking("cap", total, now), nil)
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	survivors := 0
+	for i := range total {
+		if _, err := store.Get(fmt.Sprintf("cap-%03d", i)); err == nil {
+			survivors++
+		}
+	}
+	deleted := total - survivors
+	if deleted <= 100 {
+		t.Fatalf("watchdog deleted %d beads in one window; want > 100 (legacy cap) — default budget bump ineffective", deleted)
+	}
+	if survivors != minClosedOrderTrackingRetained {
+		t.Fatalf("survivors = %d, want %d (retain floor)", survivors, minClosedOrderTrackingRetained)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_HonorsConfiguredBudget(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// 10 floor + 5 eligible. A configured budget of 2 caps deletion at 2 even
+	// though all 5 are eligible — proving the configured budget reaches the sweep.
+	store := beads.NewMemStoreFrom(1000, seedClosedOrderTracking("cfgb", minClosedOrderTrackingRetained+5, now), nil)
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Beads: config.BeadsConfig{
+				Policies: map[string]config.BeadPolicyConfig{
+					orderTrackingBeadPolicyName: {RetentionSweepBudget: 2},
+				},
+			},
+		},
+		standaloneCityStore: store,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	survivors := 0
+	for i := range minClosedOrderTrackingRetained + 5 {
+		if _, err := store.Get(fmt.Sprintf("cfgb-%03d", i)); err == nil {
+			survivors++
+		}
+	}
+	if deleted := (minClosedOrderTrackingRetained + 5) - survivors; deleted != 2 {
+		t.Fatalf("deleted = %d, want 2 (configured budget)", deleted)
+	}
+}
+
+func TestOrderTrackingRetentionWatchdog_HonorsConfiguredInterval(t *testing.T) {
+	now := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Default interval (15m) has elapsed since the last run (20m ago), so the
+	// watchdog would fire — but a configured 30m interval gates it off.
+	store := beads.NewMemStoreFrom(1000, seedClosedOrderTracking("cfgi", minClosedOrderTrackingRetained+3, now), nil)
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Beads: config.BeadsConfig{
+				Policies: map[string]config.BeadPolicyConfig{
+					orderTrackingBeadPolicyName: {RetentionSweepInterval: "30m"},
+				},
+			},
+		},
+		standaloneCityStore:                store,
+		stdout:                             io.Discard,
+		stderr:                             io.Discard,
+		logPrefix:                          "gc test",
+		orderTrackingRetentionWatchdogLast: now.Add(-20 * time.Minute),
+	}
+	cr.runOrderTrackingRetentionWatchdog(now)
+
+	// Nothing pruned: the configured interval has not elapsed.
+	if _, err := store.Get("cfgi-000"); err != nil {
+		t.Fatalf("cfgi-000 should be preserved when configured interval has not elapsed: %v", err)
+	}
+}
+
 func TestWarnIfClosedOrderTrackingBacklogLarge_SilentAtThreshold(t *testing.T) {
 	// 100 closed beads: at the threshold, no warning (fires only when > 100).
 	seed := make([]beads.Bead, 100)

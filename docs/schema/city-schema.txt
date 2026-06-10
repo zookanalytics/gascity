@@ -973,6 +973,14 @@
         "delete_after_close": {
           "type": "string",
           "description": "DeleteAfterClose deletes matching GC-owned beads after they have been\nclosed for this duration. Accepts Go duration syntax plus whole-day \"d\"\nunits, e.g. \"7d\" or \"1d12h\". Empty defers to any controller-managed\ndefault for the policy type (e.g. order_tracking defaults to 7d)."
+        },
+        "retention_sweep_interval": {
+          "type": "string",
+          "description": "RetentionSweepInterval bounds how often the controller's retention\nwatchdog runs for this policy. Accepts Go duration syntax plus whole-day\n\"d\" units, e.g. \"15m\" or \"1h\". Empty defers to the controller default\n(order_tracking: 15m). Together with RetentionSweepBudget this sets the\nsteady-state deletion throughput: at most RetentionSweepBudget closed\nbeads are pruned per interval. Consumed by the order_tracking retention\nwatchdog today."
+        },
+        "retention_sweep_budget": {
+          "type": "integer",
+          "description": "RetentionSweepBudget bounds how many closed beads the controller's\nretention watchdog deletes per invocation for this policy. 0 (the omitted\ndefault) defers to the controller default (order_tracking: 1000).\nTogether with RetentionSweepInterval this sets the steady-state deletion\nthroughput. Consumed by the order_tracking retention watchdog today."
         }
       },
       "additionalProperties": false,

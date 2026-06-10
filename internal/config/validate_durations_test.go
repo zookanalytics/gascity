@@ -154,6 +154,97 @@ func TestValidateDurationsRejectsUnsafeBeadPolicyDuration(t *testing.T) {
 	}
 }
 
+func TestValidateDurationsBadRetentionSweepInterval(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {RetentionSweepInterval: "15mins"},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.order_tracking]", "retention_sweep_interval", "15mins"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateDurationsWarnsNegativeRetentionSweepBudget(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {RetentionSweepBudget: -5},
+			},
+		},
+	}
+	warnings := ValidateDurations(cfg, "city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	for _, want := range []string{"[beads.policies.order_tracking]", "retention_sweep_budget"} {
+		if !strings.Contains(warnings[0], want) {
+			t.Errorf("warning = %q, want substring %q", warnings[0], want)
+		}
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsBadRetentionSweepInterval(t *testing.T) {
+	for _, value := range []string{"0s", "-1h", "5mins"} {
+		t.Run(value, func(t *testing.T) {
+			cfg := &City{
+				Beads: BeadsConfig{
+					Policies: map[string]BeadPolicyConfig{
+						"order_tracking": {RetentionSweepInterval: value},
+					},
+				},
+			}
+			err := ValidateNonNegativeDurations(cfg, "city.toml")
+			if err == nil {
+				t.Fatalf("expected error for retention_sweep_interval=%q", value)
+			}
+			if !strings.Contains(err.Error(), "retention_sweep_interval") {
+				t.Errorf("error = %q, want substring %q", err, "retention_sweep_interval")
+			}
+		})
+	}
+}
+
+func TestValidateNonNegativeDurationsRejectsNegativeRetentionSweepBudget(t *testing.T) {
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {RetentionSweepBudget: -1},
+			},
+		},
+	}
+	err := ValidateNonNegativeDurations(cfg, "city.toml")
+	if err == nil {
+		t.Fatal("expected error for negative retention_sweep_budget")
+	}
+	if !strings.Contains(err.Error(), "retention_sweep_budget") {
+		t.Errorf("error = %q, want substring %q", err, "retention_sweep_budget")
+	}
+}
+
+func TestValidateNonNegativeDurationsAllowsZeroRetentionSweepBudget(t *testing.T) {
+	// Zero means "unset" — the watchdog falls back to its default budget.
+	// It must not be rejected, since omitting the TOML key yields the int zero value.
+	cfg := &City{
+		Beads: BeadsConfig{
+			Policies: map[string]BeadPolicyConfig{
+				"order_tracking": {RetentionSweepBudget: 0},
+			},
+		},
+	}
+	if err := ValidateNonNegativeDurations(cfg, "city.toml"); err != nil {
+		t.Fatalf("ValidateNonNegativeDurations() = %v, want nil for zero budget", err)
+	}
+}
+
 func TestValidateDurationsBadBeadPolicyStorage(t *testing.T) {
 	cfg := &City{
 		Beads: BeadsConfig{

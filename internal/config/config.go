@@ -1396,6 +1396,20 @@ type BeadPolicyConfig struct {
 	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
 	// default for the policy type (e.g. order_tracking defaults to 7d).
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
+	// RetentionSweepInterval bounds how often the controller's retention
+	// watchdog runs for this policy. Accepts Go duration syntax plus whole-day
+	// "d" units, e.g. "15m" or "1h". Empty defers to the controller default
+	// (order_tracking: 15m). Together with RetentionSweepBudget this sets the
+	// steady-state deletion throughput: at most RetentionSweepBudget closed
+	// beads are pruned per interval. Consumed by the order_tracking retention
+	// watchdog today.
+	RetentionSweepInterval string `toml:"retention_sweep_interval,omitempty"`
+	// RetentionSweepBudget bounds how many closed beads the controller's
+	// retention watchdog deletes per invocation for this policy. 0 (the omitted
+	// default) defers to the controller default (order_tracking: 1000).
+	// Together with RetentionSweepInterval this sets the steady-state deletion
+	// throughput. Consumed by the order_tracking retention watchdog today.
+	RetentionSweepBudget int `toml:"retention_sweep_budget,omitempty"`
 }
 
 const (
@@ -1438,6 +1452,21 @@ func (p BeadPolicyConfig) DeleteAfterCloseDuration() time.Duration {
 		return 0
 	}
 	dur, err := parseConfigDurationWithDays(p.DeleteAfterClose)
+	if err != nil || dur <= 0 {
+		return 0
+	}
+	return dur
+}
+
+// RetentionSweepIntervalDuration returns RetentionSweepInterval as a duration.
+// It accepts ordinary Go durations plus a whole-day "d" unit, e.g. "15m" and
+// "1h". Empty, unparseable, or non-positive values return 0, signaling the
+// caller to fall back to its own default interval.
+func (p BeadPolicyConfig) RetentionSweepIntervalDuration() time.Duration {
+	if p.RetentionSweepInterval == "" {
+		return 0
+	}
+	dur, err := parseConfigDurationWithDays(p.RetentionSweepInterval)
 	if err != nil || dur <= 0 {
 		return 0
 	}

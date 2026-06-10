@@ -1371,12 +1371,16 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 }
 
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
-// are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
-// most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
+// are past their TTL (defaulting to 7d) and beyond the retain-10 floor. The run
+// cadence and per-invocation delete budget default to
+// defaultOrderTrackingRetentionWatchdogInterval and
+// defaultOrderTrackingRetentionWatchdogDeleteBudget, each overridable via
+// [beads.policies.order_tracking].retention_sweep_interval and
+// retention_sweep_budget.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
+	interval, budget := orderTrackingRetentionWatchdogParams(cr.cfg)
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
-		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
+		now.Sub(cr.orderTrackingRetentionWatchdogLast) < interval {
 		return
 	}
 	cr.orderTrackingRetentionWatchdogLast = now
@@ -1392,7 +1396,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+		stores, now, policy, nil, budget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
@@ -1433,7 +1437,7 @@ func warnIfClosedOrderTrackingBacklogLarge(store beads.Store, stderr io.Writer) 
 	if len(closed) >= orderTrackingRetentionStartupListLimit {
 		countStr = "≥1001"
 	}
-	fmt.Fprintf(stderr, "gc start: %s closed order-tracking beads detected — retention watchdog will prune automatically (7d TTL default; configure: [beads.policies.order_tracking].delete_after_close). For immediate cleanup: gc order sweep-tracking\n", countStr) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc start: %s closed order-tracking beads detected — retention watchdog will prune automatically (7d TTL default; raise throughput via [beads.policies.order_tracking].retention_sweep_budget / retention_sweep_interval). For immediate cleanup: gc order sweep-tracking\n", countStr) //nolint:errcheck // best-effort stderr
 }
 
 func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {

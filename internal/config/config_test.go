@@ -854,6 +854,48 @@ name = "mayor"
 	}
 }
 
+func TestParseBeadPolicyRetentionSweepFields(t *testing.T) {
+	data := []byte(`
+[workspace]
+name = "test-city"
+
+[beads.policies.order_tracking]
+retention_sweep_interval = "5m"
+retention_sweep_budget = 2500
+`)
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ot := cfg.Beads.Policies["order_tracking"]
+	if got := ot.RetentionSweepIntervalDuration(); got != 5*time.Minute {
+		t.Errorf("RetentionSweepIntervalDuration() = %v, want 5m", got)
+	}
+	if ot.RetentionSweepBudget != 2500 {
+		t.Errorf("RetentionSweepBudget = %d, want 2500", ot.RetentionSweepBudget)
+	}
+}
+
+func TestRetentionSweepIntervalDuration(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 0}, // empty defers to caller default
+		{"15m", 15 * time.Minute},
+		{"1d", 24 * time.Hour}, // whole-day "d" unit, mirrors DeleteAfterCloseDuration
+		{"5mins", 0},           // unparseable -> 0 so caller uses its default
+		{"0s", 0},              // non-positive -> 0
+		{"-1h", 0},             // negative -> 0
+	}
+	for _, tc := range cases {
+		p := BeadPolicyConfig{RetentionSweepInterval: tc.raw}
+		if got := p.RetentionSweepIntervalDuration(); got != tc.want {
+			t.Errorf("RetentionSweepIntervalDuration(%q) = %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestBeadsConfigRoundTripPreservesStagedFields(t *testing.T) {
 	disabled := false
 	c := City{
