@@ -27,31 +27,31 @@ func requireGit(t *testing.T) {
 }
 
 // TestIsolatedGitConfigNeutralizesSigning proves the helper isolates the test
-// from a hostile host config that signs commits, so `git commit` succeeds even
+// from a host config that signs commits, so `git commit` succeeds even
 // when no SSH agent is reachable (the `make test` env -i condition that strips
 // SSH_AUTH_SOCK). This is the tk-9zgnf failure mode.
 func TestIsolatedGitConfigNeutralizesSigning(t *testing.T) {
 	requireGit(t)
 
-	// Simulate the developer/CI hostile global config: signing on, ssh format,
-	// and no agent socket reachable.
-	hostileHome := t.TempDir()
-	hostileCfg := filepath.Join(hostileHome, ".gitconfig")
-	hostile := "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = /nonexistent/key\n"
-	if err := os.WriteFile(hostileCfg, []byte(hostile), 0o644); err != nil {
-		t.Fatalf("write hostile gitconfig: %v", err)
+	// A pre-existing host global config the isolation must override: signing
+	// on, ssh format, and no agent socket reachable.
+	hostHome := t.TempDir()
+	hostCfg := filepath.Join(hostHome, ".gitconfig")
+	hostConfig := "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = /nonexistent/key\n"
+	if err := os.WriteFile(hostCfg, []byte(hostConfig), 0o644); err != nil {
+		t.Fatalf("write host gitconfig: %v", err)
 	}
-	t.Setenv("HOME", hostileHome)
-	t.Setenv("GIT_CONFIG_GLOBAL", hostileCfg)
+	t.Setenv("HOME", hostHome)
+	t.Setenv("GIT_CONFIG_GLOBAL", hostCfg)
 	t.Setenv("SSH_AUTH_SOCK", "")
 
-	// Activate isolation — this must override the hostile GIT_CONFIG_GLOBAL.
+	// Activate isolation — this must override the pre-existing GIT_CONFIG_GLOBAL.
 	IsolatedGitConfig(t)
 
-	if got := os.Getenv("GIT_CONFIG_GLOBAL"); got == hostileCfg {
-		t.Fatalf("GIT_CONFIG_GLOBAL still points at hostile config %q", got)
+	if got := os.Getenv("GIT_CONFIG_GLOBAL"); got == hostCfg {
+		t.Fatalf("GIT_CONFIG_GLOBAL still points at host config %q", got)
 	}
-	if got, _ := execGitInherit(t, hostileHome, "config", "--global", "commit.gpgsign"); got != "false" {
+	if got, _ := execGitInherit(t, hostHome, "config", "--global", "commit.gpgsign"); got != "false" {
 		t.Fatalf("commit.gpgsign = %q, want false", got)
 	}
 

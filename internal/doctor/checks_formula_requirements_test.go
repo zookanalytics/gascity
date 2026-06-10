@@ -326,8 +326,6 @@ func doctorInitRepo(t *testing.T) string {
 	doctorRunGit(t, root, "init", "-b", "main")
 	doctorRunGit(t, root, "config", "user.email", "test@example.com")
 	doctorRunGit(t, root, "config", "user.name", "test")
-	// Signing is disabled by the shared isolated GIT_CONFIG_GLOBAL that
-	// doctorRunGit injects, so no per-repo gpgsign override is needed.
 	return root
 }
 

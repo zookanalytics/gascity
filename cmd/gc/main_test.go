@@ -205,15 +205,10 @@ func TestMain(m *testing.M) {
 	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
 		panic(err)
 	}
-	// Point git's global config at a writable, isolated file seeded with
-	// signing disabled. Two failures are avoided at once: (a) child `git
-	// commit` invocations no longer inherit the developer's commit.gpgsign +
-	// gpg.format=ssh, which fail under `make test`'s env -i sandbox (it strips
-	// SSH_AUTH_SOCK) with "Couldn't get agent socket"; and (b) global config
-	// WRITES such as ensure_beads_role's `git config --global beads.role
-	// maintainer` can lock and update a real file instead of failing on a
-	// /dev/null global. The config lives under testTempRoot so it is swept with
-	// the rest of the binary's temp state. See gc-j1gi1.
+	// Point git's global config at the isolated, writable config (see
+	// testutil.WriteIsolatedGitConfig for what it seeds and why). This must
+	// follow testTempRoot creation: the file is written under testTempRoot, so
+	// it is swept with the rest of the binary's temp state. See gc-j1gi1.
 	gitConfigPath, err := testutil.WriteIsolatedGitConfig(testTempRoot)
 	if err != nil {
 		panic(err)
