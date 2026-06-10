@@ -5,10 +5,28 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+// isolatedGitConfigEnv lazily creates one writable, isolated global git config
+// for this test binary and returns the env entries pointing git at it. Shared
+// by every runGit call so commits don't attempt an SSH signature (the make-test
+// env -i sandbox strips SSH_AUTH_SOCK) and global writes still succeed — without
+// inheriting the host commit.gpgsign / gpg.format=ssh config.
+var isolatedGitConfigEnv = sync.OnceValue(func() []string {
+	dir, err := os.MkdirTemp("", "gascity-git-isolated-cfg-")
+	if err != nil {
+		panic(err)
+	}
+	path, err := testutil.WriteIsolatedGitConfig(dir)
+	if err != nil {
+		panic(err)
+	}
+	return testutil.IsolatedGitConfigEnv(path)
+})
 
 // initTestRepo creates a git repo with one commit in a temp directory.
 func initTestRepo(t *testing.T) string {
@@ -22,10 +40,10 @@ func initTestRepo(t *testing.T) string {
 }
 
 // runGit runs a git command in dir and fails the test on error.
-// Strips git env vars to prevent interference from pre-commit hooks,
-// and points GIT_CONFIG_GLOBAL/SYSTEM at os.DevNull so the developer's
-// commit.gpgsign / gpg.format=ssh config can't reach a stripped
-// SSH_AUTH_SOCK when `make test` runs under env -i.
+// Strips git env vars to prevent interference from pre-commit hooks, and points
+// GIT_CONFIG_GLOBAL/SYSTEM at the shared isolated config (see
+// isolatedGitConfigEnv) so the developer's commit.gpgsign / gpg.format=ssh
+// config can't reach a stripped SSH_AUTH_SOCK when `make test` runs under env -i.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -37,10 +55,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 		}
 		cmd.Env = append(cmd.Env, e)
 	}
-	cmd.Env = append(cmd.Env,
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_CONFIG_SYSTEM="+os.DevNull,
-	)
+	cmd.Env = append(cmd.Env, isolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)

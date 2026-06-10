@@ -196,10 +196,7 @@ func runGitForRigRootBranchTest(t *testing.T, dir string, args ...string) {
 	// can't reach the test commit: without an SSH agent socket (CI, polecat
 	// worktrees) a signed commit fails with "failed to write commit object".
 	// Repo-local identity set via `git config` after init is unaffected.
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_CONFIG_SYSTEM="+os.DevNull,
-	)
+	cmd.Env = append(os.Environ(), isolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)

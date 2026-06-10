@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/rogpeppe/go-internal/testscript"
 )
@@ -192,17 +193,6 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv(managedDoltTestParentPIDEnv, fmt.Sprintf("%d", os.Getpid())); err != nil {
 		panic(err)
 	}
-	// Point git's global/system config at /dev/null so child `git commit`
-	// invocations in tests do not inherit the developer's signing config
-	// (commit.gpgsign + gpg.format=ssh). `make test` strips SSH_AUTH_SOCK
-	// via env -i, so signed commits would otherwise fail with
-	// "Couldn't get agent socket" in tests that exec git for setup.
-	if err := os.Setenv("GIT_CONFIG_GLOBAL", os.DevNull); err != nil {
-		panic(err)
-	}
-	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
-		panic(err)
-	}
 	// Sweep stale testTempRoot dirs in system /tmp before creating a new one.
 	// Sharded cmd/gc runs use a separate prefix so concurrent worktrees with
 	// older test harnesses cannot remove this package's active root.
@@ -213,6 +203,25 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		panic(err)
+	}
+	// Point git's global config at a writable, isolated file seeded with
+	// signing disabled. Two failures are avoided at once: (a) child `git
+	// commit` invocations no longer inherit the developer's commit.gpgsign +
+	// gpg.format=ssh, which fail under `make test`'s env -i sandbox (it strips
+	// SSH_AUTH_SOCK) with "Couldn't get agent socket"; and (b) global config
+	// WRITES such as ensure_beads_role's `git config --global beads.role
+	// maintainer` can lock and update a real file instead of failing on a
+	// /dev/null global. The config lives under testTempRoot so it is swept with
+	// the rest of the binary's temp state. See gc-j1gi1.
+	gitConfigPath, err := testutil.WriteIsolatedGitConfig(testTempRoot)
+	if err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_GLOBAL", gitConfigPath); err != nil {
+		panic(err)
+	}
+	if err := os.Setenv("GIT_CONFIG_SYSTEM", os.DevNull); err != nil {
 		panic(err)
 	}
 	if err := os.Setenv("TMPDIR", testTempRoot); err != nil {
