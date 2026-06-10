@@ -1495,6 +1495,22 @@ done
 exit 1
 `, mainPort, mainPID))
 
+	// Fake ss: runtime.sh prefers ss for listener detection on Linux (the
+	// kept MPTCP-correct ss-first rework); without an ss fake the real ss
+	// answers, finds no listener on the fixture port, and the city's own
+	// server PID falls through to the zombie set (zombie_count 2, want 1).
+	// Mirror the lsof fake — same pattern as the sibling foreign-managed
+	// zombie-scan tests (gc-9n4v5n).
+	writeExecutable(t, filepath.Join(fakeBin, "ss"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    "sport = :%s") printf 'pid=%s\n'; exit 0 ;;
+  esac
+done
+exit 0
+`, mainPort, mainPID))
+
 	// Fake ps: the bounded scan calls `ps -eo pid=,stat=,args=`. Emit the
 	// external PID's args line WITH `--config <path>` so the awk pass extracts
 	// it; its config dir has no dolt.pid sibling, so it must be excluded as an
