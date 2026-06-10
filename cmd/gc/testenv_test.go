@@ -293,10 +293,9 @@ func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {
 
 func writeTestGitIdentity(homeDir string) error {
 	gitConfig := filepath.Join(homeDir, ".gitconfig")
-	// Build on the shared isolated config (signing disabled, init.defaultBranch)
-	// and override with this fixture's identity plus beads.role. The trailing
-	// [user] block wins (git takes the last value), so commit author stays
-	// gc-test while commit.gpgsign=false is inherited from the shared base.
+	// Build on the shared isolated config, appending this fixture's identity and
+	// beads.role. The trailing [user] block wins (git takes the last value), so
+	// the commit author is gc-test.
 	data := []byte(testutil.IsolatedGitConfigContents() +
 		"[user]\n\tname = gc-test\n\temail = gc-test@test.local\n" +
 		"[beads]\n\trole = maintainer\n")
@@ -349,14 +348,9 @@ func configureTestDoltIdentityEnv(t *testing.T) {
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
 }
 
-// TestMainSeedsWritableIsolatedGlobalGitConfig guards the unified isolation
-// invariant that TestMain wires up. The process-wide GIT_CONFIG_GLOBAL must be
-// a real, writable file (never /dev/null) so global config WRITES such as
-// ensure_beads_role's `git config --global beads.role maintainer` succeed
-// instead of failing with "could not lock config file /dev/null" (gc-sms19);
-// and it must disable signing so commits succeed under `make test`'s env -i
-// sandbox, which strips SSH_AUTH_SOCK (tk-9zgnf). It reads the seeded file
-// directly so it neither depends on nor pollutes shared git config state.
+// TestMainSeedsWritableIsolatedGlobalGitConfig guards the invariant TestMain
+// wires up: GIT_CONFIG_GLOBAL points at a real, writable file (not /dev/null).
+// See gc-sms19 / tk-9zgnf for why.
 func TestMainSeedsWritableIsolatedGlobalGitConfig(t *testing.T) {
 	path := os.Getenv("GIT_CONFIG_GLOBAL")
 	if path == "" || path == os.DevNull {

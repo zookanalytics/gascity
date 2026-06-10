@@ -145,9 +145,6 @@ func mustGit(t *testing.T, dir string, args ...string) {
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@test.com",
 	)
-	// Point GIT_CONFIG_GLOBAL/SYSTEM at the shared writable isolated config so
-	// the developer's commit.gpgsign / gpg.format=ssh config can't reach a
-	// stripped SSH_AUTH_SOCK when `make test` runs under env -i.
 	cmd.Env = append(cmd.Env, testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

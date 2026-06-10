@@ -51,11 +51,8 @@ func runCmd(t *testing.T, dir, name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// neutralizeUserGitConfig isolates child git processes from the developer's
-// global config (commit.gpgsign / gpg.format=ssh) so signed commits don't fail
-// with "Couldn't get agent socket" when `make test` runs under `env -i` and
-// strips SSH_AUTH_SOCK. It points GIT_CONFIG_GLOBAL at a writable, seeded temp
-// config (never os.DevNull) so global config writes still succeed.
+// neutralizeUserGitConfig isolates child git processes from the host git config
+// (see testutil.IsolatedGitConfig).
 func neutralizeUserGitConfig(t *testing.T) {
 	t.Helper()
 	testutil.IsolatedGitConfig(t)

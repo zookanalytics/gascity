@@ -385,9 +385,6 @@ func TestFormulaCatalogEntriesUseFormulaRefForDiscovery(t *testing.T) {
 	runGitForFormulaTest(t, root, "init", "-b", "main")
 	runGitForFormulaTest(t, root, "config", "user.email", "test@example.com")
 	runGitForFormulaTest(t, root, "config", "user.name", "test")
-	// Signing is disabled process-wide by TestMain's isolated GIT_CONFIG_GLOBAL
-	// (see testutil.WriteIsolatedGitConfig), so no per-repo gpgsign override is
-	// needed here.
 
 	formulaDir := filepath.Join(root, "formulas")
 	writeFormulaTestFile(t, formulaDir, "from-ref", `formula = "from-ref"

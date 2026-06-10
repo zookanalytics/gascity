@@ -205,10 +205,8 @@ func TestMain(m *testing.M) {
 	if err := os.WriteFile(filepath.Join(testTempRoot, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
 		panic(err)
 	}
-	// Point git's global config at the isolated, writable config (see
-	// testutil.WriteIsolatedGitConfig for what it seeds and why). This must
-	// follow testTempRoot creation: the file is written under testTempRoot, so
-	// it is swept with the rest of the binary's temp state. See gc-j1gi1.
+	// Written under testTempRoot (swept with the binary's temp state), so this
+	// must come after testTempRoot is created. See gc-j1gi1.
 	gitConfigPath, err := testutil.WriteIsolatedGitConfig(testTempRoot)
 	if err != nil {
 		panic(err)
