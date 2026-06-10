@@ -1746,6 +1746,47 @@ func TestHandleSessionPatchTitle(t *testing.T) {
 	}
 }
 
+func TestSessionPatchInvalidatesSessionListCache(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Original")
+
+	listReq := func() []sessionResponse {
+		req := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("GET /sessions: status %d, body %s", w.Code, w.Body.String())
+		}
+		var body ListBody[sessionResponse]
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("decode list: %v", err)
+		}
+		return body.Items
+	}
+
+	items := listReq()
+	if len(items) == 0 || items[0].Title != "Original" {
+		t.Fatalf("first list: want one item titled %q, got %+v", "Original", items)
+	}
+
+	patchBody := `{"title":"Renamed"}`
+	patchReq := httptest.NewRequest("PATCH", cityURL(fs, "/session/")+info.ID, strings.NewReader(patchBody))
+	patchReq.Header.Set("X-GC-Request", "true")
+	patchW := httptest.NewRecorder()
+	h.ServeHTTP(patchW, patchReq)
+	if patchW.Code != http.StatusOK {
+		t.Fatalf("PATCH: status %d, body %s", patchW.Code, patchW.Body.String())
+	}
+
+	items = listReq()
+	if len(items) == 0 || items[0].Title != "Renamed" {
+		t.Fatalf("post-PATCH list returned stale data: want title %q, got %+v", "Renamed", items)
+	}
+}
+
 func TestHandleSessionPatchAlias(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
