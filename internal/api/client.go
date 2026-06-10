@@ -641,6 +641,26 @@ func newClient(baseURL, cityName string) *Client {
 	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
 }
 
+// BaseURL returns the API base URL the client was constructed with.
+// Exposed so callers (and tests) can introspect which API server the
+// client is pointed at — for example, to verify standalone vs. supervisor
+// routing or to log the resolved endpoint in error messages.
+func (c *Client) BaseURL() string {
+	if c == nil {
+		return ""
+	}
+	return c.baseURL
+}
+
+// CityName returns the city name a per-city client was scoped to. Empty
+// for supervisor-scope clients constructed via NewClient.
+func (c *Client) CityName() string {
+	if c == nil {
+		return ""
+	}
+	return c.cityName
+}
+
 // requireCityScope reports an error if the client was constructed as a
 // supervisor-scope client (empty cityName) but a per-city method was called.
 // Centralizes the check so silent `/v0/city//...` request construction is
