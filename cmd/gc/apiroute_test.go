@@ -54,12 +54,17 @@ func TestStandaloneControllerClient(t *testing.T) {
 	}
 }
 
-// TestAPIClientRouting covers apiClient's routing: the standalone endpoint when
-// the socket is alive and an [api] port is configured, nil (the caller's local
-// fallback) when alive without a standalone port, the supervisor client when the
-// socket is down, and nil under the GC_NO_API escape hatch. The supervisor
-// fall-through for a managed city with no [api] port is scoped to maintenance —
-// see TestMaintenanceAPIClientRoutesToSupervisor. (gascity ga-tp7)
+// TestAPIClientRouting covers apiClient's routing: the standalone endpoint
+// when the socket is alive and a usable [api] port is configured, the
+// supervisor client when the socket is alive but no standalone API is usable
+// (the supervisor-managed-city fall-through), the supervisor client when the
+// socket is down, nil when nothing is reachable, and nil under the GC_NO_API
+// escape hatch.
+//
+// The general-command fall-through to the supervisor is the gc-1rr12w fork
+// behavior: a supervisor-managed city answers the controller socket in-process
+// but omits a standalone [api] port, so without the fall-through every `gc`
+// read on such a city takes the slow direct-Dolt path. (gascity gc-1rr12w)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 
@@ -70,14 +75,15 @@ func TestAPIClientRouting(t *testing.T) {
 	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
 	t.Cleanup(func() { restore(origAlive, origSup) })
 
-	t.Run("controller-alive-no-api-port-returns-nil", func(t *testing.T) {
-		// General commands have a local fallback, so apiClient returns nil here
-		// (no global supervisor fall-through).
+	t.Run("controller-alive-no-api-port-falls-through-to-supervisor", func(t *testing.T) {
+		// Supervisor-managed city: controller socket alive, no standalone [api]
+		// port. apiClient must fall through to the supervisor rather than
+		// returning nil, so general commands use the API fast path. (gc-1rr12w)
 		t.Setenv("GC_NO_API", "")
 		restore(func(string) int { return 4242 }, func(string) *api.Client { return sentinel })
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		if got := apiClient(dir); got != nil {
-			t.Fatalf("apiClient = %p, want nil (general commands use local fallback)", got)
+		if got := apiClient(dir); got != sentinel {
+			t.Fatalf("apiClient = %p, want supervisor sentinel %p (managed-city fall-through)", got, sentinel)
 		}
 	})
 
@@ -94,12 +100,33 @@ func TestAPIClientRouting(t *testing.T) {
 		}
 	})
 
+	t.Run("controller-alive-non-loopback-bind-falls-through", func(t *testing.T) {
+		// A non-loopback [api] without allow_mutations is not a usable standalone
+		// endpoint, so apiClient falls through to the supervisor. (gc-1rr12w)
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) int { return 4242 }, func(string) *api.Client { return sentinel })
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 8080\nbind = \"0.0.0.0\"\n")
+		if got := apiClient(dir); got != sentinel {
+			t.Fatalf("apiClient = %p, want supervisor sentinel %p (non-loopback fall-through)", got, sentinel)
+		}
+	})
+
 	t.Run("controller-down-uses-supervisor", func(t *testing.T) {
 		t.Setenv("GC_NO_API", "")
 		restore(func(string) int { return 0 }, func(string) *api.Client { return sentinel })
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 8080\n")
 		if got := apiClient(dir); got != sentinel {
 			t.Fatalf("apiClient = %p, want supervisor sentinel %p", got, sentinel)
+		}
+	})
+
+	t.Run("nothing-reachable-returns-nil", func(t *testing.T) {
+		// Controller down and supervisor unreachable: nil, caller uses local fallback.
+		t.Setenv("GC_NO_API", "")
+		restore(func(string) int { return 0 }, func(string) *api.Client { return nil })
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if got := apiClient(dir); got != nil {
+			t.Fatalf("apiClient = %p, want nil when neither standalone nor supervisor is reachable", got)
 		}
 	})
 
@@ -113,11 +140,40 @@ func TestAPIClientRouting(t *testing.T) {
 	})
 }
 
-// TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
-// fall-through: when the controller socket is alive but the supervisor-managed
-// city omits a standalone [api] port, maintenanceAPIClient routes to the
-// supervisor-managed client (maintenance has no local fallback), where general
-// commands' apiClient returns nil. (gascity ga-tp7)
+// TestAPIClientFallbackReason covers the reason codes that the gc-1rr12w
+// supervisor fall-through introduces. The "standalone-api-disabled" code
+// distinguishes a supervisor-managed city (controller socket alive, no [api]
+// section, supervisor unreachable) from a genuinely down controller, so
+// operators debugging route=fallback don't chase a phantom controller-liveness
+// bug. The "escape-hatch" and "controller-down" codes are covered by
+// route_log_test.go. (gascity gc-1rr12w)
+func TestAPIClientFallbackReason(t *testing.T) {
+	origAlive := apiRouteControllerAliveHook
+	t.Cleanup(func() { apiRouteControllerAliveHook = origAlive })
+
+	t.Run("standalone-api-disabled", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		if got := apiClientFallbackReason(dir); got != "standalone-api-disabled" {
+			t.Fatalf("apiClientFallbackReason = %q, want %q", got, "standalone-api-disabled")
+		}
+	})
+
+	t.Run("non-loopback-bind", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerAliveHook = func(string) int { return 4242 }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 8080\nbind = \"0.0.0.0\"\n")
+		if got := apiClientFallbackReason(dir); got != "non-loopback-bind" {
+			t.Fatalf("apiClientFallbackReason = %q, want %q", got, "non-loopback-bind")
+		}
+	})
+}
+
+// TestMaintenanceAPIClientRoutesToSupervisor proves maintenanceAPIClient
+// resolves the supervisor client for a supervisor-managed city (controller
+// socket alive, no standalone [api] port) and honors the GC_NO_API escape
+// hatch. (gascity ga-tp7)
 func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
