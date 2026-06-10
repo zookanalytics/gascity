@@ -23,22 +23,25 @@ var (
 	apiRouteSupervisorClientHook = supervisorCityAPIClient
 )
 
-// apiClient returns an API client if a controller with a mutable API server
-// is running for the city at cityPath. Returns nil if no controller is running,
-// the API is not configured, GC_NO_API is set truthy (operator escape hatch),
-// or the API is bound to a non-localhost address without allow_mutations.
-// CLI commands use this to route reads/writes through the API when available,
-// falling back to direct bd or file mutation.
+// apiClient returns an API client when one is reachable for the city at
+// cityPath, or nil if the caller should use its local bd/file fallback.
+// Returns nil if neither a standalone controller nor a supervisor is
+// reachable, if no API is configured anywhere, if GC_NO_API is set truthy
+// (operator escape hatch), or if the only reachable standalone API is bound to
+// a non-localhost address without allow_mutations and no supervisor API is
+// available. CLI commands use this to route reads/writes through the API when
+// available, falling back to direct bd or file mutation.
 //
 // A standalone controller (gc controller / gc serve) and a supervisor-managed
 // city both answer the per-city controller socket — the supervisor hosts that
-// controller in-process. When the socket is alive, apiClient routes to the
-// standalone HTTP endpoint if the city configures an [api] port, otherwise
-// returns nil so the caller uses its local fallback; when the socket is not
-// alive it returns the supervisor-managed client. Maintenance commands have no
-// local fallback, so they use maintenanceAPIClient, which additionally routes a
-// supervisor-managed city (alive socket, no standalone [api] port) to the
-// supervisor client rather than reporting controller-down. (gascity ga-tp7)
+// controller in-process. When the socket is alive, apiClient prefers the
+// standalone HTTP endpoint if the city configures a usable [api] port;
+// otherwise it falls through to the supervisor's HTTP API (which services
+// /v0/city/{name}/... routes for every supervisor-managed city). Fall-through
+// is load-bearing on supervisor-managed cities: typical city.toml has no [api]
+// section, so without it every general `gc` invocation would take the slow
+// direct-Dolt path even though the supervisor's API is fully functional.
+// (gascity gc-1rr12w)
 func apiClient(cityPath string) *api.Client {
 	// Operator escape hatch: GC_NO_API=1|true|yes → always fall back.
 	// Unknown values warn to stderr and fail open (fall through to normal path).
@@ -48,11 +51,15 @@ func apiClient(cityPath string) *api.Client {
 		fmt.Fprintln(os.Stderr, "warning: "+warn) //nolint:errcheck // best-effort stderr
 	}
 	if apiRouteControllerAliveHook(cityPath) != 0 {
-		// Alive socket: use the standalone HTTP endpoint when configured, else
-		// return nil so the caller takes its local fallback. A supervisor-managed
-		// city (no standalone [api] port) reaches the supervisor client only via
-		// maintenanceAPIClient, which has no local fallback.
-		return standaloneControllerClient(cityPath)
+		// Alive socket: prefer the standalone HTTP endpoint when it's usable.
+		if c := standaloneControllerClient(cityPath); c != nil {
+			return c
+		}
+		// Standalone-controller API isn't usable (config absent, [api] port
+		// unset, or a non-loopback bind without allow_mutations). A
+		// supervisor-managed city hits this on every call — fall through to the
+		// supervisor's HTTP API rather than returning nil, so general commands
+		// take the fast API path instead of slow direct-Dolt. (gascity gc-1rr12w)
 	}
 	return apiRouteSupervisorClientHook(cityPath)
 }
@@ -93,22 +100,38 @@ func standaloneControllerCityName(cfg *config.City, cityPath string) string {
 // returned nil for cityPath. Read-path CLI commands call this when the
 // client is nil to emit a route=fallback reason=<code> log line.
 //
-// The closed set mirrors the enabler's reason codes (ga-71l): "escape-hatch"
-// (GC_NO_API truthy), "non-loopback-bind" (API bound to non-localhost with
-// mutations disallowed), "controller-down" (everything else — no controller,
-// config missing, API port unset).
+// The closed set: "escape-hatch" (GC_NO_API truthy), "non-loopback-bind"
+// (standalone API bound to non-localhost with mutations disallowed and no
+// supervisor reachable), "standalone-api-disabled" (standalone controller
+// alive but no API port configured and no supervisor reachable),
+// "controller-down" (no standalone controller and no supervisor reachable).
+//
+// The "standalone-api-disabled" code distinguishes the
+// supervisor-managed-city case (where the controller socket answers ping
+// but city.toml has no [api] section) from a genuinely down controller,
+// so operators debugging route=fallback don't chase the wrong thread.
 func apiClientFallbackReason(cityPath string) string {
 	if disabled, _ := classifyGCNoAPI(os.Getenv("GC_NO_API")); disabled {
 		return "escape-hatch"
 	}
-	if controllerAlive(cityPath) != 0 {
+	if apiRouteControllerAliveHook(cityPath) != 0 {
 		tomlPath := filepath.Join(cityPath, "city.toml")
 		if cfg, err := config.Load(fsys.OSFS{}, tomlPath); err == nil && cfg.API.Port > 0 {
 			bind := cfg.API.BindOrDefault()
 			if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" && !cfg.API.AllowMutations {
 				return "non-loopback-bind"
 			}
+			// Standalone API is usable; apiClient would have returned a
+			// client. Reaching here is unexpected — fall through to the
+			// catch-all rather than emit a misleading code.
+			return "controller-down"
 		}
+		// Standalone controller is alive but its HTTP API isn't configured.
+		// apiClient fell through to supervisorCityAPIClient and that also
+		// returned nil — surface the standalone-side cause so operators
+		// don't chase a phantom "controller-down" diagnosis on a perfectly
+		// healthy supervisor host.
+		return "standalone-api-disabled"
 	}
 	return "controller-down"
 }
