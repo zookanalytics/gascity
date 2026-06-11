@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestReadEventCursorMissingFileIsZero(t *testing.T) {
@@ -102,6 +105,53 @@ func TestAdvanceEventCursorWritesValidJSON(t *testing.T) {
 	}
 	if m["a"] != 1 {
 		t.Fatalf("decoded cursor = %d, want 1", m["a"])
+	}
+}
+
+// The cursor file is written from multiple processes (controller dispatch and
+// manual `gc order run`). AdvanceEventCursor must serialize the whole
+// load/merge/write with an on-disk lock so a concurrent process cannot load the
+// same map and clobber an update via the later rename. We simulate the other
+// process by holding the on-disk lock directly: AdvanceEventCursor must block
+// until it is released. flock(2) LOCK_EX blocks across distinct open file
+// descriptions even within one process, so this exercises the cross-process path.
+func TestAdvanceEventCursorHoldsCrossProcessLock(t *testing.T) {
+	dir := t.TempDir()
+	path := EventCursorPath(dir)
+
+	// Stand in for another process holding the cursor lock.
+	external := beads.NewFileFlock(path + ".lock")
+	if err := external.Lock(); err != nil {
+		t.Fatalf("acquiring external lock: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- AdvanceEventCursor(dir, "o", 5) }()
+
+	// While the external lock is held the advance must not complete.
+	select {
+	case err := <-done:
+		_ = external.Unlock() //nolint:errcheck // test cleanup on the failure path
+		t.Fatalf("AdvanceEventCursor completed while cross-process lock held (err=%v); write not serialized", err)
+	case <-time.After(150 * time.Millisecond):
+		// Expected: blocked on the on-disk lock.
+	}
+
+	if err := external.Unlock(); err != nil {
+		t.Fatalf("releasing external lock: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("AdvanceEventCursor after lock release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AdvanceEventCursor did not complete after lock release (possible deadlock)")
+	}
+
+	if got := EventCursorFunc(dir)("o"); got != 5 {
+		t.Fatalf("cursor = %d, want 5", got)
 	}
 }
 

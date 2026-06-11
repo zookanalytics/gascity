@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // EventCursorFileName is the runtime-dir-relative file holding per-order event
@@ -16,6 +18,12 @@ const EventCursorFileName = "order-event-cursors.json"
 
 // eventCursorMu serializes read-modify-write of the cursor file within a process.
 var eventCursorMu sync.Mutex
+
+// eventCursorLockSuffix names the sidecar flock file that serializes cursor
+// updates across processes. It is a separate, never-renamed file because the
+// cursor file itself is replaced via os.Rename on every write, and an flock
+// follows the open file description (inode), not the path.
+const eventCursorLockSuffix = ".lock"
 
 // EventCursorPath returns the cursor file path under a city runtime dir.
 func EventCursorPath(runtimeDir string) string {
@@ -49,10 +57,30 @@ func EventCursorFunc(runtimeDir string) CursorFunc {
 // AdvanceEventCursor moves a scoped order's cursor to seq when seq is higher,
 // writing the file atomically. The advance is monotonic so a stale writer
 // cannot move the cursor backward and replay events.
+//
+// The cursor file is written from multiple processes — controller dispatch and
+// manual `gc order run` — so the in-process mutex alone cannot prevent a lost
+// update: two processes could load the same map, each write a temp file, and
+// the later os.Rename would drop the earlier process's advance, regressing a
+// cursor and replaying already-handled events after a restart. The whole
+// load/merge/write is therefore serialized across processes with an on-disk
+// flock as well.
 func AdvanceEventCursor(runtimeDir, scoped string, seq uint64) error {
 	eventCursorMu.Lock()
 	defer eventCursorMu.Unlock()
 	path := EventCursorPath(runtimeDir)
+
+	// The flock file lives in the runtime dir; ensure it exists before opening
+	// the lock so the first write does not fail on a missing directory.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating runtime dir %q: %w", filepath.Dir(path), err)
+	}
+	lock := beads.NewFileFlock(path + eventCursorLockSuffix)
+	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("locking event cursors %q: %w", path, err)
+	}
+	defer lock.Unlock() //nolint:errcheck // best-effort unlock
+
 	m, err := loadEventCursors(path)
 	if err != nil {
 		return err
