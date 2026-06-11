@@ -844,39 +844,6 @@ func TestOrderCheckConditionUsesCityScope(t *testing.T) {
 	}
 }
 
-func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *testing.T) {
-	rigStore := beads.NewMemStore()
-	legacyStore := labelFailListStore{
-		Store:     beads.NewMemStore(),
-		failLabel: "order:watch:rig:frontend",
-	}
-	eventLog := events.NewFake()
-	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
-
-	aa := []orders.Order{{
-		Name:    "watch",
-		Rig:     "frontend",
-		Trigger: "event",
-		On:      events.BeadClosed,
-		Formula: "mol-watch",
-	}}
-	resolver := func(a orders.Order) ([]beads.Store, error) {
-		if a.Rig == "frontend" {
-			return []beads.Store{rigStore, legacyStore}, nil
-		}
-		return []beads.Store{rigStore}, nil
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := doOrderCheckWithStoresResolver(aa, time.Now(), eventLog, resolver, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("doOrderCheckWithStoresResolver = %d, want 1 when legacy event cursor cannot be read; stdout: %s", code, stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "event cursor") {
-		t.Fatalf("stderr missing event cursor error:\n%s", stderr.String())
-	}
-}
-
 func TestOrderCheckWithStoresResolverFailsWhenLegacyLastRunReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
@@ -1056,20 +1023,16 @@ name = "test-city"
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
+	// Event orders mint no tracking bead; the durable cursor advances to head.
 	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	if len(results) != 0 {
+		t.Fatalf("order-run beads = %d, want 0 (event orders mint none): %#v", len(results), results)
 	}
-	if results[0].Ephemeral || !results[0].NoHistory {
-		t.Fatalf("tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", results[0].Ephemeral, results[0].NoHistory)
-	}
-	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
-		if !slicesContain(results[0].Labels, want) {
-			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
-		}
+	if seq, err := orders.ReadEventCursor(citylayout.RuntimeDataDir(cityDir), "release-exec"); err != nil || seq != headSeq {
+		t.Fatalf("event cursor = %d (err %v), want %d", seq, err, headSeq)
 	}
 }
 
@@ -1120,20 +1083,16 @@ on = "bead.closed"
 	if err != nil {
 		t.Fatalf("openStoreAtForCity(): %v", err)
 	}
+	// Event orders mint no tracking bead; the durable cursor advances to head.
 	results, err := store.ListByLabel("order-run:release-exec", 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(): %v", err)
 	}
-	if len(results) != 1 {
-		t.Fatalf("store.ListByLabel() len = %d, want 1 (%#v)", len(results), results)
+	if len(results) != 0 {
+		t.Fatalf("order-run beads = %d, want 0 (event orders mint none): %#v", len(results), results)
 	}
-	if results[0].Ephemeral || !results[0].NoHistory {
-		t.Fatalf("tracking bead storage = Ephemeral:%v NoHistory:%v, want no-history only", results[0].Ephemeral, results[0].NoHistory)
-	}
-	for _, want := range []string{"order:release-exec", fmt.Sprintf("seq:%d", headSeq), "exec"} {
-		if !slicesContain(results[0].Labels, want) {
-			t.Fatalf("tracking bead labels = %v, want %s", results[0].Labels, want)
-		}
+	if seq, err := orders.ReadEventCursor(citylayout.RuntimeDataDir(cityDir), "release-exec"); err != nil || seq != headSeq {
+		t.Fatalf("event cursor = %d (err %v), want %d", seq, err, headSeq)
 	}
 }
 
@@ -2479,7 +2438,7 @@ func TestOrderRunExecHonorsOrdersMaxTimeout(t *testing.T) {
 	}
 }
 
-func TestOrderRunExecTrackedLabelsEnvBuildFailure(t *testing.T) {
+func TestOrderRunExecTrackedEventMintsNoTrackingBeadOnEnvFailure(t *testing.T) {
 	clearAmbientPostgresEnv(t)
 	t.Setenv("GC_BEADS", "bd")
 
@@ -2499,20 +2458,19 @@ dolt.auto-start: false
 	a := orders.Order{Name: "pg-env", Trigger: "event", On: events.BeadClosed, Exec: "true"}
 
 	var stdout, stderr bytes.Buffer
-	code := doOrderRunExecTracked(a, cityDir, nil, store, eventLog, &stdout, &stderr)
+	code := doOrderRunExecTracked(a, cityDir, nil, eventLog, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("doOrderRunExecTracked = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 
-	all := trackingBeads(t, store, "order-run:pg-env")
-	if len(all) != 1 {
-		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	// Event orders mint no tracking bead.
+	if all := trackingBeads(t, store, "order-run:pg-env"); len(all) != 0 {
+		t.Fatalf("tracking bead count = %d, want 0 (event orders mint none)", len(all))
 	}
-	if !slicesContain(all[0].Labels, "exec-env-failed") {
-		t.Fatalf("tracking bead labels = %v, want exec-env-failed", all[0].Labels)
-	}
-	if slicesContain(all[0].Labels, "exec-failed") {
-		t.Fatalf("tracking bead labels = %v, want no exec-failed for env-build failure", all[0].Labels)
+	// The durable cursor advanced before the command (consumer-offset), even
+	// though the env build failed.
+	if seq, err := orders.ReadEventCursor(citylayout.RuntimeDataDir(cityDir), "pg-env"); err != nil || seq != 1 {
+		t.Fatalf("event cursor = %d (err %v), want 1 advanced before exec", seq, err)
 	}
 }
 
@@ -2787,25 +2745,6 @@ func TestOrderHistoryWithStoresResolverFailsUnreadablePrimaryStore(t *testing.T)
 	}
 	if !strings.Contains(stderr.String(), "list failed") {
 		t.Fatalf("stderr missing primary list error:\n%s", stderr.String())
-	}
-}
-
-func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
-	store := &partialListStore{
-		Store: beads.NewMemStore(),
-		rows: []beads.Bead{{
-			ID:     "cursor-1",
-			Labels: []string{"order:digest", "seq:42"},
-		}},
-		err: fmt.Errorf("wisps tier unavailable"),
-	}
-
-	got, err := bdCursor(store, "digest")
-	if err != nil {
-		t.Fatalf("bdCursor: %v", err)
-	}
-	if got != 42 {
-		t.Fatalf("bdCursor() = %d, want 42 from surviving rows", got)
 	}
 }
 

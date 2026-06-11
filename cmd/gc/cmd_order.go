@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -23,8 +22,6 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/spf13/cobra"
 )
-
-var orderLogf = log.Printf
 
 func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -581,7 +578,7 @@ func cmdOrderRun(name, rig string, jsonOutput bool, stdout, stderr io.Writer) in
 				return epCode
 			}
 			defer ep.Close() //nolint:errcheck // best-effort
-			return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+			return doOrderRunExecTracked(a, cityPath, cfg, ep, stdout, stderr)
 		}
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
@@ -635,7 +632,7 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 			fmt.Fprintf(stderr, "gc order run: %v\n", cfgErr) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return doOrderRunExecTracked(a, cityPath, cfg, store, ep, stdout, stderr)
+		return doOrderRunExecTracked(a, cityPath, cfg, ep, stdout, stderr)
 	}
 
 	// Capture event head before wisp creation (race-free cursor). Event runs
@@ -709,18 +706,18 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
-	if a.Trigger == "event" && ep != nil {
-		update.Labels = append(update.Labels,
-			"order:"+scoped,
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if a.Trigger == "event" && ep != nil {
+		if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
+			fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	if jsonOutput {
@@ -744,7 +741,10 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	return 0
 }
 
-func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, store beads.Store, ep events.Provider, stdout, stderr io.Writer) int {
+// doOrderRunExecTracked runs an exec order, advancing the durable event cursor
+// before the command for event triggers (consumer-offset) so a manual run does
+// not leave the controller cursor stale. Event orders mint no tracking bead.
+func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, ep events.Provider, stdout, stderr io.Writer) int {
 	if a.Trigger != "event" || ep == nil {
 		return doOrderRunExec(a, cityPath, cfg, stdout, stderr)
 	}
@@ -752,41 +752,14 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, st
 	scoped := a.ScopedName()
 	headSeq, err := ep.LatestSeq()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc order run: reading event head for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	tracking, err := store.Create(beads.Bead{
-		Title:     "order:" + scoped,
-		Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-		NoHistory: true,
-	})
-	if err != nil {
-		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+	if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
+		fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	defer store.Close(tracking.ID) //nolint:errcheck // best-effort close
-
-	// Persist the event cursor before running the command so manual event execs
-	// do not leave the controller cursor stale after the side effect.
-	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	result := doOrderRunExecResult(a, cityPath, cfg, stdout, stderr)
-	labels := []string{"exec"}
-	if result.code != 0 {
-		failureLabel := result.failureLabel
-		if failureLabel == "" {
-			failureLabel = "exec-failed"
-		}
-		labels = []string{failureLabel}
-	}
-	if err := store.Update(tracking.ID, beads.UpdateOpts{Labels: labels}); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	return result.code
+	return doOrderRunExecResult(a, cityPath, cfg, stdout, stderr).code
 }
 
 // doOrderRunExec runs an exec order directly via shell.
@@ -1014,16 +987,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				}
 				return last, err
 			}
-			cursorFn := orders.CursorAcrossStores(stores...)
+			var cursorFn orders.CursorFunc
 			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				cursorFn = func(string) uint64 {
-					return cursor
-				}
+				cursorFn = orders.EventCursorFunc(citylayout.RuntimeDataDir(cityPath))
 			}
 			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 			if err != nil {
@@ -1083,16 +1049,9 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcrossStores(stores...)
+		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
-			cursorFn = func(string) uint64 {
-				return cursor
-			}
+			cursorFn = orders.EventCursorFunc(citylayout.RuntimeDataDir(cityPath))
 		}
 		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 		if err != nil {
@@ -1620,43 +1579,6 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 		}
 	}
 	return orders.Order{}, false
-}
-
-func bdCursor(store beads.Store, orderName string) (uint64, error) {
-	beadList, err := store.List(beads.ListQuery{
-		Label:         "order:" + orderName,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedDesc,
-		TierMode:      beads.TierBoth,
-	})
-	if err != nil {
-		if len(beadList) == 0 {
-			return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
-		}
-		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
-	}
-	labelSets := make([][]string, len(beadList))
-	for i, b := range beadList {
-		labelSets[i] = b.Labels
-	}
-	return orders.MaxSeqFromLabels(labelSets), nil
-}
-
-func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
-	var maxSeq uint64
-	for i, store := range stores {
-		if store == nil {
-			continue
-		}
-		seq, err := bdCursor(store, orderName)
-		if err != nil {
-			return 0, fmt.Errorf("store %d: %w", i, err)
-		}
-		if seq > maxSeq {
-			maxSeq = seq
-		}
-	}
-	return maxSeq, nil
 }
 
 // --- gc order sweep-nudge-mail ---

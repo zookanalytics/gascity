@@ -11,6 +11,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
 )
@@ -80,6 +81,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 	}
 
 	now := time.Now()
+	runtimeDir := citylayout.RuntimeDataDir(s.state.CityPath())
 	checks := make([]orderCheckResponse, 0, len(aa))
 	for _, a := range aa {
 		storeInfos, err := orderStoreInfosForState(s.state, a)
@@ -87,7 +89,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			storeInfos = nil
 		}
 		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
-		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
+		result := checkOrderTriggerForAPI(a, now, runtimeDir, history, ep)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),
@@ -129,7 +131,7 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
-func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+func checkOrderTriggerForAPI(a orders.Order, now time.Time, runtimeDir string, history []orderHistoryStoreBead, ep events.Provider) orders.TriggerResult {
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -138,16 +140,7 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
-		if fresh {
-			cursorFn = orders.CursorAcrossStores(storesFromWorkflowInfos(infos)...)
-		} else {
-			labelSets := make([][]string, 0, len(history))
-			for _, row := range history {
-				labelSets = append(labelSets, row.bead.Labels)
-			}
-			cursor := orders.MaxSeqFromLabels(labelSets)
-			cursorFn = func(string) uint64 { return cursor }
-		}
+		cursorFn = orders.EventCursorFunc(runtimeDir)
 	}
 	return orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
 }
@@ -392,16 +385,6 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 		return nil, errNoOrderStores
 	}
 	return infos, nil
-}
-
-func storesFromWorkflowInfos(infos []workflowStoreInfo) []beads.Store {
-	stores := make([]beads.Store, 0, len(infos))
-	for _, info := range infos {
-		if info.store != nil {
-			stores = append(stores, info.store)
-		}
-	}
-	return stores
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {

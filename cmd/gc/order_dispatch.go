@@ -21,6 +21,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
@@ -82,9 +83,6 @@ const (
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
 	// effective cleanup against per-tick overhead.
 	orderTrackingRetentionWatchdogInterval = 15 * time.Minute
-	// orderTrackingRetentionWatchdogDeleteBudget bounds the number of
-	// closed order-tracking beads deleted per watchdog invocation.
-	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
 
 var (
@@ -425,6 +423,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 	}
 
+	runtimeDir := citylayout.RuntimeDataDir(cityPath)
 	stores := make(map[string]beads.Store)
 	// inFlight counts the dispatchOne goroutines launched by THIS tick that
 	// still hold handles from `stores`. The per-tick handles must not be closed
@@ -528,16 +527,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcrossStores(storesForGate...)
+		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
-			if err != nil {
-				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
-				continue
-			}
-			cursorFn = func(string) uint64 {
-				return cursor
-			}
+			cursorFn = orders.EventCursorFunc(runtimeDir)
 		}
 		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
 		if err != nil {
@@ -608,25 +600,47 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		// Create tracking bead synchronously BEFORE dispatch goroutine.
-		// This prevents the cooldown trigger from re-firing on the next tick.
-		trackingBead, err := store.Create(beads.Bead{
-			Title:     "order:" + scoped,
-			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
-			NoHistory: true,
-		})
-		if err != nil {
-			logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
-			continue
+		trackingID := ""
+		if a.Trigger == "event" {
+			// Event orders mint no tracking bead. Advance the durable file cursor
+			// to head BEFORE dispatch (consumer-offset) so the next tick won't
+			// re-fire; a missing provider or read error skips this fire, retried
+			// next tick. A bead cursor would emit bead.updated and self-trigger
+			// orders that watch bead.* events.
+			if m.ep == nil {
+				continue
+			}
+			head, err := m.ep.LatestSeq()
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: reading event head for %s: %v", scoped, err)
+				continue
+			}
+			if err := orders.AdvanceEventCursor(runtimeDir, scoped, head); err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: advancing event cursor for %s: %v", scoped, err)
+				continue
+			}
+		} else {
+			// Create tracking bead synchronously BEFORE dispatch goroutine so the
+			// cooldown/cron trigger does not re-fire on the next tick.
+			trackingBead, err := store.Create(beads.Bead{
+				Title:     "order:" + scoped,
+				Labels:    []string{"order-run:" + scoped, labelOrderTracking},
+				NoHistory: true,
+			})
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: creating tracking bead for %s: %v", scoped, err)
+				continue
+			}
+			trackingID = trackingBead.ID
+			m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 		}
-		m.rememberLastRun(scoped, storeKeysForGate, trackingBead.CreatedAt)
 
-		// Fire with timeout; inflight tracks the spawned goroutine so
-		// drain can wait for tracking-bead outcome persistence before
-		// controller exit or config reload.
+		// Fire with timeout; inflight tracks the spawned goroutine so drain can
+		// wait for any tracking-bead outcome persistence before controller exit
+		// or config reload.
 		m.addInflight()
 		inFlight.Add(1)
-		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingBead.ID, inFlight.Done)
+		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingID, inFlight.Done)
 		if spendDispatchBudget(idx) {
 			return
 		}
@@ -979,13 +993,6 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 	return a.Trigger == "cooldown" || a.Trigger == "cron"
 }
 
-func eventCursorLabels(scoped string, headSeq uint64) []string {
-	return []string{
-		fmt.Sprintf("order:%s", scoped),
-		fmt.Sprintf("seq:%d", headSeq),
-	}
-}
-
 // dispatchOne runs a single order dispatch in its own goroutine.
 // For exec orders, runs the script directly. For formula orders,
 // instantiates a wisp. Emits events and updates the tracking bead.
@@ -1125,44 +1132,6 @@ func openOrderTrackingIDs(store beads.Store, ids []string) ([]string, error) {
 func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string) {
 	scoped := a.ScopedName()
 	labels := []string{"exec"}
-	var headSeq uint64
-	var hasEventCursor bool
-	if a.Trigger == "event" && m.ep != nil {
-		var err error
-		headSeq, err = m.ep.LatestSeq()
-		if err != nil {
-			errMsg := fmt.Sprintf("reading event cursor: %v", err)
-			labels = []string{"exec-failed"}
-			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
-			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
-				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
-			}
-			m.rec.Record(events.Event{
-				Type:    events.OrderFailed,
-				Actor:   "controller",
-				Subject: scoped,
-				Message: errMsg,
-			})
-			return
-		}
-		hasEventCursor = true
-		// Event-triggered exec orders persist the cursor before the command
-		// runs; otherwise a crash after the side effect can replay the event.
-		if err := store.Update(trackingID, beads.UpdateOpts{Labels: eventCursorLabels(scoped, headSeq)}); err != nil {
-			logDispatchError(m.stderr, "gc: order %s: failed to label exec event cursor on tracking bead %s: %v", scoped, trackingID, err)
-			labels = []string{"exec-failed"}
-			if updateErr := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); updateErr != nil {
-				logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, updateErr)
-			}
-			m.rec.Record(events.Event{
-				Type:    events.OrderFailed,
-				Actor:   "controller",
-				Subject: scoped,
-				Message: fmt.Sprintf("exec tracking bead %s event cursor label failed for seq=%d: %v", trackingID, headSeq, err),
-			})
-			return
-		}
-	}
 
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a)
 	var output []byte
@@ -1195,26 +1164,21 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, store beads.St
 		}
 	}
 
-	// Label tracking bead with outcome via store (not CLI). For event execs,
-	// cursor labels were already persisted before the command ran.
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
-		logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
-		msg := fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err)
-		if hasEventCursor {
-			msg = fmt.Sprintf("seq=%d: %s", headSeq, msg)
+	// Label the tracking bead with the outcome. Event orders carry no tracking
+	// bead (empty trackingID) — their cursor advanced in the dispatch loop.
+	if trackingID != "" {
+		if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+			logDispatchError(m.stderr, "gc: order %s: failed to label exec tracking bead %s: %v", scoped, trackingID, err)
+			m.rec.Record(events.Event{
+				Type:    events.OrderFailed,
+				Actor:   "controller",
+				Subject: scoped,
+				Message: fmt.Sprintf("exec tracking bead %s label failed: %v", trackingID, err),
+			})
+			return
 		}
-		m.rec.Record(events.Event{
-			Type:    events.OrderFailed,
-			Actor:   "controller",
-			Subject: scoped,
-			Message: msg,
-		})
-		return
 	}
 	if execErrMsg != "" {
-		if hasEventCursor {
-			execErrMsg = fmt.Sprintf("seq=%d: %s", headSeq, execErrMsg)
-		}
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
@@ -1307,28 +1271,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
-		return
-	}
-
-	// Capture event head before wisp creation for event triggers. Event runs
-	// fail closed when the cursor cannot be read.
-	var headSeq uint64
-	if a.Trigger == "event" && m.ep != nil {
-		var err error
-		headSeq, err = m.ep.LatestSeq()
-		if err != nil {
-			errMsg := fmt.Sprintf("reading event cursor: %v", err)
-			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
-			m.rec.Record(events.Event{
-				Type:    events.OrderFailed,
-				Actor:   "controller",
-				Subject: scoped,
-				Message: errMsg,
-			})
-			m.markTrackingFailure(store, trackingID, scoped, a, 0)
-			return
+		if trackingID != "" {
+			store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-canceled"}}) //nolint:errcheck // best-effort
 		}
+		return
 	}
 
 	var searchPaths []string
@@ -1343,7 +1289,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(store, trackingID, scoped)
 		return
 	}
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{}); err != nil {
@@ -1353,7 +1299,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(store, trackingID, scoped)
 		return
 	}
 	if warning := poolOrderRouteVisibilityWarning(a, recipe); warning != "" {
@@ -1371,7 +1317,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 				Subject: scoped,
 				Message: err.Error(),
 			})
-			m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+			m.markTrackingFailure(store, trackingID, scoped)
 			return
 		}
 	}
@@ -1393,20 +1339,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: err.Error(),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(store, trackingID, scoped)
 		return
 	}
 	rootID := cookResult.RootID
 
 	// Stamp the created wisp through the store contract rather than a raw
-	// bd subprocess so controller dispatch stays provider-aware.
+	// bd subprocess so controller dispatch stays provider-aware. The
+	// order-run label gates duplicate dispatch and feeds gc order history.
 	update := beads.UpdateOpts{Labels: []string{"order-run:" + scoped}}
-	if a.Trigger == "event" && m.ep != nil {
-		update.Labels = append(update.Labels,
-			fmt.Sprintf("order:%s", scoped),
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{"gc.routed_to": pool}
 	}
@@ -1420,7 +1361,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Subject: scoped,
 			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
 		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
+		m.markTrackingFailure(store, trackingID, scoped)
 		return
 	}
 
@@ -1430,8 +1371,10 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		Subject: scoped,
 	})
 
-	// Label tracking bead with outcome.
-	store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+	// Label the tracking bead with the outcome; event orders carry none.
+	if trackingID != "" {
+		store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp"}}) //nolint:errcheck // best-effort
+	}
 }
 
 // orderRigSuspended reports whether the order targets a suspended rig.
@@ -1453,12 +1396,11 @@ func (m *memoryOrderDispatcher) orderRigSuspended(a orders.Order) bool {
 	return m.rigSuspendedByName(rigName)
 }
 
-func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string, a orders.Order, headSeq uint64) {
-	labels := []string{"wisp", "wisp-failed"}
-	if a.Trigger == "event" && headSeq > 0 {
-		labels = append(labels, eventCursorLabels(scoped, headSeq)...)
+func (m *memoryOrderDispatcher) markTrackingFailure(store beads.Store, trackingID, scoped string) {
+	if trackingID == "" {
+		return
 	}
-	if err := store.Update(trackingID, beads.UpdateOpts{Labels: labels}); err != nil {
+	if err := store.Update(trackingID, beads.UpdateOpts{Labels: []string{"wisp", "wisp-failed"}}); err != nil {
 		logDispatchError(m.stderr, "gc: order %s: failed to mark tracking bead %s as failed: %v", scoped, trackingID, err)
 	}
 }
@@ -2121,36 +2063,6 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 	return result, errors.Join(errs...)
 }
 
-// sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog variant
-// of sweepClosedOrderTrackingRetentionAcrossStores. It stops once the total
-// deletion count across all stores reaches limit, returning the partial deleted
-// count with a nil error on budget exhaustion. Store errors are returned as
-// normal; deletion errors within budget are propagated.
-func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
-	if limit <= 0 {
-		return 0, nil
-	}
-	deleted := 0
-	var errs []error
-	for i, store := range stores {
-		if store == nil {
-			continue
-		}
-		remaining := limit - deleted
-		if remaining <= 0 {
-			break
-		}
-		// Enforce the global budget by passing the remaining allowance to the
-		// per-store bounded sweep, which stops deleting once it is spent.
-		n, err := sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, remaining)
-		deleted += n
-		if err != nil {
-			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
-		}
-	}
-	return deleted, errors.Join(errs...)
-}
-
 func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
 	if store == nil {
 		return 0, fmt.Errorf("bead store unavailable")
@@ -2203,79 +2115,6 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			continue
 		}
 		for _, entry := range entries[policy.retainLast:] {
-			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
-				continue
-			}
-			if err := deleteWorkflowBead(store, entry.ID); err != nil {
-				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", entry.ID, err))
-				continue
-			}
-			deleted++
-		}
-	}
-	return deleted, deleteErr
-}
-
-// sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
-// sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
-// occurred within this store call. On budget exhaustion it returns the partial
-// count with a nil error; delete errors are still propagated.
-func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
-	if store == nil {
-		return 0, fmt.Errorf("bead store unavailable")
-	}
-	if policy.deleteAfterClose <= 0 || limit <= 0 {
-		return 0, nil
-	}
-	if policy.retainLast < minClosedOrderTrackingRetained {
-		policy.retainLast = minClosedOrderTrackingRetained
-	}
-	entries, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
-		Status:   "closed",
-		Label:    labelOrderTracking,
-		Sort:     beads.SortCreatedDesc,
-		TierMode: beads.TierBoth,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
-	}
-
-	byOrder := make(map[string][]beads.Bead)
-	for _, entry := range entries {
-		scopedName, ok := orderTrackingRetentionBucket(entry, onlyOrders)
-		if len(onlyOrders) > 0 {
-			if !ok {
-				continue
-			}
-		}
-		if !ok {
-			scopedName = legacyOrderTrackingRetentionBucket
-		}
-		byOrder[scopedName] = append(byOrder[scopedName], entry)
-	}
-
-	cutoff := now.Add(-policy.deleteAfterClose)
-	deleted := 0
-	var deleteErr error
-	for _, entries := range byOrder {
-		if deleted >= limit {
-			break
-		}
-		sort.Slice(entries, func(i, j int) bool {
-			left := orderTrackingClosedReferenceTime(entries[i])
-			right := orderTrackingClosedReferenceTime(entries[j])
-			if left.Equal(right) {
-				return entries[i].ID > entries[j].ID
-			}
-			return left.After(right)
-		})
-		if len(entries) <= policy.retainLast {
-			continue
-		}
-		for _, entry := range entries[policy.retainLast:] {
-			if deleted >= limit {
-				break
-			}
 			if !orderTrackingClosedReferenceTime(entry).Before(cutoff) {
 				continue
 			}
