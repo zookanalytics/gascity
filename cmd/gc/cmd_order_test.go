@@ -1522,6 +1522,93 @@ func TestOrderRunEventFormulaLatestSeqErrorDoesNotInstantiate(t *testing.T) {
 	}
 }
 
+// TestOrderRunEventFormulaAdvanceCursorFailureDoesNotInstantiate locks in the
+// consumer-offset ordering for the formula-backed event run path: the durable
+// event cursor is advanced before the wisp is minted, matching dispatch and
+// event exec orders. If the cursor advance fails, no wisp may exist — otherwise
+// a restart would reprocess the same event window against the stale file cursor
+// (the no-double-processing / durable-restart acceptance for PR#56).
+func TestOrderRunEventFormulaAdvanceCursorFailureDoesNotInstantiate(t *testing.T) {
+	// A regular file where the runtime dir must be makes AdvanceEventCursor's
+	// MkdirAll fail with ENOTDIR. This is root-proof, unlike a chmod-based
+	// permission denial which a root test runner would bypass.
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seeding .gc as a file: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-watch", "", cityDir, store, eventLog, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("doOrderRun = %d, want 1 when the event cursor cannot be advanced; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+
+	// The advance fails before molecule.Instantiate, so no wisp (and no
+	// order-run label) may exist to reprocess on restart.
+	results, err := store.ListByLabel("order-run:release-watch", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("order-run beads = %d, want 0 (advance failed before instantiate): %#v", len(results), results)
+	}
+	if !strings.Contains(stderr.String(), "advancing event cursor for release-watch") {
+		t.Fatalf("stderr = %q, want event cursor advance failure", stderr.String())
+	}
+}
+
+// TestOrderRunEventFormulaAdvancesCursorThenInstantiates is the happy-path
+// counterpart: a successful formula-backed event run mints the wisp and leaves
+// the durable cursor at head, so a later tick or restart will not re-fire the
+// already-processed event window.
+func TestOrderRunEventFormulaAdvancesCursorThenInstantiates(t *testing.T) {
+	cityDir := t.TempDir()
+	store := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "release-watch", "", cityDir, store, eventLog, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	results, err := store.ListByLabel("order-run:release-watch", 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("store.ListByLabel(): %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("order-run beads = %d, want 1: %#v", len(results), results)
+	}
+	if seq, err := orders.ReadEventCursor(citylayout.RuntimeDataDir(cityDir), "release-watch"); err != nil || seq != headSeq {
+		t.Fatalf("event cursor = %d (err %v), want %d", seq, err, headSeq)
+	}
+}
+
 func TestOrderRunResolvesPackBindingForPool(t *testing.T) {
 	aa := []orders.Order{
 		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},

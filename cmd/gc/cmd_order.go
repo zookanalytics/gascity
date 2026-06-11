@@ -697,6 +697,18 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		}
 	}
 
+	// Advance the durable event cursor before minting the wisp (consumer-offset),
+	// matching controller dispatch and event exec orders. The cursor must move
+	// before the side effect: if instantiation ran first, an advance failure (or a
+	// crash between instantiate and advance) would leave the wisp visible while the
+	// file cursor stayed stale, and a restart would reprocess the same event window.
+	if a.Trigger == "event" && ep != nil {
+		if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
+			fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	cookResult, err := molecule.Instantiate(context.Background(), store, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -715,12 +727,6 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	if err := store.Update(rootID, update); err != nil {
 		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	}
-	if a.Trigger == "event" && ep != nil {
-		if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
-			fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
 	}
 
 	if jsonOutput {
