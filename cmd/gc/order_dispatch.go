@@ -529,7 +529,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursorFn = orders.EventCursorFunc(runtimeDir)
+			// Prefer the durable file cursor; on a missing file entry fall back to
+			// (and seed it from) the legacy order:<scoped> + seq:<N> tracking-bead
+			// cursor so an existing city does not replay its historical event
+			// window on the first dispatch after upgrading to the file cursor.
+			cursor, err := eventCursorWithLegacyFallback(runtimeDir, scoped, true, storesForGate...)
+			if err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", scoped, err)
+				continue
+			}
+			cursorFn = func(string) uint64 { return cursor }
 		}
 		triggerOpts, err := orderTriggerOptionsForTarget(cityPath, m.cfg, target, a)
 		if err != nil {

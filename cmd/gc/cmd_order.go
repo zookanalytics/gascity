@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -22,6 +23,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/spf13/cobra"
 )
+
+var orderLogf = log.Printf
 
 func newOrderCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -989,7 +992,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			var cursorFn orders.CursorFunc
 			if a.Trigger == "event" {
-				cursorFn = orders.EventCursorFunc(citylayout.RuntimeDataDir(cityPath))
+				cursor, err := eventCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), a.ScopedName(), false, stores...)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				cursorFn = func(string) uint64 { return cursor }
 			}
 			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 			if err != nil {
@@ -1051,7 +1059,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 		}
 		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursorFn = orders.EventCursorFunc(citylayout.RuntimeDataDir(cityPath))
+			cursor, err := eventCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), a.ScopedName(), false, stores...)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			cursorFn = func(string) uint64 { return cursor }
 		}
 		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 		if err != nil {
@@ -1579,6 +1592,79 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 		}
 	}
 	return orders.Order{}, false
+}
+
+// eventCursorWithLegacyFallback resolves the event cursor for a scoped order,
+// preferring the durable file cursor and falling back to the legacy
+// order:<scoped> + seq:<N> tracking-bead cursor when the file has no record yet.
+//
+// This bridges the migration from per-order bead cursors to the file cursor: an
+// existing city's last-processed event seq lives in those beads, and treating a
+// missing file entry as 0 would make every historical matching event appear due,
+// replaying the event window once on the first post-upgrade read. A read error
+// (file or legacy beads) propagates so the caller fails closed and retries.
+//
+// When seed is true and the fallback supplies a value, the file cursor is seeded
+// from it so future reads are file-only and the legacy beads can be pruned
+// without resurrecting the historical window. Seeding is best-effort: the
+// returned cursor is already correct for this read, and the dispatch loop's own
+// AdvanceEventCursor persists head when the order fires. Read-only callers
+// (gc order check) pass seed=false.
+func eventCursorWithLegacyFallback(runtimeDir, scoped string, seed bool, stores ...beads.Store) (uint64, error) {
+	seq, err := orders.ReadEventCursor(runtimeDir, scoped)
+	if err != nil {
+		return 0, fmt.Errorf("reading event cursor file for %q: %w", scoped, err)
+	}
+	if seq > 0 {
+		return seq, nil
+	}
+	legacy, err := bdCursorAcrossStores(scoped, stores...)
+	if err != nil {
+		return 0, err
+	}
+	if legacy > 0 && seed {
+		if err := orders.AdvanceEventCursor(runtimeDir, scoped, legacy); err != nil {
+			orderLogf("gc order: seeding event cursor for %s from legacy seq %d failed: %v", scoped, legacy, err)
+		}
+	}
+	return legacy, nil
+}
+
+func bdCursor(store beads.Store, orderName string) (uint64, error) {
+	beadList, err := store.List(beads.ListQuery{
+		Label:         "order:" + orderName,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+	})
+	if err != nil {
+		if len(beadList) == 0 {
+			return 0, fmt.Errorf("listing event cursor beads for order %q: %w", orderName, err)
+		}
+		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
+	}
+	labelSets := make([][]string, len(beadList))
+	for i, b := range beadList {
+		labelSets[i] = b.Labels
+	}
+	return orders.MaxSeqFromLabels(labelSets), nil
+}
+
+func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, error) {
+	var maxSeq uint64
+	for i, store := range stores {
+		if store == nil {
+			continue
+		}
+		seq, err := bdCursor(store, orderName)
+		if err != nil {
+			return 0, fmt.Errorf("store %d: %w", i, err)
+		}
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return maxSeq, nil
 }
 
 // --- gc order sweep-nudge-mail ---

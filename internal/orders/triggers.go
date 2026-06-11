@@ -256,3 +256,21 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 	}
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", len(matched), a.On)}
 }
+
+// MaxSeqFromLabels extracts the highest seq:<N> value from bead labels. It backs
+// the migration fallback that seeds the durable event cursor from legacy
+// order:<scoped> + seq:<N> tracking beads: cities upgraded to the file cursor
+// still carry their last-processed event seq in those labels.
+func MaxSeqFromLabels(labelSets [][]string) uint64 {
+	var maxSeq uint64
+	for _, labels := range labelSets {
+		for _, l := range labels {
+			if strings.HasPrefix(l, "seq:") {
+				if n, err := strconv.ParseUint(l[4:], 10, 64); err == nil && n > maxSeq {
+					maxSeq = n
+				}
+			}
+		}
+	}
+	return maxSeq
+}

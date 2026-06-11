@@ -140,9 +140,29 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, runtimeDir string, h
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
-		cursorFn = orders.EventCursorFunc(runtimeDir)
+		cursorFn = eventCursorFuncWithHistoryFallback(runtimeDir, history)
 	}
 	return orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
+}
+
+// eventCursorFuncWithHistoryFallback reads the durable file cursor, falling back
+// to the legacy order:<scoped> + seq:<N> cursor recorded on the order's tracking
+// beads when the file has no record yet. This keeps the read-only check display
+// consistent with dispatch across the migration to the file cursor: an existing
+// city's last-processed seq lives on those beads, and reading 0 would report
+// every historical event as due until dispatch seeds the file cursor. The
+// fallback reuses the already-fetched history beads, so it adds no store reads.
+func eventCursorFuncWithHistoryFallback(runtimeDir string, history []orderHistoryStoreBead) orders.CursorFunc {
+	return func(scoped string) uint64 {
+		if seq, err := orders.ReadEventCursor(runtimeDir, scoped); err == nil && seq > 0 {
+			return seq
+		}
+		labelSets := make([][]string, 0, len(history))
+		for _, h := range history {
+			labelSets = append(labelSets, h.bead.Labels)
+		}
+		return orders.MaxSeqFromLabels(labelSets)
+	}
 }
 
 // orderCheckResponse is the response item for GET /v0/orders/check.
