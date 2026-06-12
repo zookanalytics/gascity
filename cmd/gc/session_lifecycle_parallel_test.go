@@ -1320,6 +1320,227 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 	}
 }
 
+// TestPerTemplateWakeCap covers the per-template share of the per-tick wake
+// budget: reservedForeignWakeSlots are held back for other templates, clamped
+// to [1, globalBudget] so a template can always advance one session and the
+// throttle disables itself when the budget is too small to reserve a slot.
+func TestPerTemplateWakeCap(t *testing.T) {
+	cases := []struct{ budget, want int }{
+		{-4, 1}, {0, 1}, {1, 1}, {2, 1}, {3, 2}, {5, 4}, {10, 9},
+	}
+	for _, c := range cases {
+		if got := perTemplateWakeCap(c.budget); got != c.want {
+			t.Errorf("perTemplateWakeCap(%d) = %d, want %d", c.budget, got, c.want)
+		}
+	}
+}
+
+// TestDemoteTemplateOverflow proves the reorder keeps the first perTemplateCap
+// candidates of each template in place and moves the rest to the back without
+// dropping any, and returns the input untouched when no template exceeds the
+// cap.
+func TestDemoteTemplateOverflow(t *testing.T) {
+	cfg := &config.City{}
+	mk := func(name, template string) startCandidate {
+		return startCandidate{tp: TemplateParams{SessionName: name, TemplateName: template}}
+	}
+
+	in := []startCandidate{
+		mk("a1", "A"), mk("a2", "A"), mk("a3", "A"), mk("b1", "B"), mk("a4", "A"),
+	}
+	got := demoteTemplateOverflow(in, 2, cfg)
+	want := []string{"a1", "a2", "b1", "a3", "a4"}
+	if len(got) != len(want) {
+		t.Fatalf("len(got) = %d, want %d", len(got), len(want))
+	}
+	for i, c := range got {
+		if c.tp.SessionName != want[i] {
+			t.Errorf("position %d = %q, want %q", i, c.tp.SessionName, want[i])
+		}
+	}
+
+	none := []startCandidate{mk("a1", "A"), mk("b1", "B")}
+	out := demoteTemplateOverflow(none, 2, cfg)
+	if len(out) != 2 || out[0].tp.SessionName != "a1" || out[1].tp.SessionName != "b1" {
+		t.Errorf("expected unchanged order when no template exceeds the cap, got %+v", out)
+	}
+}
+
+// TestExecutePlannedStarts_PerTemplateWakeCapProtectsForeignTemplate proves the
+// per-template wake-budget share (gc-unpyk defense-in-depth). When one logical
+// template has more ready candidates than the budget, it must not consume the
+// ENTIRE per-tick budget and starve a different template's start: even though
+// the greedy template sorts first in fairness order, a foreign template's
+// candidate still wins a slot.
+func TestExecutePlannedStarts_PerTemplateWakeCapProtectsForeignTemplate(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 6, 12, 20, 0, 0, 0, time.UTC)}
+	budget := 3 // perTemplateWakeCap = 3 - reservedForeignWakeSlots(1) = 2
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(sessionName, template string) TemplateParams {
+		return TemplateParams{
+			Command:      "claude",
+			SessionName:  sessionName,
+			TemplateName: template,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	// Three "greedy" sessions (one template) woken long ago sort to the front;
+	// a single "victim" session of a different template sorts behind them.
+	// Without a per-template share greedy-1/2/3 take all three slots and starve
+	// the victim. The cap demotes greedy's overflow and reserves a slot.
+	specs := []struct{ name, template, lastWoke string }{
+		{"greedy-1", "greedy", "2020-01-01T00:00:00Z"},
+		{"greedy-2", "greedy", "2020-01-01T00:00:00Z"},
+		{"greedy-3", "greedy", "2020-01-01T00:00:00Z"},
+		{"victim-1", "victim", "2024-01-01T00:00:00Z"},
+	}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, s := range specs {
+		sess, err := store.Create(beads.Bead{
+			Title:  s.name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   s.name,
+				"agent_name":     s.name,
+				"template":       s.template,
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   s.lastWoke,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", s.name, err)
+		}
+		sCopy := sess
+		tp := mkTP(s.name, s.template)
+		desired[s.name] = tp
+		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	if !sp.IsRunning("victim-1") {
+		t.Fatal("foreign template 'victim-1' was starved by the greedy template consuming the entire wake budget — per-template share not enforced")
+	}
+	if sp.IsRunning("greedy-3") {
+		t.Fatal("greedy-3 started past the per-template share; overflow was not demoted")
+	}
+	for _, n := range []string{"greedy-1", "greedy-2"} {
+		if !sp.IsRunning(n) {
+			t.Fatalf("%s should have started within the per-template share", n)
+		}
+	}
+}
+
+// TestExecutePlannedStarts_PerTemplateWakeCapNoWasteWithoutContention proves the
+// share is a SOFT cap: when only one template has ready candidates (no foreign
+// template to protect), it may use the FULL budget. The reserved slot is never
+// wasted on absent contenders.
+func TestExecutePlannedStarts_PerTemplateWakeCapNoWasteWithoutContention(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 6, 12, 20, 0, 0, 0, time.UTC)}
+	budget := 3 // perTemplateWakeCap = 2, but nothing else contends
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(sessionName string) TemplateParams {
+		return TemplateParams{
+			Command:      "claude",
+			SessionName:  sessionName,
+			TemplateName: "pool",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	names := []string{"pool-1", "pool-2", "pool-3"}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, name := range names {
+		sess, err := store.Create(beads.Bead{
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   name,
+				"agent_name":     name,
+				"template":       "pool",
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   "2020-01-01T00:00:00Z",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		sCopy := sess
+		tp := mkTP(name)
+		desired[name] = tp
+		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	for _, n := range names {
+		if !sp.IsRunning(n) {
+			t.Fatalf("%s should have started — a single-template burst must use the full budget when nothing else contends", n)
+		}
+	}
+}
+
 func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{

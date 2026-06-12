@@ -113,6 +113,79 @@ func maxParallelStartsPerTick(cfg *config.City) int {
 	return cfg.Daemon.MaxWakesPerTickOrDefault()
 }
 
+// reservedForeignWakeSlots is how many of the per-tick wake budget
+// (maxParallelStartsPerTick) are held in reserve for foreign logical templates,
+// so any single template whose sessions churn or flap cannot consume the ENTIRE
+// budget and starve every other role's starts in the same tick.
+//
+// This is the defense-in-depth starvation floor from gc-unpyk: the root cause
+// of any given restart spin is addressed elsewhere, but the wake budget must
+// degrade gracefully under the NEXT spin (any cause) — at least one slot stays
+// reachable by a different template whenever templates contend. The reserve is
+// soft (see demoteTemplateOverflow): when only one template has ready
+// candidates it may still use the whole budget, so the floor never wastes a
+// slot on absent contenders.
+const reservedForeignWakeSlots = 1
+
+// perTemplateWakeCap returns how many of the per-tick wake budget a single
+// logical template may fill ahead of other templates, reserving
+// reservedForeignWakeSlots for foreign templates. The result is clamped to
+// [1, globalBudget]: a template can always advance at least one session, and
+// the cap never exceeds the budget, so a budget too small to hold a slot back
+// disables the throttle.
+func perTemplateWakeCap(globalBudget int) int {
+	if globalBudget < 1 {
+		globalBudget = 1
+	}
+	limit := globalBudget - reservedForeignWakeSlots
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
+
+// demoteTemplateOverflow reorders fairness-sorted start candidates so no single
+// logical template keeps more than perTemplateCap of the leading positions: a
+// template's candidates beyond the cap move to the back (preserving their
+// relative order) so other templates reach the per-tick wake budget first.
+// Candidates are never dropped — demoted overflow still starts when the budget
+// has room, so a single-template burst with no contention uses the full budget.
+// The input order is otherwise preserved, and the input slice is returned
+// unchanged when no template exceeds the cap.
+func demoteTemplateOverflow(ready []startCandidate, perTemplateCap int, cfg *config.City) []startCandidate {
+	if perTemplateCap < 1 {
+		perTemplateCap = 1
+	}
+	counts := make(map[string]int, len(ready))
+	overflow := false
+	for _, candidate := range ready {
+		template := candidate.logicalTemplate(cfg)
+		counts[template]++
+		if counts[template] > perTemplateCap {
+			overflow = true
+			break
+		}
+	}
+	if !overflow {
+		return ready
+	}
+	for key := range counts {
+		delete(counts, key)
+	}
+	kept := make([]startCandidate, 0, len(ready))
+	demoted := make([]startCandidate, 0, len(ready))
+	for _, candidate := range ready {
+		template := candidate.logicalTemplate(cfg)
+		counts[template]++
+		if counts[template] > perTemplateCap {
+			demoted = append(demoted, candidate)
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	return append(kept, demoted...)
+}
+
 func startCandidateHasTemplateDependencies(candidate startCandidate, cfg *config.City) bool {
 	cfgAgent := findAgentByTemplate(cfg, candidate.logicalTemplate(cfg))
 	return cfgAgent != nil && len(cfgAgent.DependsOn) > 0
@@ -2077,6 +2150,7 @@ func executePlannedStartsTraced(
 	}
 	asyncLimiter := startOpts.asyncLimiter
 	maxWakes := maxParallelStartsPerTick(cfg)
+	perTemplateCap := perTemplateWakeCap(maxWakes)
 	if startOpts.async && asyncLimiter == nil {
 		asyncLimiter = newAsyncStartLimiter(maxWakes)
 	}
@@ -2129,6 +2203,13 @@ func executePlannedStartsTraced(
 		// every tick. Sorting within the dependency wave is safe: every
 		// candidate here already has its dependencies satisfied.
 		sortCandidatesByWakeFairness(ready)
+		// Defense-in-depth (gc-unpyk): keep a single churning/flapping template
+		// from consuming the entire per-tick wake budget by demoting its overflow
+		// behind other templates. Soft cap — overflow still starts if the budget
+		// has room, so a single-template burst with no contention is unaffected.
+		if perTemplateCap < maxWakes {
+			ready = demoteTemplateOverflow(ready, perTemplateCap, cfg)
+		}
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
