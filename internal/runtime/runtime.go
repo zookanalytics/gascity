@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -446,6 +447,84 @@ func hashPathContentSkipEntry(d fs.DirEntry) bool {
 		return strings.HasPrefix(base, ".")
 	}
 	return strings.HasSuffix(base, "~")
+}
+
+// HashFSContent returns a hex-encoded SHA-256 of the content at root within
+// fsys, using the same framing as [HashPathContent]: a regular file hashes its
+// bytes; a directory hashes a sorted manifest of relative slash-paths and their
+// contents, skipping the same runtime-generated artifacts. Returns "" on any
+// error so callers get the stable HASH_UNAVAILABLE sentinel. root is a
+// slash-separated io/fs path ("." for the whole filesystem).
+//
+// It exists so a caller can fingerprint embedded (in-binary) pack content
+// deterministically — independent of any on-disk materialized copy that other
+// processes may overwrite. A binary's embedded bytes are constant for its
+// process lifetime, so a fingerprint derived from them does not flap when a
+// foreign process restages the shared on-disk copy with divergent content.
+func HashFSContent(fsys fs.FS, root string) string {
+	if fsys == nil || root == "" {
+		return ""
+	}
+	info, err := fs.Stat(fsys, root)
+	if err != nil {
+		return ""
+	}
+	h := sha256.New()
+	if !info.IsDir() {
+		data, err := fs.ReadFile(fsys, root)
+		if err != nil {
+			return ""
+		}
+		h.Write(data) //nolint:errcheck // hash.Write never errors
+		return fmt.Sprintf("%x", h.Sum(nil))
+	}
+	// Directory: hash sorted manifest of relative paths + contents, matching
+	// HashPathContent. Fail closed: any walk or read error returns "".
+	var entries []string
+	var walkErr bool
+	_ = fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			walkErr = true
+			return nil
+		}
+		rel := p
+		if root != "." {
+			rel = strings.TrimPrefix(strings.TrimPrefix(p, root), "/")
+		}
+		if rel == "" {
+			return nil
+		}
+		if hashPathContentSkipEntry(d) {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		entries = append(entries, rel)
+		return nil
+	})
+	if walkErr {
+		return ""
+	}
+	sort.Strings(entries)
+	for _, rel := range entries {
+		h.Write([]byte(rel)) //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0})   //nolint:errcheck // hash.Write never errors
+		childPath := rel
+		if root != "." {
+			childPath = path.Join(root, rel)
+		}
+		data, err := fs.ReadFile(fsys, childPath)
+		if err != nil {
+			return ""
+		}
+		h.Write(data)      //nolint:errcheck // hash.Write never errors
+		h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 // Lifecycle describes the expected lifetime of a runtime command.
