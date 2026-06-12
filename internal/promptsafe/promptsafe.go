@@ -44,7 +44,7 @@ func SanitizeForSystemReminder(s string) string {
 		return s
 	}
 	// Strip to a fixpoint. A single pass is not enough: deleting one tag can
-	// splice its neighbours into a brand-new tag — the interleaved payload
+	// splice its neighbors into a brand-new tag — the interleaved payload
 	// "</system-</system-reminder>reminder>" collapses to "</system-reminder>"
 	// once the inner tag is removed. Loop until a full pass changes nothing so
 	// no tag sequence survives by reconstruction. Each pass only deletes, so
