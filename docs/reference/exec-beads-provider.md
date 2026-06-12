@@ -98,7 +98,9 @@ provider = "bd"    # or "file", or "exec:/path/to/script"
 `ListByLabel` is used by the order subsystem for:
 - **Order history** — list all wisps for a order
 - **Last run time** — find most recent wisp for a order
-- **Event cursor** — find max `seq:` label across order wisps
+
+(The event-trigger cursor no longer uses `ListByLabel`: it lives in a
+durable file, `order-event-cursors.json`, so event orders mint no beads.)
 
 This is a core query pattern, not a bd-specific feature. Any bead store
 can filter by label. The interface should include it:
@@ -427,7 +429,6 @@ works with any provider.
 | Convoy | L3 | Create, Children, Close, Update | — |
 | Rig init | L0 | — | Init, ConfigSet |
 | Dolt sync | L0 | — | Purge |
-| Event cursor | L3 | — | ListByLabel (→ promote) |
 
 **After promoting ListByLabel:** Only `Init`, `ConfigSet`, and `Purge`
 remain outside the Store interface. These are all admin/lifecycle
