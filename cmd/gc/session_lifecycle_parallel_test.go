@@ -1345,6 +1345,231 @@ func TestExecutePlannedStarts_WakeBudgetPrioritizesLeastRecentlyWoken(t *testing
 	}
 }
 
+// TestSortCandidatesByWakeFairness_RoundRobin proves the sort orders candidates
+// least-recently-woken first, then interleaves templates round-robin so one
+// template's backlog cannot occupy the front of the queue — while a lone template
+// keeps strict least-recently-woken order.
+func TestSortCandidatesByWakeFairness_RoundRobin(t *testing.T) {
+	cfg := &config.City{}
+	mk := func(name, template, lastWoke string) startCandidate {
+		return startCandidate{
+			session: &beads.Bead{Metadata: map[string]string{
+				"session_name": name,
+				"last_woke_at": lastWoke,
+			}},
+			tp: TemplateParams{SessionName: name, TemplateName: template},
+		}
+	}
+	names := func(cs []startCandidate) []string {
+		out := make([]string, len(cs))
+		for i, c := range cs {
+			out[i] = c.tp.SessionName
+		}
+		return out
+	}
+
+	// Template A's backlog is older than B's lone candidate, so a pure fairness
+	// sort would front-load a1,a2,a3 and bury b1. Round-robin lifts b1 into the
+	// second slot, behind A's oldest but ahead of A's overflow.
+	mixed := []startCandidate{
+		mk("a1", "A", "2020-01-01T00:00:00Z"),
+		mk("a2", "A", "2020-01-01T00:00:01Z"),
+		mk("a3", "A", "2020-01-01T00:00:02Z"),
+		mk("b1", "B", "2021-01-01T00:00:00Z"),
+	}
+	sortCandidatesByWakeFairness(mixed, cfg)
+	if got, want := names(mixed), []string{"a1", "b1", "a2", "a3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("round-robin order = %v, want %v", got, want)
+	}
+
+	// A single template has nothing to interleave with, so the order is exactly
+	// least-recently-woken first.
+	lone := []startCandidate{
+		mk("p3", "pool", "2020-01-01T00:00:02Z"),
+		mk("p1", "pool", "2020-01-01T00:00:00Z"),
+		mk("p2", "pool", "2020-01-01T00:00:01Z"),
+	}
+	sortCandidatesByWakeFairness(lone, cfg)
+	if got, want := names(lone), []string{"p1", "p2", "p3"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("lone-template order = %v, want %v", got, want)
+	}
+}
+
+// TestExecutePlannedStarts_RoundRobinProtectsForeignTemplate proves the
+// round-robin interleave (gc-unpyk defense-in-depth). When one logical template
+// has more ready candidates than the budget, it must not consume the ENTIRE
+// per-tick budget and starve a different template's start: even though the greedy
+// template's candidates are all older, round-robin lifts the foreign template's
+// candidate into a slot.
+func TestExecutePlannedStarts_RoundRobinProtectsForeignTemplate(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 6, 12, 20, 0, 0, 0, time.UTC)}
+	budget := 3 // round-robin order is greedy-1, victim-1, greedy-2; greedy-3 overflows
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(sessionName, template string) TemplateParams {
+		return TemplateParams{
+			Command:      "claude",
+			SessionName:  sessionName,
+			TemplateName: template,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	// Three "greedy" sessions (one template) woken long ago would, under a pure
+	// fairness sort, take all three slots and starve the single "victim" session
+	// of a different template. Round-robin interleaves the victim ahead of
+	// greedy's overflow so it still wins a slot.
+	specs := []struct{ name, template, lastWoke string }{
+		{"greedy-1", "greedy", "2020-01-01T00:00:00Z"},
+		{"greedy-2", "greedy", "2020-01-01T00:00:00Z"},
+		{"greedy-3", "greedy", "2020-01-01T00:00:00Z"},
+		{"victim-1", "victim", "2024-01-01T00:00:00Z"},
+	}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, s := range specs {
+		sess, err := store.Create(beads.Bead{
+			Title:  s.name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   s.name,
+				"agent_name":     s.name,
+				"template":       s.template,
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   s.lastWoke,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", s.name, err)
+		}
+		sCopy := sess
+		tp := mkTP(s.name, s.template)
+		desired[s.name] = tp
+		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	if !sp.IsRunning("victim-1") {
+		t.Fatal("foreign template 'victim-1' was starved by the greedy template consuming the entire wake budget — round-robin not applied")
+	}
+	if sp.IsRunning("greedy-3") {
+		t.Fatal("greedy-3 started ahead of the foreign template; round-robin did not defer greedy's overflow")
+	}
+	for _, n := range []string{"greedy-1", "greedy-2"} {
+		if !sp.IsRunning(n) {
+			t.Fatalf("%s should have started", n)
+		}
+	}
+}
+
+// TestExecutePlannedStarts_SingleTemplateUsesFullBudget proves round-robin never
+// wastes a slot: with only one template ready (nothing to interleave with), the
+// interleave reduces to least-recently-woken order and the lone template may use
+// the FULL budget.
+func TestExecutePlannedStarts_SingleTemplateUsesFullBudget(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 6, 12, 20, 0, 0, 0, time.UTC)}
+	budget := 3 // one template, so round-robin keeps all three in order
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(sessionName string) TemplateParams {
+		return TemplateParams{
+			Command:      "claude",
+			SessionName:  sessionName,
+			TemplateName: "pool",
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	names := []string{"pool-1", "pool-2", "pool-3"}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, name := range names {
+		sess, err := store.Create(beads.Bead{
+			Title:  name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   name,
+				"agent_name":     name,
+				"template":       "pool",
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   "2020-01-01T00:00:00Z",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		sCopy := sess
+		tp := mkTP(name)
+		desired[name] = tp
+		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+	}
+
+	woken := executePlannedStarts(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	for _, n := range names {
+		if !sp.IsRunning(n) {
+			t.Fatalf("%s should have started — a single-template burst must use the full budget when nothing else contends", n)
+		}
+	}
+}
+
 func TestPrepareStartCandidate_NoneModeInitialMessageStaysInNudge(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
