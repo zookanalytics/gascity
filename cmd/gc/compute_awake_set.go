@@ -183,7 +183,16 @@ func ComputeAwakeSet(input AwakeInput) map[string]AwakeDecision {
 			}
 			if sn := resolveNamedSessionBeadName(input.SessionBeads, ns); sn != "" {
 				bead := findBeadBySessionName(input.SessionBeads, sn)
-				if bead != nil && !bead.DependencyOnly && !bead.Drained && bead.State != "closed" {
+				// Admit even a drained bead: control reaches here only when a
+				// demand reason was set above (the switch continues otherwise),
+				// so genuine work exists. Gating on !bead.Drained here deadlocks
+				// an on_demand session that drained via drain-ack and then had
+				// work assigned — nothing clears Drained for the new work, so it
+				// stays asleep forever despite recognized demand (gc-lqzwu,
+				// gascity gc-155rj stranded ~6.5h). This mirrors the always-mode
+				// path above, which has no drained gate. A drained session with
+				// NO demand still stays asleep via the switch default.
+				if bead != nil && !bead.DependencyOnly && bead.State != "closed" {
 					desired[sn] = reason
 				}
 			} else {
