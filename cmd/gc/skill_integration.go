@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -249,15 +251,19 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 }
 
 // mergeSkillFingerprintEntries adds one "skills:<name>" → content-hash
-// entry to fpExtra for each desired skill. Hashes use
-// runtime.HashPathContent so any byte-level change to a skill's source
-// directory triggers a config-fingerprint drift and drains the agent.
+// entry to fpExtra for each desired skill so a byte-level change to a
+// skill's source triggers a config-fingerprint drift and drains the agent.
+//
+// The hash source depends on the skill's origin (see skillFingerprintHash):
+// builtin system-pack skills hash the running binary's embedded bytes (stable
+// across foreign restaging in a self-hosting city); rig/agent/user skills hash
+// the on-disk source directory so live edits still reload the agent.
 //
 // Nil-map safe: allocates fpExtra if the caller passed nil. Returns
 // the (possibly new) map. The "skills:" prefix partitions the key
 // space so entries cannot collide with other fpExtra keys
 // (pool.min/pool.max/wake_mode/etc.).
-func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materialize.SkillEntry) map[string]string {
+func mergeSkillFingerprintEntries(cityPath string, fpExtra map[string]string, desired []materialize.SkillEntry) map[string]string {
 	if len(desired) == 0 {
 		return fpExtra
 	}
@@ -265,9 +271,90 @@ func mergeSkillFingerprintEntries(fpExtra map[string]string, desired []materiali
 		fpExtra = make(map[string]string, len(desired))
 	}
 	for _, e := range desired {
-		fpExtra["skills:"+e.Name] = runtime.HashPathContent(e.Source)
+		fpExtra["skills:"+e.Name] = skillFingerprintHash(cityPath, e)
 	}
 	return fpExtra
+}
+
+// builtinSkillFingerprintCache memoizes embedded builtin-pack skill hashes by
+// "<pack>\x00<skillRel>". The embedded bytes are constant for the process
+// lifetime, so the hash never changes; caching avoids re-walking the embedded
+// FS for every skill on every reconciler tick.
+var builtinSkillFingerprintCache sync.Map
+
+// builtinSystemPackSkillHash returns a deterministic content hash for a skill
+// whose source is a materialized builtin system pack
+// (<cityPath>/.gc/system/packs/<pack>/...), derived from the running binary's
+// EMBEDDED pack bytes rather than the on-disk copy. Returns ok=false when the
+// source is not a builtin system-pack skill (rig/agent/user skills, an
+// unrecognized pack, or a skill absent from the embedded pack), so the caller
+// falls back to hashing the on-disk source.
+//
+// Rationale: every gc config-load restages the embedded builtin packs into the
+// shared <cityPath>/.gc/system/packs path (see MaterializeBuiltinPacks). In a
+// self-hosting city, agents run gc binaries built from divergent worktrees, so
+// they overwrite that shared path with different SKILL.md bytes between the
+// supervisor's reconciler ticks. Hashing the on-disk copy therefore flaps the
+// CoreFingerprint and spins config-drift restarts until the wake budget
+// starves. The supervisor's embedded bytes are constant for its process
+// lifetime and are exactly what it will re-stage on the agent's next launch, so
+// they are the correct, stable fingerprint input. Both started_config_hash and
+// the per-tick drift hash are computed by the supervisor process, so the
+// embedded hash stays internally consistent across start and drift checks; a
+// genuine binary upgrade restarts the supervisor and yields one correct drift.
+func builtinSystemPackSkillHash(cityPath, source string) (string, bool) {
+	if cityPath == "" || source == "" {
+		return "", false
+	}
+	systemRoot, err := filepath.Abs(filepath.Join(cityPath, citylayout.SystemPacksRoot))
+	if err != nil {
+		return "", false
+	}
+	absSource, err := filepath.Abs(source)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(systemRoot, absSource)
+	if err != nil {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", false
+	}
+	// Need <pack>/<subpath>; the pack root itself is not a skill source.
+	parts := strings.SplitN(rel, "/", 2)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	packName, skillRel := parts[0], parts[1]
+	bp, ok := builtinPackByName(packName)
+	if !ok {
+		return "", false
+	}
+	cacheKey := packName + "\x00" + skillRel
+	if v, ok := builtinSkillFingerprintCache.Load(cacheKey); ok {
+		return v.(string), true
+	}
+	h := runtime.HashFSContent(bp.FS, skillRel)
+	if h == "" {
+		// Embedded subtree missing — fall back to disk hashing rather than
+		// poisoning the fingerprint with the HASH_UNAVAILABLE sentinel.
+		return "", false
+	}
+	builtinSkillFingerprintCache.Store(cacheKey, h)
+	return h, true
+}
+
+// skillFingerprintHash returns the fingerprint content hash for one desired
+// skill entry. Builtin system-pack skills hash the binary's embedded bytes
+// (stable across foreign restaging); rig/agent/user skills hash the on-disk
+// source content so live edits to those still drain and restart the agent.
+func skillFingerprintHash(cityPath string, e materialize.SkillEntry) string {
+	if h, ok := builtinSystemPackSkillHash(cityPath, e.Source); ok {
+		return h
+	}
+	return runtime.HashPathContent(e.Source)
 }
 
 // effectiveInjectAssignedSkills resolves the agent's prompt-appendix
