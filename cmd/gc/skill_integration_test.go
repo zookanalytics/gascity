@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestIsStage2EligibleSession(t *testing.T) {
@@ -340,7 +341,7 @@ func TestMergeSkillFingerprintEntries(t *testing.T) {
 	}
 
 	// Nil fpExtra: allocates and populates.
-	got := mergeSkillFingerprintEntries(nil, desired)
+	got := mergeSkillFingerprintEntries("", nil, desired)
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2; %+v", len(got), got)
 	}
@@ -352,7 +353,7 @@ func TestMergeSkillFingerprintEntries(t *testing.T) {
 
 	// Non-nil fpExtra: preserves existing keys.
 	base := map[string]string{"pool.max": "3"}
-	got = mergeSkillFingerprintEntries(base, desired)
+	got = mergeSkillFingerprintEntries("", base, desired)
 	if got["pool.max"] != "3" {
 		t.Errorf("existing key dropped: %+v", got)
 	}
@@ -362,7 +363,7 @@ func TestMergeSkillFingerprintEntries(t *testing.T) {
 
 	// Empty desired: returns input unchanged.
 	orig := map[string]string{"x": "y"}
-	got = mergeSkillFingerprintEntries(orig, nil)
+	got = mergeSkillFingerprintEntries("", orig, nil)
 	if !reflect.DeepEqual(got, orig) {
 		t.Errorf("empty desired modified map: got %+v, want %+v", got, orig)
 	}
@@ -377,11 +378,78 @@ func TestMergeSkillFingerprintEntriesPrefixPartitioning(t *testing.T) {
 	mustCreateSkill(t, filepath.Join(tmp, "x"))
 	desired := []materialize.SkillEntry{{Name: "x", Source: filepath.Join(tmp, "x")}}
 
-	got := mergeSkillFingerprintEntries(nil, desired)
+	got := mergeSkillFingerprintEntries("", nil, desired)
 	for k := range got {
 		if !strings.HasPrefix(k, "skills:") {
 			t.Errorf("non-prefix key present: %q", k)
 		}
+	}
+}
+
+// TestSkillFingerprintHashBuiltinIgnoresOnDiskStomp is the gc-155rj regression:
+// a skill materialized under <city>/.gc/system/packs/<builtin>/skills/<name>
+// must fingerprint the binary's EMBEDDED bytes, not the on-disk copy. In a
+// self-hosting city, foreign gc binaries restage that shared path with
+// divergent SKILL.md content between reconciler ticks; hashing disk flapped the
+// CoreFingerprint and spun config-drift restarts until the wake budget starved.
+func TestSkillFingerprintHashBuiltinIgnoresOnDiskStomp(t *testing.T) {
+	const pack, skill = "core", "gc-dispatch"
+	bp, ok := builtinPackByName(pack)
+	if !ok {
+		t.Skipf("builtin pack %q not present in this binary", pack)
+	}
+	embedded := runtime.HashFSContent(bp.FS, "skills/"+skill)
+	if embedded == "" {
+		t.Skipf("embedded pack %q ships no skills/%s", pack, skill)
+	}
+
+	cityPath := t.TempDir()
+	skillDir := filepath.Join(cityPath, ".gc", "system", "packs", pack, "skills", skill)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := filepath.Join(skillDir, "SKILL.md")
+	writeStomp := func(content string) {
+		if err := os.WriteFile(skillMD, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeStomp("STOMPED-BY-FOREIGN-BINARY-v1")
+
+	e := materialize.SkillEntry{Name: pack + "." + skill, Source: skillDir}
+	// Must equal the embedded hash, never the on-disk hash.
+	if got := skillFingerprintHash(cityPath, e); got != embedded {
+		t.Fatalf("hash = %q, want embedded %q (must ignore on-disk content)", got, embedded)
+	}
+	if onDisk := runtime.HashPathContent(skillDir); onDisk == embedded {
+		t.Fatal("test precondition broken: on-disk content must differ from embedded")
+	}
+	// Re-stomp with different content: the fingerprint must stay constant.
+	writeStomp("STOMPED-BY-FOREIGN-BINARY-v2-DIFFERENT")
+	if got := skillFingerprintHash(cityPath, e); got != embedded {
+		t.Fatalf("fingerprint flapped under on-disk mutation: %q != embedded %q", got, embedded)
+	}
+}
+
+// TestSkillFingerprintHashNonBuiltinUsesDisk asserts rig/agent/user skills
+// (not under .gc/system/packs) keep on-disk hashing, so a live edit still
+// drains and reloads the agent.
+func TestSkillFingerprintHashNonBuiltinUsesDisk(t *testing.T) {
+	cityPath := t.TempDir()
+	skillDir := filepath.Join(cityPath, "rigs", "myrig", "packs", "p", "skills", "custom")
+	mustCreateSkill(t, skillDir)
+	e := materialize.SkillEntry{Name: "custom", Source: skillDir}
+
+	got := skillFingerprintHash(cityPath, e)
+	if want := runtime.HashPathContent(skillDir); got != want {
+		t.Fatalf("non-builtin skill hash = %q, want on-disk %q", got, want)
+	}
+	// A live edit changes the fingerprint.
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("edited-body"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got2 := skillFingerprintHash(cityPath, e); got2 == got {
+		t.Fatal("live edit to a non-builtin skill must change the fingerprint")
 	}
 }
 
