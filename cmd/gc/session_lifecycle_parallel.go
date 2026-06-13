@@ -168,14 +168,36 @@ func wakeFairnessTime(c startCandidate) time.Time {
 	return time.Time{}
 }
 
-// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
-// budget-limited tick rotates wakes across sessions instead of always deferring
-// the same back-of-order sessions. Stable on the original order for ties. Callers
-// must only sort within a dependency wave (every candidate's deps are satisfied).
-func sortCandidatesByWakeFairness(candidates []startCandidate) {
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
+// sortCandidatesByWakeFairness orders a tick's wake candidates least-recently-woken
+// first, then interleaves them round-robin across logical templates so one
+// template's backlog can't fill the whole wake budget and starve other templates
+// (gc-unpyk). A lone template keeps strict least-recently-woken order. Callers must
+// only sort within a dependency wave (every candidate's deps are satisfied).
+func sortCandidatesByWakeFairness(candidates []startCandidate, cfg *config.City) {
+	type rankedCandidate struct {
+		candidate startCandidate
+		wokeAt    time.Time
+		round     int // 0-based index within its own template, oldest first
+	}
+	ranked := make([]rankedCandidate, len(candidates))
+	for i, c := range candidates {
+		ranked[i] = rankedCandidate{candidate: c, wokeAt: wakeFairnessTime(c)}
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].wokeAt.Before(ranked[j].wokeAt)
 	})
+	perTemplate := make(map[string]int, len(ranked))
+	for i := range ranked {
+		template := ranked[i].candidate.logicalTemplate(cfg)
+		ranked[i].round = perTemplate[template]
+		perTemplate[template]++
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		return ranked[i].round < ranked[j].round
+	})
+	for i := range ranked {
+		candidates[i] = ranked[i].candidate
+	}
 }
 
 func (c startCandidate) logicalTemplate(cfg *config.City) string {
@@ -2469,12 +2491,9 @@ func executePlannedStartsTraced(
 			}
 			ready = append(ready, candidate)
 		}
-		// Fairness: spend a budget-limited tick on the least-recently-woken
-		// candidates first. The wave order is a stable dependency topo-sort, so
-		// without this the same back-of-order sessions are deferred_by_wake_budget
-		// every tick. Sorting within the dependency wave is safe: every
-		// candidate here already has its dependencies satisfied.
-		sortCandidatesByWakeFairness(ready)
+		// Least-recently-woken first, then round-robin across templates so one
+		// template's backlog can't spend the whole tick's wake budget (gc-unpyk).
+		sortCandidatesByWakeFairness(ready, cfg)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
