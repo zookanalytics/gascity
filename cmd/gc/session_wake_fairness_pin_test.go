@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -184,7 +185,7 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	}))
 
 	cands := []startCandidate{recentlyWoken, newSlept, oldSlept}
-	sortCandidatesByWakeFairness(cands)
+	sortCandidatesByWakeFairness(cands, &config.City{})
 	gotOrder := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
 	// ga-old and ga-new both fall back to slept_at=base (applySleep stamps the same
 	// base on both, regardless of their distinct CreatedAt), so they tie on the
