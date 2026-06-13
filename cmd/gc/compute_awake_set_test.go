@@ -423,6 +423,58 @@ func TestNamedOnDemand_NamedSessionDemandWakesSingletonTemplateResolvedIdentity(
 	assertReason(t, result, "primary", "named-demand")
 }
 
+func TestNamedOnDemand_DrainedWithNamedSessionDemandWakes(t *testing.T) {
+	// Regression for gc-lqzwu: an on_demand named session that has drained
+	// (e.g. a refinery that called drain-ack) must re-wake when work is
+	// assigned afterward. The demand-driven admit previously dropped the bead
+	// via a !Drained gate, so the session stayed drained forever despite
+	// recognized NamedSessionDemand — a hard deadlock (gascity gc-155rj
+	// stranded ~6.5h). This mirrors the always-mode path, which already wakes
+	// drained beads (see TestNamedAlways_DrainedCompatibilityStateStillWakes).
+	// A drained bead carries no detached_at, so IdleSince is zero and the
+	// downstream idle-sleep block does not re-suppress the wake.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "hello-world--refinery",
+			Template:      "hello-world/refinery",
+			State:         "asleep",
+			SleepReason:   "drained",
+			NamedIdentity: "hello-world/refinery",
+			Drained:       true,
+		}},
+		NamedSessionDemand: map[string]bool{"hello-world/refinery": true},
+		Now:                now,
+	})
+	assertAwake(t, result, "hello-world--refinery")
+	assertReason(t, result, "hello-world--refinery", "named-demand")
+}
+
+func TestNamedOnDemand_DrainedWithoutDemandStaysAsleep(t *testing.T) {
+	// Teardown guarantee paired with the regression above: relaxing the
+	// !Drained gate must NOT keep a drained on_demand session awake when there
+	// is no demand. With NamedSessionDemand and NamedSessionWorkQ both absent,
+	// the on_demand branch hits its switch default (continue) before reaching
+	// the bead admit, so the drained session stays asleep.
+	result := ComputeAwakeSet(AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "hello-world--refinery",
+			Template:      "hello-world/refinery",
+			State:         "asleep",
+			SleepReason:   "drained",
+			NamedIdentity: "hello-world/refinery",
+			Drained:       true,
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "hello-world--refinery")
+}
+
 func TestNamedOnDemand_PendingCreateWakesWithoutDemand(t *testing.T) {
 	result := ComputeAwakeSet(AwakeInput{
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
