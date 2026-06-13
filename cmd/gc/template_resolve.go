@@ -573,7 +573,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		sharedCatalog := p.sharedSkillCatalogSnapshotForAgent(cfgAgent)
 		desired := effectiveSkillsForAgent(sharedCatalog, cfgAgent, wsProvider, p.providers, p.stderr)
 		if len(desired) > 0 {
-			fpExtra = mergeSkillFingerprintEntries(fpExtra, desired)
+			fpExtra = mergeSkillFingerprintEntries(p.cityPath, fpExtra, desired)
 			if canonWorkDir != scopeRoot {
 				// Pool instances inherit their skill catalog from the
 				// template, not the instance — namepool members (e.g.
