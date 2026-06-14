@@ -2169,7 +2169,7 @@ func TestCmdSessionPeekJSONSuccessIsJSONOnly(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionPeek([]string{b.ID}, 2, true, &stdout, &stderr); code != 0 {
+	if code := cmdSessionPeek([]string{b.ID}, 2, true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionPeek(--json) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if stderr.Len() != 0 {
