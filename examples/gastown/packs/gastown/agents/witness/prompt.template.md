@@ -140,6 +140,40 @@ The dog pool runs `mol-shutdown-dance` — a multi-stage interrogation
 that gives the polecat 3 chances to prove it's alive before killing it.
 This is due process, not summary execution.
 
+### Buffered-input detection (ghost-text-safe)
+
+A distinct stuck signal: the polecat sits idle while genuine operator-typed
+input waits unconsumed in its input area (the operator typed a redirect the
+agent never picked up). Do **not** detect this by matching the text after the
+prompt char in `gc session peek` — that capture is ANSI-stripped, so a Claude
+ghost-text suggestion (rendered dim: `❯ keep patrolling`) is byte-identical to
+typed input and fires a false warrant.
+
+Consume `gc session input-area` instead. It parses the pane with per-provider
+rendering knowledge and splits operator-typed input (`.typed`) from styled
+ghost-text suggestions (`.ghost`), so ghost text never triggers a warrant:
+
+```bash
+target={{ .RigName }}/{{ .BindingPrefix }}<polecat-suffix>
+state=$(gc session input-area "$target")
+typed=$(echo "$state" | jq -r '.typed')
+busy=$(echo "$state"  | jq -r '.busy')
+
+# Real buffered input only: ghost text lands in .ghost (never .typed), and the
+# busy gate skips agents mid-tool-call whose scrollback prompt is stale.
+if [ "$busy" = "false" ] && [ -n "$typed" ]; then
+  meta=$(jq -nc --arg t "$target" --arg r "buffered operator input: $typed" \
+    --arg dog "{{ .BindingPrefix }}dog" \
+    '{target:$t, reason:$r, requester:"witness", "gc.routed_to":$dog}')
+  gc bd create --type=task --title="Stuck: $target with buffered input" \
+    --metadata "$meta" --label=warrant
+fi
+```
+
+The same shape works across Claude, Codex, and Gemini with no per-provider
+branches in this prompt — the library carries the rendering knowledge. See
+`engdocs/design/input-area-state.md` §6.
+
 ---
 
 {{ template "following-mol" . }}
