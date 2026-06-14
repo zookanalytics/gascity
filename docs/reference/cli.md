@@ -3096,6 +3096,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
+| [gc session input-area](#gc-session-input-area) | Inspect a session's input area (typed vs ghost text, busy, prompt) |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
@@ -3142,6 +3143,27 @@ gc session close [session-id-or-alias] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+
+## gc session input-area
+
+Report the current input-area state of a session as structured data.
+
+Unlike "gc session peek", which returns raw pane text, input-area parses the
+pane with per-provider rendering knowledge and separates operator-typed
+buffered input (typed) from styled ghost-text suggestions (ghost). This is the
+stable contract prompt templates and health checks consume instead of
+re-rolling fragile pane-text pattern matches.
+
+Exit codes: 0 = state captured, 2 = session not found, 1 = other error.
+
+```
+gc session input-area <session-id-or-alias> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `json` | output format: json\|kv\|text |
+| `--include-raw` | bool |  | include the ANSI-preserved raw capture in JSON output |
 
 ## gc session kill
 
@@ -3281,6 +3303,7 @@ gc session peek <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--lines` | int | `50` | number of lines to capture |
+| `--raw` | bool |  | preserve ANSI/SGR escape sequences (tmux capture-pane -e); reads the live pane and bypasses the supervisor cache |
 
 ## gc session pin
 
