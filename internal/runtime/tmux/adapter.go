@@ -41,7 +41,20 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ InputAreaCapturer                     = (*Provider)(nil)
+	_ RawPeeker                             = (*Provider)(nil)
 )
+
+// RawPeeker is implemented by runtime providers that can capture pane output
+// with ANSI/SGR escape sequences preserved. Plain [runtime.Provider.Peek]
+// strips styling; PeekRaw retains it so callers can inspect, for example, the
+// dim wrapper Claude Code renders around ghost-text suggestions. It is an
+// optional capability — consumers type-assert for it and report an
+// unsupported-provider error when it is absent. Tmux is the only
+// implementation today.
+type RawPeeker interface {
+	PeekRaw(name string, lines int) (string, error)
+}
 
 // NewProvider returns a [Provider] backed by a real tmux installation
 // with default configuration.
@@ -565,6 +578,22 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 		return p.tm.CapturePaneAll(name)
 	}
 	return p.tm.CapturePane(name, lines)
+}
+
+// PeekRaw captures the last N lines of output from the named session with
+// ANSI/SGR escape sequences preserved. If lines <= 0, captures all available
+// scrollback. Implements [RawPeeker].
+func (p *Provider) PeekRaw(name string, lines int) (string, error) {
+	if lines <= 0 {
+		return p.tm.CapturePaneAllRaw(name)
+	}
+	return p.tm.CapturePaneRaw(name, lines)
+}
+
+// InputArea returns the structured input-area state for the named session,
+// delegating to the underlying tmux executor. Implements [InputAreaCapturer].
+func (p *Provider) InputArea(ctx context.Context, session string) (*InputAreaState, error) {
+	return p.tm.InputArea(ctx, session)
 }
 
 // ListRunning returns all tmux session names matching the given prefix.
