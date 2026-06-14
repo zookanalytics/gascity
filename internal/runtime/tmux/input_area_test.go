@@ -80,6 +80,27 @@ const claudeDimAsBrightBlack = "" +
 const claudeDim38_5_240 = "" +
 	"❯ " + dimGray + "grey ghost" + dimReset + "\n"
 
+// claudeFeedbackSurvey reproduces the Claude Code session-feedback overlay
+// (operator clarification 2026-05-30, gc-8g41r). It is dismiss-on-any-keystroke,
+// not a blocking dialog. With no normal "❯ " row visible, the pre-survey parser
+// returned an empty non-prompt state that idle-detection read as a 30h stall
+// (boot lo-wisp-h3vuf). Survey detection reclassifies it as ready-for-input so
+// the idle→input path dismisses it. The 0–3 options row must not be read as
+// buffered input.
+const claudeFeedbackSurvey = "" +
+	"⏺ Pushed the branch; handed off to the refinery.\n" +
+	"\n" +
+	"How is Claude doing this session?\n" +
+	"  0 Bad   1 Poor   2 Good   3 Great\n"
+
+// claudeSurveyDuringBusy locks in precedence: a busy indicator outranks the
+// survey overlay, so the parser still reports Busy=true and never treats a
+// working engine as ready for input.
+const claudeSurveyDuringBusy = "" +
+	"How is Claude doing this session?\n" +
+	"⏺ Running tool …\n" +
+	"  esc to interrupt\n"
+
 const codexIdle = "" +
 	"╭───────────────────────────────────────╮\n" +
 	"│ >                                     │\n" +
@@ -244,6 +265,22 @@ func TestParseClaudeInputArea(t *testing.T) {
 			fixture:    claudeDim38_5_240,
 			wantPrompt: ClaudePromptChar,
 			wantGhost:  "grey ghost",
+		},
+		{
+			// Survey overlay with no normal prompt row visible. Without
+			// survey detection this returns PromptChar="" (a non-prompt
+			// "stall"); with it, ready-for-input so the idle→input path
+			// dismisses it. Option text must not surface as Typed.
+			name:       "feedback survey is ready-for-input, not a stall",
+			fixture:    claudeFeedbackSurvey,
+			wantPrompt: ClaudePromptChar,
+			wantTyped:  "",
+			wantGhost:  "",
+		},
+		{
+			name:     "busy beats feedback survey",
+			fixture:  claudeSurveyDuringBusy,
+			wantBusy: true,
 		},
 	}
 	for _, c := range cases {

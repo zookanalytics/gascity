@@ -31,6 +31,13 @@ const (
 // canonical form returned in [InputAreaState.PromptChar].
 const ClaudePromptChar = "❯ "
 
+// claudeFeedbackSurveyMarker is the stable question text of the Claude Code
+// session-feedback survey ("How is Claude doing this session?", rated 0–3).
+// Detection anchors on this invariant question text rather than the survey's
+// box-drawing chrome, which varies across builds. See
+// [parseClaudeInputArea] for why the survey is classified as ready-for-input.
+const claudeFeedbackSurveyMarker = "How is Claude doing this session?"
+
 // InputAreaState reports what the agent's input area is showing at the
 // moment of capture. Snapshot, not a stream — callers that poll should
 // rate-limit themselves.
@@ -179,6 +186,24 @@ func parseClaudeInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 		return state
 	}
 
+	// Claude Code's session-feedback survey ("How is Claude doing this
+	// session?", rated 0–3) is a dismiss-on-any-keystroke overlay, not a
+	// blocking dialog. Classify it as ready-for-input — Busy=false with the
+	// prompt char set — so idle-detection consumers send their next action
+	// (which dismisses the survey) instead of warranting a false stall. The
+	// check runs after the busy gate (a working engine still wins) and before
+	// the prompt scan so survey option text is never read as buffered input.
+	// See engdocs/design/input-area-state.md §3.1 and the 2026-05-30 operator
+	// clarification on gc-8g41r.
+	//
+	// Input-safety note for consumers: auto-input senders must never send a
+	// bare standalone digit 0–3 — the survey records that as a rating. Any
+	// other input (a command, "311", a nudge) dismisses it without rating.
+	if paneShowsClaudeFeedbackSurvey(strippedLines) {
+		state.PromptChar = ClaudePromptChar
+		return state
+	}
+
 	// Walk lines from the bottom so the most recent prompt wins over any
 	// scrollback echoes of an earlier prompt that happen to remain after
 	// tool-call output cleared.
@@ -196,6 +221,19 @@ func parseClaudeInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 		return state
 	}
 	return state
+}
+
+// paneShowsClaudeFeedbackSurvey reports whether the stripped pane lines show
+// the Claude Code session-feedback survey. It keys on the invariant question
+// text (see [claudeFeedbackSurveyMarker]) rather than the box-drawing chrome,
+// which differs across builds. Pure function — same input, same output.
+func paneShowsClaudeFeedbackSurvey(strippedLines []string) bool {
+	for _, line := range strippedLines {
+		if strings.Contains(line, claudeFeedbackSurveyMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseCodexInputArea parses a Codex pane capture. Codex frames its input
