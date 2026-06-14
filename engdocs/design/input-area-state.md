@@ -195,6 +195,21 @@ changing.
   `requiresApprovalRe` (`This command requires approval`,
   `Approve edits?`). Distinct from input area; orthogonal to this
   spec.
+- **Feedback survey**: Claude Code periodically shows a session-feedback
+  overlay (`How is Claude doing this session?`, rated 0–3). It is a
+  dismiss-on-any-keystroke prompt, **not** a blocking dialog, so the parser
+  classifies it as ready-for-input (`Busy=false`, `PromptChar="❯ "`,
+  `Typed=""`, `Ghost=""`), keying on the invariant question text. The check
+  runs after the busy gate (a working engine still wins) and before the
+  prompt scan, so the `0–3` option row is never read as buffered input. This
+  supersedes the earlier "overlay-blocked = non-idle" framing for this
+  specific prompt: leaving the survey as an empty non-prompt state caused a
+  ~30h false stall (boot `lo-wisp-h3vuf`, deacon `lo-0j1`) because
+  idle-detection read the byte-identical pane as stuck instead of dismissing
+  it. **Consumer input-safety:** auto-input senders must never send a bare
+  standalone digit `0`–`3` — the survey records that as a rating; any other
+  input (a command, `311`, a nudge) dismisses it without rating. (Operator
+  clarification 2026-05-30, gc-8g41r.)
 - **Multi-line input**: Claude wraps long buffered input into
   multiple visual rows below the prompt. The library must consider
   rows after the row containing `❯ ` until the next non-input
