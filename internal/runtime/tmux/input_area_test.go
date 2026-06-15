@@ -1,24 +1,26 @@
 package tmux
 
 import (
-	"strings"
 	"testing"
 )
 
 // Fixtures are kept inline as Go raw-string literals so a new regression
-// is one variable + one table entry. The `dim` macros below mirror the
-// SGR sequences tmux capture-pane -e emits; using them in the fixtures
-// keeps the wire bytes visible to a reader scanning the file. Real
-// captures from a live session match these patterns byte-for-byte; the
-// Appendix C fixture in engdocs/design/input-area-state.md is the
-// canonical reference.
-
+// is one variable + one table entry. The SGR macros below mirror the
+// sequences tmux capture-pane -e emits; using them in the fixtures keeps the
+// wire bytes visible to a reader scanning the file. Real captures from a live
+// session match these patterns byte-for-byte; the Appendix C fixture in
+// engdocs/design/input-area-state.md is the canonical reference.
+//
+// Ghost text is detected by the faint attribute (dimOn = SGR 2) alone. The
+// color macros (gray256, brBlack) are present only to prove that color is NOT
+// treated as ghost — only the faint attribute is.
 const (
-	dimOn    = "\x1b[2m"
-	dimGray  = "\x1b[38;5;240m"
-	brBlack  = "\x1b[90m"
-	dimReset = "\x1b[0m"
-	dimOff22 = "\x1b[22m"
+	dimOn     = "\x1b[2m"        // SGR 2 — faint; the load-bearing ghost signal
+	dimReset  = "\x1b[0m"        // SGR 0 — reset all attributes
+	dimOff22  = "\x1b[22m"       // SGR 22 — normal intensity (clears faint)
+	defaultFg = "\x1b[39m"       // SGR 39 — default foreground (also clears faint)
+	gray256   = "\x1b[38;5;240m" // 256-color gray — a color, not faint
+	brBlack   = "\x1b[90m"       // bright-black foreground — a color, not faint
 )
 
 // claudeIdleWithGhost reproduces the empirical 2026-05-09 false positive
@@ -70,15 +72,13 @@ const claudeApprovalPrompt = "" +
 	"  > Yes\n" +
 	"    No\n"
 
-// claudeDimAsBrightBlack covers the SGR 90 variant (bright-black
-// foreground reads as grey on most terminals). Q1 in the spec calls out
-// this as one of the variants the parser must classify as ghost.
-const claudeDimAsBrightBlack = "" +
-	"❯ " + brBlack + "alt-dim ghost" + dimReset + "\n"
-
-// claudeDim38_5_240 covers the 256-color dim grey variant.
-const claudeDim38_5_240 = "" +
-	"❯ " + dimGray + "grey ghost" + dimReset + "\n"
+// claudeColorAfterPrompt proves the faint rule end-to-end at the parser
+// level: bright-black is a color, not the faint attribute, so text rendered in
+// it is operator-typed input, not ghost. This is the inverse of the old
+// SGR-90/256-gray "ghost" fixtures the gray-range heuristic used to match —
+// under the faint rule, only ESC[2m is ghost (gc-8g41r.7).
+const claudeColorAfterPrompt = "" +
+	"❯ " + brBlack + "bright black input" + dimReset + "\n"
 
 // claudeFeedbackSurvey reproduces the Claude Code session-feedback overlay
 // (operator clarification 2026-05-30, gc-8g41r). It is dismiss-on-any-keystroke,
@@ -126,6 +126,38 @@ const codexBoxPersistedInScrollback = "" +
 	"╭───────────────────────────────────────╮\n" +
 	"│ > most recent input                   │\n" +
 	"╰───────────────────────────────────────╯\n"
+
+// codexArrowIdle is the current Codex arrow shape with an empty input area.
+const codexArrowIdle = "" +
+	"› \n"
+
+// codexArrowTyped is operator-typed text after the arrow prompt.
+const codexArrowTyped = "" +
+	"› wire up the parser\n"
+
+// codexArrowGhost is a faint suggestion after the arrow prompt. The shared
+// faint rule must land it in Ghost, never Typed — the false positive this
+// parser exists to prevent. No Codex-specific ghost code is involved.
+const codexArrowGhost = "" +
+	"› " + dimOn + "run the failing test" + dimReset + "\n"
+
+// codexArrowQueuedFollowup puts a "Queued follow-up inputs" affordance above
+// the prompt. Only the arrow row is the input area; the queued chrome must be
+// ignored (§3.2.2) or it reintroduces the false-positive class.
+const codexArrowQueuedFollowup = "" +
+	"Queued follow-up inputs:\n" +
+	"  - deploy after merge\n" +
+	"\n" +
+	"› actual typed text\n"
+
+// codexArrowBelowStaleBox proves the bottom-up scan binds to the live arrow
+// row even when a stale box lingers in scrollback above it.
+const codexArrowBelowStaleBox = "" +
+	"╭───────────────────────────────────────╮\n" +
+	"│ > stale boxed content                 │\n" +
+	"╰───────────────────────────────────────╯\n" +
+	"[tool output]\n" +
+	"› fresh arrow input\n"
 
 const geminiIdle = "" +
 	"Gemini interactive shell\n" +
@@ -175,17 +207,22 @@ func TestSplitDimSegments(t *testing.T) {
 		wantGhost string
 	}{
 		{"plain text only", "hello", "hello", ""},
-		{"dim only via SGR 2", dimOn + "ghost" + dimReset, "", "ghost"},
-		{"dim only via SGR 22 reset", dimOn + "ghost" + dimOff22 + "back", "back", "ghost"},
-		{"bright-black is dim", brBlack + "grey" + dimReset, "", "grey"},
-		{"256-color 240 is dim", dimGray + "x" + dimReset, "", "x"},
-		{"256-color 244 is not dim", "\x1b[38;5;244mx\x1b[0m", "x", ""},
-		{"true-color not classified", "\x1b[38;2;100;100;100mx\x1b[0m", "x", ""},
-		{"mixed typed + ghost", "typed " + dimOn + "and ghost" + dimReset + " more", "typed  more", "and ghost"},
-		{"empty params resets dim", dimOn + "g" + "\x1b[m" + "t", "t", "g"},
-		{"unrelated SGR (color) does not toggle dim", "\x1b[31mred typed\x1b[0m", "red typed", ""},
-		// SGR 1 (bold) co-set with 2 (dim) — both attributes apply, parser must classify as dim.
-		{"bold+dim combined", "\x1b[1;2mboldim\x1b[0m", "", "boldim"},
+		{"faint via SGR 2 is ghost", dimOn + "ghost" + dimReset, "", "ghost"},
+		{"SGR 22 clears faint", dimOn + "ghost" + dimOff22 + "back", "back", "ghost"},
+		{"SGR 39 default-fg clears faint", dimOn + "ghost" + defaultFg + "back", "back", "ghost"},
+		// Color attributes are NOT faint: the faint rule classifies them as
+		// typed, replacing the old gray-range heuristic (codex finding #2).
+		{"bright-black (SGR 90) is color, not faint", brBlack + "grey" + dimReset, "grey", ""},
+		{"256-color gray (38;5;240) is color, not faint", gray256 + "x" + dimReset, "x", ""},
+		{"256-color 244 is color, not faint", "\x1b[38;5;244mx\x1b[0m", "x", ""},
+		// The "2" in a 256-color index must not be misread as the faint code.
+		{"256-color index 2 is not the faint attribute", "\x1b[38;5;2mx\x1b[0m", "x", ""},
+		{"true-color is not faint", "\x1b[38;2;100;100;100mx\x1b[0m", "x", ""},
+		{"mixed typed + faint ghost", "typed " + dimOn + "and ghost" + dimReset + " more", "typed  more", "and ghost"},
+		{"empty params resets faint", dimOn + "g" + "\x1b[m" + "t", "t", "g"},
+		{"unrelated SGR (color) does not set faint", "\x1b[31mred typed\x1b[0m", "red typed", ""},
+		// SGR 1 (bold) co-set with 2 (faint) — both apply; faint wins for ghost.
+		{"bold+faint combined is ghost", "\x1b[1;2mboldim\x1b[0m", "", "boldim"},
 		{"unterminated CSI is treated as text", "before\x1b[2mghost no reset", "before", "ghost no reset"},
 	}
 	for _, c := range cases {
@@ -255,16 +292,10 @@ func TestParseClaudeInputArea(t *testing.T) {
 			// No prompt char, no typed/ghost — partial state is fine.
 		},
 		{
-			name:       "dim via bright-black (SGR 90)",
-			fixture:    claudeDimAsBrightBlack,
+			name:       "color after prompt is typed, not ghost (faint rule)",
+			fixture:    claudeColorAfterPrompt,
 			wantPrompt: ClaudePromptChar,
-			wantGhost:  "alt-dim ghost",
-		},
-		{
-			name:       "dim via 256-color 240",
-			fixture:    claudeDim38_5_240,
-			wantPrompt: ClaudePromptChar,
-			wantGhost:  "grey ghost",
+			wantTyped:  "bright black input",
 		},
 		{
 			// Survey overlay with no normal prompt row visible. Without
@@ -301,9 +332,6 @@ func TestParseClaudeInputArea(t *testing.T) {
 			if got.Ghost != c.wantGhost {
 				t.Errorf("Ghost = %q, want %q", got.Ghost, c.wantGhost)
 			}
-			if got.Raw != c.fixture {
-				t.Errorf("Raw not preserved")
-			}
 			if got.Detected.IsZero() {
 				t.Error("Detected timestamp not set")
 			}
@@ -318,6 +346,7 @@ func TestParseCodexInputArea(t *testing.T) {
 		wantBusy   bool
 		wantPrompt string
 		wantTyped  string
+		wantGhost  string
 	}{
 		{
 			name:       "idle empty box",
@@ -342,6 +371,37 @@ func TestParseCodexInputArea(t *testing.T) {
 			wantPrompt: "> ",
 			wantTyped:  "most recent input",
 		},
+		{
+			name:       "arrow idle (current Codex shape)",
+			fixture:    codexArrowIdle,
+			wantPrompt: "› ",
+			wantTyped:  "",
+		},
+		{
+			name:       "arrow typed",
+			fixture:    codexArrowTyped,
+			wantPrompt: "› ",
+			wantTyped:  "wire up the parser",
+		},
+		{
+			name:       "arrow faint suggestion is ghost, not typed",
+			fixture:    codexArrowGhost,
+			wantPrompt: "› ",
+			wantTyped:  "",
+			wantGhost:  "run the failing test",
+		},
+		{
+			name:       "arrow ignores queued-follow-up chrome above prompt",
+			fixture:    codexArrowQueuedFollowup,
+			wantPrompt: "› ",
+			wantTyped:  "actual typed text",
+		},
+		{
+			name:       "live arrow row below stale box wins (bottom-up)",
+			fixture:    codexArrowBelowStaleBox,
+			wantPrompt: "› ",
+			wantTyped:  "fresh arrow input",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -358,9 +418,8 @@ func TestParseCodexInputArea(t *testing.T) {
 			if got.Typed != c.wantTyped {
 				t.Errorf("Typed = %q, want %q", got.Typed, c.wantTyped)
 			}
-			// Ghost is not classified for Codex in stage 2 — see Q2.
-			if got.Ghost != "" {
-				t.Errorf("Ghost = %q, want empty (Codex ghost classification deferred)", got.Ghost)
+			if got.Ghost != c.wantGhost {
+				t.Errorf("Ghost = %q, want %q", got.Ghost, c.wantGhost)
 			}
 		})
 	}
@@ -473,17 +532,5 @@ func TestParseGenericInputArea_BusyIndicator(t *testing.T) {
 	got := parseGenericInputArea(fixture, nil)
 	if !got.Busy {
 		t.Fatalf("Busy = false, want true for fixture %q", fixture)
-	}
-}
-
-func TestParseClaudeInputArea_RawSizeBounded(t *testing.T) {
-	// The InputArea entry point caps Raw at inputAreaRawCap; the pure
-	// parser does not enforce a cap of its own (the cap is a property of
-	// the wrapper, not the parser). Lock that contract in so a future
-	// refactor that moves the cap into the parser surfaces here.
-	huge := strings.Repeat("x", inputAreaRawCap+1024)
-	got := parseClaudeInputArea(huge, nil)
-	if len(got.Raw) != len(huge) {
-		t.Fatalf("parser truncated Raw; len=%d want %d", len(got.Raw), len(huge))
 	}
 }

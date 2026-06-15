@@ -54,7 +54,6 @@ type InputAreaState struct {
 	Busy       bool              `json:"busy"`
 	Typed      string            `json:"typed"`
 	Ghost      string            `json:"ghost"`
-	Raw        string            `json:"raw,omitempty"`
 	Detected   time.Time         `json:"detected"`
 }
 
@@ -66,14 +65,10 @@ type InputAreaCapturer interface {
 	InputArea(ctx context.Context, session string) (*InputAreaState, error)
 }
 
-// Capture parameters. Tuned so the default capture is large enough to
-// reach the most-recent prompt row even when Claude's full-screen UI
-// leaves several blank rows below it, while bounding Raw at 16 KiB so
-// the field stays manageable for CLI JSON output and trace logs.
-const (
-	inputAreaCaptureLines = 50
-	inputAreaRawCap       = 16 * 1024
-)
+// inputAreaCaptureLines bounds the pane capture. Tuned large enough to reach
+// the most-recent prompt row even when a full-screen agent UI leaves several
+// blank rows below it.
+const inputAreaCaptureLines = 50
 
 // InputArea returns the current input-area state for session. The call hits
 // tmux directly (no cache). For non-tmux providers, prefer adding an
@@ -88,9 +83,6 @@ func (t *Tmux) InputArea(ctx context.Context, session string) (*InputAreaState, 
 	rawANSI, err := t.capturePaneANSI(ctx, session, inputAreaCaptureLines)
 	if err != nil {
 		return nil, fmt.Errorf("capturing input area for %q: %w", session, err)
-	}
-	if len(rawANSI) > inputAreaRawCap {
-		rawANSI = rawANSI[len(rawANSI)-inputAreaRawCap:]
 	}
 
 	provider := t.detectInputAreaProvider(session)
@@ -172,11 +164,11 @@ func (t *Tmux) detectInputAreaProvider(session string) InputAreaProvider {
 var claudePromptRegex = regexp.MustCompile("❯[  ]")
 
 // parseClaudeInputArea parses a Claude Code pane capture, distinguishing
-// ghost text (wrapped in dim SGR) from operator-typed input. Pure function.
+// ghost text (wrapped in the faint SGR attribute) from operator-typed input.
+// Pure function.
 func parseClaudeInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 	state := InputAreaState{
 		Provider: InputAreaProviderClaude,
-		Raw:      rawANSI,
 		Detected: time.Now().UTC(),
 	}
 
@@ -236,41 +228,63 @@ func paneShowsClaudeFeedbackSurvey(strippedLines []string) bool {
 	return false
 }
 
-// parseCodexInputArea parses a Codex pane capture. Codex frames its input
-// area inside a Unicode box; we locate the most-recent `│ > ` row, which
-// is the prompt cell inside the active box. Ghost text is not observed in
-// current Codex builds (see engdocs/design/input-area-state.md §10 Q2);
-// stage 4 will re-verify against live captures before adding ghost support.
+// codexBoxedAnchor is the inner prompt cell of Codex's older boxed input
+// shape; codexArrowPrompt is the current clean arrow prompt (U+203A + space).
+// The parser recognizes both — see engdocs/design/input-area-state.md §3.2.
+const (
+	codexBoxedAnchor = "│ > "
+	codexArrowPrompt = "› "
+)
+
+// parseCodexInputArea parses a Codex pane capture. Codex has shipped two
+// input-area shapes: the older Unicode box (with a "│ > " prompt cell) and the
+// current clean arrow prompt ("› "). The parser scans bottom-up and binds to
+// the most-recent prompt row of either shape, so a stale box or arrow row left
+// in scrollback never wins over the live prompt row. Ghost text after the
+// arrow prompt is wrapped in the faint SGR attribute and split out by the same
+// faint rule the Claude parser uses — there is no Codex-specific ghost code.
+// The boxed shape has no observed ghost text, so its cell content is all typed.
+// Pure function.
 func parseCodexInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 	state := InputAreaState{
 		Provider: InputAreaProviderCodex,
-		Raw:      rawANSI,
 		Detected: time.Now().UTC(),
 	}
 
-	strippedLines := strings.Split(stripANSI(rawANSI), "\n")
-	if paneContainsBusyIndicator(strippedLines) {
+	ansiLines := strings.Split(rawANSI, "\n")
+	if paneContainsBusyIndicator(strings.Split(stripANSI(rawANSI), "\n")) {
 		state.Busy = true
 		return state
 	}
 
-	// Scan bottom-up for the most-recent box-prompt row. Matching the full
-	// "│ > " sequence anchors to the active box and ignores older box
-	// fragments that may still be in scrollback (see §3.2 multi-line note).
-	for i := len(strippedLines) - 1; i >= 0; i-- {
-		line := strippedLines[i]
-		idx := strings.Index(line, "│ > ")
-		if idx == -1 {
-			continue
+	// Scan bottom-up so the live prompt row wins over any stale box or arrow
+	// row still in scrollback (§3.2).
+	for i := len(ansiLines) - 1; i >= 0; i-- {
+		raw := ansiLines[i]
+		stripped := stripANSI(raw)
+
+		// Shape A — boxed. The full "│ > " anchor (left border, padding,
+		// prompt glyph, space) avoids false-matching a stray ">" elsewhere.
+		// Trim the right border "│" and the padding spaces before it.
+		if idx := strings.Index(stripped, codexBoxedAnchor); idx != -1 {
+			state.PromptChar = "> "
+			state.Typed = strings.TrimRight(stripped[idx+len(codexBoxedAnchor):], "│ \t")
+			return state
 		}
-		state.PromptChar = "> "
-		content := line[idx+len("│ > "):]
-		// Trim the trailing box-right side and any padding spaces it
-		// leaves behind. The box right side can be "│" preceded by run
-		// of spaces used to pad the cell out to the box width.
-		content = strings.TrimRight(content, "│ \t")
-		state.Typed = content
-		return state
+
+		// Shape B — arrow. Require the prompt to start the row (only leading
+		// whitespace before it) so a "›" inside a "Queued follow-up inputs"
+		// affordance above the prompt is never read as the input area. Match
+		// on the raw line so the styled content survives for faint-ghost
+		// separation; the arrow glyph itself is never styled.
+		if idx := strings.Index(raw, codexArrowPrompt); idx != -1 &&
+			strings.TrimLeft(stripANSI(raw[:idx]), " \t") == "" {
+			state.PromptChar = codexArrowPrompt
+			typed, ghost := splitDimSegments(raw[idx+len(codexArrowPrompt):])
+			state.Typed = strings.TrimRight(typed, " \t")
+			state.Ghost = strings.TrimRight(ghost, " \t")
+			return state
+		}
 	}
 	return state
 }
@@ -285,7 +299,6 @@ func parseCodexInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 func parseGeminiInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 	state := InputAreaState{
 		Provider: InputAreaProviderGemini,
-		Raw:      rawANSI,
 		Detected: time.Now().UTC(),
 	}
 
@@ -326,7 +339,6 @@ func parseGeminiInputArea(rawANSI string, _ *RuntimeConfig) InputAreaState {
 func parseGenericInputArea(rawANSI string, cfg *RuntimeConfig) InputAreaState {
 	state := InputAreaState{
 		Provider: InputAreaProviderUnknown,
-		Raw:      rawANSI,
 		Detected: time.Now().UTC(),
 	}
 
@@ -370,18 +382,17 @@ func stripANSI(s string) string {
 	return ansiCSIRegex.ReplaceAllString(s, "")
 }
 
-// splitDimSegments walks input as a stream of (text, dim) segments and
-// returns concatenated typed and ghost runs. Dim state mutates across SGR
-// codes; non-CSI runs of bytes are emitted with the current state.
+// splitDimSegments walks input as a stream of (text, faint) segments and
+// returns the concatenated typed and ghost runs. Ghost text is whatever is
+// rendered with the faint SGR attribute (`ESC[2m`); everything else is typed.
+// The faint state mutates across SGR codes; non-CSI runs of bytes are emitted
+// under the current state.
 //
-// Union of "dim" SGRs recognized today (engdocs/design/input-area-state.md §10 Q1):
-//   - SGR 2  — canonical faint/dim attribute Claude Code uses today
-//   - SGR 90 — bright-black foreground (renders as gray on most terminals)
-//   - SGR 38;5;{240..243} — common 256-color dim grays
-//
-// True-color dim (38;2;r;g;b) is intentionally not classified — there is no
-// stable cutoff between "dim color" and "regular dim-ish theme color" and
-// no current LLM uses it. Resets (SGR 0, empty, 22) clear the dim flag.
+// Faint is the load-bearing, LLM-agnostic ghost signal: real typed input is
+// never rendered faint, so no per-provider color table is needed (gc-8g41r.7).
+// Color attributes (bright-black, 256-color grays, true color) are NOT treated
+// as ghost — only the faint attribute is. Resets `ESC[0m` / `ESC[22m` /
+// `ESC[39m` (and an empty SGR, which means 0) clear the faint state.
 func splitDimSegments(input string) (typed string, ghost string) {
 	var typedB, ghostB strings.Builder
 	dim := false
@@ -436,45 +447,35 @@ func indexOfCSIFinalByte(s string) int {
 	return -1
 }
 
-// updateDimState parses one SGR parameter group and returns the next dim
-// state. Recognizes the canonical Claude wrapper (`ESC[2m`...`ESC[0m`) plus
-// the dim-equivalent variants documented in splitDimSegments.
-func updateDimState(dim bool, params string) bool {
+// updateDimState parses one SGR parameter group and returns the next faint
+// state. Ghost text is detected solely by the faint attribute (SGR 2); the
+// terminators SGR 0 (reset all), 22 (normal intensity), and 39 (default
+// foreground) clear it, as does an empty parameter (which means 0). Extended
+// color introducers (38/48 with a 5;n 256-color or 2;r;g;b true-color payload)
+// are skipped so a color index can never be misread as the standalone faint
+// code (e.g. the "2" in "38;5;2").
+func updateDimState(faint bool, params string) bool {
 	if params == "" {
-		// Empty params is SGR-default-zero, which resets attributes.
+		// Empty params == SGR 0 == reset all attributes.
 		return false
 	}
 	parts := strings.Split(params, ";")
 	for i := 0; i < len(parts); i++ {
 		switch parts[i] {
-		case "0", "":
-			dim = false
+		case "0", "", "22", "39":
+			faint = false
 		case "2":
-			dim = true
-		case "22":
-			dim = false
-		case "90", "91", "92", "93", "94", "95", "96", "97":
-			// "Bright" foreground 90 is dim-grey on most terminals.
-			// 91-97 are bright colors (not dim); only 90 sets dim, but
-			// we still need to consume the param to avoid misreading
-			// later params in the same group.
-			if parts[i] == "90" {
-				dim = true
-			}
-		case "38":
-			// Extended foreground: 38;5;n (256-color) or 38;2;r;g;b
-			// (true color). Consume those params so we don't misread n
-			// as an SGR code on its own.
+			faint = true
+		case "38", "48":
+			// Extended fg/bg color: "5;n" (256-color) or "2;r;g;b" (true
+			// color). Consume the payload so its numbers are never read as
+			// SGR attribute codes.
 			if i+2 < len(parts) && parts[i+1] == "5" {
-				switch parts[i+2] {
-				case "240", "241", "242", "243":
-					dim = true
-				}
 				i += 2
 			} else if i+4 < len(parts) && parts[i+1] == "2" {
 				i += 4
 			}
 		}
 	}
-	return dim
+	return faint
 }

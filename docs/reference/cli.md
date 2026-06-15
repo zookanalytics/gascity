@@ -3163,7 +3163,6 @@ gc session input-area <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--format` | string | `json` | output format: json\|kv\|text |
-| `--include-raw` | bool |  | include the ANSI-preserved raw capture in JSON output |
 
 ## gc session kill
 
@@ -3303,7 +3302,6 @@ gc session peek <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--lines` | int | `50` | number of lines to capture |
-| `--raw` | bool |  | preserve ANSI/SGR escape sequences (tmux capture-pane -e); reads the live pane and bypasses the supervisor cache |
 
 ## gc session pin
 

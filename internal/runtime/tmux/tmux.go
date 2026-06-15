@@ -2267,23 +2267,6 @@ func (t *Tmux) CapturePaneAll(session string) (string, error) {
 	return t.run("capture-pane", "-p", "-t", session, "-S", "-")
 }
 
-// CapturePaneRaw captures the last N lines of a pane with ANSI/SGR escape
-// sequences preserved (capture-pane -e). Plain [Tmux.CapturePane] strips
-// styling; CapturePaneRaw retains it so callers can inspect, for example, the
-// dim wrapper Claude Code renders around ghost-text suggestions. Unlike
-// [Tmux.capturePaneANSI] (which joins wrapped rows with -J for the input-area
-// parser), this preserves the literal pane layout for human inspection.
-func (t *Tmux) CapturePaneRaw(session string, lines int) (string, error) {
-	return t.run("capture-pane", "-p", "-e", "-t", session, "-S", fmt.Sprintf("-%d", lines))
-}
-
-// CapturePaneAllRaw captures all scrollback history with ANSI/SGR escape
-// sequences preserved (capture-pane -e). The raw counterpart of
-// [Tmux.CapturePaneAll].
-func (t *Tmux) CapturePaneAllRaw(session string) (string, error) {
-	return t.run("capture-pane", "-p", "-e", "-t", session, "-S", "-")
-}
-
 // CapturePaneLines captures the last N lines of a pane as a slice.
 func (t *Tmux) CapturePaneLines(session string, lines int) ([]string, error) {
 	out, err := t.CapturePane(session, lines)
