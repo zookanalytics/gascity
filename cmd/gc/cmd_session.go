@@ -2033,13 +2033,12 @@ func parsePruneDuration(s string) (time.Duration, error) {
 func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	var lines int
 	var jsonOutput bool
-	var raw bool
 	cmd := &cobra.Command{
 		Use:   "peek <session-id-or-alias>",
 		Short: "View session output without attaching",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionPeek(args, lines, jsonOutput, raw, stdout, stderr) != 0 {
+			if cmdSessionPeek(args, lines, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2048,7 +2047,6 @@ func newSessionPeekCmd(stdout, stderr io.Writer) *cobra.Command {
 	}
 	cmd.Flags().IntVar(&lines, "lines", 50, "number of lines to capture")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL result")
-	cmd.Flags().BoolVar(&raw, "raw", false, "preserve ANSI/SGR escape sequences (tmux capture-pane -e); reads the live pane and bypasses the supervisor cache")
 	return cmd
 }
 
@@ -2128,17 +2126,12 @@ func renderSessionPeekFromAPI(cr api.CachedRead[api.SessionView], target string,
 
 // cmdSessionPeek is the CLI entry point for "gc session peek". It routes
 // through the supervisor API when a controller is up and falls back to the
-// local runtime provider otherwise. With raw=true the ANSI-preserving capture
-// is read from the live pane directly: the supervisor cache only holds
-// plain-stripped output, so the API path cannot serve a raw request.
-func cmdSessionPeek(args []string, lines int, jsonOutput, raw bool, stdout, stderr io.Writer) int {
+// local runtime provider otherwise.
+func cmdSessionPeek(args []string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
-	}
-	if raw {
-		return doSessionPeekRawFallback(cityPath, args[0], lines, jsonOutput, stdout, stderr)
 	}
 	c, reason := sessionPeekAPIClient(cityPath)
 	return routeSessionPeek(cityPath, args[0], lines, c, reason, jsonOutput, stdout, stderr)
@@ -2171,52 +2164,6 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 	}
 
 	output, err := handle.Peek(context.Background(), lines)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	return writeSessionPeekResult(output, sessionID, target, lines, jsonOutput, stdout, stderr)
-}
-
-// doSessionPeekRawFallback reads the live pane with ANSI/SGR escape sequences
-// preserved. Unlike the plain peek path it never consults the supervisor API
-// (whose cache holds only stripped output): it resolves the live runtime
-// session name and captures via the provider's [tmux.RawPeeker] capability.
-// Providers that cannot preserve ANSI (non-tmux runtimes) report an
-// unsupported-provider error.
-func doSessionPeekRawFallback(cityPath, target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
-	store, code := openCityStore(stderr, "gc session peek")
-	if store == nil {
-		return code
-	}
-
-	var cfg *config.City
-	cfg, _ = loadCityConfig(cityPath, stderr)
-	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	sp := newSessionProvider()
-	rawPeeker, ok := sp.(tmux.RawPeeker)
-	if !ok {
-		fmt.Fprintf(stderr, "gc session peek: --raw is not supported for this session's runtime provider\n") //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	name, err := resolveRuntimeSessionName(cityPath, store, sp, cfg, sessionID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if name == "" {
-		fmt.Fprintf(stderr, "gc session peek: session %q is not running\n", target) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
-	output, err := rawPeeker.PeekRaw(name, lines)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session peek: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2271,7 +2218,7 @@ func resolveRuntimeSessionName(cityPath string, store beads.Store, sp runtime.Pr
 // sessionInputAreaJSON is the typed JSON contract emitted by
 // "gc session input-area". It mirrors [tmux.InputAreaState] with an added
 // session field so a consumer capturing several sessions can attribute each
-// record. raw is omitted unless --include-raw is set.
+// record.
 type sessionInputAreaJSON struct {
 	Session    string                 `json:"session"`
 	Provider   tmux.InputAreaProvider `json:"provider"`
@@ -2279,7 +2226,6 @@ type sessionInputAreaJSON struct {
 	Busy       bool                   `json:"busy"`
 	Typed      string                 `json:"typed"`
 	Ghost      string                 `json:"ghost"`
-	Raw        string                 `json:"raw,omitempty"`
 	Detected   time.Time              `json:"detected"`
 }
 
@@ -2290,7 +2236,6 @@ type sessionInputAreaJSON struct {
 // suggestions. See engdocs/design/input-area-state.md §5.2.
 func newSessionInputAreaCmd(stdout, stderr io.Writer) *cobra.Command {
 	var format string
-	var includeRaw bool
 	cmd := &cobra.Command{
 		Use:   "input-area <session-id-or-alias>",
 		Short: "Inspect a session's input area (typed vs ghost text, busy, prompt)",
@@ -2306,11 +2251,10 @@ Exit codes: 0 = state captured, 2 = session not found, 1 = other error.`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessionIDs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			return exitForCode(cmdSessionInputArea(args[0], format, includeRaw, stdout, stderr))
+			return exitForCode(cmdSessionInputArea(args[0], format, stdout, stderr))
 		},
 	}
 	cmd.Flags().StringVar(&format, "format", "json", "output format: json|kv|text")
-	cmd.Flags().BoolVar(&includeRaw, "include-raw", false, "include the ANSI-preserved raw capture in JSON output")
 	return cmd
 }
 
@@ -2318,7 +2262,7 @@ Exit codes: 0 = state captured, 2 = session not found, 1 = other error.`,
 // reads the live pane via the provider's [tmux.InputAreaCapturer] capability;
 // the supervisor cache cannot serve it (it holds only stripped text). Returns
 // a CLI exit code: 0 success, 2 session not found, 1 other error.
-func cmdSessionInputArea(target, format string, includeRaw bool, stdout, stderr io.Writer) int {
+func cmdSessionInputArea(target, format string, stdout, stderr io.Writer) int {
 	switch format {
 	case "json", "kv", "text":
 	default:
@@ -2370,13 +2314,12 @@ func cmdSessionInputArea(target, format string, includeRaw bool, stdout, stderr 
 		return 1
 	}
 
-	return writeSessionInputArea(state, target, format, includeRaw, stdout, stderr)
+	return writeSessionInputArea(state, target, format, stdout, stderr)
 }
 
 // writeSessionInputArea renders an [tmux.InputAreaState] in the requested
-// format. raw is surfaced only in JSON output and only when includeRaw is set
-// (keeping default output small and grep-friendly per the spec contract).
-func writeSessionInputArea(state *tmux.InputAreaState, target, format string, includeRaw bool, stdout, stderr io.Writer) int {
+// format.
+func writeSessionInputArea(state *tmux.InputAreaState, target, format string, stdout, stderr io.Writer) int {
 	switch format {
 	case "kv":
 		line := fmt.Sprintf("session=%q provider=%s prompt_char=%q busy=%t typed=%q ghost=%q\n",
@@ -2397,9 +2340,6 @@ func writeSessionInputArea(state *tmux.InputAreaState, target, format string, in
 			Typed:      state.Typed,
 			Ghost:      state.Ghost,
 			Detected:   state.Detected,
-		}
-		if includeRaw {
-			out.Raw = state.Raw
 		}
 		if err := writeCLIJSONLine(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
