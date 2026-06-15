@@ -24,9 +24,10 @@ that blind spot and can fire on a UI suggestion the operator never typed.
 This document proposes a typed library API — `InputAreaState(session)` —
 that returns the current input-area state with per-LLM rendering knowledge
 (typed text, ghost text, busy flag, prompt char), plus a CLI surface
-(`gc session peek --raw` and a typed inspection command) for human and
-programmatic consumers. Implementation is staged separately under the same
-convoy.
+(`gc session input-area`) for human and programmatic consumers. Ghost
+detection is a single faint-attribute rule (§3.1); the struct carries no raw
+capture or per-shape discriminator. Implementation is staged separately under
+the same convoy.
 
 ## 1. Problem statement
 
@@ -107,10 +108,10 @@ knowledge.
 ### Goals
 
 1. Library API the consumer can call to get a structured answer:
-   `{Provider, ShapeVariant, PromptChar, Busy, Typed, Ghost, Raw,
-   RawTruncated, Detected}`. `ShapeVariant` discriminates per-provider
-   build shapes (see §3.2); `RawTruncated` surfaces capture-cap
-   truncation (see §4.2).
+   `{Provider, PromptChar, Busy, Typed, Ghost, Detected}`. The struct is
+   deliberately lean — ghost detection is a single faint-attribute rule
+   (§3.1), so no per-provider shape discriminator and no raw-capture field
+   are needed.
 2. ANSI-aware capture inside the library — consumers never see escape
    sequences unless they ask for them.
 3. Per-LLM dispatch (Claude / Codex / Gemini today; pluggable for new
@@ -152,41 +153,33 @@ changing.
 
 - **Prompt char**: `❯ ` (U+276F + space). NBSP (U+00A0) variant exists
   and is normalized in `matchesPromptPrefix` (`tmux.go:2332`).
-- **Typed input**: rendered after the prompt in default style (no
-  SGR wrapper, or default-foreground SGR like `ESC[39m`).
-- **Ghost text**: rendered after the prompt wrapped in any SGR from
-  the recognized **dim-foreground union**, closed by a reset (`ESC[0m`
-  or `ESC[39m` returning to default fg). On wide suggestions Claude
-  pads with trailing spaces inside the dim wrapper. The ghost text
-  disappears as soon as the operator types one character; partial
-  typed prefixes are not shown dim.
+- **Typed input**: rendered after the prompt in normal intensity —
+  whether default style, a default-foreground SGR (`ESC[39m`), or a
+  color attribute. Real typed input is never rendered faint.
+- **Ghost text**: rendered after the prompt wrapped in the **faint
+  attribute** `ESC[2m`, closed by a reset (`ESC[0m`, `ESC[22m` normal
+  intensity, or `ESC[39m` default foreground). On wide suggestions
+  Claude pads with trailing spaces inside the faint wrapper. The ghost
+  text disappears as soon as the operator types one character; partial
+  typed prefixes are not shown faint.
 
-  **Dim-foreground SGR union** (in match order):
-
-  1. `ESC[2m` — SGR 2, faint / dim attribute. Canonical wrapper
-     observed on 2026-05-09 (see Appendix C); the most-common form
-     in Claude Code today.
-  2. `ESC[90m` — SGR 90, bright-black foreground; renders as gray on
-     most terminals.
-  3. `ESC[38;5;<n>m` for `n` in the 8-bit grayscale range 232–245 —
-     standard low-contrast grays in xterm 256-color palettes.
-
-  True-color dim (`ESC[38;2;r;g;b`) is **not** classified; there is
-  no stable cutoff between "dim color" and "regular dim-ish theme
-  color" and no current LLM build uses it for ghost text. New SGR
-  conventions land as a fixture plus a one-line match-table entry,
-  not a parser rewrite.
-
-  **Version-skew failure mode.** A future Claude Code build that
-  switches conventions to one of the other dim SGRs (or that
-  introduces a new one) silently under-detects when the parser
-  matches a single SGR. The failure is invisible: `Ghost` reports
-  empty and `Typed` populates with what should be a suggestion,
-  restoring exactly the false-positive this spec exists to prevent.
-  The parser MUST match the union as a unit, and the parser test
-  suite MUST carry a fixture per recognized SGR so a regression
-  failing to match one entry surfaces as a test failure, not a
-  silent consumer warrant.
+  **Faint is the whole rule.** Ghost text is detected by the faint SGR
+  attribute (`ESC[2m`) and nothing else; everything not faint is typed.
+  Validated empirically on 2026-06-15 against live Claude sessions
+  (operator + host): ghost suggestions are `ESC[2m`-wrapped, typed input
+  is normal-weight, and cursor position does NOT distinguish them — the
+  faint attribute is the load-bearing signal, not cursor position. The
+  rule is LLM-agnostic (it needs no per-provider color table) and it
+  replaces the earlier gray-range heuristic (`ESC[90m` bright-black,
+  `ESC[38;5;232..245m` 256-color grays). That heuristic was fragile in
+  both directions: a gray-but-not-faint themed input would have been
+  misread as ghost, and a faint suggestion rendered in a gray outside
+  the enumerated range would have been missed. Color attributes
+  (bright-black, 256-color grays, true color) are explicitly NOT treated
+  as ghost — only the faint attribute is. A 256-color or true-color
+  introducer (`ESC[38;5;n m`, `ESC[38;2;r;g;b m`, and the `48;` background
+  forms) has its payload consumed so a color index can never be misread
+  as the standalone faint code.
 - **Busy indicator**: status-bar line containing literal substring
   `esc to interrupt` (sometimes preceded by a spinner glyph). Matched
   today in `paneContainsBusyIndicator`. While busy, the prompt char
@@ -219,10 +212,10 @@ changing.
 
 Codex has shipped at least two distinct input-area shapes in the
 wild, and the parser must recognize both. A **union parser** scans
-the capture for either shape and reports which it matched via the
-`ShapeVariant` field on `InputAreaState` (see §4.1). Consumers can
-ignore `ShapeVariant` entirely; it exists so debug tooling and
-fixture tests can distinguish builds without re-capturing.
+the capture bottom-up and binds to the most-recent prompt row of
+either shape. The matched shape is not surfaced on `InputAreaState` —
+the typed/ghost/prompt fields are everything a consumer needs, and
+fixture tests distinguish the shapes by construction.
 
 #### 3.2.1 Shape A — boxed
 
@@ -246,7 +239,6 @@ input area in a Unicode box:
   keystroke, so old box rows can persist in scrollback and produce
   false matches. The parser must scope to the most-recent box by
   scanning bottom-up for the box-prompt row.
-- **`ShapeVariant`**: `codex_boxed`.
 
 #### 3.2.2 Shape B — arrow prompt
 
@@ -270,12 +262,10 @@ Queued follow-up inputs:
   block is not buffered operator input in the input-area sense and
   treating it as such reintroduces the false-positive class this
   spec is designed to prevent.
-- **Ghost text**: dim text after the `› ` prompt has been observed
-  in this shape. The dim wrapper follows the same SGR union
-  documented in §3.1 (`ESC[2m`, `ESC[90m`, `ESC[38;5;232..245m`);
-  the parser reuses the Claude dim-detection helper to populate
-  `Ghost` separately from `Typed`.
-- **`ShapeVariant`**: `codex_arrow`.
+- **Ghost text**: faint text after the `› ` prompt has been observed
+  in this shape. It follows the same faint rule as §3.1 (`ESC[2m`); the
+  parser reuses the shared faint helper to populate `Ghost` separately
+  from `Typed`. There is no Codex-specific ghost code.
 
 #### 3.2.3 Busy indicator (both shapes)
 
@@ -286,25 +276,29 @@ boundary, not "currently busy" — and stays out of `InputAreaState`.
 
 #### 3.2.4 Discrimination algorithm
 
-The parser scans the capture bottom-up:
+The parser scans the capture bottom-up and binds to the first prompt
+row it finds, of either shape:
 
-1. First look for the Shape A anchor `│ > `. If found, parse as
-   boxed and emit `ShapeVariant=codex_boxed`.
-2. Otherwise look for a `› ` row (Shape B). If found, parse as
-   arrow-prompt and emit `ShapeVariant=codex_arrow`.
-3. A partial re-render that exposes neither shape (e.g.
-   mid-keystroke with a top-`╭` but no matching `╰` yet) returns
-   `Busy=false, Typed="", Ghost="", PromptChar="", ShapeVariant=""`
-   and the consumer disambiguates via re-poll.
+1. On each row, look for the Shape A anchor `│ > `; if present, parse
+   the box cell as typed (boxed ghost text is not observed).
+2. Otherwise look for a Shape B `› ` row that starts the line (leading
+   whitespace only); if present, split typed vs faint ghost with the
+   shared faint rule.
+3. A partial re-render that exposes neither shape (e.g. mid-keystroke
+   with a top-`╭` but no matching `╰` yet) returns `Busy=false,
+   Typed="", Ghost="", PromptChar=""` and the consumer disambiguates
+   via re-poll.
 4. A capture that matches neither shape and is not busy returns the
-   same empty `ShapeVariant=""` outcome. The parser does not crash;
-   it reports an unrecognized state and the consumer treats it as
-   "no input-area information" per §4.2.
+   same empty outcome. The parser does not crash; it reports an
+   unrecognized state and the consumer treats it as "no input-area
+   information" per §4.2.
 
 Bottom-up matters: a scrollback window can contain both a stale
-Shape A box and a current Shape B arrow row. The bottom-up scan
-binds to whichever shape appears first scanning upward from the
-bottom of the capture, which is always the active row.
+Shape A box and a current Shape B arrow row. The bottom-up scan binds
+to whichever shape appears first scanning upward from the bottom of
+the capture, which is always the active row. The "starts the line"
+guard on the arrow row keeps a `›` inside a queued-follow-up
+affordance above the prompt from being mistaken for the input area.
 
 ### 3.3 Gemini
 
@@ -333,12 +327,12 @@ with `Provider="unknown"` and `Ghost=""`.
 
 ### 3.5 Summary table
 
-| Provider | `ShapeVariant` | PromptChar | Ghost wrapper | Busy substring | Multi-line input |
-|----------|----------------|-----------|---------------|----------------|------------------|
-| claude   | (n/a — single shape) | `❯ ` (NBSP-tolerant) | dim-SGR union after prompt (see §3.1) | `esc to interrupt` | wrap rows below prompt |
-| codex    | `codex_boxed` | `> ` inside `╭…╯` box | not observed | `Press Esc or Ctrl+C to cancel` | re-rendered box |
-| codex    | `codex_arrow` | `› ` on clean row | dim-SGR union after prompt | `Press Esc or Ctrl+C to cancel` | single line; queued-follow-up block ignored |
-| gemini   | (n/a — single shape) | `> ` | not observed | rewind/confirm dialog visible | single line |
+| Provider | Shape | PromptChar | Ghost wrapper | Busy substring | Multi-line input |
+|----------|-------|-----------|---------------|----------------|------------------|
+| claude   | single | `❯ ` (NBSP-tolerant) | faint `ESC[2m` after prompt (see §3.1) | `esc to interrupt` | wrap rows below prompt |
+| codex    | boxed | `> ` inside `╭…╯` box | not observed | `Press Esc or Ctrl+C to cancel` | re-rendered box |
+| codex    | arrow | `› ` on clean row | faint `ESC[2m` after prompt | `Press Esc or Ctrl+C to cancel` | single line; queued-follow-up block ignored |
+| gemini   | single | `> ` | not observed | rewind/confirm dialog visible | single line |
 | unknown  | (n/a) | configured prefix or "" | not detected | union of known | best-effort |
 
 ## 4. Library API proposal
@@ -363,30 +357,15 @@ const (
     InputAreaProviderUnknown InputAreaProvider = "unknown"
 )
 
-// InputAreaShape identifies the input-area rendering variant the
-// parser matched. Empty for providers and builds with a single
-// shape; populated for providers (e.g. Codex) where the wire
-// shape has changed across builds and the consumer may want to
-// discriminate. See §3.2 for Codex variants.
-type InputAreaShape string
-
-const (
-    InputAreaShapeCodexBoxed InputAreaShape = "codex_boxed"
-    InputAreaShapeCodexArrow InputAreaShape = "codex_arrow"
-)
-
 // InputAreaState reports what the agent's input area is showing
 // at the moment of capture. Snapshot, not a stream.
 type InputAreaState struct {
-    Provider     InputAreaProvider
-    ShapeVariant InputAreaShape // see §3.2; empty for single-shape providers
-    PromptChar   string         // e.g. "❯ ", "> "; "" if no prompt visible
-    Busy         bool           // engine is processing; not at a prompt
-    Typed        string         // operator-typed buffered text; empty if none
-    Ghost        string         // ghost-text suggestion; empty if none
-    Raw          string         // ANSI-preserved capture used for parsing
-    RawTruncated bool           // true if Raw was clipped at the capture cap
-    Detected     time.Time      // capture time (UTC)
+    Provider   InputAreaProvider
+    PromptChar string    // e.g. "❯ ", "> ", "› "; "" if no prompt visible
+    Busy       bool      // engine is processing; not at a prompt
+    Typed      string    // operator-typed buffered text; empty if none
+    Ghost      string    // faint ghost-text suggestion; empty if none
+    Detected   time.Time // capture time (UTC)
 }
 
 // InputAreaCapturer is implemented by runtime providers that expose
@@ -411,20 +390,12 @@ type InputAreaCapturer interface {
   non-prompt state (boot, dialog, error). Consumers should not
   treat empty `Typed` here as proof of "operator did not type
   anything."
-- `Raw` is the ANSI-preserved capture the parser ran against. It
-  exists for debugging and for consumers who need to do their own
-  pattern match without re-capturing. Bounded: capped at 16 KiB
-  by default (configurable via option).
-- **`Raw` truncation semantics.** When the capture exceeds the cap,
-  the library keeps the **newest** content (the bottom of the pane)
-  and drops the oldest. The input area sits at the bottom of the
-  pane, so a consumer reading `Raw` for current input state always
-  sees it. Parsers must tolerate a partial CSI at the start of the
-  buffer — truncation cuts on a byte boundary, not necessarily on
-  a complete escape sequence — by ignoring any unterminated CSI at
-  the leading edge. When truncation happens, the library sets
-  `RawTruncated=true` so consumers can distinguish "small pane"
-  from "clipped output."
+- The ANSI-preserved capture the parser ran against is an internal
+  detail, not a struct field: the parsers consume it and return only
+  the typed/ghost split. Consumers that need the literal pane bytes
+  use `gc session peek` (which has its own ANSI-stripping contract);
+  the input-area surface deliberately never emits escape sequences,
+  satisfying §2 Goal 2.
 - `Detected` is set by the library, not the caller — guarantees
   every consumer logs a comparable timestamp.
 
@@ -454,8 +425,8 @@ type InputAreaCapturer interface {
 - tmux subprocess error ⇒ wrap with context like
   `"capturing input area for %q: %w"`.
 - Parse never fails — a parser that can't make sense of pane
-  text returns `InputAreaState{Provider: <p>, Raw: rawANSI,
-  Detected: now}` with empty `Typed/Ghost` and `Busy=false`.
+  text returns `InputAreaState{Provider: <p>, Detected: now}` with
+  empty `Typed/Ghost` and `Busy=false`.
 
 ### 4.5 What this does *not* do
 
@@ -469,28 +440,11 @@ type InputAreaCapturer interface {
 
 ## 5. CLI surface
 
-Two changes, both additive.
+One additive command: `gc session input-area`.
 
-### 5.1 `gc session peek --raw`
+### 5.1 `gc session input-area`
 
-Add a flag to the existing `gc session peek` command
-(`cmd_session.go:1410`) that preserves ANSI sequences in the
-output. Default behavior (no flag) keeps the current
-plain-stripped capture so today's piped scripts and screenshots
-are unaffected.
-
-```text
-gc session peek <session> [--lines N] [--raw]
-```
-
-`--raw` calls a new method on the worker handle
-(`handle.PeekRaw(ctx, lines)`) that wraps `tmux capture-pane -p -e`.
-For non-tmux providers, `--raw` returns `runtime.ErrUnsupported`
-with a clear message.
-
-### 5.2 `gc session input-area`
-
-A new command that returns a typed `InputAreaState` as JSON for
+A command that returns a typed `InputAreaState` as JSON for
 programmatic consumption.
 
 ```text
@@ -503,40 +457,21 @@ Default output:
 {
   "session": "signal-loom/witness",
   "provider": "claude",
-  "shape_variant": "",
   "prompt_char": "❯ ",
   "busy": false,
   "typed": "",
   "ghost": "keep patrolling",
-  "raw_truncated": false,
   "detected": "2026-05-09T22:14:33Z"
 }
 ```
 
-`shape_variant` is empty for providers with a single rendering
-shape (Claude, Gemini, unknown) and populated for providers with
-multiple builds (`codex_boxed`, `codex_arrow`); see §3.2. Consumers
-that do not need build discrimination can ignore the field.
-
-`raw_truncated` reports whether the underlying `Raw` capture
-exceeded the cap and was clipped. It is `false` for the steady
-state and only flips to `true` when a pane has more scrollback
-than the cap (default 16 KiB). Consumers parsing the JSON should
-not treat `raw_truncated=true` as a parse failure — the parsed
-fields (`typed`, `ghost`, `prompt_char`, `shape_variant`) are
-still valid; only `raw` (when included) is partial.
+The output is the lean `InputAreaState` plus a `session` field so a
+consumer capturing several sessions can attribute each record. It
+never emits escape sequences (§2 Goal 2), and the matched Codex shape
+is not surfaced — a consumer needs only the typed/ghost/prompt split.
 
 Flags:
 
-- `--include-raw` — adds the `"raw"` field with the ANSI-preserved
-  capture used for parsing. This flag is the **only** way `gc
-  session input-area` surfaces `Raw`. Default output omits it to
-  keep output small and grep-friendly and to satisfy §2 Goal 2
-  (consumers never see escape sequences unless they ask). `gc
-  session peek --raw` is a separate human-debugging surface (§5.1);
-  the two flags do not share semantics — `peek --raw` is a raw
-  pane dump for humans, `input-area --include-raw` is the parser's
-  input buffer attached to a typed state.
 - `--format=json|kv|text` — JSON is default; `kv` prints
   `provider=claude busy=false typed="" ghost="keep patrolling"`
   for shell-friendly use; `text` prints a one-line human summary.
@@ -551,12 +486,14 @@ This command is the contract prompt templates consume. It is
 deliberately small: one shell-out, one JSON parse, no scrollback
 heuristics in the prompt.
 
-### 5.3 Why two surfaces
+### 5.2 Why this surface
 
-`--raw` is for humans and one-off debugging. `input-area` is for
-prompts and tests. Without `--raw`, an operator seeing a false
-positive cannot reproduce the bug; without `input-area`, every
-consumer re-rolls a parser in shell or templated Markdown.
+`input-area` is for prompts and tests: without it, every consumer
+re-rolls a fragile pane-text parser in shell or templated Markdown,
+blind to the typed-vs-ghost distinction this API exists to provide.
+The typed/ghost split is itself what lets an operator confirm a
+ghost-text false positive — the styled suggestion lands in `ghost`,
+never `typed`.
 
 ## 6. Consumer rewrite (before / after)
 
@@ -732,7 +669,7 @@ caller was reviewed against the proposed API.
 | Caller | Line | Purpose | Affected? |
 |--------|------|---------|-----------|
 | `gemini rewind confirmation` | 315 | match `No code changes to revert.` | No — plain text |
-| `Provider.Peek` (CLI peek path) | 436, 438 | user-facing `gc session peek` | New path: `--raw` adds an ANSI-preserved capture; default behavior unchanged |
+| `Provider.Peek` (CLI peek path) | 436, 438 | user-facing `gc session peek` | No — plain stripped capture unchanged |
 | `waitForPane` generic matcher | 474 | gemini dialog wait | No — plain text matchers |
 
 ### 8.4 The one place worth double-checking — `WaitForIdle`
@@ -780,9 +717,8 @@ in `internal/runtime/tmux/`, which is upstreamable to
 One PR per stage, gated on convoy graduation:
 
 - **Stage 2 PR (library + CLI):** new `input_area.go`, the
-  `--raw` flag, the `gc session input-area` command, parser
-  fixtures, integration test. Self-contained, no consumer
-  changes.
+  `gc session input-area` command, parser fixtures, integration
+  test. Self-contained, no consumer changes.
 - **Stage 3+ PRs (code reviews + graduation):** synthesis of
   reviewer feedback, then squash-merge of
   `integration/input-area-state` into `main`.
@@ -795,8 +731,8 @@ One PR per stage, gated on convoy graduation:
 - Forks that already have a custom `CapturePane` extension will
   get a new method on the same type. No method-rename, no
   signature changes.
-- Forks that depend on `gc session peek` plain-text shape are
-  unaffected — `--raw` is opt-in.
+- Forks that depend on `gc session peek` are unaffected — its
+  plain-stripped output is unchanged.
 - Forks that have their own buffered-input detection in agent
   prompts get a strictly better surface to migrate to.
 
@@ -819,17 +755,17 @@ quiet.
 
 ## 10. Open questions for stage 1b review
 
-1. **Ghost-text wrapper across Claude versions.** *Resolved by
-   stage-1b delta D1; see §3.1.* The parser matches a dim-foreground
-   SGR union (`ESC[2m`, `ESC[90m`, `ESC[38;5;232..245m`), not just
-   `ESC[2m`, and the test suite carries a fixture per recognized
-   SGR. True-color dim is intentionally not classified.
-2. **Codex ghost text.** *Resolved by stage-1b delta D5; see §3.2.*
-   A live 2026-05-28 capture confirmed dim text alongside the `› `
-   prompt in the current arrow-shape Codex build. The Codex parser
-   reuses the §3.1 dim-foreground union to populate `Ghost`
-   separately from `Typed` in the arrow shape. The boxed shape
-   remains "not observed."
+1. **Ghost-text wrapper across Claude versions.** *Resolved; see
+   §3.1.* Superseding the earlier dim-foreground SGR union, ghost text
+   is detected by the faint attribute (`ESC[2m`) alone — validated
+   against live Claude sessions on 2026-06-15. The rule is LLM-agnostic
+   and needs no per-build color table; color attributes (bright-black,
+   256-color grays, true color) are not ghost.
+2. **Codex ghost text.** *Resolved; see §3.2.* A live 2026-05-28
+   capture confirmed faint text alongside the `› ` prompt in the
+   current arrow-shape Codex build. The Codex parser reuses the §3.1
+   faint rule to populate `Ghost` separately from `Typed` in the arrow
+   shape. The boxed shape remains "not observed."
 3. **Gemini boxed input.** Some Gemini builds box the prompt like
    Codex. Verify per release before assuming `> ` on a clean row.
 4. **Multi-line typed input.** When operator typing wraps to a
