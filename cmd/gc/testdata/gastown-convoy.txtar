@@ -151,3 +151,85 @@ stderr 'missing subcommand'
 # Unknown subcommand
 ! exec gc convoy blorp
 stderr 'unknown subcommand "blorp"'
+
+# --- 13. Rig-scope resolution for `gc convoy create` (gc-nm4d2h) ---
+#
+# `gc convoy create` must resolve the target rig the same way `gc bd` does
+# — explicit --rig flag, then cwd, then GC_RIG — instead of always landing
+# in city scope. The city-scope fall-through warns unless --city-scope opts
+# in, and --rig + --city-scope is rejected as contradictory.
+#
+# This file-backend harness collapses every scope onto the single city store
+# (the dolt-only prefix split — lx- vs tk- — can't be reproduced here), so
+# the resolution OUTCOME is asserted via the warning contract: a city
+# fall-through warns, a resolved rig does not. Store-directory placement
+# itself is covered by TestResolveConvoyCreateScope. A fresh city keeps these
+# assertions independent of the lifecycle scenarios above.
+
+exec gc init $WORK/scope-city
+cd $WORK/scope-city
+mkdir $WORK/scope-city/myrig
+exec gc rig add $WORK/scope-city/myrig --name myrig --prefix mp
+stdout 'Rig added'
+
+# Seed a couple of city issues for the positional-issue paths.
+exec bd create 'city child A'
+stdout 'gc-1'
+exec bd create 'city child B'
+stdout 'gc-2'
+
+# 13a. No rig signal from city root -> city scope WITH a warning.
+exec gc convoy create rs-city-default
+stdout 'Created convoy'
+stderr 'city scope'
+
+# 13b. --city-scope opt-in -> city scope, no warning.
+exec gc convoy create rs-city-explicit --city-scope
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13c. --rig flag after the subcommand -> rig resolved, no city-scope warning.
+exec gc convoy create rs-rigflag --rig myrig
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13d. --rig flag before the subcommand -> rig resolved, no warning.
+exec gc --rig myrig convoy create rs-rigflag2
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13e. --rig + --city-scope is contradictory -> error.
+! exec gc convoy create rs-conflict --rig myrig --city-scope
+stderr 'city-scope'
+stderr 'rig'
+
+# 13f. Positional issue from the city store, no signal -> city scope, no warning.
+exec gc convoy create rs-city-issue gc-1
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13g. Cross-rig: --rig resolves to myrig but the tracked issue lives in the
+#      city store. The convoy co-locates with the issue so parent refs
+#      resolve, and a warning notes the override.
+exec gc --rig myrig convoy create rs-xrig gc-2
+stdout 'Created convoy'
+stderr 'tracked issues'
+
+# 13h. cwd inside the rig -> rig resolved, no warning.
+cd $WORK/scope-city/myrig
+exec gc convoy create rs-cwd
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13i. --city-scope overrides a rig cwd -> city scope, no warning.
+exec gc convoy create rs-cwd-cityscope --city-scope
+stdout 'Created convoy'
+! stderr 'warning'
+
+# 13j. GC_RIG env from city root -> rig resolved, no warning. Set last; the
+#      env var persists for the remainder of the script.
+cd $WORK/scope-city
+env GC_RIG=myrig
+exec gc convoy create rs-env
+stdout 'Created convoy'
+! stderr 'warning'
