@@ -85,24 +85,33 @@ control beads.`,
 }
 
 type convoyCreateOptions struct {
-	Fields ConvoyFields
-	Owned  bool
+	Fields    ConvoyFields
+	Owned     bool
+	CityScope bool
 }
 
 func newConvoyCreateCmd(stdout, stderr io.Writer) *cobra.Command {
 	var owner, notify, merge, target string
-	var owned, jsonOut bool
+	var owned, jsonOut, cityScope bool
 	cmd := &cobra.Command{
 		Use:   "create <name> [issue-ids...]",
 		Short: "Create a convoy and optionally track issues",
 		Long: `Create a convoy and optionally link existing issues to it.
 
 Creates a convoy bead and tracks any provided issue IDs. Issues can
-also be added later with "gc convoy add".`,
+also be added later with "gc convoy add".
+
+The convoy is created in the same rig scope that "gc bd" would resolve:
+an explicit --rig flag wins, then the current directory's rig, then the
+GC_RIG environment variable, otherwise city scope. When tracked issues
+are supplied they anchor the scope so the convoy and its issues share a
+store. Pass --city-scope to force city scope (and silence the city-scope
+fall-through warning).`,
 		Example: `  gc convoy create sprint-42
   gc convoy create sprint-42 issue-1 issue-2 issue-3
   gc convoy create deploy --owner mayor --notify mayor --merge mr
-  gc convoy create auth-rewrite --owned --target integration/auth-rewrite`,
+  gc convoy create auth-rewrite --owned --target integration/auth-rewrite
+  gc convoy create infra-sweep --city-scope`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			opts := convoyCreateOptions{
@@ -112,7 +121,8 @@ also be added later with "gc convoy add".`,
 					Merge:  merge,
 					Target: target,
 				},
-				Owned: owned,
+				Owned:     owned,
+				CityScope: cityScope,
 			}
 			code := 0
 			if jsonOut {
@@ -131,6 +141,7 @@ also be added later with "gc convoy add".`,
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, local")
 	cmd.Flags().StringVar(&target, "target", "", "target branch inherited by child work beads")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark convoy as owned (manual lifecycle, no auto-close)")
+	cmd.Flags().BoolVar(&cityScope, "city-scope", false, "force city scope (overrides --rig/GC_RIG/cwd detection and silences the city-scope warning)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	return cmd
 }
@@ -161,12 +172,17 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 		}
 	}
 
-	// Determine which store to use: if children are provided, use the
-	// first child's rig store so convoy and children share a database.
-	// This avoids cross-store parent references that bd can't resolve.
-	storeDir := cityPath
-	if len(issueIDs) > 0 {
-		storeDir = convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+	// Resolve which store the convoy lands in, mirroring `gc bd`'s rig
+	// resolution (--rig flag, cwd, GC_RIG, then city scope). Tracked issues,
+	// when supplied, anchor the scope so the convoy and its children share a
+	// store and parent references stay resolvable.
+	storeDir, scopeWarning, err := resolveConvoyCreateScope(cfg, cityPath, rigFlag, opts.CityScope, issueIDs)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy create: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if scopeWarning != "" {
+		fmt.Fprintln(stderr, scopeWarning) //nolint:errcheck // best-effort stderr
 	}
 	store, err := openStoreAtForCity(storeDir, cityPath)
 	if err != nil {
@@ -182,6 +198,72 @@ func cmdConvoyCreateWithOptionsJSON(args []string, opts convoyCreateOptions, jso
 // When cfg/cityPath are nil/empty, all beads are assumed to be in the same store.
 func doConvoyCreate(store beads.Store, rec events.Recorder, args []string, stdout, stderr io.Writer) int {
 	return doConvoyCreateWithOptions(store, rec, args, convoyCreateOptions{}, stdout, stderr)
+}
+
+// resolveConvoyCreateScope decides which bead store a new convoy is created
+// in. It mirrors `gc bd`'s rig resolution so `gc convoy create` is no longer
+// asymmetric with `gc bd create`: an explicit --rig flag wins, then a
+// cwd-detected rig, then the GC_RIG env var, then city scope — the same order
+// resolveBdScopeTarget applies.
+//
+// When child issue IDs are supplied they anchor the scope: a convoy and the
+// issues it tracks must share a store because bd cannot resolve cross-store
+// parent references. The children's store therefore overrides the resolved
+// scope, and a warning is returned when that override contradicts an explicit
+// rig/city signal (silent issue-prefix routing remains the no-signal default).
+//
+// It returns the absolute store scope root, an optional stderr warning, and an
+// error — the latter only for contradictory flags or an unresolvable --rig.
+func resolveConvoyCreateScope(cfg *config.City, cityPath, rigName string, cityScope bool, issueIDs []string) (string, string, error) {
+	rigName = strings.TrimSpace(rigName)
+	if cityScope && rigName != "" {
+		return "", "", fmt.Errorf("--city-scope conflicts with --rig %q: choose one", rigName)
+	}
+
+	var resolved execStoreTarget
+	if cityScope {
+		resolved = bdCityScopeTarget(cityPath, cfg)
+	} else {
+		// Pass no bead args: the convoy name is not a bead and child issues
+		// are handled below, so resolveBdScopeTarget is restricted to its
+		// flag/cwd/env resolution — the same store selection `gc bd` uses.
+		target, err := resolveBdScopeTarget(cfg, cityPath, rigName, nil)
+		if err != nil {
+			return "", "", err
+		}
+		resolved = target
+	}
+
+	if len(issueIDs) > 0 {
+		childRoot := convoyCreateStoreRoot(cfg, cityPath, issueIDs[0])
+		if !samePath(childRoot, resolved.ScopeRoot) && (cityScope || resolved.ScopeKind == "rig") {
+			// An explicit signal (a resolved rig, or --city-scope) is being
+			// overridden so the convoy can co-locate with its issues.
+			return childRoot, "gc convoy create: warning: tracked issues live outside the resolved scope; creating the convoy alongside them so parent references resolve", nil
+		}
+		return childRoot, "", nil
+	}
+
+	if !cityScope && resolved.ScopeKind != "rig" && cityHasBoundRig(cfg) {
+		return resolved.ScopeRoot, "gc convoy create: warning: no rig resolved from --rig, GC_RIG, or the current directory; creating the convoy in city scope. Pass --rig <name> to target a rig, or --city-scope to silence this warning.", nil
+	}
+	return resolved.ScopeRoot, "", nil
+}
+
+// cityHasBoundRig reports whether cfg declares at least one rig with a path
+// binding. The city-scope fall-through warning is only meaningful when a rig
+// was an available alternative; a rigless city has nowhere else to put a
+// convoy, so warning there would be pure noise.
+func cityHasBoundRig(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func convoyCreateStoreRoot(cfg *config.City, cityPath, beadID string) string {
