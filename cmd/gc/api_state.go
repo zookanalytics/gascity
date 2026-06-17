@@ -470,12 +470,25 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	cs.mu.RUnlock()
 
-	for _, store := range stores {
-		if cached, ok := store.(*beads.CachingStore); ok {
-			cached.ApplyEvent(evt.Type, evt.Payload)
-		}
-	}
+	// Skip events we emitted ourselves (reconciler-detected changes):
+	// don't re-apply them to the caching stores, and don't poke. The
+	// originating CachingStore already updated its own cache during
+	// reconcile; redelivering through ApplyEvent risks a self-feedback
+	// loop because mergeCacheEventPatch is field-aware (driven by which
+	// JSON keys are present) while notifyChange marshals the full bead
+	// with omitempty — fields that became empty are dropped from the
+	// payload and the merge silently keeps the prior cache value, so the
+	// next reconcile cycle still sees a diff and re-fires. Other stores
+	// filter by ownsBeadID, so the only meaningful delivery was a self-
+	// echo back to the originating store anyway. Bead-close autoclose
+	// below still runs regardless of actor: a close first observed via
+	// reconcile must still cascade convoy/wisp/molecule autoclose.
 	if evt.Actor != "cache-reconcile" {
+		for _, store := range stores {
+			if cached, ok := store.(*beads.CachingStore); ok {
+				cached.ApplyEvent(evt.Type, evt.Payload)
+			}
+		}
 		cs.Poke()
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
