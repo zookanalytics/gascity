@@ -20,11 +20,9 @@ func rigViewFromGen(g genclient.RigResponse) RigView {
 	out := RigView{
 		Name:         g.Name,
 		Path:         g.Path,
+		Prefix:       g.Prefix,
 		Suspended:    g.Suspended,
 		RunningCount: int(g.RunningCount),
-	}
-	if g.Prefix != nil {
-		out.Prefix = *g.Prefix
 	}
 	if g.DefaultBranch != nil {
 		out.DefaultBranch = *g.DefaultBranch
