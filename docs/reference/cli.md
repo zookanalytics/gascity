@@ -1057,6 +1057,13 @@ Create a convoy and optionally link existing issues to it.
 Creates a convoy bead and tracks any provided issue IDs. Issues can
 also be added later with "gc convoy add".
 
+The convoy is created in the same rig scope that "gc bd" would resolve:
+an explicit --rig flag wins, then the current directory's rig, then the
+GC_RIG environment variable, otherwise city scope. When tracked issues
+are supplied they anchor the scope so the convoy and its issues share a
+store. Pass --city-scope to force city scope (and silence the city-scope
+fall-through warning).
+
 ```
 gc convoy create <name> [issue-ids...] [flags]
 ```
@@ -1068,10 +1075,12 @@ gc convoy create sprint-42
 gc convoy create sprint-42 issue-1 issue-2 issue-3
 gc convoy create deploy --owner mayor --notify mayor --merge mr
 gc convoy create auth-rewrite --owned --target integration/auth-rewrite
+gc convoy create infra-sweep --city-scope
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--city-scope` | bool |  | force city scope (overrides --rig/GC_RIG/cwd detection and silences the city-scope warning) |
 | `--json` | bool |  | emit JSONL result |
 | `--merge` | string |  | merge strategy: direct, mr, local |
 | `--notify` | string |  | notification target on completion |
