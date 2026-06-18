@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 var rawDoltSQLCallRe = regexp.MustCompile(`(?m)(^|[^A-Za-z0-9_-])dolt(?:[ \t]+|[ \t]*\\[ \t]*\r?\n[ \t]*)+sql([ \t]|$)`)
@@ -7005,6 +7006,10 @@ exit 0
 // later `git push origin main` would target the same ref the test verifies.
 func initSeedArchive(t *testing.T, archiveRepo string, prevCount int) string {
 	t.Helper()
+	// Disable host commit signing for the seed commit: make test runs under
+	// env -i (no SSH_AUTH_SOCK), so an inherited commit.gpgsign + gpg.format=ssh
+	// fails with "Couldn't get agent socket?".
+	testutil.IsolatedGitConfig(t)
 	dbDir := filepath.Join(archiveRepo, "beads")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -7287,6 +7292,7 @@ exit 0
 
 func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevCount int) string {
 	t.Helper()
+	testutil.IsolatedGitConfig(t) // disable host commit signing (env -i strips SSH_AUTH_SOCK)
 	dbDir := filepath.Join(archiveRepo, "beads")
 	if err := os.MkdirAll(dbDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -7330,6 +7336,7 @@ func initSeedArchiveWithoutLocalIdentity(t *testing.T, archiveRepo string, prevC
 
 func initSeedArchiveWithRemote(t *testing.T, archiveRepo string) (string, string) {
 	t.Helper()
+	testutil.IsolatedGitConfig(t) // disable host commit signing (env -i strips SSH_AUTH_SOCK)
 	remoteRepo := filepath.Join(t.TempDir(), "archive-remote.git")
 	if out, err := exec.Command("git", "init", "--bare", "-q", remoteRepo).CombinedOutput(); err != nil {
 		t.Fatalf("git init --bare: %v\n%s", err, out)
@@ -7403,6 +7410,7 @@ func initSeedArchiveWithUnreachableRemote(t *testing.T, archiveRepo string) {
 
 func advanceArchiveRemoteMain(t *testing.T, remoteRepo string) string {
 	t.Helper()
+	testutil.IsolatedGitConfig(t) // disable host commit signing (env -i strips SSH_AUTH_SOCK)
 	worktree := t.TempDir()
 	if out, err := exec.Command("git", "clone", "-q", remoteRepo, worktree).CombinedOutput(); err != nil {
 		t.Fatalf("git clone remote advance worktree: %v\n%s", err, out)
