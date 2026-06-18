@@ -54,10 +54,19 @@ agent pools.
   order definition overrides a lower-priority one with the same
   subdirectory name (last-wins semantics).
 
-- **Tracking Bead**: A bead created synchronously before each dispatch
-  goroutine launches, labeled `order-run:<scopedName>`. Serves dual
-  purpose: prevents the cooldown trigger from re-firing on the next tick,
-  and provides execution history for `gc order history`.
+- **Tracking Bead**: A bead created synchronously before a cooldown, cron,
+  or condition order's dispatch goroutine launches, labeled
+  `order-run:<scopedName>`. Serves dual purpose: prevents the trigger from
+  re-firing on the next tick, and provides execution history for
+  `gc order history`. **Event orders mint no tracking bead** — they dedup
+  via a durable file cursor (see Event Cursor below).
+
+- **Event Cursor**: A durable per-order record (`scopedName` →
+  last-processed event seq) in `<runtime>/order-event-cursors.json`,
+  updated in place each fire. Replaces the legacy `seq:<N>` label that rode
+  on per-fire tracking beads, so event orders need no bead at all — a bead
+  cursor would emit `bead.updated` and self-trigger orders watching
+  `bead.*`. Lives behind `orders.EventCursorFunc` / `AdvanceEventCursor`.
 
 ## Architecture
 
@@ -145,9 +154,12 @@ The order subsystem spans two packages:
 1. `dispatch()` iterates all non-manual orders.
 2. `CheckTrigger()` evaluates the trigger condition against current time,
    last-run history (from bead store), and event state (from event bus).
-3. For each due order, a tracking bead is created **synchronously**
-   with label `order-run:<scopedName>`. This is critical: it
-   prevents the cooldown trigger from re-firing on the next tick.
+3. For each due cooldown/cron/condition order, a tracking bead is created
+   **synchronously** with label `order-run:<scopedName>`, preventing the
+   trigger from re-firing on the next tick. **Event orders create no
+   tracking bead**: the loop reads the event head and advances the durable
+   file cursor before launching the goroutine, which serves the same
+   anti-re-fire role.
 4. A goroutine calls `dispatchOne()` with a context timeout derived from
    `effectiveTimeout()` (per-order timeout capped by global
    `max_timeout`).
@@ -246,11 +258,10 @@ Violations indicate bugs.
   window.
 
 - **Event trigger uses cursor-based deduplication**: Event orders track
-  the highest processed event sequence number via `seq:<N>` labels on
-  order-run beads. Formula orders stamp the wisp root or failure tracking
-  bead; exec orders stamp the tracking bead before the command runs. Subsequent
-  trigger checks use `AfterSeq` filtering to avoid reprocessing
-  already-handled events.
+  the highest processed event sequence number in the durable file cursor
+  (`order-event-cursors.json`), advanced to the current event head before
+  the goroutine launches. Subsequent trigger checks use `AfterSeq` filtering
+  to avoid reprocessing already-handled events. No bead is involved.
 
 - **Dispatch goroutines are drained on controller exit**: Each due
   order launches a goroutine whose completion is tracked by an
@@ -287,10 +298,11 @@ Violations indicate bugs.
 | File | Responsibility |
 |---|---|
 | `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
-| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()`, `MaxSeqFromLabels()` |
+| `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()` |
+| `internal/orders/event_cursor.go` | Durable per-order event cursor: `EventCursorFunc()`, `ReadEventCursor()`, `AdvanceEventCursor()` (file `order-event-cursors.json`) |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
-| `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()`, `bdCursorFunc()` |
+| `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()` |
 
 ## Configuration
 
@@ -358,7 +370,8 @@ files in the library and two in the CLI:
 | Test file | Coverage |
 |---|---|
 | `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
-| `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName), MaxSeqFromLabels (various label configurations) |
+| `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName) |
+| `internal/orders/event_cursor_test.go` | Durable event cursor: missing-file is zero, advance persists and reads, durable across restart, monotonic (no backward move), independent per-order keys, valid JSON, read error is fail-open zero |
 | `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording) |
 | `cmd/gc/order_dispatch_test.go` | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped) |
 | `cmd/gc/cmd_order_test.go` | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder |
@@ -385,14 +398,15 @@ boundaries.
   `sh -c <check>` synchronously during trigger evaluation. A slow check
   command blocks evaluation of subsequent orders on that tick.
 
-- **Event trigger cursor is per-run, not per-dispatch**: The cursor
-  position is computed from `seq:<N>` labels on existing order-run beads via
-  `MaxSeqFromLabels()`. The controller and `gc order run` fail closed when the
-  current event head cannot be read. For side-effecting exec orders, the cursor
-  is persisted before the command runs so a crash after execution does not
-  replay the same event. Trade-off: a controller crash after the cursor stamp
-  and before exec start drops that event for idempotent exec orders; for
-  non-idempotent exec orders this is the safer failure mode.
+- **Event trigger cursor is a durable file, not a bead**: The cursor
+  position is read from and advanced in `order-event-cursors.json`
+  (`orders.EventCursorFunc` / `AdvanceEventCursor`), one record per order.
+  The controller and `gc order run` fail closed when the current event head
+  cannot be read (skip the fire, retry next tick). The cursor is advanced
+  before the command runs (consumer-offset) so a crash after execution does
+  not replay the same event. Trade-off: a crash after the advance and before
+  exec start drops that event for idempotent exec orders; for non-idempotent
+  exec orders this is the safer failure mode.
 
 - **No hot-add of orders**: Order discovery runs on controller
   start and config reload (via fsnotify). Adding a new
