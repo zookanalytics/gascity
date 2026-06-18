@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func exampleDir() string {
@@ -50,15 +51,11 @@ func runCmd(t *testing.T, dir, name string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// neutralizeUserGitConfig points GIT_CONFIG_GLOBAL/SYSTEM at os.DevNull so
-// child git processes don't inherit commit.gpgsign or gpg.format=ssh from
-// the developer's global config. `make test` runs under `env -i` and
-// strips SSH_AUTH_SOCK, so signed commits would otherwise fail with
-// "Couldn't get agent socket" when these tests exec `git commit`.
+// neutralizeUserGitConfig isolates child git processes from the host git config
+// (see testutil.IsolatedGitConfig).
 func neutralizeUserGitConfig(t *testing.T) {
 	t.Helper()
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
-	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	testutil.IsolatedGitConfig(t)
 }
 
 func currentBranch(t *testing.T, dir string) string {
