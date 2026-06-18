@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
@@ -328,7 +329,7 @@ func builtinSystemPackSkillHash(cityPath, source string) (string, bool) {
 		return "", false
 	}
 	packName, skillRel := parts[0], parts[1]
-	bp, ok := builtinPackByName(packName)
+	bp, ok := builtinpacks.ByName(packName)
 	if !ok {
 		return "", false
 	}
