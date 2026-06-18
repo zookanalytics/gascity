@@ -1489,8 +1489,28 @@ func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResu
 
 // ListFullFromBeads is like ListFull but reuses a caller-supplied slice of
 // session-labeled beads. Callers that already loaded session beads can avoid
-// a second store scan by passing the same slice here.
+// a second store scan by passing the same slice here. Each matching bead is
+// expanded with live runtime observation via infoFromBead.
 func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
+	return m.listFromBeads(all, stateFilter, templateFilter, m.infoFromBead)
+}
+
+// ListSummaryFromBeads is the no-liveness counterpart to ListFullFromBeads: it
+// expands each matching bead with infoFromBeadStatic, which reads only stored
+// metadata and never calls the session provider. It backs the view=summary
+// session list, whose contract is to fan out no live runtime probes (no tmux
+// forks, no transcript I/O), so the status bar can poll cheaply without paying
+// for per-session liveness.
+func (m *Manager) ListSummaryFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
+	return m.listFromBeads(all, stateFilter, templateFilter, m.infoFromBeadStatic)
+}
+
+// listFromBeads filters a caller-supplied bead slice by state and template,
+// then expands each survivor into an Info via the supplied projection. The
+// projection is the sole difference between the Full listing (infoFromBead,
+// live observation) and the Summary listing (infoFromBeadStatic, metadata
+// only); the filtering is identical for both.
+func (m *Manager) listFromBeads(all []beads.Bead, stateFilter, templateFilter string, project func(beads.Bead) Info) *ListResult {
 	result := make([]Info, 0, len(all))
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
@@ -1530,7 +1550,7 @@ func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templa
 			continue
 		}
 
-		result = append(result, m.infoFromBead(b))
+		result = append(result, project(b))
 	}
 	return &ListResult{Sessions: result, Beads: all}
 }
@@ -1547,26 +1567,25 @@ func (m *Manager) Peek(id string, lines int) (string, error) {
 	return m.sp.Peek(sessName, lines)
 }
 
-// infoFromBead converts a bead to an Info struct, enriching with runtime state.
-func (m *Manager) infoFromBead(b beads.Bead) Info {
+// infoFromBeadStatic converts a bead to an Info using only its stored
+// metadata, performing no live runtime observation. It never calls the session
+// provider: no IsRunning/IsAttached/GetLastActivity probe, no transport
+// detection, and no ACP routing. State is taken verbatim from metadata (no
+// stale active->asleep downgrade) and Transport falls back to the metadata
+// value; the live-observation fields (Attached, LastActive) stay at their zero
+// values. This is the projection behind the view=summary session list, whose
+// contract forbids forking tmux or touching the runtime, and it is the shared
+// base infoFromBead layers live observation on top of.
+func (m *Manager) infoFromBeadStatic(b beads.Bead) Info {
 	sessName := b.Metadata["session_name"]
 	if sessName == "" {
 		sessName = sessionNameFor(b.ID)
 	}
 	closed := b.Status == "closed"
-	transport := transportFromMetadata(b)
-	if !closed {
-		transport, _ = m.transportForBead(b, sessName)
-		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	}
 
 	state := normalizeInfoState(State(b.Metadata["state"]))
 	if closed {
 		state = "" // closed beads have no runtime state
-	} else if m.sp != nil && state == StateActive && !m.sp.IsRunning(sessName) {
-		// Surface stale "awake" / "active" beads as dormant immediately.
-		// The controller also heals metadata on the next tick.
-		state = StateAsleep
 	}
 
 	info := Info{
@@ -1578,7 +1597,7 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 		Alias:         b.Metadata["alias"],
 		AgentName:     b.Metadata["agent_name"],
 		Provider:      b.Metadata["provider"],
-		Transport:     transport,
+		Transport:     transportFromMetadata(b),
 		Command:       b.Metadata["command"],
 		WorkDir:       b.Metadata["work_dir"],
 		SessionName:   sessName,
@@ -1593,11 +1612,34 @@ func (m *Manager) infoFromBead(b beads.Bead) Info {
 			info.LastNudgeDeliveredAt = parsed
 		}
 	}
+	return info
+}
+
+// infoFromBead converts a bead to an Info struct, enriching the metadata-only
+// projection (infoFromBeadStatic) with live runtime state. For non-closed beads
+// it resolves the live transport, routes ACP if needed, and downgrades stale
+// active beads to asleep; for active beads it observes attach state and last
+// activity. Every provider call lives here, so callers that must not touch the
+// runtime use infoFromBeadStatic instead.
+func (m *Manager) infoFromBead(b beads.Bead) Info {
+	info := m.infoFromBeadStatic(b)
+
+	if !info.Closed {
+		transport, _ := m.transportForBead(b, info.SessionName)
+		info.Transport = transport
+		_ = m.routeACPIfNeeded(b.Metadata["provider"], transport, info.SessionName)
+
+		if m.sp != nil && info.State == StateActive && !m.sp.IsRunning(info.SessionName) {
+			// Surface stale "awake" / "active" beads as dormant immediately.
+			// The controller also heals metadata on the next tick.
+			info.State = StateAsleep
+		}
+	}
 
 	// Enrich with live runtime state if active.
-	if state == StateActive && m.sp != nil {
-		info.Attached = m.sp.IsAttached(sessName)
-		if t, err := m.sp.GetLastActivity(sessName); err == nil && !t.IsZero() {
+	if info.State == StateActive && m.sp != nil {
+		info.Attached = m.sp.IsAttached(info.SessionName)
+		if t, err := m.sp.GetLastActivity(info.SessionName); err == nil && !t.IsZero() {
 			info.LastActive = t
 		}
 	}
