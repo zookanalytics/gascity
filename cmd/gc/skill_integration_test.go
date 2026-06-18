@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -394,7 +395,7 @@ func TestMergeSkillFingerprintEntriesPrefixPartitioning(t *testing.T) {
 // CoreFingerprint and spun config-drift restarts until the wake budget starved.
 func TestSkillFingerprintHashBuiltinIgnoresOnDiskStomp(t *testing.T) {
 	const pack, skill = "core", "gc-dispatch"
-	bp, ok := builtinPackByName(pack)
+	bp, ok := builtinpacks.ByName(pack)
 	if !ok {
 		t.Skipf("builtin pack %q not present in this binary", pack)
 	}
