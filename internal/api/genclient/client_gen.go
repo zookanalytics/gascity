@@ -6019,6 +6019,9 @@ type GetV0CityByCityNameSessionsParams struct {
 
 	// Peek Include last output preview.
 	Peek *bool `form:"peek,omitempty" json:"peek,omitempty"`
+
+	// View Response detail level. "summary" returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, options, metadata) built from stored metadata with no live runtime probe; it skips per-session enrichment (live running probe, active-bead lookup, model/context transcript read) and also leaves the live-observation fields running, active_bead, model, context_pct, last_output, attached, and last_active at their zero values. It takes precedence over peek. Empty or "full" (the default, and any unrecognized value) returns the enriched response.
+	View *string `form:"view,omitempty" json:"view,omitempty"`
 }
 
 // CreateSessionParams defines parameters for CreateSession.
@@ -22995,6 +22998,22 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 		if params.Peek != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "peek", *params.Peek, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.View != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "view", *params.View, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

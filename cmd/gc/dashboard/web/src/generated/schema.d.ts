@@ -12901,6 +12901,8 @@ export interface operations {
                 template?: string;
                 /** @description Include last output preview. */
                 peek?: boolean;
+                /** @description Response detail level. "summary" returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, options, metadata) built from stored metadata with no live runtime probe; it skips per-session enrichment (live running probe, active-bead lookup, model/context transcript read) and also leaves the live-observation fields running, active_bead, model, context_pct, last_output, attached, and last_active at their zero values. It takes precedence over peek. Empty or "full" (the default, and any unrecognized value) returns the enriched response. */
+                view?: string;
             };
             header?: never;
             path: {
