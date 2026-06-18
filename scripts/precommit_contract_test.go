@@ -249,11 +249,11 @@ exit 0
 	// out above, so we just need the files to exist for git add.
 	placeholders := []string{
 		"internal/api/openapi.json",
-		"docs/schema/openapi.json",
-		"docs/schema/openapi.txt",
+		"docs/reference/schema/openapi.json",
+		"docs/reference/schema/openapi.txt",
 		"internal/api/genclient/client_gen.go",
-		"docs/schema/city-schema.json",
-		"docs/schema/city-schema.txt",
+		"docs/reference/schema/city-schema.json",
+		"docs/reference/schema/city-schema.txt",
 		"docs/reference/config.md",
 		"docs/reference/cli.md",
 		"cmd/gc/dashboard/web/src/generated/placeholder.ts",
