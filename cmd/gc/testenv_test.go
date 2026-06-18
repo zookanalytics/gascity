@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -302,7 +303,12 @@ func TestInstallTestProviderStubsUsesPIDPrefixedDir(t *testing.T) {
 
 func writeTestGitIdentity(homeDir string) error {
 	gitConfig := filepath.Join(homeDir, ".gitconfig")
-	data := []byte("[user]\n\tname = gc-test\n\temail = gc-test@test.local\n[beads]\n\trole = maintainer\n")
+	// Build on the shared isolated config, appending this fixture's identity and
+	// beads.role. The trailing [user] block wins (git takes the last value), so
+	// the commit author is gc-test.
+	data := []byte(testutil.IsolatedGitConfigContents() +
+		"[user]\n\tname = gc-test\n\temail = gc-test@test.local\n" +
+		"[beads]\n\trole = maintainer\n")
 	return os.WriteFile(gitConfig, data, 0o644)
 }
 
@@ -320,10 +326,8 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 	if err := writeTestGitIdentity(homeDir); err != nil {
 		t.Fatalf("write test git identity for beads-bd: %v", err)
 	}
-	return []string{
-		"HOME=" + homeDir,
-		"GIT_CONFIG_GLOBAL=" + filepath.Join(homeDir, ".gitconfig"),
-	}
+	return append([]string{"HOME=" + homeDir},
+		testutil.IsolatedGitConfigEnv(filepath.Join(homeDir, ".gitconfig"))...)
 }
 
 func writeTestDoltIdentity(homeDir string) error {
@@ -350,5 +354,28 @@ func configureTestDoltIdentityEnv(t *testing.T) {
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
+}
+
+// TestMainSeedsWritableIsolatedGlobalGitConfig guards the invariant TestMain
+// wires up: GIT_CONFIG_GLOBAL points at a real, writable file (not /dev/null).
+// See gc-sms19 / tk-9zgnf for why.
+func TestMainSeedsWritableIsolatedGlobalGitConfig(t *testing.T) {
+	path := os.Getenv("GIT_CONFIG_GLOBAL")
+	if path == "" || path == os.DevNull {
+		t.Fatalf("GIT_CONFIG_GLOBAL = %q, want a writable temp file (gc-sms19)", path)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("GIT_CONFIG_GLOBAL %q is not writable: %v", path, err)
+	}
+	_ = f.Close()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read GIT_CONFIG_GLOBAL %q: %v", path, err)
+	}
+	if !strings.Contains(string(data), "gpgsign = false") {
+		t.Fatalf("isolated global config %q missing gpgsign=false (tk-9zgnf):\n%s", path, data)
+	}
 }
