@@ -21,11 +21,9 @@ func initTestRepo(t *testing.T) string {
 	return dir
 }
 
-// runGit runs a git command in dir and fails the test on error.
-// Strips git env vars to prevent interference from pre-commit hooks,
-// and points GIT_CONFIG_GLOBAL/SYSTEM at os.DevNull so the developer's
-// commit.gpgsign / gpg.format=ssh config can't reach a stripped
-// SSH_AUTH_SOCK when `make test` runs under env -i.
+// runGit runs a git command in dir and fails the test on error. It strips
+// blacklisted git env vars (pre-commit hook interference) and points git at the
+// shared isolated config (see testutil.SharedIsolatedGitConfigEnv).
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
@@ -37,10 +35,7 @@ func runGit(t *testing.T, dir string, args ...string) {
 		}
 		cmd.Env = append(cmd.Env, e)
 	}
-	cmd.Env = append(cmd.Env,
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_CONFIG_SYSTEM="+os.DevNull,
-	)
+	cmd.Env = append(cmd.Env, testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), out, err)

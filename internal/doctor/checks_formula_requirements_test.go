@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestFormulaRequirementsCheckOK(t *testing.T) {
@@ -325,7 +326,6 @@ func doctorInitRepo(t *testing.T) string {
 	doctorRunGit(t, root, "init", "-b", "main")
 	doctorRunGit(t, root, "config", "user.email", "test@example.com")
 	doctorRunGit(t, root, "config", "user.name", "test")
-	doctorRunGit(t, root, "config", "commit.gpgsign", "false")
 	return root
 }
 
@@ -333,6 +333,7 @@ func doctorRunGit(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), testutil.SharedIsolatedGitConfigEnv()...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
