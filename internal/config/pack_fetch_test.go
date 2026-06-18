@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // initBareRepo creates a bare git repo with a pack.toml file.
@@ -143,13 +144,8 @@ func mustGit(t *testing.T, dir string, args ...string) {
 	cmd.Env = append(cmd.Env,
 		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@test.com",
-		// Point GIT_CONFIG_GLOBAL/SYSTEM at os.DevNull so the
-		// developer's commit.gpgsign / gpg.format=ssh config can't
-		// reach a stripped SSH_AUTH_SOCK when `make test` runs under
-		// env -i.
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
-		"GIT_CONFIG_SYSTEM="+os.DevNull,
 	)
+	cmd.Env = append(cmd.Env, testutil.SharedIsolatedGitConfigEnv()...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), string(out), err)

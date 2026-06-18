@@ -1,0 +1,169 @@
+package testutil
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+// execGitInherit runs git in dir inheriting the ambient process environment
+// (so t.Setenv-injected GIT_CONFIG_* take effect) and returns trimmed output.
+func execGitInherit(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func requireGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skipf("git unavailable: %v", err)
+	}
+}
+
+// TestIsolatedGitConfigNeutralizesSigning proves the helper isolates the test
+// from a host config that signs commits, so `git commit` succeeds even
+// when no SSH agent is reachable (the `make test` env -i condition that strips
+// SSH_AUTH_SOCK). This is the tk-9zgnf failure mode.
+func TestIsolatedGitConfigNeutralizesSigning(t *testing.T) {
+	requireGit(t)
+
+	// A pre-existing host global config the isolation must override: signing
+	// on, ssh format, and no agent socket reachable.
+	hostHome := t.TempDir()
+	hostCfg := filepath.Join(hostHome, ".gitconfig")
+	hostConfig := "[commit]\n\tgpgsign = true\n[gpg]\n\tformat = ssh\n[user]\n\tsigningkey = /nonexistent/key\n"
+	if err := os.WriteFile(hostCfg, []byte(hostConfig), 0o644); err != nil {
+		t.Fatalf("write host gitconfig: %v", err)
+	}
+	t.Setenv("HOME", hostHome)
+	t.Setenv("GIT_CONFIG_GLOBAL", hostCfg)
+	t.Setenv("SSH_AUTH_SOCK", "")
+
+	// Activate isolation — this must override the pre-existing GIT_CONFIG_GLOBAL.
+	IsolatedGitConfig(t)
+
+	if got := os.Getenv("GIT_CONFIG_GLOBAL"); got == hostCfg {
+		t.Fatalf("GIT_CONFIG_GLOBAL still points at host config %q", got)
+	}
+	if got, _ := execGitInherit(t, hostHome, "config", "--global", "commit.gpgsign"); got != "false" {
+		t.Fatalf("commit.gpgsign = %q, want false", got)
+	}
+
+	repo := t.TempDir()
+	if out, err := execGitInherit(t, repo, "init"); err != nil {
+		t.Fatalf("git init: %s: %v", out, err)
+	}
+	// Identity comes from the isolated global config; no repo-local identity set.
+	if out, err := execGitInherit(t, repo, "commit", "--allow-empty", "-m", "init"); err != nil {
+		t.Fatalf("git commit should succeed under isolation (no signing): %s: %v", out, err)
+	}
+}
+
+// TestIsolatedGitConfigAllowsGlobalWrite proves the isolated config is a real
+// writable file (never /dev/null), so a global config WRITE — like
+// ensure_beads_role's `git config --global beads.role maintainer` — succeeds.
+// This is the gc-sms19 failure mode.
+func TestIsolatedGitConfigAllowsGlobalWrite(t *testing.T) {
+	requireGit(t)
+	IsolatedGitConfig(t)
+
+	if out, err := execGitInherit(t, t.TempDir(), "config", "--global", "beads.role", "maintainer"); err != nil {
+		t.Fatalf("global config write should succeed: %s: %v", out, err)
+	}
+	got, err := execGitInherit(t, t.TempDir(), "config", "--global", "beads.role")
+	if err != nil {
+		t.Fatalf("read back beads.role: %v", err)
+	}
+	if got != "maintainer" {
+		t.Fatalf("beads.role = %q, want maintainer", got)
+	}
+}
+
+// TestWriteIsolatedGitConfig verifies the testing.T-free building block writes
+// a parseable config seeded with signing disabled.
+func TestWriteIsolatedGitConfig(t *testing.T) {
+	requireGit(t)
+	dir := t.TempDir()
+	path, err := WriteIsolatedGitConfig(dir)
+	if err != nil {
+		t.Fatalf("WriteIsolatedGitConfig: %v", err)
+	}
+	if filepath.Dir(path) != dir {
+		t.Fatalf("config path %q not under dir %q", path, dir)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("config file %q is not writable (mode %v)", path, info.Mode())
+	}
+	for _, key := range []string{"commit.gpgsign", "tag.gpgsign"} {
+		out, err := execGitInherit(t, dir, "config", "--file", path, "--type=bool", key)
+		if err != nil {
+			t.Fatalf("git config --file %s %s: %v", path, key, err)
+		}
+		if out != "false" {
+			t.Fatalf("%s = %q, want false", key, out)
+		}
+	}
+}
+
+// TestIsolatedGitConfigContents documents the canonical keys the seeded config
+// must carry so the contract stays visible if the format is edited.
+func TestIsolatedGitConfigContents(t *testing.T) {
+	contents := IsolatedGitConfigContents()
+	for _, want := range []string{"gpgsign = false", "[commit]", "[tag]", "defaultBranch = main"} {
+		if !strings.Contains(contents, want) {
+			t.Errorf("IsolatedGitConfigContents() missing %q\n--- got ---\n%s", want, contents)
+		}
+	}
+}
+
+// TestSharedIsolatedGitConfigEnv verifies the once-per-binary env getter points
+// at a real, writable, signing-disabled config and is stable across calls.
+func TestSharedIsolatedGitConfigEnv(t *testing.T) {
+	requireGit(t)
+	first := SharedIsolatedGitConfigEnv()
+	if !reflect.DeepEqual(first, SharedIsolatedGitConfigEnv()) {
+		t.Fatalf("SharedIsolatedGitConfigEnv not stable across calls: %v vs %v", first, SharedIsolatedGitConfigEnv())
+	}
+	var globalPath string
+	for _, e := range first {
+		if strings.HasPrefix(e, "GIT_CONFIG_GLOBAL=") {
+			globalPath = strings.TrimPrefix(e, "GIT_CONFIG_GLOBAL=")
+		}
+	}
+	if globalPath == "" || globalPath == os.DevNull {
+		t.Fatalf("GIT_CONFIG_GLOBAL = %q, want a writable temp file", globalPath)
+	}
+	if out, err := execGitInherit(t, t.TempDir(), "config", "--file", globalPath, "--type=bool", "commit.gpgsign"); err != nil || out != "false" {
+		t.Fatalf("commit.gpgsign from %q = %q (err %v), want false", globalPath, out, err)
+	}
+}
+
+// TestIsolatedGitConfigEnv verifies the env-entry form used by helpers that
+// build a subprocess environment explicitly.
+func TestIsolatedGitConfigEnv(t *testing.T) {
+	env := IsolatedGitConfigEnv("/tmp/x/.gitconfig")
+	want := map[string]bool{
+		"GIT_CONFIG_GLOBAL=/tmp/x/.gitconfig": false,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull:     false,
+	}
+	for _, e := range env {
+		if _, ok := want[e]; ok {
+			want[e] = true
+		}
+	}
+	for entry, seen := range want {
+		if !seen {
+			t.Errorf("IsolatedGitConfigEnv missing entry %q (got %v)", entry, env)
+		}
+	}
+}
