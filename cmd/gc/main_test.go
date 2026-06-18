@@ -2783,9 +2783,6 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
 
-[daemon]
-formula_v2 = true
-
 # [mail]
 # retention_ttl controls how long read messages are retained before purge.
 # 0 disables retention; use "168h" for 7 days.
@@ -2820,11 +2817,6 @@ version = "` + config.PublicGascityPackVersion + `"
 [[named_session]]
 template = "mayor"
 mode = "always"
-
-[[named_session]]
-name = "control-dispatcher"
-template = "core.control-dispatcher"
-mode = "on_demand"
 `
 	if packGot != packWant {
 		t.Errorf("pack.toml content:\ngot:\n%s\nwant:\n%s", packGot, packWant)

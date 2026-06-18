@@ -1040,7 +1040,7 @@ func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherUsesMetadataRou
 	maxActive := 1
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "maintainer-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Rigs: []config.Rig{{
 			Name: "gascity",
 			Path: t.TempDir(),
@@ -1133,7 +1133,7 @@ func TestApplyAttemptControlStepRoute_ImportQualifiedControlDispatcherUsesScope(
 	maxActive := 1
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "maintainer-city"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		Rigs: []config.Rig{{
 			Name: "fixture",
 			Path: t.TempDir(),

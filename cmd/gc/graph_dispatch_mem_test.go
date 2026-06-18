@@ -31,7 +31,7 @@ func buildMemGraphWorkflowConfig(t *testing.T) *config.City {
 	t.Helper()
 	cfg := &config.City{
 		Daemon: config.DaemonConfig{
-			FormulaV2: true,
+			FormulaV2: boolPtr(true),
 		},
 		Workspace: config.Workspace{Name: "test-city"},
 		FormulaLayers: config.FormulaLayers{

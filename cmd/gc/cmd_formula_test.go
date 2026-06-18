@@ -657,7 +657,7 @@ func TestFormulaCookHonorsFormulaV2DisabledCityBeforeCreatingBeads(t *testing.T)
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_BOOTSTRAP", "skip")
 	t.Cleanup(func() {
-		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)}})
 	})
 
 	cityDir := t.TempDir()

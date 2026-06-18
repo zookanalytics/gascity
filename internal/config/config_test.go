@@ -111,7 +111,7 @@ func TestMarshalDefaultCityFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n\n[daemon]\nformula_v2 = true\n"
+	want := "[workspace]\nname = \"bright-lights\"\n\n[[agent]]\nname = \"mayor\"\nprompt_template = \"prompts/mayor.md\"\n\n[[named_session]]\ntemplate = \"mayor\"\nmode = \"always\"\n"
 	if string(data) != want {
 		t.Errorf("Marshal output:\ngot:\n%s\nwant:\n%s", data, want)
 	}
@@ -125,7 +125,7 @@ name = "bright-lights"
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if !cfg.Daemon.FormulaV2 {
+	if !cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
 	}
 }
@@ -141,7 +141,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
 	}
 	data, err := cfg.Marshal()
@@ -165,7 +165,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit formula_v2=false to win")
 	}
 }
@@ -181,7 +181,7 @@ graph_workflows = false
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want legacy graph_workflows=false alias to disable formula_v2")
 	}
 	data, err := cfg.Marshal()
@@ -3740,14 +3740,24 @@ name = "worker"
 	}
 }
 
-func TestMarshalDefaultCityIncludesFormulaV2Default(t *testing.T) {
+func TestMarshalDefaultCityOmitsFormulaV2Default(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
-	if !strings.Contains(string(data), "[daemon]") || !strings.Contains(string(data), "formula_v2 = true") {
-		t.Errorf("Marshal output should include formula_v2 default:\n%s", data)
+	// formula_v2 is on by default; generated configs must NOT pin the default
+	// (a nil pointer is omitted), so the [daemon] table does not appear at all.
+	if strings.Contains(string(data), "formula_v2") {
+		t.Errorf("default city.toml should omit formula_v2 (default-on):\n%s", data)
+	}
+	// ...and a round-trip still loads as enabled.
+	cfg, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse round-trip: %v", err)
+	}
+	if !cfg.Daemon.FormulaV2Enabled() {
+		t.Errorf("round-trip of default city.toml should be formula-v2 enabled")
 	}
 }
 
@@ -6410,7 +6420,7 @@ func TestValidateDependsOn(t *testing.T) {
 }
 
 func TestInjectImplicitAgents_NoProviders(t *testing.T) {
-	cfg := &City{Daemon: DaemonConfig{FormulaV2: true}}
+	cfg := &City{Daemon: DaemonConfig{FormulaV2: boolPtr(true)}}
 	InjectImplicitAgents(cfg)
 
 	if len(cfg.Agents) != 0 {
@@ -6425,7 +6435,7 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 	// workspace.provider selects a default but the provider catalog creates
 	// implicit agents.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: true},
+		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": BuiltinProviderAlias("claude"),
@@ -6448,7 +6458,7 @@ func TestInjectImplicitAgents_WorkspaceProvider(t *testing.T) {
 func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 	// [providers.claude] + [providers.codex] → both get implicit agents.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: true},
+		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": BuiltinProviderAlias("claude"),
@@ -6472,7 +6482,7 @@ func TestInjectImplicitAgents_WorkspaceProviderPlusExplicit(t *testing.T) {
 func TestInjectImplicitAgents_WorkspaceProviderNoDuplicate(t *testing.T) {
 	// workspace.provider = "claude" + [providers.claude] → no duplicate.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: true},
+		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: Workspace{Provider: "claude"},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
@@ -6489,7 +6499,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltin(t *testing.T) {
 	// A non-builtin workspace.provider without a matching [providers.X]
 	// section must NOT create an implicit agent (it would fail at resolution).
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: true},
+		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: Workspace{Provider: "my-custom-llm"},
 	}
 	InjectImplicitAgents(cfg)
@@ -6503,7 +6513,7 @@ func TestInjectImplicitAgents_WorkspaceProviderNonBuiltinWithEntry(t *testing.T)
 	// A non-builtin workspace.provider WITH a matching [providers.X]
 	// section should still work.
 	cfg := &City{
-		Daemon:    DaemonConfig{FormulaV2: true},
+		Daemon:    DaemonConfig{FormulaV2: boolPtr(true)},
 		Workspace: Workspace{Provider: "my-custom-llm"},
 		Providers: map[string]ProviderSpec{
 			"my-custom-llm": {Command: "ollama"},
@@ -6524,7 +6534,7 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 	// workspace.provider is preserved, but no implicit agent is created
 	// for that provider.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 		},
@@ -6558,7 +6568,7 @@ func TestInjectImplicitAgents_ExplicitAgentUnconfiguredProvider(t *testing.T) {
 func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 	// Only providers in cfg.Providers get implicit agents.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6596,7 +6606,7 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 	// Multiple builtins + multiple custom providers: builtins come first
 	// in canonical order, then customs in alphabetical order.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"codex":    {},
 			"claude":   {},
@@ -6620,7 +6630,7 @@ func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 
 func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6660,7 +6670,7 @@ func TestInjectImplicitAgents_ExplicitWins(t *testing.T) {
 func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 	// An explicit rig-scoped "claude" should NOT prevent the implicit city-scoped one.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},
@@ -6706,7 +6716,7 @@ func TestInjectImplicitAgents_RigScopedExplicitDoesNotBlockCity(t *testing.T) {
 func TestInjectImplicitAgents_RigInjection(t *testing.T) {
 	// With rigs defined, implicit agents are injected for each rig too.
 	cfg := &City{
-		Daemon: DaemonConfig{FormulaV2: true},
+		Daemon: DaemonConfig{FormulaV2: boolPtr(true)},
 		Providers: map[string]ProviderSpec{
 			"claude": {},
 			"codex":  {},

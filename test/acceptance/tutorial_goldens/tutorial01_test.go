@@ -112,11 +112,16 @@ func TestTutorial01Cities(t *testing.T) {
 			}
 			for _, want := range []string{
 				`provider = "claude"`,
-				`formula_v2 = true`,
 			} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("city.toml missing %q:\n%s", want, out)
 				}
+			}
+			// formula_v2 is on by default and intentionally omitted from
+			// generated city.toml (a pinned default is confusing and risks
+			// writing formula_v2=false). It must not appear at all.
+			if strings.Contains(out, "formula_v2") {
+				t.Fatalf("city.toml should omit formula_v2 (default-on):\n%s", out)
 			}
 			if strings.Contains(out, `includes = [".gc/system/packs/core"`) {
 				t.Fatalf("city.toml should not carry legacy builtin includes:\n%s", out)

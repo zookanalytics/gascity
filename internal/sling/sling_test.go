@@ -2562,7 +2562,7 @@ func graphV2SlingTestConfig(t *testing.T, formulaDir string) *config.City {
 	formulatest.EnableV2ForTest(t)
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{formulaDir},
 		},
@@ -2596,7 +2596,7 @@ title = "Do work"
 
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Daemon:    config.DaemonConfig{FormulaV2: true},
+		Daemon:    config.DaemonConfig{FormulaV2: boolPtr(true)},
 		FormulaLayers: config.FormulaLayers{
 			City: []string{formulaDir},
 		},

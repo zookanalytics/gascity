@@ -148,7 +148,7 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		}
 	})
 
-	t.Run("Config_JSON_DefaultOnDemandControlDispatcher", func(t *testing.T) {
+	t.Run("Config_JSON_NoDefaultControlDispatcherNamedSession", func(t *testing.T) {
 		out, err := c.GC("config", "show", "--json")
 		if err != nil {
 			t.Fatalf("gc config show --json: %v\n%s", err, out)
@@ -165,18 +165,16 @@ func TestSessionDefaultNamedSession(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("gc config show --json output is not a config envelope: %v\n%s", err, out)
 		}
+		// The control dispatcher serves via demand-scaling of the core-pack
+		// agent template (openControlDispatcherDemand), so gc init no longer
+		// injects a redundant on_demand named session for it -- that only
+		// produced a confusing "backing template not found ... disabled"
+		// warning on upgraded cities. Assert it is NOT auto-created.
 		for _, sess := range got.Config.NamedSessions {
 			if sess.Name == config.ControlDispatcherAgentName {
-				if sess.Template != "core."+config.ControlDispatcherAgentName {
-					t.Fatalf("default control-dispatcher template = %q, want core.control-dispatcher\n%s", sess.Template, out)
-				}
-				if sess.Mode != "on_demand" {
-					t.Fatalf("default control-dispatcher mode = %q, want on_demand\n%s", sess.Mode, out)
-				}
-				return
+				t.Fatalf("gc init should not create a control-dispatcher named session (redundant with demand-scaling); found %+v\n%s", sess, out)
 			}
 		}
-		t.Fatalf("default control-dispatcher named session missing from config\n%s", out)
 	})
 
 	t.Run("Prune_NoClosedSessions", func(t *testing.T) {

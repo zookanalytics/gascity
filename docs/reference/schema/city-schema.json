@@ -1182,7 +1182,7 @@
       "properties": {
         "formula_v2": {
           "type": "boolean",
-          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\ncompiler-v2 workflow compilation, batch graph-apply bead creation, and\nrouting to the core pack's control-dispatcher worker.\nRequires bd with --graph support. Default: true. Set false only for cities\npinned to formula compiler v1.",
+          "description": "FormulaV2 enables formula compiler v2 workflow infrastructure:\ncompiler-v2 workflow compilation, batch graph-apply bead creation, and\nrouting to the core pack's control-dispatcher worker.\nRequires bd with --graph support. Default: ENABLED. A nil pointer means\nthe default-on behavior and is OMITTED from generated configs (so\nauto-generated city.toml files never pin the default and never\naccidentally write formula_v2=false); an explicit formula_v2=false (or\nthe deprecated graph_workflows=false alias) is preserved as a non-nil\nfalse. Read the effective value via FormulaV2Enabled(), never the field.",
           "default": true
         },
         "graph_workflows": {

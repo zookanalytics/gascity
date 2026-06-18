@@ -147,7 +147,7 @@ args = ["notes-mcp"]
 		cfg := &config.City{
 			Workspace:  config.Workspace{Provider: "claude"},
 			Providers:  map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
-			Daemon:     config.DaemonConfig{FormulaV2: true},
+			Daemon:     config.DaemonConfig{FormulaV2: boolPtr(true)},
 			PackMCPDir: filepath.Join(cityPath, "mcp"),
 		}
 		control := &config.Agent{

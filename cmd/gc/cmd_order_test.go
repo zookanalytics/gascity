@@ -984,7 +984,7 @@ func TestOrderRunJSONFormulaSummary(t *testing.T) {
 
 func TestOrderRunHonorsFormulaV2DisabledCity(t *testing.T) {
 	t.Cleanup(func() {
-		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: true}})
+		applyFeatureFlags(&config.City{Daemon: config.DaemonConfig{FormulaV2: boolPtr(true)}})
 	})
 
 	cityDir := t.TempDir()

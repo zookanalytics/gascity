@@ -24,12 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gastown`/`maintenance` import sources, superseded bundled pins, and stale
   locks are migrated to explicit pinned imports in `pack.toml` plus
   `packs.lock`.
-- **Fresh cities include a `control-dispatcher` named-session alias; upgraded
-  cities do not need one.** Existing cities repaired by `gc doctor --fix`
-  route controller work through `gc.routed_to = "core.control-dispatcher"` and
-  the normal control-dispatcher pool demand path. The doctor does not add the
-  fresh-init `[[named_session]]` alias because it is an operator convenience,
-  not required runtime state.
+- **No control-dispatcher named session is generated.** The control dispatcher
+  serves entirely via demand-scaling of the core pack's `core.control-dispatcher`
+  agent template (controller work routed through `gc.routed_to =
+  "core.control-dispatcher"`), so the on-demand `[[named_session]]` alias older
+  builds wrote is redundant. `gc init` no longer creates it, and `gc doctor
+  --fix` (during a pack-layout migration) drops the stale alias from upgraded
+  cities so its "backing template not found … disabled" warning stops firing.
+- **Generated configs no longer pin `formula_v2`.** Formula v2 is on by
+  default, so `gc init` omits the `[daemon] formula_v2` line instead of writing
+  the default value. An explicit `formula_v2 = false` (or the deprecated
+  `graph_workflows = false` alias) is still honored and preserved on round-trip.
 - **The built-in Claude provider no longer declares a fresh-start
   `session_id_flag`.** Claude remains resume-capable, but Gas City now records
   the provider-created session key after startup instead of passing a

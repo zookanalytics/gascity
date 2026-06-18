@@ -56,7 +56,7 @@ name = "test"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if !cfg.Daemon.FormulaV2 {
+	if !cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = false, want true when formula_v2 is omitted")
 	}
 }
@@ -74,7 +74,7 @@ formula_v2 = false
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want explicit false")
 	}
 }
@@ -98,7 +98,7 @@ patrol_interval = "1m"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if cfg.Daemon.FormulaV2 {
+	if cfg.Daemon.FormulaV2Enabled() {
 		t.Fatal("Daemon.FormulaV2 = true, want root explicit false to survive daemon fragment")
 	}
 	if cfg.Daemon.PatrolInterval != "1m" {

@@ -2226,16 +2226,16 @@ func (d DoltMaintenance) GCTimeoutOrDefault() time.Duration {
 
 // DaemonConfig holds controller daemon settings.
 type DaemonConfig struct {
-	// formulaV2Set keeps DaemonConfig non-zero when a file explicitly sets
-	// formula_v2=false, so the TOML encoder preserves that operator choice.
-	formulaV2Set bool `toml:"-" json:"-" jsonschema:"-"`
-
 	// FormulaV2 enables formula compiler v2 workflow infrastructure:
 	// compiler-v2 workflow compilation, batch graph-apply bead creation, and
 	// routing to the core pack's control-dispatcher worker.
-	// Requires bd with --graph support. Default: true. Set false only for cities
-	// pinned to formula compiler v1.
-	FormulaV2 bool `toml:"formula_v2" jsonschema:"default=true"`
+	// Requires bd with --graph support. Default: ENABLED. A nil pointer means
+	// the default-on behavior and is OMITTED from generated configs (so
+	// auto-generated city.toml files never pin the default and never
+	// accidentally write formula_v2=false); an explicit formula_v2=false (or
+	// the deprecated graph_workflows=false alias) is preserved as a non-nil
+	// false. Read the effective value via FormulaV2Enabled(), never the field.
+	FormulaV2 *bool `toml:"formula_v2,omitempty" jsonschema:"default=true"`
 	// GraphWorkflows is the deprecated predecessor of FormulaV2. Retained
 	// for backwards compatibility as an alias. Explicit formula_v2 wins.
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
@@ -4687,7 +4687,6 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 func DefaultCity(name string) City {
 	return City{
 		Workspace:     Workspace{Name: name},
-		Daemon:        DaemonConfig{FormulaV2: true},
 		Agents:        []Agent{{Name: "mayor", PromptTemplate: "prompts/mayor.md"}},
 		NamedSessions: []NamedSession{{Template: "mayor", Mode: "always"}},
 	}
@@ -4766,7 +4765,6 @@ func WizardCityWithProviders(name, defaultProvider string, providers []string) C
 	ws.InstallAgentHooks = defaultInstallAgentHooksForProviders(providers)
 	return City{
 		Workspace: ws,
-		Daemon:    DaemonConfig{FormulaV2: true},
 		Providers: builtinProviderAliases(providers),
 		Agents: []Agent{
 			{Name: "mayor", PromptTemplate: "prompts/mayor.md"},
@@ -4842,7 +4840,6 @@ func gastownCityWithWorkspace(_ string, ws Workspace, providers map[string]Provi
 		},
 		DefaultRigImportOrder: []string{"gastown"},
 		Daemon: DaemonConfig{
-			FormulaV2:       true,
 			PatrolInterval:  "30s",
 			MaxRestarts:     &maxRestarts,
 			RestartWindow:   "1h",
@@ -4929,20 +4926,30 @@ func Parse(data []byte) (*City, error) {
 	return &cfg, nil
 }
 
+// FormulaV2Enabled reports the effective formula-v2 setting. It is ENABLED by
+// default: a nil pointer (the absent/omitted state) means enabled; only an
+// explicit formula_v2=false (or the deprecated graph_workflows=false alias)
+// disables it. Always read the effective value through this helper, never the
+// raw pointer field.
+func (d DaemonConfig) FormulaV2Enabled() bool {
+	return d.FormulaV2 == nil || *d.FormulaV2
+}
+
 func applyDaemonFormulaV2Default(cfg *City, md toml.MetaData) {
 	if cfg == nil {
 		return
 	}
+	// An explicit formula_v2 always wins: the decoder already populated the
+	// pointer (&true or &false), so leave it untouched.
 	if md.IsDefined("daemon", "formula_v2") {
-		cfg.Daemon.formulaV2Set = true
 		return
 	}
+	// Honor the deprecated graph_workflows alias only when formula_v2 is absent.
 	if md.IsDefined("daemon", "graph_workflows") {
-		cfg.Daemon.FormulaV2 = cfg.Daemon.GraphWorkflows
-		if !cfg.Daemon.FormulaV2 {
-			cfg.Daemon.formulaV2Set = true
-		}
+		v := cfg.Daemon.GraphWorkflows
+		cfg.Daemon.FormulaV2 = &v
 		return
 	}
-	cfg.Daemon.FormulaV2 = true
+	// Neither set: leave FormulaV2 nil so it stays default-on (via
+	// FormulaV2Enabled) and is omitted from any generated/round-tripped config.
 }
