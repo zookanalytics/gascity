@@ -1114,6 +1114,10 @@
           "$ref": "#/$defs/EventsConfig",
           "description": "Events configures the events provider backend."
         },
+        "usage": {
+          "$ref": "#/$defs/UsageConfig",
+          "description": "Usage configures the usage-fact sink backend."
+        },
         "dolt": {
           "$ref": "#/$defs/DoltConfig",
           "description": "Dolt configures optional dolt server connection overrides."
@@ -1387,7 +1391,7 @@
         "read_timeout_millis": {
           "type": "integer",
           "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
-          "default": 30000
+          "default": 15000
         },
         "write_timeout_millis": {
           "type": "integer",
@@ -2780,6 +2784,17 @@
       "additionalProperties": false,
       "type": "object",
       "description": "UpstreamSpec is a named model-serving endpoint preset (Phase C — the Upstream axis: WHO serves+resolves the model)."
+    },
+    "UsageConfig": {
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Provider selects the usage sink backend:\n  - \"discard\" / \"fake\" → drop all facts\n  - \"exec:\u003cscript\u003e\" → user-supplied script (JSON fact per line on stdin)\n  - \"\" / \"local\" → durable file-backed JSONL at .gc/usage.jsonl (default)"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "UsageConfig holds usage-fact sink settings."
     },
     "Workspace": {
       "properties": {
