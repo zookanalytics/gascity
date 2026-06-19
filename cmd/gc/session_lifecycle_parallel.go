@@ -889,7 +889,14 @@ func buildPreparedStartWithWorkDirResolver(
 	firstStart := session.Metadata["started_config_hash"] == ""
 	forceFresh := session.Metadata["wake_mode"] == "fresh"
 	hasResumeKey := strings.TrimSpace(session.Metadata["session_key"]) != ""
-	if !firstStart && !forceFresh && hasResumeKey {
+	// !tp.IsACP mirrors the CLI-resume guard above: only providers that actually
+	// take a --resume/--session-id flag rehydrate the prior conversation. ACP is
+	// excluded from resolveSessionCommand and acp.Provider.Start always opens a
+	// fresh session/new, delivering the rendered role prompt via the nudge — so
+	// suppressing prompt replay on an ACP "resume" would drop the role prompt
+	// entirely (gc-xlj7s). A Claude ACP session can still mint a session_key, so
+	// hasResumeKey alone is not enough to tell that --resume rehydration applies.
+	if !firstStart && !forceFresh && hasResumeKey && !tp.IsACP {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
 		// On resume the provider rehydrates the prior conversation (the rendered
