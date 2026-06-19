@@ -728,6 +728,13 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 
 	populateAgentLocalAssetDirs(fs, root, cityRoot)
 
+	// Resolve "<pack>//<subpath>" agent path references against the imported
+	// pack closure now that PackDirs is populated. Unknown/ambiguous packs
+	// fail here rather than rendering an empty prompt at spawn.
+	if err := resolvePackQualifiedAgentPaths(root); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
 
@@ -1458,6 +1465,12 @@ func loadNamepools(fs fsys.FS, cfg *City, cityRoot string) {
 // "//" paths resolve to city root. Absolute paths pass through unchanged.
 func adjustFragmentPath(p, fragDir, cityRoot string) string {
 	if p == "" {
+		return p
+	}
+	// "<pack>//<subpath>" references survive composition unchanged; they
+	// resolve against the imported pack closure in
+	// resolvePackQualifiedAgentPaths once PackDirs is populated.
+	if _, _, ok := splitPackQualifiedPath(p); ok {
 		return p
 	}
 	if strings.HasPrefix(p, "//") {
