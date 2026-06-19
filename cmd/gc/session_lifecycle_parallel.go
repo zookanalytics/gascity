@@ -892,7 +892,18 @@ func buildPreparedStartWithWorkDirResolver(
 	if !firstStart && !forceFresh && hasResumeKey {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		// On resume the provider rehydrates the prior conversation (the rendered
+		// role prompt included) via --resume, so an agent that already carries a
+		// nudge only needs the nudge to wake without landing idle. Prepending the
+		// prompt in that case duplicates the already-restored role on every wake
+		// (gc-7go2a; the ~20k-token re-injection in gc-cbtfq). #2477's prompt
+		// replay stays as the fallback for nudge-less agents, whose only
+		// first-turn payload is the prompt itself.
+		if strings.TrimSpace(tp.Hints.Nudge) != "" {
+			agentCfg.Nudge = tp.Hints.Nudge
+		} else {
+			agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		}
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
 		}
