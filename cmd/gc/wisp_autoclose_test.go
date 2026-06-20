@@ -685,6 +685,49 @@ func TestWispAutocloseLeavesLegacyWorkflowRootViaInputConvoy(t *testing.T) {
 	}
 }
 
+func TestWispAutocloseLeavesAbandonedOrderRootWithoutInputConvoy(t *testing.T) {
+	// Scope boundary for the narrowed graph.v2 input-convoy reap (PR #71): the
+	// on_close cascade reaches a graph.v2 workflow root only through
+	// gc.input_convoy_id -> a tracking convoy whose member just closed. An
+	// abandoned no-op *order-run* root (the gc-y29q8 shape) carries NO
+	// gc.input_convoy_id, has no tracking convoy, and materializes zero child
+	// work, so nothing here can discover it -- and in production no owner-bead
+	// close fires this hook for it at all. Reaping that shape needs a periodic-
+	// reaper / reconciler mechanism, not the close cascade; upstream has none
+	// today (closeAbandonedRoots' stepless `descendants == 0` guard intentionally
+	// skips it). Tracked in gc-2pyrf. This test pins the boundary so a later
+	// "fix" that broadens this path into a blind routed-root reaper -- which
+	// would race the instantiator on legitimately-fresh roots -- fails here.
+	store := beads.NewMemStore()
+	unrelated, _ := store.Create(beads.Bead{Title: "unrelated work", Type: "task"})
+	root, _ := store.Create(beads.Bead{
+		Title: "abandoned no-op order root",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            "workflow",
+			beadmeta.FormulaContractMetadataKey: "graph.v2",
+			beadmeta.RoutedToMetadataKey:        "gascity/gc-toolkit.polecat",
+			// No gc.input_convoy_id, no tracking convoy, no children.
+		},
+	})
+
+	_ = store.Close(unrelated.ID)
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, unrelated.ID, &stdout)
+
+	rootAfter, err := store.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(root): %v", err)
+	}
+	if rootAfter.Status != "open" {
+		t.Fatalf("abandoned no-input-convoy order root status = %q, want open (out of scope for the close cascade; needs a periodic reaper -- gc-2pyrf)", rootAfter.Status)
+	}
+	if stdout.String() != "" {
+		t.Fatalf("close cascade must not act on the abandoned order root, got %q", stdout.String())
+	}
+}
+
 func TestWispAutocloseBeadNotFound(t *testing.T) {
 	store := beads.NewMemStore()
 

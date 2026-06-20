@@ -72,6 +72,15 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer) {
 	for _, attached := range attachments {
 		seen[attached.ID] = true
 	}
+	// Scope boundary: this reaches a graph.v2 workflow root only through
+	// gc.input_convoy_id -> a tracking convoy whose member (parent) just closed.
+	// It deliberately does NOT cover an abandoned graph.v2 *order-run* root that
+	// carries no gc.input_convoy_id, has no tracking convoy, and materializes
+	// zero child work (the gc-y29q8 shape): no owner-bead close fires this hook
+	// for it, and nothing here can discover it. That shape needs a periodic-
+	// reaper / reconciler mechanism instead -- upstream has none today
+	// (closeAbandonedRoots' stepless `descendants == 0` guard skips it).
+	// Tracked in gc-2pyrf.
 	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, parent, seen)...)
 	if err == nil || len(attachments) > 0 {
 		for _, attached := range attachments {
