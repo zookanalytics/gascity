@@ -72,3 +72,17 @@ linters:
         linters:
           - revive
         text: "stutters"
+      # SA5011 ("possible nil pointer dereference") false positives in tests.
+      # The pinned golangci-lint (GOLANGCI_LINT_VERSION in the Makefile) bundles
+      # a staticcheck that predates Go 1.26 (go.mod) and does not recognize
+      # t.Fatal/t.Fatalf as terminating, so it flags the standard guarded test
+      # pattern as a nil deref:
+      #   x := f(); if x == nil { t.Fatal(...) }; ... x.field ...
+      # The tests are correct (the deref is guarded). All findings are in
+      # _test.go files; SA5011 stays active for production code. Remove this once
+      # GOLANGCI_LINT_VERSION is bumped to a Go-1.26-compatible release that
+      # restores t.Fatal terminating-call analysis (gc-sugi0).
+      - path: '_test\.go$'
+        linters:
+          - staticcheck
+        text: "SA5011"
