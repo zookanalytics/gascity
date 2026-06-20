@@ -1979,6 +1979,68 @@ esac
 	}
 }
 
+// TestEffectiveWorkQueryMemoizesEphemeralStatusQueries asserts the default work
+// query issues each `bd query ephemeral=true AND status=<s>` at most once per
+// invocation, even with all three identity variables set and the routed
+// pool-demand tier running.
+func TestEffectiveWorkQueryMemoizesEphemeralStatusQueries(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig"}
+	bdScript := `#!/bin/sh
+case "$1" in
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`
+	log := runWorkQueryCapturingBdLog(t, a.EffectiveWorkQuery(), map[string]string{
+		"GC_SESSION_ID":     "rig-bead",
+		"GC_SESSION_NAME":   "rig/polecat-session",
+		"GC_ALIAS":          "rig/polecat",
+		"GC_SESSION_ORIGIN": "ephemeral",
+	}, bdScript)
+
+	if got := strings.Count(log, "ephemeral=true AND status=in_progress"); got != 1 {
+		t.Fatalf("ephemeral in_progress query issued %d times, want 1 (no per-identity fan-out); bd log:\n%s", got, log)
+	}
+	if got := strings.Count(log, "ephemeral=true AND status=open"); got != 1 {
+		t.Fatalf("ephemeral open query issued %d times, want 1 (shared across assigned-ready and pool-demand tiers); bd log:\n%s", got, log)
+	}
+}
+
+// TestEffectiveWorkQueryResolvesEphemeralAssignedOnLaterIdentity asserts the
+// memoized ephemeral probe still resolves assigned work matching a later
+// identity (GC_ALIAS, probed third), so the one-shot fetch preserves
+// per-identity selection.
+func TestEffectiveWorkQueryResolvesEphemeralAssignedOnLaterIdentity(t *testing.T) {
+	a := Agent{Name: "polecat", Dir: "rig"}
+	bdScript := `#!/bin/sh
+set -eu
+case "$1" in
+  list) printf '[]' ;;
+  ready) printf '[]' ;;
+  query)
+    case "$*" in
+      *"ephemeral=true AND status=in_progress"*)
+        printf '[{"id":"ga-late","assignee":"rig/polecat","status":"in_progress","ephemeral":true}]' ;;
+      *) printf '[]' ;;
+    esac ;;
+  *) printf '[]' ;;
+esac
+`
+	out := runShellWithFakeBd(t, a.EffectiveWorkQuery(), map[string]string{
+		"GC_SESSION_ID":   "rig-bead",
+		"GC_SESSION_NAME": "rig/polecat-session",
+		"GC_ALIAS":        "rig/polecat",
+	}, bdScript)
+	if !strings.Contains(out, "ga-late") {
+		t.Fatalf("EffectiveWorkQuery() = %q, want ephemeral in-progress work resolved via GC_ALIAS identity", out)
+	}
+}
+
 func TestEffectiveWorkQueryCustom(t *testing.T) {
 	a := Agent{Name: "mayor", WorkQuery: "bd ready --label=pool:polecats"}
 	got := a.EffectiveWorkQuery()
@@ -5676,6 +5738,37 @@ func runLifecycleHookCommand(t *testing.T, command string, bdScript string) stri
 	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read hook log: %v", err)
+	}
+	return string(data)
+}
+
+// runWorkQueryCapturingBdLog runs command with a fake `bd` on PATH plus the
+// supplied env. The fake bd logs each invocation to $BD_LOG so tests can assert
+// how many times a bd subcommand was issued. The command is expected to exit 0.
+func runWorkQueryCapturingBdLog(t *testing.T, command string, env map[string]string, bdScript string) string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	bdPath := filepath.Join(tmp, "bd")
+	if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	logPath := filepath.Join(tmp, "bd.log")
+
+	cmd := exec.Command("sh", "-c", command)
+	cmd.Env = []string{
+		"PATH=" + tmp + ":" + os.Getenv("PATH"),
+		"BD_LOG=" + logPath,
+	}
+	for k, v := range env {
+		cmd.Env = append(cmd.Env, k+"="+v)
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("run work query with fake bd: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
 	}
 	return string(data)
 }

@@ -3441,6 +3441,33 @@ func bdQueryEphemeralStatusQuietShell(status string) string {
 	return bdQueryEphemeralStatusShell(status) + ` 2>/dev/null`
 }
 
+// ephemeralStatusCacheShellVars returns the shell variable names that memoize a
+// single `bd query ephemeral=true AND status=<status>` result per work-query
+// invocation: cacheVar holds the JSON rows, seenVar guards a one-shot fetch.
+// status is always a fixed literal, so the derived names are stable shell
+// identifiers.
+func ephemeralStatusCacheShellVars(status string) (cacheVar, seenVar string) {
+	cacheVar = "__gc_eph_" + status
+	return cacheVar, cacheVar + "_seen"
+}
+
+// ephemeralStatusLazyFetchShell emits a guarded fetch that populates the status
+// cache variable at most once, then reuses it on later probes for the same
+// status. The fetch is lazy: a probe that is never reached (assigned work found
+// first) issues no ephemeral query. The generated script runs without `set -u`,
+// so the unset guard variable expands to empty on the first probe.
+func ephemeralStatusLazyFetchShell(status string) string {
+	cacheVar, seenVar := ephemeralStatusCacheShellVars(status)
+	return `[ -n "$` + seenVar + `" ] || { ` + cacheVar + `=$(` + bdQueryEphemeralStatusQuietShell(status) + `); ` + seenVar + `=1; }; `
+}
+
+// ephemeralStatusCachedReadShell emits a read of the cached status rows as jq
+// input. printf '%s' keeps arbitrary JSON (including literal % bytes) as data.
+func ephemeralStatusCachedReadShell(status string) string {
+	cacheVar, _ := ephemeralStatusCacheShellVars(status)
+	return `printf '%s' "$` + cacheVar + `"`
+}
+
 func legacyEphemeralReadyFilterJQ(selector string, limit int) string {
 	filter := `[.[] | ` + selector +
 		` | select(((.issue_type // .type // "") != "epic"))` +
@@ -3463,15 +3490,17 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 			` | select(((.metadata["gc.routed_to"] // "") == $target) or (((.metadata["gc.routed_to"] // "") == "") and ((.metadata["gc.run_target"] // "") == $target) and ((.metadata["gc.kind"] // "") == "workflow")))`,
 		limit,
 	)
-	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+		// Quiet first-row probe: read the memoized open rows (the lazy guard
+		// still fetches on a cold routed-pool-only query) and suppress bd/jq
+		// stderr.
+		return `{ ` + ephemeralStatusLazyFetchShell("open") +
+			ephemeralStatusCachedReadShell("open") + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"`
 	}
-	jqStderr := ""
-	if quiet {
-		jqStderr = ` 2>/dev/null`
-	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+	// Count form (reconciler): a standalone process with no assigned-work loop
+	// to share a cache with, and it must surface bd failures rather than mask
+	// them, so it keeps the direct, un-redirected query.
+	return `{ ` + bdQueryEphemeralStatusShell("open") + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + `; } || printf "[]"`
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -3585,7 +3614,8 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return ephemeralStatusLazyFetchShell("in_progress") +
+		`r=$(` + ephemeralStatusCachedReadShell("in_progress") + ` | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -3595,7 +3625,8 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+	return ephemeralStatusLazyFetchShell("open") +
+		`r=$(` + ephemeralStatusCachedReadShell("open") + ` | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
