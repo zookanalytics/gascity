@@ -5658,8 +5658,13 @@ func TestCityRuntimeShutdownBlockedDispatchPersistsOutcomeBeforeGracefulStop(t *
 		return []byte("ok\n"), nil
 	}
 
+	// condition trigger: the tracking-bead outcome label is written only for
+	// condition orders now (cooldown/cron advance the last-run cursor in the
+	// dispatch loop before the goroutine, gc-7hf34, which cannot prove the
+	// outcome was persisted after drain). The drain/shutdown ordering this test
+	// guards is identical across trigger types.
 	ad := buildOrderDispatcherFromListExec(
-		[]orders.Order{{Name: "blocked", Trigger: "cooldown", Interval: "2m", Exec: "scripts/blocked.sh"}},
+		[]orders.Order{{Name: "blocked", Trigger: "condition", Check: "true", Exec: "scripts/blocked.sh"}},
 		store, nil, fakeExec, nil,
 	)
 	if ad == nil {

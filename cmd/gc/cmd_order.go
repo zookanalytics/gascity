@@ -734,21 +734,26 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
-	// Event orders advance the durable event cursor (above) as their progress
-	// marker, so they mint no tracking bead — the no-op tracking beads otherwise
-	// churned ~6k/day via nudge-on-route (gc-9hxxv), and the exec path already
-	// skips them (doOrderRunExecTracked). Cooldown/cron orders have no cursor and
-	// record the run in the order-tracking history index here so a manual formula
-	// `gc order run` advances the cooldown clock, matching dispatcher-driven
-	// (order_dispatch.go) runs. The wisp root above carries only "order-run:<scoped>"
-	// — never labelOrderTracking, since molecule roots don't auto-close — so without
-	// a dedicated tracking bead the run is invisible to the labelOrderTracking history
-	// index. Post-PR the index-hit gate suppresses the per-order fallback, so an
-	// unindexed manual run no longer advances cooldown and the order can re-fire
-	// mid-cooldown (#3294). Create it closed: its CreatedAt is the cooldown marker,
-	// and a lingering open tracking bead would read as in-flight work and block
-	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
-	if a.Trigger != "event" {
+	// Record the run so a manual `gc order run` advances the same clock the
+	// controller dispatcher reads, matching dispatcher-driven (order_dispatch.go)
+	// runs. Three cases, all mirroring the dispatch loop:
+	//   - event: the durable event cursor advanced above is the marker; no bead.
+	//   - cooldown/cron: advance the durable last-run file cursor (gc-7hf34).
+	//     These mint no tracking bead — the per-fire retained beads were the bulk
+	//     of the controller's bead-write/event churn (gc-k8r4y). Without this an
+	//     unindexed manual run would not advance cooldown and the order could
+	//     re-fire mid-cooldown (#3294).
+	//   - condition (and any other non-event, non-cooldown/cron): record a closed
+	//     tracking bead. Create it closed because a lingering open tracking bead
+	//     would read as in-flight work and block re-dispatch (ga-jra/ga-lo8c).
+	// The wisp root above carries only "order-run:<scoped>" — never
+	// labelOrderTracking, since molecule roots don't auto-close. Best-effort: the
+	// wisp already launched.
+	if orderTriggerUsesLastRun(a) {
+		if err := orders.AdvanceLastRun(citylayout.RuntimeDataDir(cityPath), scoped, time.Now()); err != nil {
+			fmt.Fprintf(stderr, "gc order run: advancing last-run cursor: %v\n", err) //nolint:errcheck
+		}
+	} else if a.Trigger != "event" {
 		if tracking, err := store.Create(beads.Bead{
 			Title:     "order:" + scoped,
 			Labels:    []string{"order-run:" + scoped, labelOrderTracking},
@@ -1018,7 +1023,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			baseLastRunFn := orders.LastRunAcrossStores(stores...)
+			baseLastRunFn := func(orderName string) (time.Time, error) {
+				// cooldown/cron last-run lives in the durable file cursor
+				// (gc-7hf34); prefer it and fall back to legacy tracking beads
+				// on a miss. Read-only command: seed=false (never mutate state).
+				return lastRunCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), orderName, false, stores...)
+			}
 			var lastRunErr error
 			lastRunFn := func(orderName string) (time.Time, error) {
 				last, err := baseLastRunFn(orderName)
@@ -1085,7 +1095,12 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		baseLastRunFn := orders.LastRunAcrossStores(stores...)
+		baseLastRunFn := func(orderName string) (time.Time, error) {
+			// cooldown/cron last-run lives in the durable file cursor
+			// (gc-7hf34); prefer it and fall back to legacy tracking beads on a
+			// miss. Read-only command: seed=false (never mutate state).
+			return lastRunCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), orderName, false, stores...)
+		}
 		var lastRunErr error
 		lastRunFn := func(orderName string) (time.Time, error) {
 			last, err := baseLastRunFn(orderName)
@@ -1676,6 +1691,41 @@ func eventCursorWithLegacyFallback(runtimeDir, scoped string, seed bool, stores 
 	if legacy > 0 && seed {
 		if err := orders.AdvanceEventCursor(runtimeDir, scoped, legacy); err != nil {
 			orderLogf("gc order: seeding event cursor for %s from legacy seq %d failed: %v", scoped, legacy, err)
+		}
+	}
+	return legacy, nil
+}
+
+// lastRunCursorWithLegacyFallback reads the durable last-run file cursor for a
+// cooldown/cron order, falling back to the legacy tracking-bead history (the
+// most recent order-run:<scoped> bead's CreatedAt) when the file has no record
+// yet. This keeps `gc order check`/`run` consistent with controller dispatch
+// across the migration to the file cursor: a pre-migration city's last run lives
+// on those beads, and reading the zero time would report every cooldown/cron
+// order as due until dispatch seeds the file. The mirror of
+// eventCursorWithLegacyFallback for timestamps (gc-7hf34).
+//
+// When seed is true and the fallback supplies a value, the file cursor is seeded
+// from it so future reads are file-only and the legacy beads can be pruned
+// without re-firing the order. Seeding is best-effort: the returned time is
+// already correct for this read, and the dispatch loop's own AdvanceLastRun
+// persists `now` when the order fires. Read-only callers (gc order check) pass
+// seed=false.
+func lastRunCursorWithLegacyFallback(runtimeDir, scoped string, seed bool, stores ...beads.Store) (time.Time, error) {
+	last, err := orders.ReadLastRun(runtimeDir, scoped)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading last-run cursor file for %q: %w", scoped, err)
+	}
+	if !last.IsZero() {
+		return last, nil
+	}
+	legacy, err := orders.LastRunAcrossStores(stores...)(scoped)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !legacy.IsZero() && seed {
+		if err := orders.AdvanceLastRun(runtimeDir, scoped, legacy); err != nil {
+			orderLogf("gc order: seeding last-run cursor for %s from legacy %s failed: %v", scoped, legacy.Format(time.RFC3339), err)
 		}
 	}
 	return legacy, nil

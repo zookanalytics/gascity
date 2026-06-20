@@ -520,7 +520,33 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
-		baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcrossStores(storesForGate...))
+		legacyLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate, orders.LastRunAcrossStores(storesForGate...))
+		// cooldown/cron orders persist their cooldown clock in the durable
+		// last-run file cursor instead of a per-fire tracking bead (gc-7hf34).
+		// Prefer it; on a miss (a pre-migration city or a never-run order) fall
+		// back to the legacy tracking-bead index and seed the file so future
+		// reads are file-only and stop querying beads. A cursor read error
+		// propagates rather than defaulting to zero, because reading a
+		// recently-run order as "never run" would re-fire it.
+		baseLastRunFn := func(orderName string) (time.Time, error) {
+			last, err := orders.ReadLastRun(runtimeDir, orderName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if !last.IsZero() {
+				return last, nil
+			}
+			legacy, err := legacyLastRunFn(orderName)
+			if err != nil {
+				return time.Time{}, err
+			}
+			if !legacy.IsZero() {
+				if seedErr := orders.AdvanceLastRun(runtimeDir, orderName, legacy); seedErr != nil {
+					logDispatchError(m.stderr, "gc: order dispatch: seeding last-run cursor for %s: %v", orderName, seedErr)
+				}
+			}
+			return legacy, nil
+		}
 		var lastRunErr error
 		var lastRunFromCache bool
 		lastRunFn := func(orderName string) (time.Time, error) {
@@ -616,7 +642,8 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 
 		trackingID := ""
-		if a.Trigger == "event" {
+		switch {
+		case a.Trigger == "event":
 			// Event orders mint no tracking bead. Advance the durable file cursor
 			// to head BEFORE dispatch (consumer-offset) so the next tick won't
 			// re-fire; a missing provider or read error skips this fire, retried
@@ -634,9 +661,28 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 				logDispatchError(m.stderr, "gc: order dispatch: advancing event cursor for %s: %v", scoped, err)
 				continue
 			}
-		} else {
-			// Create tracking bead synchronously BEFORE dispatch goroutine so the
-			// cooldown/cron trigger does not re-fire on the next tick.
+		case orderTriggerUsesLastRun(a):
+			// Cooldown/cron orders advance the durable last-run file cursor to
+			// `now` BEFORE the dispatch goroutine (consumer-offset), serving the
+			// anti-re-fire role the tracking bead used to: the next tick reads
+			// last-run=now and the cooldown/cron gate suppresses re-dispatch.
+			// They mint no tracking bead — those per-fire retained beads were
+			// the bulk of the controller's bead-write/event churn (gc-7hf34). An
+			// advance failure skips this fire and retries next tick rather than
+			// firing without recording the run (which would re-fire every tick).
+			// trackingID stays "" so dispatchOne treats them like event orders;
+			// every tracking-bead write site there already guards trackingID != "".
+			if err := orders.AdvanceLastRun(runtimeDir, scoped, now); err != nil {
+				logDispatchError(m.stderr, "gc: order dispatch: advancing last-run cursor for %s: %v", scoped, err)
+				continue
+			}
+			m.rememberLastRun(scoped, storeKeysForGate, now)
+		default:
+			// condition (and any other non-event, non-cooldown/cron) orders keep
+			// a tracking bead: they carry no last-run clock, so the open tracking
+			// bead is their only in-flight re-fire gate. Create it synchronously
+			// BEFORE the dispatch goroutine so the trigger does not re-fire on the
+			// next tick.
 			trackingBead, err := store.Create(beads.Bead{
 				Title:     "order:" + scoped,
 				Labels:    []string{"order-run:" + scoped, labelOrderTracking},

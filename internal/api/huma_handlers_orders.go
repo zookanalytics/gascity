@@ -132,7 +132,17 @@ func hasConditionOrder(aa []orders.Order) bool {
 }
 
 func checkOrderTriggerForAPI(a orders.Order, now time.Time, runtimeDir string, history []orderHistoryStoreBead, ep events.Provider) orders.TriggerResult {
-	lastRunFn := func(string) (time.Time, error) {
+	lastRunFn := func(scoped string) (time.Time, error) {
+		// cooldown/cron orders persist their last run in the durable file cursor
+		// (gc-7hf34), so they mint no per-fire tracking bead. Prefer the cursor;
+		// fall back to the tracking-bead history below for a pre-migration city
+		// whose cursor has not been seeded yet. condition orders carry no
+		// last-run clock; their history bead (if any) is the only source.
+		if a.Trigger == "cooldown" || a.Trigger == "cron" {
+			if last, err := orders.ReadLastRun(runtimeDir, scoped); err == nil && !last.IsZero() {
+				return last, nil
+			}
+		}
 		if len(history) == 0 {
 			return time.Time{}, nil
 		}

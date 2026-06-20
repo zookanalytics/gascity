@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -180,7 +181,13 @@ func doctorOrderFiringCurrentLastRunFunc(cityPath string, cfg *config.City, stde
 		if err != nil {
 			return time.Time{}, err
 		}
-		return orders.LastRunAcrossStores(stores...)(order.ScopedName())
+		// cooldown/cron last-run lives in the durable file cursor (gc-7hf34);
+		// prefer it and fall back to the legacy tracking-bead history on a miss.
+		// Without this, a manual `gc order run` of a cooldown/cron order — which
+		// advances the cursor but mints no tracking bead and emits no OrderFired
+		// event — would be invisible to this freshness check, falsely reading as
+		// stale. Read-only diagnostic: seed=false (never mutate state).
+		return lastRunCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), order.ScopedName(), false, stores...)
 	}
 }
 

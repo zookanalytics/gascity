@@ -910,23 +910,29 @@ func TestOrderRunFormulaRecordsTrackingBead(t *testing.T) {
 	}
 	store := beads.NewMemStore()
 
+	// Writable city path: a cooldown `gc order run` now advances the durable
+	// last-run cursor under <runtime> instead of minting a tracking bead
+	// (gc-7hf34), so a manual run advances the same cooldown clock the
+	// controller dispatcher reads (#3294).
+	cityPath := t.TempDir()
 	var stdout, stderr bytes.Buffer
-	if code := doOrderRun(aa, "digest", "", "/city", store, nil, &stdout, &stderr); code != 0 {
+	if code := doOrderRun(aa, "digest", "", cityPath, store, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
+	// No tracking bead is minted for a cooldown order.
 	tracking, err := store.ListByLabel(labelOrderTracking, 0, beads.IncludeClosed, beads.WithBothTiers)
 	if err != nil {
 		t.Fatalf("store.ListByLabel(%s): %v", labelOrderTracking, err)
 	}
-	if len(tracking) != 1 {
-		t.Fatalf("order-tracking beads = %d, want 1 (%#v)", len(tracking), tracking)
+	if len(tracking) != 0 {
+		t.Fatalf("order-tracking beads = %d, want 0 (cooldown records via cursor) (%#v)", len(tracking), tracking)
 	}
-	if !beadLabelsContain(tracking[0].Labels, "order-run:digest") {
-		t.Fatalf("tracking bead labels = %v, want order-run:digest", tracking[0].Labels)
-	}
-	if tracking[0].Status != "closed" {
-		t.Fatalf("tracking bead status = %q, want closed", tracking[0].Status)
+	// The run advanced the last-run cursor.
+	if last, err := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), "digest"); err != nil {
+		t.Fatalf("ReadLastRun: %v", err)
+	} else if last.IsZero() {
+		t.Fatal("last-run cursor for digest not advanced by gc order run")
 	}
 }
 

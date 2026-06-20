@@ -39,6 +39,52 @@ func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
 	return all
 }
 
+// assertLastRunAdvanced fails unless the cooldown/cron last-run file cursor for
+// scoped has been advanced to a non-zero time. Post-gc-7hf34, cooldown/cron
+// orders record a fire by advancing this cursor instead of minting a tracking
+// bead, so this is the proof that such an order dispatched.
+func assertLastRunAdvanced(t *testing.T, cityPath, scoped string) time.Time {
+	t.Helper()
+	last, err := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), scoped)
+	if err != nil {
+		t.Fatalf("ReadLastRun(%q): %v", scoped, err)
+	}
+	if last.IsZero() {
+		t.Fatalf("last-run cursor for %q not advanced; want non-zero", scoped)
+	}
+	return last
+}
+
+// countLastRunCursors returns how many of the given scoped order names have a
+// non-zero cooldown/cron last-run cursor (i.e. have fired at least once).
+func countLastRunCursors(t *testing.T, cityPath string, scoped ...string) int {
+	t.Helper()
+	n := 0
+	for _, s := range scoped {
+		last, err := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), s)
+		if err != nil {
+			t.Fatalf("ReadLastRun(%q): %v", s, err)
+		}
+		if !last.IsZero() {
+			n++
+		}
+	}
+	return n
+}
+
+// assertLastRunZero fails unless the cooldown/cron last-run file cursor for
+// scoped is unset — i.e. the order never fired.
+func assertLastRunZero(t *testing.T, cityPath, scoped string) {
+	t.Helper()
+	last, err := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), scoped)
+	if err != nil {
+		t.Fatalf("ReadLastRun(%q): %v", scoped, err)
+	}
+	if !last.IsZero() {
+		t.Fatalf("last-run cursor for %q = %v; want zero (never fired)", scoped, last)
+	}
+}
+
 func workBeadByOrderLabel(t *testing.T, store beads.Store, label string) beads.Bead {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -474,7 +520,9 @@ func TestOrderDispatchRejectsAmbiguousPackPool(t *testing.T) {
 		cfg:     cfg,
 	}
 
-	m.dispatch(context.Background(), t.TempDir(), time.Now())
+	// One city runtime dir across both ticks so the last-run cursor persists.
+	cityPath := t.TempDir()
+	m.dispatch(context.Background(), cityPath, time.Now())
 	m.drain(context.Background())
 
 	if !rec.hasType(events.OrderFailed) {
@@ -483,23 +531,16 @@ func TestOrderDispatchRejectsAmbiguousPackPool(t *testing.T) {
 	if !strings.Contains(stderr.String(), `ambiguous pool "dog"`) {
 		t.Fatalf("stderr = %q, want ambiguity error", stderr.String())
 	}
-	all := trackingBeads(t, store, "order-run:mol-dog-doctor")
-	var workCount int
-	for _, bead := range all {
-		if !strings.HasPrefix(bead.Title, "order:") {
-			workCount++
-		}
+	// No work bead (wisp) is created — dispatch fails at pool resolution. The
+	// cooldown order mints no tracking bead either (gc-7hf34).
+	if all := trackingBeads(t, store, "order-run:mol-dog-doctor"); len(all) != 0 {
+		t.Fatalf("beads with order-run label = %d, want 0 (ambiguous pool, no wisp, no tracking bead)", len(all))
 	}
-	if len(all) != 1 {
-		t.Fatalf("tracking beads with order-run label = %d, want 1", len(all))
-	}
-	if workCount != 0 {
-		t.Fatalf("work bead count = %d, want 0", workCount)
-	}
-
-	// An ambiguous failure should still count as the authoritative last run,
-	// so the next patrol tick within the cooldown interval must not create a
-	// second tracking bead or emit another order.failed event.
+	// The ambiguous failure still counts as the authoritative last run: the
+	// cooldown cursor is advanced in the dispatch loop before the goroutine
+	// detects the ambiguity, so the next tick within the interval must not
+	// re-fire or emit another order.failed event.
+	assertLastRunAdvanced(t, cityPath, "mol-dog-doctor")
 	failedEvents := 0
 	for _, event := range rec.events {
 		if event.Type == events.OrderFailed && event.Subject == "mol-dog-doctor" {
@@ -510,12 +551,11 @@ func TestOrderDispatchRejectsAmbiguousPackPool(t *testing.T) {
 		t.Fatalf("order.failed count after first dispatch = %d, want 1", failedEvents)
 	}
 
-	m.dispatch(context.Background(), t.TempDir(), time.Now().Add(10*time.Second))
+	m.dispatch(context.Background(), cityPath, time.Now().Add(10*time.Second))
 	m.drain(context.Background())
 
-	all = trackingBeads(t, store, "order-run:mol-dog-doctor")
-	if len(all) != 1 {
-		t.Fatalf("tracking beads with order-run label after second dispatch = %d, want 1", len(all))
+	if all := trackingBeads(t, store, "order-run:mol-dog-doctor"); len(all) != 0 {
+		t.Fatalf("beads with order-run label after second dispatch = %d, want 0", len(all))
 	}
 	failedEvents = 0
 	for _, event := range rec.events {
@@ -1242,21 +1282,20 @@ func TestOrderDispatchMultiple(t *testing.T) {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	cityPath := t.TempDir()
+	dispatchNow := time.Now()
+	ad.dispatch(context.Background(), cityPath, dispatchNow)
 	ad.drain(context.Background())
 
-	// Should have the seed bead + 1 tracking bead for order-a.
-	all := trackingBeads(t, store, "order-run:order-a")
-	trackingCount := 0
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:order-a" {
-				trackingCount++
-			}
-		}
+	// order-a (cooldown 1m, never run) is due → records the fire by advancing
+	// its last-run cursor to the tick time (gc-7hf34), not a tracking bead.
+	if got := assertLastRunAdvanced(t, cityPath, "order-a"); !got.Equal(dispatchNow) {
+		t.Errorf("order-a last-run = %v, want dispatch time %v", got, dispatchNow)
 	}
-	if trackingCount != 1 {
-		t.Errorf("expected 1 tracking bead for order-a, got %d", trackingCount)
+	// order-b was seeded with a recent run (1h cooldown) → not due, must not
+	// fire this tick. Its cursor (seeded from the legacy bead) stays before now.
+	if got, _ := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), "order-b"); !got.Before(dispatchNow) {
+		t.Errorf("order-b fired despite active cooldown: last-run %v not before %v", got, dispatchNow)
 	}
 }
 
@@ -1280,18 +1319,24 @@ func TestOrderDispatchRespectsMaxDispatchesPerTick(t *testing.T) {
 	m := ad.(*memoryOrderDispatcher)
 	m.maxDispatchesPerTick = 2
 
+	// One city runtime dir across both ticks: the last-run cursors persist there
+	// (gc-7hf34), so the second tick sees the first tick's fires and the budget
+	// rotates onto the not-yet-run orders.
+	cityPath := t.TempDir()
+	scoped := []string{"order-0", "order-1", "order-2", "order-3", "order-4"}
+
 	now := time.Date(2026, 5, 19, 2, 30, 0, 0, time.UTC)
-	ad.dispatch(context.Background(), t.TempDir(), now)
+	ad.dispatch(context.Background(), cityPath, now)
 	ad.drain(context.Background())
 
-	if got := countOrderTrackingRuns(t, store); got != 2 {
-		t.Fatalf("tracking runs after first tick = %d, want 2", got)
+	if got := countLastRunCursors(t, cityPath, scoped...); got != 2 {
+		t.Fatalf("orders fired after first tick = %d, want 2", got)
 	}
 
-	ad.dispatch(context.Background(), t.TempDir(), now.Add(time.Second))
+	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
 	ad.drain(context.Background())
-	if got := countOrderTrackingRuns(t, store); got != 4 {
-		t.Fatalf("tracking runs after second tick = %d, want 4", got)
+	if got := countLastRunCursors(t, cityPath, scoped...); got != 4 {
+		t.Fatalf("orders fired after second tick = %d, want 4", got)
 	}
 }
 
@@ -1451,19 +1496,19 @@ func TestOrderDispatchCachesAutoTrackingBeadCreatedAt(t *testing.T) {
 
 	cityPath := t.TempDir()
 	ad.dispatch(context.Background(), cityPath, now)
-	all := trackingBeads(t, store, "order-run:test-order")
-	if len(all) != 1 {
-		t.Fatalf("order-run beads after first dispatch = %d, want 1", len(all))
-	}
+	// Cooldown orders record a fire by advancing the last-run cursor, not by
+	// minting a tracking bead (gc-7hf34).
+	firstRun := assertLastRunAdvanced(t, cityPath, "test-order")
 
 	store.reset()
 	ad.dispatch(context.Background(), cityPath, now.Add(time.Second))
 	if store.includeClosedLists != 0 {
-		t.Fatalf("second dispatch performed %d closed-history reads, want cached tracking bead timestamp", store.includeClosedLists)
+		t.Fatalf("second dispatch performed %d closed-history reads, want cached last-run timestamp", store.includeClosedLists)
 	}
-	all = trackingBeads(t, store, "order-run:test-order")
-	if len(all) != 1 {
-		t.Fatalf("order-run beads after second dispatch = %d, want cached cooldown suppression", len(all))
+	// Cooldown still active (+1s << 1h): the cached last-run suppresses re-fire,
+	// so the cursor must not have advanced again.
+	if secondRun := assertLastRunAdvanced(t, cityPath, "test-order"); !secondRun.Equal(firstRun) {
+		t.Fatalf("cursor advanced on cooldown-suppressed second dispatch: %v -> %v", firstRun, secondRun)
 	}
 }
 
@@ -1491,33 +1536,18 @@ func TestOrderDispatchExecDue(t *testing.T) {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	cityPath := t.TempDir()
+	ad.dispatch(context.Background(), cityPath, time.Now())
 	ad.drain(context.Background())
 
 	if !ran {
 		t.Error("exec runner was not called")
 	}
 
-	// Check tracking bead exists with exec label.
-	all := trackingBeads(t, store, "order-run:wasteland-poll")
-	found := false
-	hasExec := false
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:wasteland-poll" {
-				found = true
-			}
-			if l == "exec" {
-				hasExec = true
-			}
-		}
-	}
-	if !found {
-		t.Error("tracking bead missing order-run label")
-	}
-	if !hasExec {
-		t.Error("tracking bead missing exec label")
-	}
+	// Cooldown orders record the fire by advancing the last-run cursor rather
+	// than minting a tracking bead (gc-7hf34); the exec outcome is carried by
+	// the order.completed event checked below, not a bead label.
+	assertLastRunAdvanced(t, cityPath, "wasteland-poll")
 
 	// Check events.
 	if !rec.hasType(events.OrderFired) {
@@ -1685,10 +1715,13 @@ func TestOrderDispatchFormulaCookFailureLabelsTrackingBead(t *testing.T) {
 	store := beads.NewMemStore()
 	var rec memRecorder
 
+	// condition trigger: only condition orders still mint a tracking bead
+	// (cooldown/cron moved to the last-run cursor, gc-7hf34), so the
+	// wisp-failed labeling path is exercised through a condition order.
 	aa := []orders.Order{{
 		Name:         "fail-formula",
-		Trigger:      "cooldown",
-		Interval:     "2m",
+		Trigger:      "condition",
+		Check:        "true",
 		Formula:      "missing-formula",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
@@ -1743,10 +1776,13 @@ title = "Do work for {{target_id}}"
 description = "Target: {{target_id}}, workspace: {{workspace}}"
 `)
 
+	// condition trigger so a tracking bead is minted (cooldown/cron use the
+	// last-run cursor now, gc-7hf34) and the validation-failure labeling path
+	// stays exercised.
 	aa := []orders.Order{{
 		Name:         "fail-formula-vars",
-		Trigger:      "cooldown",
-		Interval:     "2m",
+		Trigger:      "condition",
+		Check:        "true",
 		Formula:      "order-required-vars",
 		FormulaLayer: formulaDir,
 	}}
@@ -2042,10 +2078,12 @@ func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
 	var rec memRecorder
 	var stderr bytes.Buffer
 
+	// condition trigger so a tracking bead exists to receive the wisp-failed
+	// label (cooldown/cron use the last-run cursor now, gc-7hf34).
 	aa := []orders.Order{{
 		Name:         "fail-label",
-		Trigger:      "cooldown",
-		Interval:     "2m",
+		Trigger:      "condition",
+		Check:        "true",
 		Formula:      "test-formula",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
@@ -2130,7 +2168,10 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
-	ad.dispatch(context.Background(), "/city-root", time.Now())
+	// Writable city root: cooldown dispatch now advances the durable last-run
+	// file cursor under <runtime>, so the path must exist (gc-7hf34).
+	cityRoot := t.TempDir()
+	ad.dispatch(context.Background(), cityRoot, time.Now())
 	ad.drain(context.Background())
 
 	foundDir := false
@@ -2141,13 +2182,13 @@ func TestOrderDispatchExecOrderDir(t *testing.T) {
 		if e == "ORDER_DIR=/city/orders" {
 			foundDir = true
 		}
-		if e == "GC_CITY=/city-root" {
+		if e == "GC_CITY="+cityRoot {
 			foundCity = true
 		}
-		if e == "GC_CITY_PATH=/city-root" {
+		if e == "GC_CITY_PATH="+cityRoot {
 			foundCityPath = true
 		}
-		if e == "GC_CITY_RUNTIME_DIR=/city-root/.gc/runtime" {
+		if e == "GC_CITY_RUNTIME_DIR="+citylayout.RuntimeDataDir(cityRoot) {
 			foundRuntime = true
 		}
 	}
@@ -2184,7 +2225,10 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
-	ad.dispatch(context.Background(), "/city-root", time.Now())
+	// Writable city root: cooldown dispatch now advances the durable last-run
+	// file cursor under <runtime>, so the path must exist (gc-7hf34).
+	cityRoot := t.TempDir()
+	ad.dispatch(context.Background(), cityRoot, time.Now())
 	ad.drain(context.Background())
 
 	foundPackDir := false
@@ -2201,7 +2245,7 @@ func TestOrderDispatchExecPackDir(t *testing.T) {
 		if e == "GC_PACK_NAME=maintenance" {
 			foundPackName = true
 		}
-		if e == "GC_PACK_STATE_DIR=/city-root/.gc/runtime/packs/maintenance" {
+		if e == "GC_PACK_STATE_DIR="+citylayout.RuntimeDataDir(cityRoot)+"/packs/maintenance" {
 			foundPackState = true
 		}
 	}
@@ -2445,9 +2489,15 @@ func TestOrderDispatchExecPackDirEmpty(t *testing.T) {
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 
-	ad.dispatch(context.Background(), "/city-root", time.Now())
+	// Writable city root so the cooldown last-run cursor write succeeds and the
+	// exec actually runs (gc-7hf34). A non-writable path would skip the fire,
+	// leaving gotEnv nil and this env assertion vacuously passing.
+	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	ad.drain(context.Background())
 
+	if len(gotEnv) == 0 {
+		t.Fatal("exec env not captured; order did not fire")
+	}
 	for _, e := range gotEnv {
 		if strings.HasPrefix(e, "PACK_DIR=") {
 			t.Errorf("PACK_DIR should not be set when FormulaLayer is empty, got: %s", e)
@@ -6127,40 +6177,30 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	ad.dispatch(context.Background(), t.TempDir(), time.Now())
+	// One city runtime dir so the last-run cursors persist for the assertions.
+	cityPath := t.TempDir()
+	dispatchNow := time.Now()
+	ad.dispatch(context.Background(), cityPath, dispatchNow)
 	ad.drain(context.Background())
 
-	// rig-b should have a tracking bead, rig-a should not.
-	all := trackingBeads(t, store, "order-run:db-health:rig:rig-b")
-	rigBTracked := false
-	rigATracked := false
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "order-run:db-health:rig:rig-b" {
-				rigBTracked = true
-			}
-			// Check that no NEW bead was created for rig-a (only the seed).
-			// The seed bead is the only one with rig-a label.
-		}
+	// rig-b has no prior run → it fires, recording the run by advancing its
+	// last-run cursor to the tick time (gc-7hf34); cooldown orders mint no
+	// tracking bead. rig-a was seeded with a recent legacy run, so its 1h
+	// cooldown is still active (resolved through the legacy-bead fallback) and
+	// it must not fire — its cursor stays before the tick and no new bead lands.
+	if got := assertLastRunAdvanced(t, cityPath, "db-health:rig:rig-b"); !got.Equal(dispatchNow) {
+		t.Errorf("rig-b last-run = %v, want dispatch time %v", got, dispatchNow)
 	}
-	if !rigBTracked {
-		t.Error("missing tracking bead for rig-b")
+	if all := trackingBeads(t, store, "order-run:db-health:rig:rig-b"); len(all) != 0 {
+		t.Errorf("rig-b tracking beads = %d, want 0 (cooldown records via cursor)", len(all))
 	}
 
-	// Count rig-a beads — should be exactly 1 (the seed).
-	rigAAll := trackingBeads(t, store, "order-run:db-health:rig:rig-a")
-	rigACount := 0
-	for _, b := range rigAAll {
-		for _, l := range b.Labels {
-			if l == "order-run:db-health:rig:rig-a" {
-				rigACount++
-			}
-		}
+	if got, _ := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), "db-health:rig:rig-a"); !got.Before(dispatchNow) {
+		t.Errorf("rig-a fired despite active cooldown: last-run %v not before %v", got, dispatchNow)
 	}
-	if rigACount != 1 {
-		t.Errorf("rig-a bead count = %d, want 1 (seed only)", rigACount)
+	if rigAAll := trackingBeads(t, store, "order-run:db-health:rig:rig-a"); len(rigAAll) != 1 {
+		t.Errorf("rig-a bead count = %d, want 1 (seed only, no new fire)", len(rigAAll))
 	}
-	_ = rigATracked
 }
 
 func TestRigExclusiveLayers(t *testing.T) {
@@ -7251,11 +7291,14 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 		return []byte("ok\n"), nil
 	}
 
+	// condition trigger: only condition orders still mint a tracking bead
+	// (cooldown/cron use the last-run cursor now, gc-7hf34), so the
+	// create-then-close lifecycle is exercised through a condition order.
 	aa := []orders.Order{{
-		Name:     "health-check",
-		Trigger:  "cooldown",
-		Interval: "1m",
-		Exec:     "scripts/health.sh",
+		Name:    "health-check",
+		Trigger: "condition",
+		Check:   "true",
+		Exec:    "scripts/health.sh",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
 
@@ -8330,11 +8373,15 @@ func TestOrderDispatcherDrainWaitsForInFlightDispatch(t *testing.T) {
 		return []byte("ok\n"), nil
 	}
 
+	// condition trigger so a tracking bead is minted (cooldown/cron use the
+	// last-run cursor now, gc-7hf34); that bead carries the exec-outcome label
+	// this test reads to prove drain waited for the in-flight dispatch. Drain
+	// behavior is trigger-agnostic, so the condition order exercises it equally.
 	aa := []orders.Order{{
-		Name:     "drain-test",
-		Trigger:  "cooldown",
-		Interval: "2m",
-		Exec:     "scripts/drain.sh",
+		Name:    "drain-test",
+		Trigger: "condition",
+		Check:   "true",
+		Exec:    "scripts/drain.sh",
 	}}
 	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
 	if ad == nil {
@@ -8907,15 +8954,17 @@ func TestLockedStderrWrapsNonNil(t *testing.T) {
 }
 
 // TestOrderDispatchTrackingBeadIsNoHistory asserts the dispatcher routes the
-// tracking bead to the no-history tier, so each cooldown cycle avoids a full
-// Dolt commit while remaining visible to normal issue-tier reads.
+// tracking bead to the no-history tier, so each fire avoids a full Dolt commit
+// while remaining visible to normal issue-tier reads. Post-gc-7hf34 only
+// condition orders still mint a tracking bead (cooldown/cron record runs in the
+// last-run file cursor), so the no-history routing is exercised through one.
 func TestOrderDispatchTrackingBeadIsNoHistory(t *testing.T) {
 	store := beads.NewMemStore()
 
 	aa := []orders.Order{{
 		Name:         "wisp-order",
-		Trigger:      "cooldown",
-		Interval:     "1m",
+		Trigger:      "condition",
+		Check:        "true",
 		Formula:      "test-formula",
 		Pool:         "worker",
 		FormulaLayer: sharedTestFormulaDir,

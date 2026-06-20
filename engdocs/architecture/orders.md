@@ -47,19 +47,35 @@ agent pools.
   orders across rigs. City-level orders use the plain name
   (e.g., `dolt-health`). Rig-level orders append `:rig:<rigName>`
   (e.g., `dolt-health:rig:demo-repo`). ScopedName drives independent
-  cooldown tracking, event cursors, and label scoping.
+  last-run cursors, event cursors, and label scoping.
 
 - **Formula Layer**: A directory scanned for `orders/*/order.toml`.
   Layers are ordered lowest to highest priority; a higher-priority layer's
   order definition overrides a lower-priority one with the same
   subdirectory name (last-wins semantics).
 
-- **Tracking Bead**: A bead created synchronously before a cooldown, cron,
-  or condition order's dispatch goroutine launches, labeled
-  `order-run:<scopedName>`. Serves dual purpose: prevents the trigger from
-  re-firing on the next tick, and provides execution history for
-  `gc order history`. **Event orders mint no tracking bead** — they dedup
-  via a durable file cursor (see Event Cursor below).
+- **Tracking Bead**: A bead created synchronously before a `condition`
+  order's dispatch goroutine launches, labeled `order-run:<scopedName>`.
+  A condition order carries no last-run clock, so the open tracking bead is
+  its only in-flight re-fire gate. **Cooldown, cron, and event orders mint
+  no tracking bead** — they dedup via durable file cursors (see Last-Run
+  Cursor and Event Cursor below). Per-fire tracking beads were the bulk of
+  the controller's bead-write/event churn: each write emitted `bead.created`
+  /`bead.updated`, which the bead-event watcher turned into a controller
+  Poke → tick → more dispatch → more writes (the self-feeding loop in
+  gc-k8r4y).
+
+- **Last-Run Cursor**: A durable per-order record (`scopedName` →
+  most-recent dispatch time, Unix nanos) in
+  `<runtime>/order-lastrun-cursors.json`, updated in place each fire.
+  Replaces the per-fire tracking bead for cooldown/cron orders (gc-7hf34):
+  the cooldown/cron gate reads it instead of the most recent tracking
+  bead's `CreatedAt`. Advanced to the tick time *before* the dispatch
+  goroutine launches (consumer-offset), so the next tick reads
+  `last-run = now` and the gate suppresses re-fire — the same anti-re-fire
+  role the bead held. A file, not a bead, so advancing it emits no bead
+  event and cannot self-trigger. Lives behind `orders.ReadLastRun` /
+  `orders.AdvanceLastRun`.
 
 - **Event Cursor**: A durable per-order record (`scopedName` →
   last-processed event seq) in `<runtime>/order-event-cursors.json`,
@@ -100,7 +116,10 @@ The order subsystem spans two packages:
                 │  │        └──┬──────────┬──┘                   │  │
                 │  │       no  │          │ yes                   │  │
                 │  │       skip│          ▼                       │  │
-                │  │           │  Create tracking bead (sync)    │  │
+                │  │           │  Set re-fire marker (sync):      │  │
+                │  │           │  cooldown/cron→last-run cursor,  │  │
+                │  │           │  event→event cursor,             │  │
+                │  │           │  condition→tracking bead         │  │
                 │  │           │          │                       │  │
                 │  │           │          ▼                       │  │
                 │  │           │  go dispatchOne(a) ──────────┐  │  │
@@ -153,13 +172,17 @@ The order subsystem spans two packages:
 
 1. `dispatch()` iterates all non-manual orders.
 2. `CheckTrigger()` evaluates the trigger condition against current time,
-   last-run history (from bead store), and event state (from event bus).
-3. For each due cooldown/cron/condition order, a tracking bead is created
-   **synchronously** with label `order-run:<scopedName>`, preventing the
-   trigger from re-firing on the next tick. **Event orders create no
-   tracking bead**: the loop reads the event head and advances the durable
-   file cursor before launching the goroutine, which serves the same
-   anti-re-fire role.
+   last-run (from the file cursor, seeded from the legacy bead store on a
+   miss), and event state (from event bus).
+3. For each due order, the anti-re-fire marker is set **synchronously**
+   before the dispatch goroutine launches:
+   - **Cooldown/cron**: the loop advances the durable last-run file cursor
+     to the tick time (`orders.AdvanceLastRun`). No tracking bead.
+   - **Event**: the loop reads the event head and advances the durable
+     event cursor. No tracking bead.
+   - **Condition**: a tracking bead is created with label
+     `order-run:<scopedName>` — it has no last-run clock, so the open bead
+     is its only re-fire gate.
 4. A goroutine calls `dispatchOne()` with a context timeout derived from
    `effectiveTimeout()` (per-order timeout capped by global
    `max_timeout`).
@@ -224,17 +247,18 @@ Violations indicate bugs.
   requires `check`, an `event` trigger requires `on`. `Validate()` enforces
   these per-trigger-type constraints.
 
-- **Tracking beads are created before dispatch goroutines**: The tracking
-  bead (labeled `order-run:<scopedName>`) is created synchronously
-  in the main dispatch loop. This prevents the cooldown trigger from
-  re-firing on the next controller tick while the dispatch goroutine is
-  still running.
+- **Re-fire markers are set before dispatch goroutines**: The anti-re-fire
+  marker is set synchronously in the main dispatch loop, before the
+  goroutine launches, so the trigger does not re-fire on the next
+  controller tick while the dispatch is still running. Cooldown/cron
+  advance the last-run file cursor; event advances the event cursor;
+  condition creates a tracking bead (labeled `order-run:<scopedName>`).
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
-  `dolt-health:rig:rig-a` vs `dolt-health:rig:rig-b`). Cooldown
-  tracking, event cursors, and history queries all use ScopedName.
-  Firing one rig's order does not affect another rig's trigger
+  `dolt-health:rig:rig-a` vs `dolt-health:rig:rig-b`). Last-run cursors,
+  event cursors, condition tracking beads, and history queries all use
+  ScopedName. Firing one rig's order does not affect another rig's trigger
   evaluation.
 
 - **Higher-priority layers override lower by name**: When the same
@@ -267,12 +291,13 @@ Violations indicate bugs.
   order launches a goroutine whose completion is tracked by an
   in-flight counter and channel signal on the dispatcher. Controller
   shutdown and config reload call `orderDispatcher.drain(ctx)` with
-  a bounded timeout so tracking bead outcomes and `order.failed` /
-  `order.completed` events are persisted before the dispatcher is
+  a bounded timeout so condition tracking-bead outcomes and `order.failed`
+  / `order.completed` events are persisted before the dispatcher is
   discarded. Reload retains any dispatcher that does not drain before
   its timeout and drains it again during controller shutdown. Failed
-  orders emit `order.failed` events but do not retry; the tracking
-  bead prevents re-fire within the same cooldown window.
+  orders emit `order.failed` events but do not retry; the advanced
+  last-run cursor (cooldown/cron) prevents re-fire within the same
+  cooldown window.
 
 - **No role names in Go code**: The order subsystem operates on
   config-driven pool names and formula references. No line of Go
@@ -300,6 +325,7 @@ Violations indicate bugs.
 | `internal/orders/order.go` | `Order` struct, `Parse()`, `Validate()`, `IsEnabled()`, `IsExec()`, `TimeoutOrDefault()`, `ScopedName()` |
 | `internal/orders/triggers.go` | `TriggerResult`, `CheckTrigger()`, `checkCooldown()`, `checkCron()`, `checkCondition()`, `checkEvent()`, `cronFieldMatches()` |
 | `internal/orders/event_cursor.go` | Durable per-order event cursor: `EventCursorFunc()`, `ReadEventCursor()`, `AdvanceEventCursor()` (file `order-event-cursors.json`) |
+| `internal/orders/lastrun_cursor.go` | Durable per-order cooldown/cron last-run cursor: `ReadLastRun()`, `AdvanceLastRun()` (file `order-lastrun-cursors.json`) |
 | `internal/orders/scanner.go` | `Scan()` -- discovers orders across formula layers with priority override |
 | `cmd/gc/order_dispatch.go` | `orderDispatcher` interface, `memoryOrderDispatcher`, `buildOrderDispatcher()`, `dispatch()`, `dispatchOne()`, `dispatchExec()`, `dispatchWisp()`, `effectiveTimeout()`, `rigExclusiveLayers()`, `qualifyPool()`, `ExecRunner`, `shellExecRunner` |
 | `cmd/gc/cmd_order.go` | CLI commands: `gc order list`, `show`, `run`, `check`, `history`. Helper functions: `loadOrders()`, `loadAllOrders()`, `cityFormulaLayers()`, `findOrder()`, `orderLastRunFn()` |
@@ -372,6 +398,7 @@ files in the library and two in the CLI:
 | `internal/orders/automation_test.go` | Parse (formula, exec, event orders), Validate (all trigger types, mutual exclusion, missing fields, timeout validation), IsEnabled default/explicit, IsExec, TimeoutOrDefault (defaults and custom), ScopedName (city and rig) |
 | `internal/orders/triggers_test.go` | CheckTrigger for all five trigger types: cooldown (never run, due, not due), cron (matched, not matched, already run this minute), condition (pass, fail), event (due, with cursor, cursor past all, not due, nil provider), rig-scoped triggers (cooldown, cron, event use ScopedName) |
 | `internal/orders/event_cursor_test.go` | Durable event cursor: missing-file is zero, advance persists and reads, durable across restart, monotonic (no backward move), independent per-order keys, valid JSON, read error is fail-open zero |
+| `internal/orders/lastrun_cursor_test.go` | Durable cooldown/cron last-run cursor: missing-file is zero, advance persists and reads, durable across restart, monotonic (no backward move), zero-time ignored, independent per-order keys, valid JSON, corrupt-file errors, cross-process lock |
 | `internal/orders/scanner_test.go` | Scan (basic discovery, empty layers, layer override priority, skip list, disabled filtering, source path recording) |
 | `cmd/gc/order_dispatch_test.go` | Dispatcher nil-guard (no orders, manual-only), cooldown dispatch (due, not due, multiple), exec dispatch (due, failure, cooldown, ORDER_DIR env, timeout), rig-scoped dispatch (rig stamping, independent cooldown, qualified pool), rigExclusiveLayers, qualifyPool, effectiveTimeout (default, custom, capped) |
 | `cmd/gc/cmd_order_test.go` | CLI commands: list (empty, with data, exec type), show (found, not found), check (due, not due), history, findOrder |
@@ -385,9 +412,9 @@ boundaries.
 ## Known Limitations
 
 - **No retry on dispatch failure**: Failed orders emit events but
-  are not retried. The tracking bead prevents re-fire within the same
-  cooldown window, so a failed order must wait for the next trigger
-  opening.
+  are not retried. The advanced last-run cursor (cooldown/cron) prevents
+  re-fire within the same cooldown window, so a failed order must wait for
+  the next trigger opening.
 
 - **Cron granularity is minutes**: The cron trigger operates at
   minute-level granularity with simple field matching (`*`, exact

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -51,14 +52,17 @@ func TestOrderDispatchIdempotentFailsOpenOnGateTimeout(t *testing.T) {
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
-	ad.dispatch(context.Background(), t.TempDir(), now)
+	cityPath := t.TempDir()
+	ad.dispatch(context.Background(), cityPath, now)
 	ad.drain(context.Background())
 
-	if got := trackingBeads(t, store, "order-run:unrouted-feeder"); len(got) == 0 {
-		t.Error("idempotent order should fail OPEN on gate timeout and dispatch, but no tracking bead was created (order was skipped — the starvation regression)")
+	// Cooldown orders record a fire by advancing the last-run cursor, not a
+	// tracking bead (gc-7hf34): a non-zero cursor proves the order dispatched.
+	if got, _ := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), "unrouted-feeder"); got.IsZero() {
+		t.Error("idempotent order should fail OPEN on gate timeout and dispatch, but its last-run cursor was not advanced (order was skipped — the starvation regression)")
 	}
-	if got := trackingBeads(t, store, "order-run:merge-loop-sweep"); len(got) != 0 {
-		t.Errorf("non-idempotent order should fail CLOSED on gate timeout and skip; got %d tracking beads", len(got))
+	if got, _ := orders.ReadLastRun(citylayout.RuntimeDataDir(cityPath), "merge-loop-sweep"); !got.IsZero() {
+		t.Errorf("non-idempotent order should fail CLOSED on gate timeout and skip; but its last-run cursor advanced to %v", got)
 	}
 }
 
