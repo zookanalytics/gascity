@@ -76,3 +76,13 @@ func (rt *serviceRuntime) Poke() {
 	default:
 	}
 }
+
+// PokeDemand marks the demand snapshot dirty before signaling a tick, so a
+// sling-routed work bead wakes a sleeping pool this tick instead of waiting out
+// the demand-snapshot freshness TTL (gc-lskvo). See controllerState.PokeDemand.
+func (rt *serviceRuntime) PokeDemand() {
+	if rt.cr.demandDirty != nil {
+		rt.cr.demandDirty.Store(true)
+	}
+	rt.Poke()
+}

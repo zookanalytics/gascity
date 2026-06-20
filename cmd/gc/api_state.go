@@ -57,6 +57,7 @@ type controllerState struct {
 	ct                     crashTracker  // nil if crash tracking disabled
 	pokeCh                 chan struct{} // nil when poke is not available; triggers immediate reconciler tick
 	configDirty            *atomic.Bool  // optional dirty flag shared with the reconciler reload path
+	demandDirty            *atomic.Bool  // optional flag shared with the reconciler; set by work-routing pokes to force a demand rebuild
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
@@ -1629,6 +1630,18 @@ func (cs *controllerState) Poke() {
 	case cs.pokeCh <- struct{}{}:
 	default: // poke already pending
 	}
+}
+
+// PokeDemand marks the demand snapshot dirty, then signals an immediate tick.
+// Used after sling routes new work so the reconciler rebuilds pool demand and
+// wakes a sleeping pool this tick, even though routing a work bead leaves the
+// session fingerprint (the demand snapshot's freshness key) unchanged — a plain
+// Poke would reuse the cached no-demand snapshot (gc-lskvo / gc-qedgc).
+func (cs *controllerState) PokeDemand() {
+	if cs.demandDirty != nil {
+		cs.demandDirty.Store(true)
+	}
+	cs.Poke()
 }
 
 // WaitForSessionCommandable waits until the controller has reconciled an async

@@ -409,7 +409,9 @@ type apiNotifier struct {
 }
 
 func (n *apiNotifier) PokeController(_ string) {
-	n.state.Poke()
+	// Sling routed new work; force a demand rebuild so a sleeping pool wakes
+	// this tick rather than waiting out the demand-snapshot TTL (gc-lskvo).
+	n.state.PokeDemand()
 }
 
 func (n *apiNotifier) PokeControlDispatch(_ string) {

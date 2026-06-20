@@ -31,25 +31,26 @@ func newPostRequest(url string, body io.Reader) *http.Request {
 
 // fakeState implements State for testing.
 type fakeState struct {
-	cfg           *config.City
-	rawCfg        *config.City // optional: raw config for provenance detection
-	sp            *runtime.Fake
-	stores        map[string]beads.Store
-	cityBeadStore beads.Store // city-level store for session beads
-	cityBeadsDiag *beads.BeadsDiagnostic
-	cityMailProv  mail.Provider // city-level mail provider (all mail is city-scoped)
-	eventProv     events.Provider
-	cityName      string
-	cityPath      string
-	startedAt     time.Time
-	quarantined   map[string]bool
-	autos         []orders.Order
-	allOrders     []orders.Order
-	services      workspacesvc.Registry
-	pokeCount     int
-	extmsgSvc     *extmsg.Services
-	adapterReg    *extmsg.AdapterRegistry
-	maintenance   MaintenanceProvider
+	cfg             *config.City
+	rawCfg          *config.City // optional: raw config for provenance detection
+	sp              *runtime.Fake
+	stores          map[string]beads.Store
+	cityBeadStore   beads.Store // city-level store for session beads
+	cityBeadsDiag   *beads.BeadsDiagnostic
+	cityMailProv    mail.Provider // city-level mail provider (all mail is city-scoped)
+	eventProv       events.Provider
+	cityName        string
+	cityPath        string
+	startedAt       time.Time
+	quarantined     map[string]bool
+	autos           []orders.Order
+	allOrders       []orders.Order
+	services        workspacesvc.Registry
+	pokeCount       int
+	demandPokeCount int
+	extmsgSvc       *extmsg.Services
+	adapterReg      *extmsg.AdapterRegistry
+	maintenance     MaintenanceProvider
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -116,6 +117,7 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	return f.autos
 }
 func (f *fakeState) Poke()                                    { f.pokeCount++ }
+func (f *fakeState) PokeDemand()                              { f.demandPokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }

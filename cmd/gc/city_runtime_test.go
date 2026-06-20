@@ -759,6 +759,81 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke is the regression
+// guard for gc-lskvo (codex finding on PR#69 / gc-qedgc). gc-qedgc made poke
+// ticks reuse the cached demand snapshot whenever the session fingerprint is
+// stable. But gc sling routes a new work bead and pokes the controller for an
+// immediate wake of a sleeping pool, and routing a work bead does not mutate
+// any session bead — so the fingerprint stays stable and the poke tick would
+// reuse the primed no-demand snapshot, leaving the pool cold until the 30s
+// freshness TTL. A work-routing poke marks demand dirty, which must force a
+// rebuild this tick while leaving the gc-qedgc cache-reuse win intact for the
+// high-frequency session-lifecycle poke path.
+func TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke(t *testing.T) {
+	buildCalls := 0
+	routedWork := false
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		demandDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		st := map[string]TemplateParams{}
+		if routedWork {
+			// Newly-routed pool work produces a desired session (the wake).
+			st["worker-bd-1"] = TemplateParams{SessionName: "worker-bd-1"}
+		}
+		return DesiredStateResult{State: st}
+	}
+
+	// Sleeping pool: no session beads at all. Prime a no-demand snapshot.
+	sessionBeads := newSessionBeadSnapshot(nil)
+	primed := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after prime = %d, want 1", buildCalls)
+	}
+	if len(primed.result.State) != 0 {
+		t.Fatalf("primed desired sessions = %d, want 0 (no work routed yet)", len(primed.result.State))
+	}
+
+	// A plain poke with a stable fingerprint and no demand-dirty signal reuses
+	// the cache — the gc-qedgc perf win we must not regress.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after plain poke = %d, want 1 (cache reuse preserved)", buildCalls)
+	}
+
+	// gc sling routes new work for the sleeping pool and fires a work-routing
+	// poke (poke-demand), which marks demand dirty. The session fingerprint is
+	// unchanged, so only the dirty flag can force the rebuild this tick.
+	routedWork = true
+	cr.demandDirty.Store(true)
+	woken := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after work-routing poke = %d, want 2 (forced rebuild)", buildCalls)
+	}
+	if len(woken.result.State) != 1 {
+		t.Fatalf("woken desired sessions = %d, want 1 (routed work observed immediately)", len(woken.result.State))
+	}
+	if cr.demandDirty.Load() {
+		t.Fatal("demandDirty must be cleared once a rebuild consumes it (one-shot)")
+	}
+
+	// The signal is one-shot: the next stable poke reuses the rebuilt cache.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after consuming demand-dirty = %d, want 2 (reuse)", buildCalls)
+	}
+}
+
 func TestCityRuntimeEnsureManagedDoltPublishedForTickCallsHealthWhenManagedPortMissing(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 

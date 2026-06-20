@@ -603,6 +603,15 @@ func TestSlingPoolTarget(t *testing.T) {
 	if resp["status"] != "slung" {
 		t.Fatalf("status = %q, want slung", resp["status"])
 	}
+
+	// Routing work to a sleeping pool (MinActiveSessions=0) must demand-poke the
+	// controller, not just plain-poke it: routing a work bead mutates no session
+	// bead, so a plain poke's tick would reuse the cached no-demand snapshot and
+	// the pool would stay cold until the freshness TTL. The demand-poke forces a
+	// rebuild so the pool wakes this tick (gc-lskvo, follow-up to gc-qedgc).
+	if state.demandPokeCount == 0 {
+		t.Fatalf("slinging to a sleeping pool = %d demand-pokes, want >0 (must force a demand-snapshot rebuild)", state.demandPokeCount)
+	}
 }
 
 // TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo is the write-side guard for
