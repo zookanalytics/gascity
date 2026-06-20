@@ -369,6 +369,14 @@ func IsTransientControllerError(err error) bool {
 	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
+	// A saturated shared Dolt server is a deliberate collective back-off signal
+	// from the native store factory: callers must retry/back off, never treat it
+	// as a hard controller error. The typed check covers callers that preserve
+	// the error chain; the "dolt server saturated" needle below covers chains
+	// flattened to a string at the bead-store CLI boundary.
+	if errors.Is(err, beads.ErrDoltServerSaturated) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	transientNeedles := []string{
 		"i/o timeout",
@@ -385,6 +393,7 @@ func IsTransientControllerError(err error) bool {
 		"database is locked",
 		"database table is locked",
 		"sqlite_busy",
+		"dolt server saturated",
 	}
 	for _, needle := range transientNeedles {
 		if strings.Contains(msg, needle) {

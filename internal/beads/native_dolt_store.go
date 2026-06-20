@@ -196,13 +196,18 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 	// storm. The gate is shared across every database on the server, so all
 	// native opens to a saturated server back off together.
 	gate := doltAdmissionGateFor(doltServerAddrFromEnv(env))
-	if gate != nil && !gate.Admit() {
-		return nil, fmt.Errorf("native Dolt open for %s: %w", scopeRoot, ErrDoltServerSaturated)
+	var probeToken admissionToken
+	if gate != nil {
+		admitted, token := gate.Admit()
+		if !admitted {
+			return nil, fmt.Errorf("native Dolt open for %s: %w", scopeRoot, ErrDoltServerSaturated)
+		}
+		probeToken = token
 	}
 
 	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
 	if gate != nil {
-		gate.RecordOutcome(err)
+		gate.RecordOutcome(probeToken, err)
 	}
 	if err != nil {
 		return nil, err

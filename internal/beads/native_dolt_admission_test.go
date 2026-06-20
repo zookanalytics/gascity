@@ -21,29 +21,52 @@ func newTestAdmissionGate() (*doltAdmissionGate, *fakeAdmissionClock) {
 	return g, clk
 }
 
+// admits reports whether the gate admits, discarding the token. Used by tests
+// that only care about the admit/reject decision, not probe identity.
+func admits(g *doltAdmissionGate) bool {
+	admitted, _ := g.Admit()
+	return admitted
+}
+
+// recordSaturated injects n saturation outcomes from ordinary (non-probe) opens
+// admitted while the gate was closed, so they carry the zero token.
 func recordSaturated(g *doltAdmissionGate, n int) {
 	for i := 0; i < n; i++ {
-		g.RecordOutcome(fmt.Errorf("dial tcp 127.0.0.1:3307: i/o timeout"))
+		g.RecordOutcome(0, fmt.Errorf("dial tcp 127.0.0.1:3307: i/o timeout"))
 	}
 }
 
 func recordOK(g *doltAdmissionGate, n int) {
 	for i := 0; i < n; i++ {
-		g.RecordOutcome(nil)
+		g.RecordOutcome(0, nil)
 	}
 }
 
 func TestDoltAdmissionGateAdmitsByDefault(t *testing.T) {
 	g, _ := newTestAdmissionGate()
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("fresh gate should admit")
+	}
+}
+
+func TestDoltAdmissionGateAdmitsWithZeroTokenWhileClosed(t *testing.T) {
+	g, _ := newTestAdmissionGate()
+	// Ordinary opens admitted while the gate is closed are not probes, so they
+	// must carry the zero token; otherwise a closed-gate open could later be
+	// mistaken for a probe and resolve the gate.
+	admitted, token := g.Admit()
+	if !admitted {
+		t.Fatal("fresh gate should admit")
+	}
+	if token != 0 {
+		t.Fatalf("closed-gate admit token = %d, want 0", token)
 	}
 }
 
 func TestDoltAdmissionGateTripsOnSaturationCluster(t *testing.T) {
 	g, _ := newTestAdmissionGate()
 	recordSaturated(g, doltSaturationMinSamples)
-	if g.Admit() {
+	if admits(g) {
 		t.Fatalf("gate should back off after %d saturation outcomes", doltSaturationMinSamples)
 	}
 }
@@ -53,9 +76,9 @@ func TestDoltAdmissionGateIgnoresNonSaturationErrors(t *testing.T) {
 	// Hard-down refusals are owned by the per-database breaker, not the
 	// saturation gate. They must not trip collective backoff.
 	for i := 0; i < doltSaturationMinSamples*3; i++ {
-		g.RecordOutcome(fmt.Errorf("dial tcp 127.0.0.1:3307: connect: connection refused"))
+		g.RecordOutcome(0, fmt.Errorf("dial tcp 127.0.0.1:3307: connect: connection refused"))
 	}
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("connection-refused outcomes must not trip the saturation gate")
 	}
 }
@@ -67,13 +90,13 @@ func TestDoltAdmissionGateIgnoresNonSaturationErrors(t *testing.T) {
 func TestDoltAdmissionGateTripsDespiteInterleavedSuccesses(t *testing.T) {
 	g, _ := newTestAdmissionGate()
 	// 6 saturated + 3 succeeded = 9 samples, ratio 0.67 >= trip fraction.
-	g.RecordOutcome(nil)
+	g.RecordOutcome(0, nil)
 	recordSaturated(g, 2)
-	g.RecordOutcome(nil)
+	g.RecordOutcome(0, nil)
 	recordSaturated(g, 2)
-	g.RecordOutcome(nil)
+	g.RecordOutcome(0, nil)
 	recordSaturated(g, 2)
-	if g.Admit() {
+	if admits(g) {
 		t.Fatal("gate should back off when a majority of recent opens saturate, even with interleaved successes")
 	}
 }
@@ -88,7 +111,7 @@ func TestDoltAdmissionGateStaysOpenBelowTripFraction(t *testing.T) {
 		recordOK(g, 3)
 		recordSaturated(g, 1)
 	}
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("a low saturation ratio must not trip the gate")
 	}
 }
@@ -100,7 +123,7 @@ func TestDoltAdmissionGateWindowExpiry(t *testing.T) {
 	// The earlier failures have aged out of the window; one fresh failure is
 	// far below the minimum sample count.
 	recordSaturated(g, 1)
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("stale failures outside the window must not count toward tripping")
 	}
 }
@@ -108,25 +131,29 @@ func TestDoltAdmissionGateWindowExpiry(t *testing.T) {
 func TestDoltAdmissionGateProbeRecoversOnSuccess(t *testing.T) {
 	g, clk := newTestAdmissionGate()
 	recordSaturated(g, doltSaturationMinSamples)
-	if g.Admit() {
+	if admits(g) {
 		t.Fatal("gate should be open immediately after tripping")
 	}
 	// Before cooldown elapses, no probe is allowed.
 	clk.advance(doltSaturationCooldown - time.Second)
-	if g.Admit() {
+	if admits(g) {
 		t.Fatal("gate should reject before cooldown elapses")
 	}
-	// After cooldown, exactly one probe is admitted.
+	// After cooldown, exactly one probe is admitted with a non-zero token.
 	clk.advance(2 * time.Second)
-	if !g.Admit() {
+	admitted, token := g.Admit()
+	if !admitted {
 		t.Fatal("gate should admit a single probe after cooldown")
 	}
-	if g.Admit() {
+	if token == 0 {
+		t.Fatal("an admitted probe must carry a non-zero token")
+	}
+	if admits(g) {
 		t.Fatal("gate should reject additional callers while a probe is in flight")
 	}
 	// The probe succeeds: the gate closes and admits normally again.
-	g.RecordOutcome(nil)
-	if !g.Admit() {
+	g.RecordOutcome(token, nil)
+	if !admits(g) {
 		t.Fatal("gate should close after a successful probe")
 	}
 }
@@ -135,17 +162,18 @@ func TestDoltAdmissionGateProbeFailureReArmsCooldown(t *testing.T) {
 	g, clk := newTestAdmissionGate()
 	recordSaturated(g, doltSaturationMinSamples)
 	clk.advance(doltSaturationCooldown + time.Second)
-	if !g.Admit() {
+	admitted, token := g.Admit()
+	if !admitted {
 		t.Fatal("gate should admit a probe after cooldown")
 	}
 	// The probe still saturates: stay open and re-arm the cooldown.
-	g.RecordOutcome(fmt.Errorf("dial tcp 127.0.0.1:3307: i/o timeout"))
-	if g.Admit() {
+	g.RecordOutcome(token, fmt.Errorf("dial tcp 127.0.0.1:3307: i/o timeout"))
+	if admits(g) {
 		t.Fatal("gate should stay open after a failed probe")
 	}
 	// Another cooldown later, a fresh probe is allowed again.
 	clk.advance(doltSaturationCooldown + time.Second)
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("gate should admit a new probe after re-armed cooldown")
 	}
 }
@@ -155,9 +183,87 @@ func TestDoltAdmissionGateStragglerSuccessDoesNotCancelBackoff(t *testing.T) {
 	recordSaturated(g, doltSaturationMinSamples)
 	// A success from an open admitted just before the trip arrives late. It
 	// must not cancel the active backoff (no probe is in flight yet).
-	g.RecordOutcome(nil)
-	if g.Admit() {
+	g.RecordOutcome(0, nil)
+	if admits(g) {
 		t.Fatal("a straggler success must not cancel collective backoff")
+	}
+}
+
+// TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored covers the race the
+// per-admission token exists for: an open admitted *before* the trip can still
+// be in flight (native opens run up to the full open timeout, far longer than
+// the cooldown) and finish *during* a later probe window. Its stale success
+// must not close the gate — only the probe's own outcome may. Without token
+// matching this straggler would resolve the gate and falsely declare recovery.
+func TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored(t *testing.T) {
+	g, clk := newTestAdmissionGate()
+
+	// An ordinary open is admitted while the gate is still closed; it will take
+	// a long time to return.
+	admitted, stragglerToken := g.Admit()
+	if !admitted {
+		t.Fatal("closed gate should admit the straggler open")
+	}
+	if stragglerToken != 0 {
+		t.Fatalf("closed-gate straggler token = %d, want 0", stragglerToken)
+	}
+
+	// The server saturates and the gate trips while the straggler is in flight.
+	recordSaturated(g, doltSaturationMinSamples)
+
+	// After cooldown a real probe is admitted, with its own non-zero token.
+	clk.advance(doltSaturationCooldown + time.Second)
+	probeAdmitted, probeToken := g.Admit()
+	if !probeAdmitted {
+		t.Fatal("gate should admit a probe after cooldown")
+	}
+	if probeToken == stragglerToken {
+		t.Fatal("probe and straggler must have distinct tokens")
+	}
+
+	// The straggler finally returns successfully, inside the probe window. Its
+	// stale success must NOT close the gate.
+	g.RecordOutcome(stragglerToken, nil)
+	if admits(g) {
+		t.Fatal("a straggler success during a probe window must not close the gate")
+	}
+
+	// The real probe then succeeds and the gate recovers as normal.
+	g.RecordOutcome(probeToken, nil)
+	if !admits(g) {
+		t.Fatal("gate should close after the real probe succeeds")
+	}
+}
+
+// TestDoltAdmissionGateStragglerTimeoutDuringProbeDoesNotDiscardRealProbe is the
+// mirror case: a straggler that *times out* during a probe window must not
+// re-arm the cooldown, because that would consume the probe slot and discard the
+// real probe's still-pending (successful) result, wedging the gate open.
+func TestDoltAdmissionGateStragglerTimeoutDuringProbeDoesNotDiscardRealProbe(t *testing.T) {
+	g, clk := newTestAdmissionGate()
+
+	admitted, stragglerToken := g.Admit()
+	if !admitted {
+		t.Fatal("closed gate should admit the straggler open")
+	}
+
+	recordSaturated(g, doltSaturationMinSamples)
+
+	clk.advance(doltSaturationCooldown + time.Second)
+	probeAdmitted, probeToken := g.Admit()
+	if !probeAdmitted {
+		t.Fatal("gate should admit a probe after cooldown")
+	}
+
+	// The straggler times out inside the probe window. It must be ignored, not
+	// re-arm the cooldown.
+	g.RecordOutcome(stragglerToken, fmt.Errorf("dial tcp 127.0.0.1:3307: i/o timeout"))
+
+	// The real probe SUCCEEDS. Because the straggler didn't hijack the probe
+	// slot, this success still resolves recovery and closes the gate.
+	g.RecordOutcome(probeToken, nil)
+	if !admits(g) {
+		t.Fatal("the real probe's success must still close the gate despite a straggler timeout")
 	}
 }
 
@@ -165,15 +271,49 @@ func TestDoltAdmissionGateLostProbeReArms(t *testing.T) {
 	g, clk := newTestAdmissionGate()
 	recordSaturated(g, doltSaturationMinSamples)
 	clk.advance(doltSaturationCooldown + time.Second)
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("gate should admit a probe after cooldown")
 	}
 	// The probe's outcome is never recorded (e.g. a panic between admit and
 	// open). After the probe timeout, the gate re-arms a fresh probe rather
 	// than wedging open forever.
 	clk.advance(doltSaturationProbeTimeout + time.Second)
-	if !g.Admit() {
+	if !admits(g) {
 		t.Fatal("gate should re-arm a probe whose outcome was never recorded")
+	}
+}
+
+// TestDoltAdmissionGateLostProbeStragglerCannotResolveReArmedProbe pins the
+// re-arm path: once a timed-out probe is superseded, its late outcome carries a
+// stale token and must not resolve the freshly re-armed probe.
+func TestDoltAdmissionGateLostProbeStragglerCannotResolveReArmedProbe(t *testing.T) {
+	g, clk := newTestAdmissionGate()
+	recordSaturated(g, doltSaturationMinSamples)
+	clk.advance(doltSaturationCooldown + time.Second)
+	_, lostProbeToken := g.Admit()
+
+	// The first probe never reports back; after the probe timeout a fresh probe
+	// is admitted with a new token.
+	clk.advance(doltSaturationProbeTimeout + time.Second)
+	admitted, reArmedToken := g.Admit()
+	if !admitted {
+		t.Fatal("gate should re-arm a probe whose outcome was never recorded")
+	}
+	if lostProbeToken == reArmedToken {
+		t.Fatal("re-armed probe must have a distinct token from the lost probe")
+	}
+
+	// The lost probe finally returns successfully — but it is stale and must not
+	// resolve the re-armed probe's slot.
+	g.RecordOutcome(lostProbeToken, nil)
+	if admits(g) {
+		t.Fatal("a superseded probe's late success must not resolve the re-armed probe")
+	}
+
+	// Only the re-armed probe's own outcome closes the gate.
+	g.RecordOutcome(reArmedToken, nil)
+	if !admits(g) {
+		t.Fatal("gate should close after the re-armed probe succeeds")
 	}
 }
 

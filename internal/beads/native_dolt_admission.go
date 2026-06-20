@@ -51,8 +51,9 @@ const (
 // where an admitted probe's outcome is never recorded (e.g. a panic between
 // Admit and the open) so the gate cannot wedge open forever. It is set safely
 // beyond the native open operation timeout (bdCommandTimeout) so a slow probe
-// always reports its outcome before the gate would re-arm — preventing a
-// straggler probe from resolving a freshly re-armed probe's slot.
+// normally reports its outcome before the gate would re-arm; the per-admission
+// token (see admissionToken) is the durable backstop that keeps a straggler
+// probe from resolving a freshly re-armed probe's slot even if it does not.
 var doltSaturationProbeTimeout = 2 * bdCommandTimeout
 
 // doltAdmissionOutcome is one recorded native-open result within the window.
@@ -60,6 +61,14 @@ type doltAdmissionOutcome struct {
 	at        time.Time
 	saturated bool
 }
+
+// admissionToken identifies a single native-store open admitted through the
+// gate. Admit hands one back and RecordOutcome matches it, so that only the
+// outcome of the open admitted as the recovery probe can resolve the gate. The
+// zero value is never issued for a probe and means "no probe in flight"; opens
+// admitted while the gate is closed also carry the zero token because they are
+// not probes and must never resolve a later probe's slot.
+type admissionToken uint64
 
 // doltAdmissionGate is a process-wide saturation breaker for a single Dolt
 // server address (host:port), shared across every database on that server.
@@ -77,10 +86,11 @@ type doltAdmissionGate struct {
 	now    func() time.Time
 	recent []doltAdmissionOutcome
 
-	open          bool      // true while backing off
-	openedAt      time.Time // when backoff began / the last probe was issued
-	probeInFlight bool      // a post-cooldown probe has been admitted
-	probeAt       time.Time // when the in-flight probe was admitted
+	open       bool           // true while backing off
+	openedAt   time.Time      // when backoff began / the last probe was issued
+	nextToken  admissionToken // monotonic source of probe tokens
+	probeToken admissionToken // token of the in-flight probe (0 = none)
+	probeAt    time.Time      // when the in-flight probe was admitted
 }
 
 // newDoltAdmissionGate creates a closed (admitting) gate for the given server
@@ -89,38 +99,45 @@ func newDoltAdmissionGate(addr string) *doltAdmissionGate {
 	return &doltAdmissionGate{addr: addr, now: time.Now}
 }
 
-// Admit reports whether a native-store open against this server should proceed.
-// While closed it always admits. While backing off it rejects every caller
-// except one probe per cooldown, which it issues to test recovery.
-func (g *doltAdmissionGate) Admit() bool {
+// Admit reports whether a native-store open against this server should proceed
+// and returns a token identifying the admission. While closed it always admits
+// with the zero token (the open is an ordinary open, not a probe). While
+// backing off it rejects every caller except one probe per cooldown, which it
+// admits with a fresh non-zero token so RecordOutcome can tell the probe's
+// outcome apart from a straggler open admitted before the trip.
+func (g *doltAdmissionGate) Admit() (bool, admissionToken) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
 	if !g.open {
-		return true
+		return true, 0
 	}
 
 	now := g.now()
 	// A probe is already out; keep rejecting until it resolves or times out.
-	if g.probeInFlight {
+	if g.probeToken != 0 {
 		if now.Sub(g.probeAt) < doltSaturationProbeTimeout {
-			return false
+			return false, 0
 		}
-		// The previous probe never reported back; fall through and re-arm.
+		// The previous probe never reported back; fall through and re-arm. Its
+		// token is now stale, so if it ever returns it cannot match the new
+		// probe and cannot resolve the re-armed slot.
 	}
 
 	if now.Sub(g.openedAt) >= doltSaturationCooldown {
-		g.probeInFlight = true
+		g.nextToken++
+		g.probeToken = g.nextToken
 		g.probeAt = now
 		g.openedAt = now
-		return true
+		return true, g.probeToken
 	}
-	return false
+	return false, 0
 }
 
 // RecordOutcome reports the result of a native-store open so the gate can trip
-// or recover. err is the error returned by the open (nil on success).
-func (g *doltAdmissionGate) RecordOutcome(err error) {
+// or recover. token is the value Admit returned for this open; err is the error
+// returned by the open (nil on success).
+func (g *doltAdmissionGate) RecordOutcome(token admissionToken, err error) {
 	saturated := doltServerSaturationOutcome(err)
 
 	g.mu.Lock()
@@ -128,13 +145,16 @@ func (g *doltAdmissionGate) RecordOutcome(err error) {
 	now := g.now()
 
 	if g.open {
-		// Only the designated probe resolves the gate. Outcomes from opens that
-		// were admitted just before the trip are stragglers; ignoring them keeps
-		// a single lingering success from canceling an active backoff.
-		if !g.probeInFlight {
+		// Only the admitted probe's own outcome resolves the gate. An outcome
+		// whose token does not match the live probe is a straggler — an open
+		// admitted before the trip (token 0) or a superseded probe — that just
+		// happened to finish inside this probe window. Ignoring it keeps a stale
+		// success from canceling an active backoff and a stale timeout from
+		// re-arming the cooldown and discarding the real probe's pending result.
+		if g.probeToken == 0 || token != g.probeToken {
 			return
 		}
-		g.probeInFlight = false
+		g.probeToken = 0
 		if saturated {
 			g.openedAt = now // re-arm: another cooldown before the next probe
 			return
@@ -161,7 +181,7 @@ func (g *doltAdmissionGate) RecordOutcome(err error) {
 		float64(satCount) >= doltSaturationTripFraction*float64(len(g.recent)) {
 		g.open = true
 		g.openedAt = now
-		g.probeInFlight = false
+		g.probeToken = 0
 		log.Printf("[dolt-admission] %s: saturated, backing off collectively (%d/%d recent opens saturating; cooldown %s)",
 			g.addr, satCount, len(g.recent), doltSaturationCooldown)
 		g.recent = nil

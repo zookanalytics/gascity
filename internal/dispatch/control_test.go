@@ -1461,6 +1461,9 @@ func TestIsTransientControllerError(t *testing.T) {
 		{name: "mysql deadlock", err: errors.New("Error 1213 (40001): Deadlock found when trying to get lock; try restarting transaction"), want: true},
 		{name: "sqlite locked", err: errors.New("listing sqlite ready beads: database is locked (5) (SQLITE_BUSY)"), want: true},
 		{name: "sqlite table locked", err: errors.New("listing sqlite ready beads: database table is locked"), want: true},
+		{name: "dolt server saturated typed", err: beads.ErrDoltServerSaturated, want: true},
+		{name: "dolt server saturated wrapped", err: fmt.Errorf("opening store for city: %w", beads.ErrDoltServerSaturated), want: true},
+		{name: "dolt server saturated string only", err: errors.New("native Dolt open for /scope: dolt server saturated: backing off (collective)"), want: true},
 		{name: "bad step spec", err: errors.New("deserializing step spec: invalid character 'n'"), want: false},
 	}
 
