@@ -715,8 +715,8 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 		},
 	}})
 
-	first := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
-	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	first := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	second := cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 	if buildCalls != 1 {
 		t.Fatalf("buildDesiredState call count = %d, want 1 for stable patrol reuse", buildCalls)
@@ -735,14 +735,27 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 			"pending_create_claim": "true",
 		},
 	}})
-	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count after session change = %d, want 2", buildCalls)
 	}
 
-	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, "poke", false)
+	// gc-qedgc: a poke-driven (non-patrol) tick with a stable session
+	// fingerprint reuses the fresh cached snapshot instead of force-rebuilding.
+	// Before gc-qedgc, every non-patrol tick force-rebuilt the demand snapshot —
+	// a full GetReadyWork-per-store-group rebuild on every poke — which, under
+	// the poke→tick→bead-write feedback loop, saturated the shared Dolt server
+	// (gc-k8r4y). Poke ticks now fall through the same fingerprint+freshness
+	// gate as patrol ticks.
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after stable poke = %d, want 2 (poke reuses fresh cache)", buildCalls)
+	}
+
+	// A config change still forces a rebuild — templates actually changed.
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, true)
 	if buildCalls != 3 {
-		t.Fatalf("buildDesiredState call count after poke = %d, want 3", buildCalls)
+		t.Fatalf("buildDesiredState call count after config change = %d, want 3 (config change rebuilds)", buildCalls)
 	}
 }
 
@@ -1235,7 +1248,7 @@ func TestCityRuntimeDemandSnapshotRetainsOnlyPoolScaleCheckPartials(t *testing.T
 				return tc.result
 			}
 
-			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 			if got := snapshot.result.PoolDesiredCounts["worker"]; got != tc.want {
 				t.Fatalf("PoolDesiredCounts[worker] = %d, want %d", got, tc.want)
@@ -1938,8 +1951,8 @@ func TestCityRuntimeDemandSnapshotRefreshesWhenDemandCommandsAreCustom(t *testin
 			}
 
 			sessionBeads := newSessionBeadSnapshot(nil)
-			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
-			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+			_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+			_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 			if buildCalls != tc.wantBuilds {
 				t.Fatalf("buildDesiredState call count = %d, want %d", buildCalls, tc.wantBuilds)
@@ -1968,7 +1981,7 @@ func TestCityRuntimeDemandSnapshotDoesNotRunControllerWorkQuery(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	snapshot := cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "patrol", false)
+	snapshot := cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, false)
 
 	if len(snapshot.result.WorkSet) != 0 {
 		t.Fatalf("WorkSet = %#v, want empty; controller demand must not run work_query", snapshot.result.WorkSet)
@@ -2002,7 +2015,7 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		stderr: io.Discard,
 	}
 
-	_ = cr.loadDemandSnapshot(nil, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(nil, nil, false)
 
 	if err := sp.Attach("headless-agent"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
 		t.Fatalf("Attach(headless-agent) error = %v, want ACP transport route", err)

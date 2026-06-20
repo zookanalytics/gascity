@@ -1138,7 +1138,7 @@ func (cr *CityRuntime) tick(
 		return
 	}
 	phaseStart = time.Now()
-	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
+	demand := cr.loadDemandSnapshot(sessionBeads, trace, configChanged)
 	recordPhase(TraceSiteDemandSnapshot, "load_demand_snapshot", phaseStart, map[string]any{
 		"config_changed": configChanged,
 		"trigger":        trigger,
@@ -2925,11 +2925,10 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 func (cr *CityRuntime) loadDemandSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 	trace *sessionReconcilerTraceCycle,
-	trigger string,
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
-	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+	if cr.shouldRefreshDemandSnapshot(configChanged, sessionFingerprint) {
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionBeads []beads.Bead
 		if sessionBeads != nil {
@@ -2962,15 +2961,22 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	return snapshot
 }
 
+// shouldRefreshDemandSnapshot reports whether the cached demand snapshot must
+// be rebuilt this tick. The gate is trigger-independent: poke-driven ticks
+// reuse a fresh, stable snapshot exactly as patrol ticks do, rebuilding only
+// when the config (templates) changed, the session fingerprint changed, or the
+// cached snapshot aged out. Forcing a rebuild on every non-patrol tick made the
+// poke→tick→bead-write feedback loop run a full demand rebuild (GetReadyWork
+// per store-group) on every poke — a large share of the per-tick query volume
+// that saturated the shared Dolt server (gc-k8r4y).
 func (cr *CityRuntime) shouldRefreshDemandSnapshot(
-	trigger string,
 	configChanged bool,
 	sessionFingerprint string,
 ) bool {
 	if !cr.demandSnapshotsEnabled() {
 		return true
 	}
-	if configChanged || trigger != "patrol" {
+	if configChanged {
 		return true
 	}
 	if cr.demandSnapshot == nil {
