@@ -1264,7 +1264,10 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	now := time.Now()
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
-		cr.applyWispQueryIndexes(ctx)
+		// Run on a background goroutine: the migration now sweeps every managed
+		// database, and a first-time CREATE INDEX on a large wisps table can be
+		// slow. ctx is the controller-lifetime context, so shutdown cancels it.
+		go cr.applyWispQueryIndexes(ctx)
 	}
 	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
 	cr.runOrderTrackingSweepWatchdog(now)
