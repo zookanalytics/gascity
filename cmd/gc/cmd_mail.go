@@ -97,6 +97,7 @@ type mailArchiveSelectOptions struct {
 	SubjectContains string
 	EmptyBody       bool
 	Limit           int
+	KeepNewest      int
 	IncludeRead     bool
 	DryRun          bool
 	CaseInsensitive bool
@@ -203,6 +204,7 @@ slice without enumerating IDs by hand.`,
 	cmd.Flags().StringVar(&opts.SubjectContains, "subject-contains", "", "archive matching unread messages whose subject contains this text")
 	cmd.Flags().BoolVar(&opts.EmptyBody, "empty-body", false, "only archive matching messages whose body is empty")
 	cmd.Flags().IntVar(&opts.Limit, "limit", opts.Limit, "maximum matching messages to archive in this run")
+	cmd.Flags().IntVar(&opts.KeepNewest, "keep-newest", 0, "preserve the newest N matching messages, archiving only the older duplicates")
 	cmd.Flags().BoolVar(&opts.IncludeRead, "include-read", false, "include read-but-open messages when selecting by filter")
 	cmd.Flags().BoolVar(&opts.DryRun, "dry-run", false, "list matching messages without archiving them")
 	return cmd
@@ -230,7 +232,8 @@ func (o mailArchiveSelectOptions) hasSelector() bool {
 		strings.TrimSpace(o.SubjectContains) != "" ||
 		o.EmptyBody ||
 		o.IncludeRead ||
-		o.DryRun
+		o.DryRun ||
+		o.KeepNewest > 0
 }
 
 func (o mailArchiveSelectOptions) hasContentFilter() bool {
@@ -286,6 +289,10 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		fmt.Fprintln(stderr, "gc mail archive: --limit must be greater than zero") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if opts.KeepNewest < 0 {
+		fmt.Fprintln(stderr, "gc mail archive: --keep-newest cannot be negative") //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	archiver, ok := mp.(archiveMatchingProvider)
 	if !ok {
 		fmt.Fprintln(stderr, "gc mail archive: filtered archive requires the beadmail provider") //nolint:errcheck // best-effort stderr
@@ -304,6 +311,7 @@ func doMailArchiveSelectedJSON(mp mail.Provider, rec events.Recorder, args []str
 		IncludeRead:     opts.IncludeRead,
 		CaseInsensitive: opts.CaseInsensitive,
 		Limit:           opts.Limit,
+		KeepNewest:      opts.KeepNewest,
 	}
 	if opts.DryRun {
 		matches, err := archiver.ArchiveCandidates(filter)

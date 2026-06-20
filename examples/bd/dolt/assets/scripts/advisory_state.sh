@@ -61,13 +61,18 @@ advisory_clear() {
   rm -f "$1" 2>/dev/null || true
 }
 
-# advisory_compact RECIPIENT SUBJECT_PREFIX [LIMIT] — archive (close) open mail
-# wisps whose subject starts with SUBJECT_PREFIX, addressed to RECIPIENT,
-# collapsing the pre-dedup pile of duplicate advisories and superseding a stale
-# advisory when the condition set changes or clears. Read-but-open wisps are
-# included so a partially-read pile compacts fully. LIMIT bounds one run
-# (default 1000; a larger pile drains over subsequent ticks — the pass is
-# idempotent).
+# advisory_compact RECIPIENT SUBJECT_PREFIX [LIMIT] [KEEP_NEWEST] — archive
+# (close) open mail wisps whose subject starts with SUBJECT_PREFIX, addressed to
+# RECIPIENT, collapsing the pre-dedup pile of duplicate advisories and
+# superseding a stale advisory when the condition set changes or clears.
+# Read-but-open wisps are included so a partially-read pile compacts fully. LIMIT
+# bounds one run (default 1000; a larger pile drains over subsequent ticks — the
+# pass is idempotent).
+#
+# KEEP_NEWEST (default 0) preserves the newest N matching wisps instead of
+# archiving them. Pass 1 on a steady, still-active condition so the pile of
+# duplicates drains while the single current advisory stays open; leave it 0 to
+# archive everything (superseding before a fresh send, or clearing when healthy).
 #
 # Best-effort: a missing/failing `gc`, a transport error, or zero matches is a
 # silent no-op so compaction never blocks or fails the health probe. Refuses to
@@ -79,13 +84,15 @@ advisory_compact() {
   _adv_to="${1:-}"
   _adv_prefix="${2:-}"
   _adv_limit="${3:-1000}"
+  _adv_keep="${4:-0}"
   [ -n "$_adv_to" ] || return 0
   [ -n "$_adv_prefix" ] || return 0
   case "$_adv_limit" in ''|*[!0-9]*|0) _adv_limit=1000 ;; esac
-  "${GC_BIN:-gc}" mail archive \
-    --to "$_adv_to" \
-    --subject-prefix "$_adv_prefix" \
-    --include-read \
-    --limit "$_adv_limit" \
-    >/dev/null 2>&1 || true
+  case "$_adv_keep" in ''|*[!0-9]*) _adv_keep=0 ;; esac
+  set -- mail archive --to "$_adv_to" --subject-prefix "$_adv_prefix" \
+    --include-read --limit "$_adv_limit"
+  if [ "$_adv_keep" -gt 0 ]; then
+    set -- "$@" --keep-newest "$_adv_keep"
+  fi
+  "${GC_BIN:-gc}" "$@" >/dev/null 2>&1 || true
 }

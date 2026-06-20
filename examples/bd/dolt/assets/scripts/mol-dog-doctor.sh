@@ -305,12 +305,22 @@ Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
             advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
         fi
+    else
+        # Steady warning (unchanged signature) — the common state once a
+        # persistent condition has its signature on file. The send-time dedup
+        # correctly suppresses a re-send, but neither the supersede above nor the
+        # healthy drain below runs here, so a pre-dedup pile (or advisories left
+        # by a prior run before this signature was recorded) would stay open for
+        # the life of a condition that never clears, e.g. orphan DBs. Drain the
+        # duplicates while keeping the single current advisory (--keep-newest 1)
+        # so the operator still sees one standing alert. Idempotent: once
+        # converged to one, this archives nothing.
+        advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX" "" 1
     fi
 else
     # Healthy: forget the last advisory so a future condition re-alerts, then
     # archive any open advisories — the condition cleared, so none should remain
-    # open. This is also where the pre-dedup pile drains: a healthy tick (the
-    # common steady state) compacts every leftover advisory wisp in one pass.
+    # open. Drains the pile too whenever the server is healthy on this tick.
     advisory_clear "$ADVISORY_STATE_FILE"
     advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX"
 fi

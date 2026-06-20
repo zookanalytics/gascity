@@ -2729,6 +2729,71 @@ func TestMailArchiveSelectedIsFilteredAndBounded(t *testing.T) {
 	}
 }
 
+func TestMailArchiveSelectedKeepNewestPreservesCurrent(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+	first, err := mp.Send("human", "operator", "Dolt health advisory [MEDIUM]", "oldest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := mp.Send("human", "operator", "Dolt health advisory [MEDIUM]", "middle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newest, err := mp.Send("human", "operator", "Dolt health advisory [MEDIUM]", "current")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		Recipient:       "operator",
+		SubjectPrefix:   "Dolt health advisory",
+		Limit:           100,
+		KeepNewest:      1,
+		IncludeRead:     true,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doMailArchiveSelected = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	// The two oldest advisories are archived; the newest current advisory stays
+	// open so the operator keeps one standing alert.
+	for _, id := range []string{first.ID, second.ID} {
+		if _, err := store.Get(id); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("Get(%s) err = %v, want ErrNotFound (older duplicate should be archived)", id, err)
+		}
+	}
+	b, err := store.Get(newest.ID)
+	if err != nil {
+		t.Fatalf("Get newest %s: %v", newest.ID, err)
+	}
+	if b.Status != "open" {
+		t.Fatalf("newest advisory %s status = %q, want open (must be preserved)", newest.ID, b.Status)
+	}
+}
+
+func TestMailArchiveSelectedRejectsNegativeKeepNewest(t *testing.T) {
+	store := beads.NewMemStore()
+	mp := beadmail.New(store)
+
+	var stdout, stderr bytes.Buffer
+	code := doMailArchiveSelected(mp, events.Discard, mailArchiveSelectOptions{
+		Recipient:       "operator",
+		SubjectPrefix:   "Dolt health advisory",
+		Limit:           100,
+		KeepNewest:      -1,
+		CaseInsensitive: true,
+	}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doMailArchiveSelected with negative --keep-newest = 0, want non-zero")
+	}
+	if !strings.Contains(stderr.String(), "keep-newest cannot be negative") {
+		t.Fatalf("stderr = %q, want negative keep-newest rejection", stderr.String())
+	}
+}
+
 func TestMailArchiveSelectedAllRecipientsEmptyBody(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)

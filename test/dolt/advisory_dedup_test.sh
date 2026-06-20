@@ -110,6 +110,27 @@ if arg_logged "1000"; then pass "advisory_compact defaults --limit to 1000"; els
 ( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "abc" )
 if arg_logged "1000" && ! arg_logged "abc"; then pass "advisory_compact coerces invalid limit to 1000"; else bad "advisory_compact did not coerce invalid limit: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
 
+# Default (no KEEP_NEWEST) archives the whole matching set — no --keep-newest
+# flag, so a supersede/healthy pass closes every duplicate.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" 50 )
+if ! arg_logged "--keep-newest"; then pass "advisory_compact omits --keep-newest by default (archive all)"; else bad "advisory_compact passed --keep-newest without being asked: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# KEEP_NEWEST=1 (steady-warning drain) preserves the current advisory: passes
+# --keep-newest 1 so the pile of duplicates compacts down to the one open wisp.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "" 1 )
+if arg_logged "--keep-newest" && arg_logged "1" && arg_logged "1000"; then
+  pass "advisory_compact passes --keep-newest 1 and keeps the default limit"
+else
+  bad "advisory_compact did not pass keep-newest with default limit: $(tr '\n' '|' < "$GC_STUB_LOG")"
+fi
+
+# A non-numeric KEEP_NEWEST coerces to 0 (archive all), never passed as junk.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "" "abc" )
+if ! arg_logged "--keep-newest" && ! arg_logged "abc"; then pass "advisory_compact coerces invalid keep-newest to 0"; else bad "advisory_compact did not coerce invalid keep-newest: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
 # Refuses to run without BOTH a recipient and a subject prefix — never archives
 # unrelated mail.
 : > "$GC_STUB_LOG"

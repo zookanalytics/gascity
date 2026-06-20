@@ -1061,6 +1061,108 @@ func TestArchiveCandidatesUseBothTiers(t *testing.T) {
 	}
 }
 
+func TestArchiveCandidatesKeepNewestPreservesCurrent(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	// Three advisories to one recipient under the same subject prefix, sent
+	// oldest-to-newest (MemStore assigns ascending ids and non-decreasing
+	// timestamps, so the last Send is the newest).
+	var sent []mail.Message
+	for i := 0; i < 3; i++ {
+		m, err := p.Send("human", "mayor", "Dolt health advisory [MEDIUM]", "body")
+		if err != nil {
+			t.Fatalf("Send #%d: %v", i, err)
+		}
+		sent = append(sent, m)
+	}
+	newest := sent[len(sent)-1]
+
+	matches, err := p.ArchiveCandidates(ArchiveFilter{
+		Recipients:    []string{"mayor"},
+		SubjectPrefix: "Dolt health advisory",
+		IncludeRead:   true,
+		KeepNewest:    1,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("KeepNewest:1 over 3 messages = %d matches, want 2", len(matches))
+	}
+	if hasMailMessageID(matches, newest.ID) {
+		t.Fatalf("KeepNewest:1 must preserve the newest advisory %s; matches=%#v", newest.ID, matches)
+	}
+	for _, older := range sent[:2] {
+		if !hasMailMessageID(matches, older.ID) {
+			t.Fatalf("KeepNewest:1 should archive older advisory %s; matches=%#v", older.ID, matches)
+		}
+	}
+}
+
+func TestArchiveCandidatesKeepNewestGreaterThanMatchesArchivesNothing(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	for i := 0; i < 2; i++ {
+		if _, err := p.Send("human", "mayor", "Dolt health advisory [MEDIUM]", "body"); err != nil {
+			t.Fatalf("Send #%d: %v", i, err)
+		}
+	}
+
+	matches, err := p.ArchiveCandidates(ArchiveFilter{
+		Recipients:    []string{"mayor"},
+		SubjectPrefix: "Dolt health advisory",
+		IncludeRead:   true,
+		KeepNewest:    5,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("KeepNewest >= match count must archive nothing, got %d matches", len(matches))
+	}
+}
+
+func TestArchiveCandidatesKeepNewestRespectsLimit(t *testing.T) {
+	store := beads.NewMemStore()
+	p := New(store)
+
+	var sent []mail.Message
+	for i := 0; i < 5; i++ {
+		m, err := p.Send("human", "mayor", "Dolt health advisory [MEDIUM]", "body")
+		if err != nil {
+			t.Fatalf("Send #%d: %v", i, err)
+		}
+		sent = append(sent, m)
+	}
+	newest := sent[len(sent)-1]
+
+	// 5 matches, keep the newest 1 (4 archivable), but cap this run at 2: the
+	// two oldest are archived, the newest stays preserved.
+	matches, err := p.ArchiveCandidates(ArchiveFilter{
+		Recipients:    []string{"mayor"},
+		SubjectPrefix: "Dolt health advisory",
+		IncludeRead:   true,
+		KeepNewest:    1,
+		Limit:         2,
+	})
+	if err != nil {
+		t.Fatalf("ArchiveCandidates: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("KeepNewest:1 Limit:2 over 5 messages = %d matches, want 2", len(matches))
+	}
+	if hasMailMessageID(matches, newest.ID) {
+		t.Fatalf("KeepNewest:1 must never archive the newest advisory %s even under a limit; matches=%#v", newest.ID, matches)
+	}
+	for _, oldest := range sent[:2] {
+		if !hasMailMessageID(matches, oldest.ID) {
+			t.Fatalf("KeepNewest:1 Limit:2 should archive the oldest advisory %s first; matches=%#v", oldest.ID, matches)
+		}
+	}
+}
+
 func TestArchiveNonMessage(t *testing.T) {
 	store := beads.NewMemStore()
 	p := New(store)

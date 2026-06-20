@@ -4475,6 +4475,90 @@ exit 0
 	}
 }
 
+// TestDoctorScriptSteadyWarningCompactsDuplicatesKeepingCurrent is the
+// regression test for the steady-warning / unchanged-signature state-machine
+// case (PR#75 review). Once a persistent condition has its signature recorded,
+// advisory_changed is false on every later tick, so neither the supersede arm
+// nor the healthy-drain arm runs. Without a dedicated steady-warning drain the
+// pre-dedup pile of duplicate advisories would stay open for the life of the
+// condition. The doctor must instead compact the duplicates while keeping the
+// one current advisory (--keep-newest 1), and must NOT re-send (the send-time
+// dedup still suppresses that).
+func TestDoctorScriptSteadyWarningCompactsDuplicatesKeepingCurrent(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	// A persistent latency warning (LATENCY_WARN_S=0 fires every tick) with the
+	// advisory signature persisted across ticks in a fixed state file.
+	stateFile := filepath.Join(cityPath, "doctor-advisory-state")
+	env := []string{
+		"GC_DOCTOR_LATENCY_WARN_S=0",
+		"GC_DOCTOR_ADVISORY_STATE_FILE=" + stateFile,
+	}
+
+	// Tick 1: condition is new (no signature on file) -> the doctor alerts and
+	// records the signature for the dedup.
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, env...)
+	if _, err := os.Stat(stateFile); err != nil {
+		t.Fatalf("tick 1 must record the advisory signature for the dedup: %v", err)
+	}
+	firstLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log after tick 1: %v", err)
+	}
+	if !strings.Contains(string(firstLog), "Dolt health advisory [MEDIUM]") {
+		t.Fatalf("tick 1 should send the advisory, log:\n%s", firstLog)
+	}
+
+	// Truncate the log so the tick-2 assertions only observe tick-2 invocations.
+	if err := os.WriteFile(gcLogPath, nil, 0o644); err != nil {
+		t.Fatalf("truncate gc log between ticks: %v", err)
+	}
+
+	// Tick 2: same condition, signature now on file -> steady warning. The
+	// doctor must drain the duplicate pile keeping the current advisory and must
+	// not re-send.
+	runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, env...)
+	secondLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log after tick 2: %v", err)
+	}
+	got := string(secondLog)
+	if !strings.Contains(got, "mail archive") || !strings.Contains(got, "--keep-newest 1") {
+		t.Fatalf("steady warning must compact duplicates with --keep-newest 1, log:\n%s", got)
+	}
+	if !strings.Contains(got, "--subject-prefix Dolt health advisory") || !strings.Contains(got, "--to human") {
+		t.Fatalf("steady-warning compaction must target the advisory recipient and prefix, log:\n%s", got)
+	}
+	if strings.Contains(got, "Dolt health advisory [MEDIUM]") {
+		t.Fatalf("steady warning must NOT re-send the advisory (send-time dedup), log:\n%s", got)
+	}
+}
+
 // TestDoctorScriptUnreachableEscalationUsesGenericEscalation asserts the
 // server-unreachable path goes through the generic escalation recipient.
 func TestDoctorScriptUnreachableEscalationUsesGenericEscalation(t *testing.T) {
