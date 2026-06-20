@@ -526,6 +526,25 @@ has_dependency_target_column() {
     printf '%s\n' "$fields" | grep -qx 'depends_on_external' || return 1
 }
 
+# wisp_table_exists reports whether $1 (already validated by
+# valid_database_identifier) contains the auxiliary wisp table named $2. The
+# closed-wisp purge uses it to cascade deletes only into the auxiliary tables
+# this bead store actually has: wisp_labels / wisp_events / wisp_comments are
+# present in current bd schemas but may be absent from older or minimal ones,
+# and a DELETE against a missing table would fail the whole purge statement.
+# The exact-match grep guards against LIKE treating the table name's
+# underscores as single-character wildcards. On probe failure it reports absent
+# (1) so the optional cascade is skipped for this run and the next healthy run
+# retries — safer than erroring the purge.
+wisp_table_exists() (
+    db="$1"
+    table="$2"
+    if ! output=$(dolt_sql -r csv -q "SHOW TABLES FROM \`$db\` LIKE '$table'" 2>/dev/null); then
+        return 1
+    fi
+    printf '%s\n' "$output" | tail -n +2 | tr -d '\r' | grep -Fqx "$table"
+)
+
 workflow_root_candidates_cte() {
     local db="$1"
     local candidate_cte="$2"
@@ -898,7 +917,23 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 3: Purge — delete closed wisps past purge_age.
+    # Step 3: Purge — delete closed wisps past purge_age along with the
+    # auxiliary rows they own.
+    #
+    # A bare `DELETE FROM wisps` is unsafe for the wisp tables: this schema
+    # carries no ON DELETE CASCADE, so every row keyed on a deleted wisp —
+    # wisp_labels, wisp_events, wisp_comments, and the wisp_dependencies edges
+    # on either side of it — survives as an orphan. On a busy city those
+    # orphans accumulated into the hundreds of thousands (recurring
+    # order-tracking labels and order-run events) and saturated Dolt; see
+    # gc-4zo0v. We delete the auxiliary rows owned by the exact purge-candidate
+    # set first, then delete the wisps — the same cascade the issue-side
+    # session prune already performs in Step 6.
+    #
+    # The candidate set — closed, past purge_age, and not purge-protected — is
+    # the predicate below. A closed parent is protected (and so keeps every
+    # auxiliary row) while any protected-type edge points to it from a
+    # still-live child, so it is never a candidate.
     get_sql_count "$DB" "closed wisp purge" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status = 'closed'
@@ -913,8 +948,12 @@ while IFS= read -r DB; do
     PURGE_COUNT=$SQL_COUNT_RESULT
 
     if [ "$PURGE_COUNT" -gt 0 ] && [ -z "$DRY_RUN" ]; then
-        if run_sql_change "$DB" "purging closed wisps" "
-            DELETE FROM \`$DB\`.wisps
+        # Candidate-id subquery, reused by every auxiliary delete so each one
+        # targets exactly the wisps the final delete removes. The escaped
+        # backticks stay literal in the value and are not re-evaluated when the
+        # variable is expanded into the statements below.
+        PURGE_CANDIDATE_SELECT="
+            SELECT id FROM \`$DB\`.wisps
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
@@ -923,7 +962,39 @@ while IFS= read -r DB; do
                 WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
-        "; then
+        "
+
+        # wisp_dependencies always exists here (gated at the top of the loop).
+        # The issue_id-keyed content tables are optional across schema versions,
+        # so cascade only into the ones this store actually has.
+        PURGE_SQL=""
+        for aux_table in wisp_labels wisp_events wisp_comments; do
+            if wisp_table_exists "$DB" "$aux_table"; then
+                PURGE_SQL="${PURGE_SQL}DELETE FROM \`$DB\`.$aux_table WHERE issue_id IN ($PURGE_CANDIDATE_SELECT);
+"
+            fi
+        done
+        # Remove dependency edges on both sides so none is left pointing at a
+        # deleted wisp: edges a candidate owns (issue_id) and inbound references
+        # to it (depends_on_wisp_id). This cannot change the candidate set the
+        # final delete computes — candidate wisps are closed, and only a *live*
+        # child confers purge protection, so no candidate-owned or
+        # candidate-targeting edge contributes to any wisp's protection.
+        PURGE_SQL="${PURGE_SQL}DELETE FROM \`$DB\`.wisp_dependencies WHERE issue_id IN ($PURGE_CANDIDATE_SELECT) OR depends_on_wisp_id IN ($PURGE_CANDIDATE_SELECT);
+"
+        # wisps last so run_sql_change's ROW_COUNT() reports purged wisps. This
+        # statement is the long-standing protection-aware delete, unchanged.
+        PURGE_SQL="${PURGE_SQL}DELETE FROM \`$DB\`.wisps
+            WHERE status = 'closed'
+            AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
+            AND id NOT IN (
+                SELECT DISTINCT d.depends_on_wisp_id FROM \`$DB\`.wisp_dependencies d
+                INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
+                WHERE d.type IN ($WISP_PURGE_PROTECT_EDGE_TYPES)
+                AND child_wisp.status IN ('open', 'hooked', 'in_progress')
+            )"
+
+        if run_sql_change "$DB" "purging closed wisps" "$PURGE_SQL"; then
             PURGED_ROWS=$SQL_CHANGE_ROWS_RESULT
             DB_PURGED=$((DB_PURGED + PURGED_ROWS))
             TOTAL_PURGED=$((TOTAL_PURGED + PURGED_ROWS))
