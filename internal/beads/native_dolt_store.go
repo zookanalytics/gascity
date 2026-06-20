@@ -190,7 +190,20 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		return nil, err
 	}
 	defer restoreEnv()
+
+	// Process-wide collective backoff: when the shared Dolt server is
+	// saturated, fail fast without dialing rather than feeding the connection
+	// storm. The gate is shared across every database on the server, so all
+	// native opens to a saturated server back off together.
+	gate := doltAdmissionGateFor(doltServerAddrFromEnv(env))
+	if gate != nil && !gate.Admit() {
+		return nil, fmt.Errorf("native Dolt open for %s: %w", scopeRoot, ErrDoltServerSaturated)
+	}
+
 	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if gate != nil {
+		gate.RecordOutcome(err)
+	}
 	if err != nil {
 		return nil, err
 	}

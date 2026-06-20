@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -137,6 +138,20 @@ func OpenStoreAtForCity(ctx context.Context, opts StoreOpenOptions) (StoreOpenRe
 
 	native, err := opts.openNativeStore(ctx)
 	if err != nil {
+		if errors.Is(err, ErrDoltServerSaturated) {
+			// Collective backoff: the shared Dolt server is saturated. Falling
+			// back to the bd-CLI store would dial the same overloaded server and
+			// deepen the saturation, so propagate the backoff to the caller
+			// rather than reopening a connection through another path.
+			diag := BeadsDiagnostic{
+				Store:               storeNameNativeDoltStore,
+				NativeStoreEligible: true,
+				PreflightGate:       "native_open_saturated",
+				PreflightReason:     err.Error(),
+			}
+			logNativeUnavailable(opts.Logger, opts.ScopeRoot, diag.PreflightGate, diag.PreflightReason)
+			return StoreOpenResult{Diagnostic: diag}, err
+		}
 		diag := BeadsDiagnostic{
 			Store:               storeNameBdStore,
 			NativeStoreEligible: false,

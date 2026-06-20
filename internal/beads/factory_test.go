@@ -47,6 +47,36 @@ func TestOpenStoreAtForCityEligibleNativeReturnsInjectedNativeStore(t *testing.T
 	}
 }
 
+func TestOpenStoreAtForCitySaturatedNativeDoesNotFallBackToBd(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	scope := "/city"
+
+	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+		ScopeRoot:        scope,
+		Provider:         "bd",
+		PreflightChecker: factoryPreflightChecker(scope, factoryPreflightDoltMetadata(), contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+		OpenBdStore: func() (Store, error) {
+			t.Fatal("OpenBdStore called while the shared Dolt server is saturated")
+			return nil, nil
+		},
+		OpenNativeStore: func() (Store, error) {
+			return nil, ErrDoltServerSaturated
+		},
+	})
+	if !errors.Is(err, ErrDoltServerSaturated) {
+		t.Fatalf("OpenStoreAtForCity() error = %v, want ErrDoltServerSaturated", err)
+	}
+	if result.Store != nil {
+		t.Fatalf("Store = %T, want nil on saturation backoff", result.Store)
+	}
+	if result.Diagnostic.PreflightGate != "native_open_saturated" {
+		t.Fatalf("diagnostic preflight_gate = %q, want native_open_saturated", result.Diagnostic.PreflightGate)
+	}
+	if result.Diagnostic.Store != storeNameNativeDoltStore {
+		t.Fatalf("diagnostic store = %q, want %q", result.Diagnostic.Store, storeNameNativeDoltStore)
+	}
+}
+
 func TestOpenStoreAtForCityIneligibleProviderSkipsPreflight(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
