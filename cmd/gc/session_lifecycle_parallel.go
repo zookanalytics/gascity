@@ -981,10 +981,28 @@ func buildPreparedStartWithWorkDirResolver(
 		agentCfg.Command = resolveSessionCommand(agentCfg.Command, sk, parentSID, tp.ResolvedProvider, firstStart, forceFresh)
 	}
 	hasResumeKey := strings.TrimSpace(session.Metadata["session_key"]) != ""
-	if !firstStart && !forceFresh && hasResumeKey {
+	// !tp.IsACP mirrors the CLI-resume guard above: only providers that actually
+	// take a --resume/--session-id flag rehydrate the prior conversation. ACP is
+	// excluded from resolveSessionCommand and acp.Provider.Start always opens a
+	// fresh session/new, delivering the rendered role prompt via the nudge — so
+	// suppressing prompt replay on an ACP "resume" would drop the role prompt
+	// entirely (gc-xlj7s). A Claude ACP session can still mint a session_key, so
+	// hasResumeKey alone is not enough to tell that --resume rehydration applies.
+	if !firstStart && !forceFresh && hasResumeKey && !tp.IsACP {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		// On resume the provider rehydrates the prior conversation (the rendered
+		// role prompt included) via --resume, so an agent that already carries a
+		// nudge only needs the nudge to wake without landing idle. Prepending the
+		// prompt in that case duplicates the already-restored role on every wake
+		// (gc-7go2a; the ~20k-token re-injection in gc-cbtfq). #2477's prompt
+		// replay stays as the fallback for nudge-less agents, whose only
+		// first-turn payload is the prompt itself.
+		if strings.TrimSpace(tp.Hints.Nudge) != "" {
+			agentCfg.Nudge = tp.Hints.Nudge
+		} else {
+			agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		}
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
 		}
