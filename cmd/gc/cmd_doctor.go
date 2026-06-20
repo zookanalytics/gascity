@@ -214,6 +214,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))
+			// wisp-orphans connects to the managed Dolt server, so respect the
+			// GC_DOLT=skip opt-out like the other SQL-connecting Dolt checks.
+			if !gcDoltSkip() {
+				register(newWispOrphanCheck(cityPath, cfg))
+			}
 		}
 		register(doctor.NewCitySuspendedCheck(cfg))
 		register(doctor.NewConfigValidCheck(cfg))
