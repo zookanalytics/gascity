@@ -156,6 +156,73 @@ func TestReadLastRunCorruptFileErrors(t *testing.T) {
 	}
 }
 
+func TestLastRunCursorFingerprintChangesWhenCursorAdvances(t *testing.T) {
+	dir := t.TempDir()
+
+	// A missing cursor file fingerprints to 0 with no error.
+	fp0, err := LastRunCursorFingerprint(dir)
+	if err != nil {
+		t.Fatalf("fingerprint on missing file: %v", err)
+	}
+	if fp0 != 0 {
+		t.Fatalf("missing-file fingerprint = %d, want 0", fp0)
+	}
+
+	// The first advance materializes the file: fingerprint becomes non-zero.
+	if err := AdvanceLastRun(dir, "a", time.Unix(1_700_000_000, 0)); err != nil {
+		t.Fatalf("AdvanceLastRun: %v", err)
+	}
+	fp1, err := LastRunCursorFingerprint(dir)
+	if err != nil {
+		t.Fatalf("fingerprint after first advance: %v", err)
+	}
+	if fp1 == 0 {
+		t.Fatal("fingerprint after advance = 0, want non-zero")
+	}
+
+	// It is stable while the file is unchanged, so a warm /orders/check cache
+	// entry still hits between advances.
+	fpRepeat, err := LastRunCursorFingerprint(dir)
+	if err != nil {
+		t.Fatalf("fingerprint repeat: %v", err)
+	}
+	if fpRepeat != fp1 {
+		t.Fatalf("fingerprint changed without a write: %d != %d", fpRepeat, fp1)
+	}
+
+	// A later advance rewrites the file, so the fingerprint must change — this is
+	// what invalidates a stale cached /orders/check body after a cooldown/cron
+	// order fires (gc-7hf34).
+	if err := AdvanceLastRun(dir, "a", time.Unix(1_700_000_001, 0)); err != nil {
+		t.Fatalf("second AdvanceLastRun: %v", err)
+	}
+	fp2, err := LastRunCursorFingerprint(dir)
+	if err != nil {
+		t.Fatalf("fingerprint after second advance: %v", err)
+	}
+	if fp2 == fp1 {
+		t.Fatalf("fingerprint unchanged after cursor advanced: still %d", fp2)
+	}
+}
+
+func TestLastRunCursorFingerprintHashesBytesNotJSON(t *testing.T) {
+	dir := t.TempDir()
+	// Unlike ReadLastRun, the fingerprint only reads raw bytes — it does not
+	// parse the cursor map — so a corrupt-but-present file is hashed, not an
+	// error. Its only error path is a genuine read failure; on that the caller
+	// bypasses the cache. A present file must fingerprint to a usable non-zero.
+	if err := os.WriteFile(filepath.Join(dir, LastRunCursorFileName), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("seeding corrupt file: %v", err)
+	}
+	fp, err := LastRunCursorFingerprint(dir)
+	if err != nil {
+		t.Fatalf("fingerprint on corrupt-but-present file: %v", err)
+	}
+	if fp == 0 {
+		t.Fatal("fingerprint of non-empty file = 0, want non-zero")
+	}
+}
+
 // The cursor file is written from multiple processes (controller dispatch and
 // manual `gc order run`). AdvanceLastRun must serialize the whole
 // load/merge/write with an on-disk lock so a concurrent process cannot load the

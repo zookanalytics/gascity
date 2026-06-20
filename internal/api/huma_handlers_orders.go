@@ -71,17 +71,32 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 
 	ep := s.state.EventProvider()
 
+	now := time.Now()
+	runtimeDir := citylayout.RuntimeDataDir(s.state.CityPath())
+
 	index := s.latestIndex()
 	cacheKey := cacheKeyFor("orders-check", input)
 	useResponseCache := !input.Fresh && !hasConditionOrder(aa)
+	if useResponseCache && hasCursorBackedOrder(aa) {
+		// cooldown/cron orders persist their last run in a durable file cursor
+		// that emits no bead event (gc-7hf34), so s.latestIndex() does not move
+		// when one fires. Fold the cursor-file fingerprint into the cache index
+		// so an AdvanceLastRun invalidates a previously cached /orders/check
+		// body. If the cursor file can't be read we can't prove freshness, so
+		// bypass the cache for this request rather than risk a stale response.
+		fp, err := orders.LastRunCursorFingerprint(runtimeDir)
+		if err != nil {
+			useResponseCache = false
+		} else {
+			index ^= fp
+		}
+	}
 	if useResponseCache {
 		if body, ok := cachedResponseAs[OrderCheckListBody](s, cacheKey, index); ok {
 			return &OrderCheckListOutput{Body: body}, nil
 		}
 	}
 
-	now := time.Now()
-	runtimeDir := citylayout.RuntimeDataDir(s.state.CityPath())
 	checks := make([]orderCheckResponse, 0, len(aa))
 	for _, a := range aa {
 		storeInfos, err := orderStoreInfosForState(s.state, a)
@@ -125,6 +140,19 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 func hasConditionOrder(aa []orders.Order) bool {
 	for _, a := range aa {
 		if a.Trigger == "condition" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCursorBackedOrder reports whether any order persists its last-run state in
+// the durable file cursor (cooldown/cron orders). Their advances write only that
+// file and emit no bead event, so the event-sequence cache index cannot observe
+// them; callers fold the cursor fingerprint into the cache index for these.
+func hasCursorBackedOrder(aa []orders.Order) bool {
+	for _, a := range aa {
+		if a.Trigger == "cooldown" || a.Trigger == "cron" {
 			return true
 		}
 	}

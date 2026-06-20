@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -514,6 +515,58 @@ func TestHandleOrderCheckRunsConditionByDefault(t *testing.T) {
 	}
 	if string(got) != "xxx" {
 		t.Fatalf("condition marker = %q, want one execution per request", got)
+	}
+}
+
+func TestHandleOrderCheckInvalidatesCacheWhenLastRunCursorAdvances(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{
+		{Name: "nightly-review", Formula: "mol-adopt-pr-v2", Trigger: "cooldown", Interval: "24h"},
+	}
+
+	h := newTestCityHandler(t, fs)
+	check := func() (bool, *string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/check"), nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+		}
+		var resp struct {
+			Checks []struct {
+				Due     bool    `json:"due"`
+				LastRun *string `json:"last_run"`
+			} `json:"checks"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(resp.Checks) != 1 {
+			t.Fatalf("len(checks) = %d, want 1", len(resp.Checks))
+		}
+		return resp.Checks[0].Due, resp.Checks[0].LastRun
+	}
+
+	// First check: never run, no cursor -> due=true, no last_run. This warms the
+	// response cache at the current (stable, event-free) index.
+	if due, lastRun := check(); !due || lastRun != nil {
+		t.Fatalf("first check due=%v last_run=%v, want due=true last_run=nil for a never-run cooldown order", due, lastRun)
+	}
+
+	// Advance the durable last-run cursor exactly as dispatch / `gc order run`
+	// does. AdvanceLastRun writes only the cursor file and emits no bead/event,
+	// so the event index the response cache keys on does not change (gc-7hf34).
+	runtimeDir := citylayout.RuntimeDataDir(fs.CityPath())
+	if err := orders.AdvanceLastRun(runtimeDir, "nightly-review", time.Now().UTC()); err != nil {
+		t.Fatalf("advance last-run cursor: %v", err)
+	}
+
+	// Second check at the same event index must reflect the advanced cursor, not
+	// a stale cached due=true / no-last_run body.
+	if due, lastRun := check(); due || lastRun == nil {
+		t.Fatalf("second check due=%v last_run=%v, want due=false last_run!=nil after the cursor advanced (stale response cache)", due, lastRun)
 	}
 }
 

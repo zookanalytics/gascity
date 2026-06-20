@@ -3,6 +3,7 @@ package orders
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,27 @@ func ReadLastRun(runtimeDir, scoped string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	return time.Unix(0, nanos).UTC(), nil
+}
+
+// LastRunCursorFingerprint returns a content fingerprint of the last-run cursor
+// file. Readers that cache results keyed on the event sequence — notably the API
+// /orders/check response cache — fold this into their cache index so a cursor
+// advance, which writes only this file and emits no bead event (gc-7hf34), still
+// invalidates a previously cached body. A missing file fingerprints to 0; an
+// unreadable or corrupt file surfaces as an error so callers can bypass the
+// cache rather than serve a body that may be stale.
+func LastRunCursorFingerprint(runtimeDir string) (uint64, error) {
+	path := LastRunCursorPath(runtimeDir)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading last-run cursors %q: %w", path, err)
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(data)
+	return h.Sum64(), nil
 }
 
 // AdvanceLastRun moves a scoped order's cursor to when if it is later than the
