@@ -186,6 +186,12 @@ func TestInstallOrderDispatcherCachedStoresWiresResolver(t *testing.T) {
 	if got := mad.cachedStoreFn(execStoreTarget{ScopeKind: "city"}); got != beads.Store(cityStore) {
 		t.Errorf("wired resolver: got %p, want city store %p", got, cityStore)
 	}
+	// The installer must also register the dispatcher so a config mutation's
+	// store swap can drain its in-flight borrowers before closing retired cached
+	// handles (gc-t5rev / gascity#3157).
+	if got := cr.cs.inflightOrderDispatcher.Load(); got != mad {
+		t.Errorf("installOrderDispatcherCachedStores did not register the dispatcher for store-retire drain: got %p, want %p", got, mad)
+	}
 
 	// Non-memoryOrderDispatcher: installer must not panic and must leave it alone.
 	cr.od = nopOrderDispatcher{}
@@ -198,3 +204,118 @@ type nopOrderDispatcher struct{}
 
 func (nopOrderDispatcher) dispatch(context.Context, string, time.Time) {}
 func (nopOrderDispatcher) drain(context.Context) bool                  { return true }
+
+// TestOrderDispatchWaitsForInflightBeforeClosingStore is the gc-t5rev codex
+// finding (PR#68): a config mutation that swaps the controller's cached bead
+// stores must not close a handle an in-flight order dispatch borrowed. update()
+// schedules the replaced handles to close after controllerStateStoreCloseDelay,
+// but a dispatchOne can hold a borrowed handle across a long exec/formula and
+// then write its tracking-bead outcome through it; closing underneath that write
+// latches the native store shut and orphans the run (gascity#3157).
+// scheduleCloseReplacedStores must wait for the dispatcher's in-flight drain
+// before retiring the handle.
+func TestOrderDispatchWaitsForInflightBeforeClosingStore(t *testing.T) {
+	restore := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = 0 // isolate the wait to the in-flight drain
+	defer func() { controllerStateStoreCloseDelay = restore }()
+
+	// A dispatcher with one in-flight dispatchOne still holding a borrowed handle.
+	mad := &memoryOrderDispatcher{}
+	mad.addInflight()
+
+	cs := &controllerState{}
+	cs.inflightOrderDispatcher.Store(mad)
+
+	borrowed := newLatchedCloseStore()
+	replacement := newLatchedCloseStore()
+	cs.scheduleCloseReplacedStores(borrowed, replacement, nil, nil)
+
+	// While the dispatch is in-flight, the retired borrowed handle must stay open.
+	time.Sleep(50 * time.Millisecond)
+	if borrowed.isClosed() {
+		t.Fatal("retired borrowed store closed while an order dispatch was still in-flight (gc-t5rev use-after-close)")
+	}
+
+	// Release the in-flight dispatch; the retire must now close the handle.
+	mad.doneInflight()
+	waitStoreClosed(t, borrowed, "retired borrowed store never closed after in-flight order dispatch drained")
+}
+
+// TestOrderDispatchClosesStoreAfterInflightCompletes pairs with the wait test:
+// once the in-flight dispatch finishes — writing its tracking-bead outcome
+// through the borrowed handle — the retire must close the handle, without
+// leaking it and without any use-after-close. It runs a real dispatchOne held
+// mid-exec so the post-exec tracking-bead write is exercised against the live
+// borrowed store before the close lands (gc-t5rev / gascity#3157).
+func TestOrderDispatchClosesStoreAfterInflightCompletes(t *testing.T) {
+	restore := controllerStateStoreCloseDelay
+	controllerStateStoreCloseDelay = 0
+	defer func() { controllerStateStoreCloseDelay = restore }()
+
+	borrowed := newLatchedCloseStore()
+	entered := make(chan struct{}) // closed once dispatchOne reaches exec holding `borrowed`
+	release := make(chan struct{})
+	var rec memRecorder
+	fakeExec := func(context.Context, string, string, []string) ([]byte, error) {
+		close(entered)
+		<-release // hold the dispatch in-flight, still borrowing `borrowed`
+		return []byte("ok\n"), nil
+	}
+	aa := []orders.Order{{
+		Name:     "cached-health",
+		Trigger:  "cooldown",
+		Interval: "1h",
+		Exec:     "scripts/health.sh",
+	}}
+	// The fallback store must never be opened/closed: the target resolves to the
+	// cached handle, so reaching storeFn would be a bug.
+	ad := buildOrderDispatcherFromListExec(aa, newLatchedCloseStore(), nil, fakeExec, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	mad.cachedStoreFn = func(execStoreTarget) beads.Store { return borrowed }
+
+	cs := &controllerState{}
+	cs.inflightOrderDispatcher.Store(mad)
+
+	// Tick once: borrows `borrowed`, creates its tracking bead, and launches a
+	// dispatchOne that blocks in exec while holding the handle. addInflight runs
+	// synchronously in dispatch, so the handle is in-flight once dispatch returns;
+	// `entered` confirms the goroutine reached exec still holding it.
+	mad.dispatch(context.Background(), t.TempDir(), time.Now())
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("dispatchOne never reached exec; the cached-store dispatch must launch a goroutine that holds the handle")
+	}
+
+	// Retire `borrowed` mid-exec.
+	cs.scheduleCloseReplacedStores(borrowed, newLatchedCloseStore(), nil, nil)
+	time.Sleep(50 * time.Millisecond)
+	if borrowed.isClosed() {
+		t.Fatal("retired borrowed store closed while dispatchOne was still mid-exec (gc-t5rev use-after-close)")
+	}
+
+	// Finish the exec; dispatchOne writes its tracking-bead outcome through
+	// `borrowed` (still open), then drain releases and the retire closes it.
+	close(release)
+	waitStoreClosed(t, borrowed, "retired borrowed store never closed after dispatchOne completed")
+	if op, used := borrowed.usedAfterClose(); used {
+		t.Fatalf("borrowed store saw use-after-close op %q; the retire closed it before the in-flight dispatch finished writing", op)
+	}
+}
+
+// waitStoreClosed polls until the latched store reports closed or fails the test
+// after a bounded deadline, so the close-coordination tests stay deterministic
+// without sleeping on the detached drain+close goroutine.
+func waitStoreClosed(t *testing.T, s *latchedCloseStore, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !s.isClosed() {
+		if time.Now().After(deadline) {
+			t.Fatal(msg)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

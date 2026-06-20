@@ -1322,6 +1322,15 @@ func (cr *CityRuntime) installOrderDispatcherCachedStores() {
 		return
 	}
 	mem.cachedStoreFn = cr.controllerCachedOrderStore
+	// Register the dispatcher so a config mutation's store swap can drain its
+	// in-flight dispatchOne goroutines before closing the cached handles they
+	// borrowed (controllerState.scheduleCloseReplacedStores). Without this the
+	// swap closes a borrowed handle on a 250ms timer that a long-running order
+	// outlives, latching it shut underneath an in-flight tracking-bead write
+	// (gc-t5rev / gascity#3157).
+	if cr.cs != nil {
+		cr.cs.inflightOrderDispatcher.Store(mem)
+	}
 }
 
 // controllerCachedOrderStore returns the controller-cached, long-lived bead
