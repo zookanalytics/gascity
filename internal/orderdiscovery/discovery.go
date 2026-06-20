@@ -12,6 +12,11 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
+// orderScopeRig is the explicit Order.Scope value declaring an order is
+// rig-scoped: instantiated once per importing rig, never city-wide. It mirrors
+// the literal used by orders.Order.IsCityScoped and orders.Validate.
+const orderScopeRig = "rig"
+
 // RigScanErrorHandler handles a failed rig-exclusive order scan.
 // Returning nil skips that rig and continues scanning remaining rigs.
 type RigScanErrorHandler func(rigName string, err error) error
@@ -54,6 +59,14 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	if err != nil {
 		return nil, err
 	}
+	// An explicit scope="rig" order instantiates once per importing rig (the
+	// rig loop below stamps Rig and the bare pool rig-qualifies at dispatch).
+	// It must never register as a city-wide (empty-Rig) order: a city-level
+	// instance carries the order's bare, binding-qualified pool verbatim into
+	// gc.routed_to, which never rig-qualifies, so no rig polecat claims the
+	// minted work bead and it strands open forever (gc-ctcle). Drop them from
+	// the city set here; the rig loop re-discovers them per importing rig.
+	cityOrders = dropRigScopedCityOrders(cityOrders)
 
 	rigNames := make(map[string]struct{}, len(cfg.FormulaLayers.Rigs)+len(cfg.RigPackDirs))
 	for rigName := range cfg.FormulaLayers.Rigs {
@@ -123,6 +136,24 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		return nil, err
 	}
 	return allOrders, nil
+}
+
+// dropRigScopedCityOrders removes explicit scope="rig" orders from the
+// city-level (empty-Rig) order set produced by the city-root scan. Such
+// orders are instantiated per importing rig by the rig loop; registering them
+// city-wide would route their bare, binding-qualified pool verbatim and strand
+// the minted work beads (gc-ctcle). Unscoped (rig-default) and scope="city"
+// orders are preserved so existing city-local and city-singleton behavior is
+// unchanged.
+func dropRigScopedCityOrders(cityOrders []orders.Order) []orders.Order {
+	kept := make([]orders.Order, 0, len(cityOrders))
+	for _, o := range cityOrders {
+		if o.Scope == orderScopeRig {
+			continue
+		}
+		kept = append(kept, o)
+	}
+	return kept
 }
 
 func validateOrders(allOrders []orders.Order, extraValidate OrderValidator, onError ValidateErrorHandler) ([]orders.Order, error) {
