@@ -376,6 +376,32 @@ func TestDoltServerAddrFromEnv(t *testing.T) {
 			t.Fatalf("addr = %q, want ambient.example:4407", addr)
 		}
 	})
+	t.Run("non-nil env authoritative: absent host ignores ambient", func(t *testing.T) {
+		// withNativeDoltOpenEnv unsets BEADS_DOLT_SERVER_HOST for the open when a
+		// scoped env omits it, so the gate must resolve "" rather than key on an
+		// unrelated ambient server. Ambient is populated to prove the scoped map —
+		// not os.Getenv — decides the address.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "4407")
+		if addr := doltServerAddrFromEnv(map[string]string{"BEADS_DOLT_SERVER_PORT": "3307"}); addr != "" {
+			t.Fatalf("addr = %q, want empty: a non-nil scoped env without a host must not fall back to ambient", addr)
+		}
+	})
+	t.Run("non-nil env authoritative: empty port ignores ambient", func(t *testing.T) {
+		// mirrorBeadsDoltEnv writes BEADS_DOLT_SERVER_PORT="" so child opens cannot
+		// inherit stale ambient Dolt settings; projection unsets it. The gate must
+		// treat the explicit empty as "no port", matching the open, not fall back
+		// to ambient and reject against the wrong host:port.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "4407")
+		t.Setenv("BEADS_DOLT_PORT", "4407")
+		addr := doltServerAddrFromEnv(map[string]string{
+			"BEADS_DOLT_SERVER_HOST": "dolt.example",
+			"BEADS_DOLT_SERVER_PORT": "",
+		})
+		if addr != "" {
+			t.Fatalf("addr = %q, want empty: an explicit empty scoped port must not fall back to ambient", addr)
+		}
+	})
 }
 
 func TestDoltAdmissionGateForSharesPerAddr(t *testing.T) {

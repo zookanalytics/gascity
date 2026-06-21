@@ -242,18 +242,22 @@ func doltAdmissionGateFor(addr string) *doltAdmissionGate {
 	return g.(*doltAdmissionGate)
 }
 
-// doltServerAddrFromEnv resolves the shared Dolt server address (host:port) from
-// a scoped open environment, falling back to the ambient process environment.
-// It returns "" when either coordinate is absent — embedded/standalone opens
-// have no shared-server ceiling to protect, so they are not gated.
+// doltServerAddrFromEnv resolves the shared Dolt server address (host:port) the
+// native open will actually dial, so the admission gate keys on the same server
+// the open contacts. It mirrors withNativeDoltOpenEnv's projection authority: a
+// non-nil scoped env is authoritative for the native-open env keys (an absent or
+// empty coordinate resolves to "", because projection unsets it for the open),
+// and the ambient process environment applies only when no scoped env was
+// supplied. It returns "" when either coordinate is absent — embedded/standalone
+// opens have no shared-server ceiling to protect, so they are not gated.
 func doltServerAddrFromEnv(env map[string]string) string {
-	host := envOrAmbient(env, "BEADS_DOLT_SERVER_HOST")
+	host := scopedServerEnv(env, "BEADS_DOLT_SERVER_HOST")
 	if host == "" {
 		return ""
 	}
-	port := envOrAmbient(env, "BEADS_DOLT_SERVER_PORT")
+	port := scopedServerEnv(env, "BEADS_DOLT_SERVER_PORT")
 	if port == "" {
-		port = envOrAmbient(env, "BEADS_DOLT_PORT")
+		port = scopedServerEnv(env, "BEADS_DOLT_PORT")
 	}
 	if port == "" {
 		return ""
@@ -261,15 +265,15 @@ func doltServerAddrFromEnv(env map[string]string) string {
 	return host + ":" + port
 }
 
-// envOrAmbient reads key from the scoped env map when present and non-empty,
-// otherwise from the process environment.
-func envOrAmbient(env map[string]string, key string) string {
+// scopedServerEnv resolves key under the same authority model as
+// withNativeDoltOpenEnv's projection. A non-nil scoped env is authoritative: the
+// projection sets each native-open key from the map and unsets any the map omits
+// or leaves empty, so an absent/empty key here resolves to "" rather than leaking
+// an ambient value the open will never see. The ambient process environment is
+// consulted only when no scoped env was supplied (env == nil).
+func scopedServerEnv(env map[string]string, key string) string {
 	if env != nil {
-		if v, ok := env[key]; ok {
-			if trimmed := strings.TrimSpace(v); trimmed != "" {
-				return trimmed
-			}
-		}
+		return strings.TrimSpace(env[key])
 	}
 	return strings.TrimSpace(os.Getenv(key))
 }
