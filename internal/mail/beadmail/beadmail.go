@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,6 +259,11 @@ type ArchiveFilter struct {
 	IncludeRead     bool
 	CaseInsensitive bool
 	Limit           int
+	// KeepNewest preserves the newest N matching messages (by creation time,
+	// ID tie-break) instead of archiving them. Zero archives every match. Used
+	// to compact a pile of duplicate notifications down to the single current
+	// one rather than closing all of them.
+	KeepNewest int
 }
 
 // Archive deletes a message bead without reading it.
@@ -327,8 +333,29 @@ func (p *Provider) ArchiveCandidates(filter ArchiveFilter) ([]mail.Message, erro
 			continue
 		}
 		matches = append(matches, msg)
-		if filter.Limit > 0 && len(matches) >= filter.Limit {
+		// KeepNewest needs the full match set to identify the newest entries, so
+		// the early limit-break is skipped in that mode; the limit is reapplied
+		// after the newest entries are set aside below.
+		if filter.KeepNewest <= 0 && filter.Limit > 0 && len(matches) >= filter.Limit {
 			break
+		}
+	}
+	if filter.KeepNewest > 0 {
+		// The candidate query uses the store-default order, which is not
+		// guaranteed chronological, so order oldest-first here before setting the
+		// newest entries aside. Tie-break by id to match SortCreatedAsc.
+		sort.Slice(matches, func(i, j int) bool {
+			if matches[i].CreatedAt.Equal(matches[j].CreatedAt) {
+				return matches[i].ID < matches[j].ID
+			}
+			return matches[i].CreatedAt.Before(matches[j].CreatedAt)
+		})
+		if filter.KeepNewest >= len(matches) {
+			return matches[:0], nil
+		}
+		matches = matches[:len(matches)-filter.KeepNewest]
+		if filter.Limit > 0 && len(matches) > filter.Limit {
+			matches = matches[:filter.Limit]
 		}
 	}
 	return matches, nil

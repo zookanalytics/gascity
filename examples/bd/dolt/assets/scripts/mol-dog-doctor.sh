@@ -36,6 +36,12 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
 ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
+# Compaction targets for advisory_compact (advisory_state.sh). Recipient mirrors
+# escalate.sh's default so compaction matches what advisories were addressed to;
+# the prefix matches the [MEDIUM] advisory subject but not the CRITICAL
+# "server unreachable" escalation.
+ADVISORY_RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
+ADVISORY_SUBJECT_PREFIX="Dolt health advisory"
 
 dolt_sql() {
     DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" \
@@ -167,7 +173,10 @@ if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
     exit 0
 fi
 PROBE_END_MS=$(now_ms)
-LATENCY_MS=$((PROBE_END_MS - PROBE_START_MS))
+# latency_delta (latency.sh) guards the subtraction so a zero, stale, or
+# wrong-precision now_ms reading cannot surface an impossible epoch-scale
+# latency in the advisory; an untrustworthy probe reports 0ms this tick.
+LATENCY_MS=$(latency_delta "$PROBE_START_MS" "$PROBE_END_MS")
 LATENCY_WARN=""
 if latency_should_warn "$LATENCY_MS" "$LATENCY_WARN_MS"; then
     LATENCY_WARN=" [WARN: latency ${LATENCY_MS}ms >= threshold ${LATENCY_WARN_MS}ms]"
@@ -282,6 +291,10 @@ if [ -n "$WARNINGS" ]; then
     if [ -n "$ORPHAN_WARN" ]; then ADVISORY_SIG="${ADVISORY_SIG}orphan "; fi
     if [ -n "$BACKUP_STALE" ]; then ADVISORY_SIG="${ADVISORY_SIG}backup "; fi
     if advisory_changed "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"; then
+        # Supersede: archive any prior open advisories before sending the fresh
+        # one, so a changed condition set leaves exactly one current advisory
+        # open instead of stacking a new wisp on top of the superseded ones.
+        advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX"
         if send_escalation \
             "Dolt health advisory [MEDIUM]" \
             "Latency: ${LATENCY_MS}ms${LATENCY_WARN}
@@ -290,10 +303,19 @@ Disk: ${DISK_USAGE}
 Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
             advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
         fi
+    else
+        # Steady warning (unchanged signature): the send-time dedup suppresses a
+        # re-send, and neither the supersede nor the healthy-drain arm runs, so a
+        # pre-dedup pile would otherwise stay open for the life of the condition.
+        # Drain the duplicates but keep the current advisory (--keep-newest 1).
+        advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX" "" 1
     fi
 else
-    # Healthy: forget the last advisory so a future condition re-alerts.
+    # Healthy: forget the last advisory so a future condition re-alerts, then
+    # archive any open advisories — the condition cleared, so none should remain
+    # open. Drains the pile too whenever the server is healthy on this tick.
     advisory_clear "$ADVISORY_STATE_FILE"
+    advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX"
 fi
 
 SUMMARY="doctor — server: ok, latency: ${LATENCY_MS}ms, conns: ${CONN_COUNT}/${CONN_MAX}, disk: ${DISK_USAGE}, orphans: ${ORPHAN_COUNT}"

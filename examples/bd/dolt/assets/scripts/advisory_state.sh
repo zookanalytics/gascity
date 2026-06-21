@@ -16,6 +16,12 @@
 # re-alerts. The CRITICAL "server unreachable" escalation is intentionally NOT
 # routed through this dedup, so a true outage always alerts.
 #
+# advisory_compact is the cleanup arm of the same concern: the send-time dedup
+# stops NEW duplicates, but pre-dedup advisories (and stale advisories from a
+# now-superseded condition set) still sit open. Compaction archives those open
+# wisps so the operator sees one current advisory, not a pile of identical or
+# superseded ones.
+#
 # Sourced by mol-dog-doctor.sh; unit-tested by test/dolt/advisory_dedup_test.sh.
 
 # advisory_changed SIGNATURE STATE_FILE — exit 0 when SIGNATURE differs from the
@@ -53,4 +59,40 @@ advisory_record() {
 advisory_clear() {
   [ -n "${1:-}" ] || return 0
   rm -f "$1" 2>/dev/null || true
+}
+
+# advisory_compact RECIPIENT SUBJECT_PREFIX [LIMIT] [KEEP_NEWEST] — archive
+# (close) open mail wisps whose subject starts with SUBJECT_PREFIX, addressed to
+# RECIPIENT, collapsing the pre-dedup pile of duplicate advisories and
+# superseding a stale advisory when the condition set changes or clears.
+# Read-but-open wisps are included so a partially-read pile compacts fully. LIMIT
+# bounds one run (default 1000; a larger pile drains over subsequent ticks — the
+# pass is idempotent).
+#
+# KEEP_NEWEST (default 0) preserves the newest N matching wisps instead of
+# archiving them. Pass 1 on a steady, still-active condition so the pile of
+# duplicates drains while the single current advisory stays open; leave it 0 to
+# archive everything (superseding before a fresh send, or clearing when healthy).
+#
+# Best-effort: a missing/failing `gc`, a transport error, or zero matches is a
+# silent no-op so compaction never blocks or fails the health probe. Refuses to
+# run without BOTH a recipient and a subject prefix, so it can never archive
+# unrelated mail. The `gc` binary comes from $GC_BIN (default "gc") so tests can
+# inject a recording stub. The CRITICAL "server unreachable" escalation carries a
+# different subject and is therefore never matched by an advisory prefix.
+advisory_compact() {
+  _adv_to="${1:-}"
+  _adv_prefix="${2:-}"
+  _adv_limit="${3:-1000}"
+  _adv_keep="${4:-0}"
+  [ -n "$_adv_to" ] || return 0
+  [ -n "$_adv_prefix" ] || return 0
+  case "$_adv_limit" in ''|*[!0-9]*|0) _adv_limit=1000 ;; esac
+  case "$_adv_keep" in ''|*[!0-9]*) _adv_keep=0 ;; esac
+  set -- mail archive --to "$_adv_to" --subject-prefix "$_adv_prefix" \
+    --include-read --limit "$_adv_limit"
+  if [ "$_adv_keep" -gt 0 ]; then
+    set -- "$@" --keep-newest "$_adv_keep"
+  fi
+  "${GC_BIN:-gc}" "$@" >/dev/null 2>&1 || true
 }

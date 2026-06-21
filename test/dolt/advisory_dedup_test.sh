@@ -71,6 +71,84 @@ if [ -f "$NESTED" ]; then pass "record creates missing parent directories"; else
 got=$(cat "$NESTED" 2>/dev/null || true)
 if [ "$got" = "orphan " ]; then pass "recorded signature round-trips"; else bad "recorded signature mismatch: got '$got'"; fi
 
+# --- advisory_compact (cleanup arm) ----------------------------------------
+# Closes the open advisory wisps the send-time dedup cannot reach: the pre-dedup
+# pile and advisories superseded by a changed/cleared condition set. A recording
+# `gc` stub (injected via GC_BIN) captures the invocation, one arg per line.
+command -v advisory_compact >/dev/null 2>&1 || { echo "FAIL: advisory_compact not defined"; exit 1; }
+
+GC_STUB="$WORK/gc-stub"
+cat > "$GC_STUB" <<'STUB'
+#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$GC_STUB_LOG"; done
+exit 0
+STUB
+chmod +x "$GC_STUB"
+export GC_STUB_LOG="$WORK/gc-archive.log"
+arg_logged() { grep -Fxq -- "$1" "$GC_STUB_LOG"; }
+
+# Issues `gc mail archive` with the expected open-advisory filter flags.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" 50 )
+if arg_logged "mail" && arg_logged "archive" && arg_logged "--to" && arg_logged "human" \
+   && arg_logged "--subject-prefix" && arg_logged "Dolt health advisory" \
+   && arg_logged "--include-read" && arg_logged "--limit" && arg_logged "50"; then
+  pass "advisory_compact issues gc mail archive with the expected filter flags"
+else
+  bad "advisory_compact invocation missing expected flags: $(tr '\n' '|' < "$GC_STUB_LOG")"
+fi
+
+# Omitted limit defaults to 1000 (a generous one-run bound; larger piles drain
+# over later ticks).
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" )
+if arg_logged "1000"; then pass "advisory_compact defaults --limit to 1000"; else bad "advisory_compact missing default limit: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# A non-numeric limit is coerced to the default, never passed through as junk
+# (gc rejects --limit <= 0).
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "abc" )
+if arg_logged "1000" && ! arg_logged "abc"; then pass "advisory_compact coerces invalid limit to 1000"; else bad "advisory_compact did not coerce invalid limit: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# Default (no KEEP_NEWEST) archives the whole matching set — no --keep-newest
+# flag, so a supersede/healthy pass closes every duplicate.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" 50 )
+if ! arg_logged "--keep-newest"; then pass "advisory_compact omits --keep-newest by default (archive all)"; else bad "advisory_compact passed --keep-newest without being asked: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# KEEP_NEWEST=1 (steady-warning drain) preserves the current advisory: passes
+# --keep-newest 1 so the pile of duplicates compacts down to the one open wisp.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "" 1 )
+if arg_logged "--keep-newest" && arg_logged "1" && arg_logged "1000"; then
+  pass "advisory_compact passes --keep-newest 1 and keeps the default limit"
+else
+  bad "advisory_compact did not pass keep-newest with default limit: $(tr '\n' '|' < "$GC_STUB_LOG")"
+fi
+
+# A non-numeric KEEP_NEWEST coerces to 0 (archive all), never passed as junk.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "Dolt health advisory" "" "abc" )
+if ! arg_logged "--keep-newest" && ! arg_logged "abc"; then pass "advisory_compact coerces invalid keep-newest to 0"; else bad "advisory_compact did not coerce invalid keep-newest: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# Refuses to run without BOTH a recipient and a subject prefix — never archives
+# unrelated mail.
+: > "$GC_STUB_LOG"
+( export GC_BIN="$GC_STUB"; advisory_compact "" "Dolt health advisory" )
+( export GC_BIN="$GC_STUB"; advisory_compact "human" "" )
+if [ ! -s "$GC_STUB_LOG" ]; then pass "advisory_compact no-ops without recipient+prefix"; else bad "advisory_compact ran with missing args: $(tr '\n' '|' < "$GC_STUB_LOG")"; fi
+
+# Best-effort: a failing gc must not propagate — compaction never blocks or
+# fails the health probe.
+GC_FAIL="$WORK/gc-fail"
+printf '#!/bin/sh\nexit 3\n' > "$GC_FAIL"
+chmod +x "$GC_FAIL"
+if ( export GC_BIN="$GC_FAIL"; advisory_compact "human" "Dolt health advisory" ); then
+  pass "advisory_compact swallows a failing gc (best-effort)"
+else
+  bad "advisory_compact propagated a gc failure"
+fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi
 exit "$fail"

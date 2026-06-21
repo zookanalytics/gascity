@@ -113,6 +113,43 @@ case "$v" in
     ;;
 esac
 
+# --- latency_delta sanitization --------------------------------------------
+# Guards the doctor's END-START subtraction so a zero, empty, stale, or
+# unit-mismatched start timestamp cannot surface an "enormous" epoch-scale
+# latency in a [MEDIUM] advisory. An untrustworthy reading collapses to 0
+# ("not measured this tick"), which never trips the latency warn.
+command -v latency_delta >/dev/null 2>&1 || { echo "FAIL: latency_delta not defined"; exit 1; }
+
+# A small ceiling lets the boundary be exercised without epoch-scale numbers.
+delta_capped() { ( GC_LATENCY_SANE_MAX_MS="$1"; latency_delta "$2" "$3" ); }
+
+# Normal forward delta is preserved unchanged.
+if [ "$(latency_delta 1000 1050)" = "50" ]; then pass "latency_delta forward delta preserved (50ms)"; else bad "latency_delta 1000 1050 = $(latency_delta 1000 1050), want 50"; fi
+
+# Zero-value: now_ms degraded to 0/empty would make END-0 an epoch-scale value.
+if [ "$(latency_delta 0 1781936353000)" = "0" ]; then pass "latency_delta zero start -> 0 (no epoch-scale latency)"; else bad "latency_delta 0 1781936353000 = $(latency_delta 0 1781936353000), want 0"; fi
+if [ "$(latency_delta 1781936353000 0)" = "0" ]; then pass "latency_delta zero end -> 0"; else bad "latency_delta 1781936353000 0 = $(latency_delta 1781936353000 0), want 0"; fi
+
+# Empty / non-numeric operands degrade to 0 — never a crash or garbage echo.
+if [ "$(latency_delta '' 1781936353000)" = "0" ]; then pass "latency_delta empty start -> 0"; else bad "latency_delta '' 1781936353000 != 0"; fi
+if [ "$(latency_delta 1781936353000 abc)" = "0" ]; then pass "latency_delta non-numeric end -> 0"; else bad "latency_delta 1781936353000 abc != 0"; fi
+
+# Restart / backward clock (NTP step, server restart): END < START -> 0,
+# not a negative latency.
+if [ "$(latency_delta 1781936353500 1781936353400)" = "0" ]; then pass "latency_delta backward clock (restart) -> 0"; else bad "latency_delta backward clock != 0"; fi
+
+# Stale timestamp / unit mismatch: a seconds-scale start (10 digits) against an
+# ms-scale end (13 digits) yields ~1.78e12 ms (~56 years). That impossible
+# value must collapse to 0.
+if [ "$(latency_delta 1781936353 1781936353000)" = "0" ]; then pass "latency_delta stale seconds-scale start -> 0 (impossible value suppressed)"; else bad "latency_delta 1781936353 1781936353000 = $(latency_delta 1781936353 1781936353000), want 0"; fi
+
+# Ceiling boundary: delta == ceiling is kept; ceiling+1 collapses to 0.
+if [ "$(delta_capped 100 1000 1100)" = "100" ]; then pass "latency_delta delta == ceiling kept (100ms)"; else bad "delta_capped 100 1000 1100 = $(delta_capped 100 1000 1100), want 100"; fi
+if [ "$(delta_capped 100 1000 1101)" = "0" ]; then pass "latency_delta delta past ceiling -> 0"; else bad "delta_capped 100 1000 1101 = $(delta_capped 100 1000 1101), want 0"; fi
+
+# A real probe latency band (well under the default 10-min ceiling) is kept.
+if [ "$(latency_delta 1781936353000 1781936354500)" = "1500" ]; then pass "latency_delta real slow probe kept (1500ms)"; else bad "latency_delta real slow probe = $(latency_delta 1781936353000 1781936354500), want 1500"; fi
+
 echo "----"
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "FAILURES PRESENT"; fi
 exit "$fail"
