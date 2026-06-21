@@ -409,7 +409,8 @@ type apiNotifier struct {
 }
 
 func (n *apiNotifier) PokeController(_ string) {
-	n.state.Poke()
+	// Sling changed pool demand, so force a demand rebuild rather than a plain poke.
+	n.state.PokeDemand()
 }
 
 func (n *apiNotifier) PokeControlDispatch(_ string) {

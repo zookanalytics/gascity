@@ -165,7 +165,8 @@ Examples:
 type slingOpts = sling.SlingOpts
 
 var (
-	slingPokeController        = pokeController
+	// slingPokeController wakes the controller after sling routes work.
+	slingPokeController        = pokeControllerDemand
 	slingPokeControlDispatcher = pokeControlDispatch
 	slingOpenCityStore         = openCityStoreAt
 )
@@ -1405,8 +1406,8 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				}
 			}
 		}
-		// No running config session — poke controller for immediate wake.
-		if err := pokeController(cityPath); err != nil {
+		// No running session for the target — poke the controller to wake the pool.
+		if err := pokeControllerDemand(cityPath); err != nil {
 			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
 			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
@@ -1430,6 +1431,19 @@ func pokeController(cityPath string) error {
 		return nil
 	}
 	// Fall back to supervisor reload.
+	return pokeSupervisor()
+}
+
+// pokeControllerDemand is pokeController plus a demand-rebuild signal, for
+// callers that change pool demand without mutating a session bead (e.g. gc sling
+// routing work to a sleeping pool) — a change the demand snapshot's fingerprint
+// cannot otherwise observe. The supervisor fallback ("reload") also rebuilds demand.
+func pokeControllerDemand(cityPath string) error {
+	_, err := sendControllerCommand(cityPath, "poke-demand")
+	if err == nil {
+		return nil
+	}
+	// Fall back to supervisor reload, which rebuilds demand via configChanged.
 	return pokeSupervisor()
 }
 
