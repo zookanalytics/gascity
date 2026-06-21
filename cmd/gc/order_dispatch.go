@@ -269,8 +269,15 @@ type orderSetSnapshot struct {
 // ctx OR dispatchCtx is done (see launchDispatchOne). cancel() cancels
 // dispatchCtx.
 type memoryOrderDispatcher struct {
-	aa                   []orders.Order
-	storeFn              orderStoreFunc
+	aa      []orders.Order
+	storeFn orderStoreFunc
+	// cachedStoreFn resolves a controller-cached, long-lived bead store for a
+	// dispatch target, or nil when none is available. A returned store is
+	// BORROWED — owned by controllerState and reused across ticks, so dispatch
+	// must never close it; a nil result falls back to storeFn, which opens and
+	// closes a per-tick store. Set by CityRuntime after construction; nil in
+	// tests and standalone (no-API) mode.
+	cachedStoreFn        func(execStoreTarget) beads.Store
 	ep                   events.Provider
 	execRun              ExecRunner
 	rec                  events.Recorder
@@ -418,6 +425,23 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 	}
 }
 
+// resolveDispatchStore returns the bead store for a dispatch target plus whether
+// dispatch owns the handle. owned=false is a borrowed controller-cached store
+// reused across ticks (never close it); owned=true was opened fresh for this tick
+// via storeFn and must be closed once in-flight dispatches release it. Preferring
+// the cached handle avoids the per-tick TCP dial + connection pool + preflight
+// subprocess fork that dominates the controller's connection rate against the
+// shared Dolt server.
+func (m *memoryOrderDispatcher) resolveDispatchStore(target execStoreTarget) (beads.Store, bool, error) {
+	if m.cachedStoreFn != nil {
+		if store := m.cachedStoreFn(target); store != nil {
+			return store, false, nil
+		}
+	}
+	store, err := m.storeFn(target)
+	return store, true, err
+}
+
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
@@ -431,20 +455,25 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 	runtimeDir := citylayout.RuntimeDataDir(cityPath)
 	stores := make(map[string]beads.Store)
-	// inFlight counts the dispatchOne goroutines launched by THIS tick that
-	// still hold handles from `stores`. The per-tick handles must not be closed
-	// until those goroutines finish using them: on a native store, CloseStore is
-	// a one-way latch (internal/beads/native_dolt_store.go) and the goroutine's
-	// post-tick tracking-bead writes would hit a closed handle (gascity#3157).
-	// drain() only waits at controller exit/reload, not at end of tick, so the
-	// close is handed to a detached closer scoped to this tick's launches. The
-	// closer never blocks the tick; when nothing was launched it closes
-	// immediately (Wait returns at once on a zero count).
+	// ownedStores holds only the per-tick handles THIS tick opened via storeFn.
+	// Borrowed cached stores are reused across ticks and MUST NOT be closed here.
+	// Both kinds live in `stores` for within-tick reuse; only ownedStores close below.
+	ownedStores := make(map[string]beads.Store)
+	// inFlight counts the dispatchOne goroutines launched by THIS tick that still
+	// hold handles from `stores`. An owned per-tick handle must not be closed
+	// until they finish: CloseStore is a one-way latch (native_dolt_store.go) and
+	// their post-tick tracking-bead writes would hit a closed handle. drain() only
+	// waits at controller exit/reload, so the close is handed to a detached closer
+	// scoped to this tick's launches; it never blocks the tick and is skipped
+	// entirely when no owned store was opened (the steady-state path).
 	var inFlight sync.WaitGroup
 	defer func() {
+		if len(ownedStores) == 0 {
+			return
+		}
 		go func() {
 			inFlight.Wait()
-			for _, st := range stores {
+			for _, st := range ownedStores {
 				if err := closeBeadStoreHandle(st); err != nil {
 					logDispatchError(m.stderr, "gc: order dispatch: closing store: %v", err)
 				}
@@ -487,16 +516,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		storeKey := orderStoreTargetKey(target)
 		store, ok := stores[storeKey]
 		if !ok {
-			store, err = m.storeFn(target)
+			var owned bool
+			store, owned, err = m.resolveDispatchStore(target)
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
 				continue
 			}
 			stores[storeKey] = store
+			if owned {
+				ownedStores[storeKey] = store
+			}
 		}
 
 		storesForGate := []beads.Store{store}
-		legacyStore, legacyOK := m.legacyCityStoreForTarget(cityPath, target, stores)
+		legacyStore, legacyOK := m.legacyCityStoreForTarget(cityPath, target, stores, ownedStores)
 		if !legacyOK {
 			continue
 		}
@@ -952,7 +985,7 @@ func indexStoreKey(storeKeys []string, index int) string {
 	return fmt.Sprintf("store:%d", index)
 }
 
-func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores map[string]beads.Store) (beads.Store, bool) {
+func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target execStoreTarget, stores, ownedStores map[string]beads.Store) (beads.Store, bool) {
 	if !legacyOrderCityFallbackNeeded(cityPath, target) {
 		return nil, true
 	}
@@ -961,12 +994,15 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 	if store, ok := stores[key]; ok {
 		return store, true
 	}
-	store, err := m.storeFn(legacyTarget)
+	store, owned, err := m.resolveDispatchStore(legacyTarget)
 	if err != nil {
 		logDispatchError(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v", err)
 		return nil, false
 	}
 	stores[key] = store
+	if owned {
+		ownedStores[key] = store
+	}
 	return store, true
 }
 

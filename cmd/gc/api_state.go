@@ -64,6 +64,12 @@ type controllerState struct {
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 
+	// inflightOrderDispatcher lets a config swap's store retirement drain
+	// in-flight dispatches before closing the cached handles they borrowed.
+	// Atomic: written when the dispatcher is installed, read on the API mutation
+	// goroutine. nil in standalone/no-API mode and tests.
+	inflightOrderDispatcher atomic.Pointer[memoryOrderDispatcher]
+
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
 	// each record into the city event log as an emergency.signaled event.
@@ -94,6 +100,13 @@ var controllerStateOpenRigStoreAtForCity = beads.OpenStoreAtForCity
 // controllerStateStoreCloseDelay gives handlers that already captured a store
 // reference a short drain window before reload closes replaced backings.
 var controllerStateStoreCloseDelay = 250 * time.Millisecond
+
+// controllerStoreRetireDrainTimeout bounds how long a config swap waits for
+// in-flight order dispatch to release a retired cached handle before closing it.
+// Set well above reloadOrderDrainTimeout so legitimate long orders finish first;
+// a pathologically continuous order stream instead falls back to the startup
+// orphan-sweep. A var so tests can shrink it.
+var controllerStoreRetireDrainTimeout = 2 * time.Minute
 
 type configMutationSnapshot struct {
 	cityPath  string
@@ -675,10 +688,34 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
-	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
-		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+	cs.scheduleCloseReplacedStores(oldCityStore, cityStore, oldRigStores, stores)
+}
+
+// scheduleCloseReplacedStores retires the bead-store handles a config swap
+// replaced, once the in-flight order dispatches that borrowed them release the
+// handles. With a dispatcher wired, it waits for the dispatcher's drain on a
+// detached goroutine (never blocking the mutation) before the delay timer
+// retires the handles; with none (standalone/no-API, tests) it closes through
+// the delay timer directly, which also covers short-lived HTTP handlers that
+// captured a reference.
+func (cs *controllerState) scheduleCloseReplacedStores(oldCityStore, newCityStore beads.Store, oldRigStores, newRigStores map[string]beads.Store) {
+	closeReplaced := func() {
+		if newCityStore != nil && oldCityStore != nil && oldCityStore != newCityStore {
+			scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
+		}
+		scheduleCloseReplacedBeadStoreHandles(oldRigStores, newRigStores)
 	}
-	scheduleCloseReplacedBeadStoreHandles(oldRigStores, stores)
+	dispatcher := cs.inflightOrderDispatcher.Load()
+	if dispatcher == nil {
+		closeReplaced()
+		return
+	}
+	go func() {
+		drainCtx, cancel := context.WithTimeout(context.Background(), controllerStoreRetireDrainTimeout)
+		dispatcher.drain(drainCtx)
+		cancel()
+		closeReplaced()
+	}()
 }
 
 func scheduleCloseBeadStoreHandle(label string, store beads.Store) {

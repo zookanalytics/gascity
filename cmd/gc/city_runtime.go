@@ -329,6 +329,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if err := cr.svc.Reload(); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: service init: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}
+	cr.installOrderDispatcherCachedStores()
 	return cr
 }
 
@@ -337,6 +338,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 // before run starts, and never replaced afterward.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
+	// Re-point the dispatcher's cached-store resolver now that cr.cs exists.
+	// controllerLoop builds CityRuntime as a struct literal (not newCityRuntime),
+	// so this is the install point for the `gc start` path.
+	cr.installOrderDispatcherCachedStores()
 }
 
 // crashTracker returns the crash tracker for API server wiring.
@@ -1299,6 +1304,49 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 		}
 	}
 	cr.od = next
+	cr.installOrderDispatcherCachedStores()
+}
+
+// installOrderDispatcherCachedStores points the active order dispatcher at the
+// controller's cached-store resolver so dispatch reuses the long-lived pooled
+// CachingStore handles instead of opening a fresh native Dolt store per target
+// every tick. No-op unless the dispatcher is the production memoryOrderDispatcher
+// (tests inject their own storeFn), and safe to call before cr.cs is set: the
+// resolver reads cr.cs live, returning nil until controllerState is installed.
+func (cr *CityRuntime) installOrderDispatcherCachedStores() {
+	mem, ok := cr.od.(*memoryOrderDispatcher)
+	if !ok {
+		return
+	}
+	mem.cachedStoreFn = cr.controllerCachedOrderStore
+	// Register the dispatcher so a config swap's store retirement can drain
+	// in-flight dispatches before closing the handles they borrowed
+	// (controllerState.scheduleCloseReplacedStores).
+	if cr.cs != nil {
+		cr.cs.inflightOrderDispatcher.Store(mem)
+	}
+}
+
+// controllerCachedOrderStore returns the controller-cached, long-lived bead
+// store for an order dispatch target, or nil when none is available (no
+// controllerState in standalone/no-API mode, or the scope has no cached handle).
+// A non-nil result is borrowed — the caller must not close it; controllerState
+// owns the pooled handle and keeps it warm.
+func (cr *CityRuntime) controllerCachedOrderStore(target execStoreTarget) beads.Store {
+	if cr.cs == nil {
+		return nil
+	}
+	switch target.ScopeKind {
+	case "city":
+		return cr.cs.CityBeadStore()
+	case "rig":
+		if strings.TrimSpace(target.RigName) == "" {
+			return nil
+		}
+		return cr.cs.BeadStore(target.RigName)
+	default:
+		return nil
+	}
 }
 
 func (cr *CityRuntime) rescanOrderDispatcher(ctx context.Context, cityRoot string, cfg *config.City, cmdName string, now time.Time) (bool, string, error) {
