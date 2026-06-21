@@ -9368,3 +9368,35 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 		t.Errorf("cache size = %d after no-op carries, want 2", len(next.lastRunCache))
 	}
 }
+
+// TestCarryInflightFrom pins the contract carryInflightFrom must satisfy for the
+// in-flight gate to survive reload/rescan dispatcher replacement (gc-4nxy8): the
+// replacement SHARES the previous dispatcher's gate by reference (not a copy),
+// so a marker cleared by the retired dispatcher's still-running goroutine is
+// observed by the replacement; nil/empty predecessors are a no-op.
+func TestCarryInflightFrom(t *testing.T) {
+	prev := &memoryOrderDispatcher{inflight: newOrderInflightSet()}
+	prev.markOrderInflight("city/slow")
+
+	next := &memoryOrderDispatcher{inflight: newOrderInflightSet()}
+	next.carryInflightFrom(prev)
+
+	if !next.orderInflight("city/slow") {
+		t.Fatal("replacement does not see the carried in-flight marker")
+	}
+
+	// Shared by reference: the retired dispatcher clearing its own set must be
+	// visible through the replacement. A copy would leave next wedged.
+	prev.clearOrderInflight("city/slow")
+	if next.orderInflight("city/slow") {
+		t.Fatal("clear on the retired dispatcher not visible on the replacement; gate was copied, not shared")
+	}
+
+	// nil/empty predecessors are no-ops that leave the existing set intact.
+	keep := next.inflight
+	next.carryInflightFrom(nil)
+	next.carryInflightFrom(&memoryOrderDispatcher{}) // prev.inflight == nil
+	if next.inflight != keep {
+		t.Fatal("no-op carry replaced the in-flight set")
+	}
+}

@@ -1302,11 +1302,15 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
 // warm last-run data from the outgoing dispatcher so a rebuild (reload or
 // rescan) reuses it instead of cold-starting and re-querying every order
-// (#3201). Call after draining the outgoing dispatcher.
+// (#3201). It also shares the outgoing dispatcher's in-flight gate forward so a
+// dispatchOne goroutine still running after a timed-out drain keeps blocking a
+// concurrent re-dispatch on the replacement (gc-4nxy8). Call after draining the
+// outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
 			nextMem.carryLastRunCacheFrom(prev)
+			nextMem.carryInflightFrom(prev)
 		}
 	}
 	cr.od = next

@@ -291,15 +291,59 @@ type memoryOrderDispatcher struct {
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 
-	// inflightOrders is the in-memory per-order in-flight gate. Cooldown/cron
-	// and event orders mint no tracking bead (gc-7hf34), so the open-work gate
-	// cannot see that a dispatchOne goroutine is still running its (possibly
-	// slow) command. Without this gate, an exec whose runtime exceeds the order
-	// interval would be dispatched a second time on a later tick while the first
-	// copy is still in flight (gc-4nxy8). Keyed by scoped order name; an entry
-	// exists for the lifetime of a dispatchOne goroutine.
-	inflightOrdersMu sync.Mutex
-	inflightOrders   map[string]struct{}
+	// inflight is the in-memory per-order in-flight gate. Cooldown/cron and event
+	// orders mint no tracking bead (gc-7hf34), so the open-work gate cannot see
+	// that a dispatchOne goroutine is still running its (possibly slow) command.
+	// Without this gate, an exec whose runtime exceeds the order interval would be
+	// dispatched a second time on a later tick while the first copy is still in
+	// flight (gc-4nxy8). It is shared by reference across dispatcher generations
+	// so the gate survives reload/rescan dispatcher replacement — see
+	// orderInflightSet and carryInflightFrom.
+	inflight *orderInflightSet
+}
+
+// orderInflightSet is the in-flight gate state for cooldown/cron and event
+// orders, which mint no tracking bead (gc-7hf34). It is held by pointer and
+// shared by reference across dispatcher generations: a config reload/rescan
+// rebuilds the dispatcher, but a dispatchOne goroutine launched by the now-
+// retired dispatcher may still be running its command (the reload drain is
+// bounded by reloadOrderDrainTimeout and can return before the command
+// finishes). Carrying the SAME set into the replacement dispatcher — rather than
+// copying it, which would strand a marker the retired dispatcher's goroutine
+// clears on its own copy — keeps the gate intact so a later tick on the new
+// dispatcher still skips the concurrent re-dispatch (gc-4nxy8 reload/rescan
+// gap). Keyed by scoped order name; an entry exists for the lifetime of a
+// dispatchOne goroutine. The mutex and map travel together so every generation
+// reads and writes the gate under one lock.
+type orderInflightSet struct {
+	mu  sync.Mutex
+	set map[string]struct{}
+}
+
+func newOrderInflightSet() *orderInflightSet {
+	return &orderInflightSet{set: make(map[string]struct{})}
+}
+
+func (s *orderInflightSet) inflight(scoped string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.set[scoped]
+	return ok
+}
+
+func (s *orderInflightSet) mark(scoped string) {
+	s.mu.Lock()
+	if s.set == nil {
+		s.set = make(map[string]struct{})
+	}
+	s.set[scoped] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *orderInflightSet) clear(scoped string) {
+	s.mu.Lock()
+	delete(s.set, scoped)
+	s.mu.Unlock()
 }
 
 type orderDispatchTrackingIndex struct {
@@ -425,6 +469,7 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		cityPath:             cityPath,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
+		inflight:             newOrderInflightSet(),
 	}
 }
 
@@ -799,32 +844,50 @@ func (m *memoryOrderDispatcher) doneInflight() {
 // orderInflight reports whether a dispatchOne goroutine for the scoped order is
 // still running. It is the in-memory in-flight gate for orders that mint no
 // tracking bead (cooldown/cron, event), preventing a second dispatch while a
-// command that outlives the order interval is still in flight (gc-4nxy8).
+// command that outlives the order interval is still in flight (gc-4nxy8). A nil
+// set (a dispatcher constructed directly in tests, never via the constructor)
+// means nothing is in flight.
 func (m *memoryOrderDispatcher) orderInflight(scoped string) bool {
-	m.inflightOrdersMu.Lock()
-	defer m.inflightOrdersMu.Unlock()
-	_, ok := m.inflightOrders[scoped]
-	return ok
+	if m.inflight == nil {
+		return false
+	}
+	return m.inflight.inflight(scoped)
 }
 
 // markOrderInflight records that a dispatchOne goroutine for the scoped order is
 // about to start. Called synchronously from dispatch on the tick goroutine,
-// before launch, and paired with clearOrderInflight in dispatchOne's defer.
+// before launch, and paired with clearOrderInflight in dispatchOne's defer. The
+// constructor always installs the shared set; the lazy init only covers
+// dispatchers built directly in tests.
 func (m *memoryOrderDispatcher) markOrderInflight(scoped string) {
-	m.inflightOrdersMu.Lock()
-	if m.inflightOrders == nil {
-		m.inflightOrders = make(map[string]struct{})
+	if m.inflight == nil {
+		m.inflight = newOrderInflightSet()
 	}
-	m.inflightOrders[scoped] = struct{}{}
-	m.inflightOrdersMu.Unlock()
+	m.inflight.mark(scoped)
 }
 
 // clearOrderInflight removes the in-flight marker for the scoped order when its
 // dispatchOne goroutine returns, allowing a later tick to dispatch it again.
 func (m *memoryOrderDispatcher) clearOrderInflight(scoped string) {
-	m.inflightOrdersMu.Lock()
-	delete(m.inflightOrders, scoped)
-	m.inflightOrdersMu.Unlock()
+	if m.inflight == nil {
+		return
+	}
+	m.inflight.clear(scoped)
+}
+
+// carryInflightFrom shares prev's in-flight gate with m so the marker for a
+// dispatchOne goroutine still running after a reload/rescan drain timeout keeps
+// blocking a concurrent re-dispatch on the replacement dispatcher until that
+// goroutine returns and clears it (gc-4nxy8). Unlike carryLastRunCacheFrom this
+// shares the set by reference rather than copying: the retired dispatcher's
+// goroutine clears its own *orderInflightSet on return, so a copy would leave a
+// stale marker wedged on m. Call from replaceOrderDispatcher with the outgoing
+// dispatcher as prev.
+func (m *memoryOrderDispatcher) carryInflightFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil || prev.inflight == nil {
+		return
+	}
+	m.inflight = prev.inflight
 }
 
 // drain blocks until all in-flight dispatchOne goroutines complete or ctx
