@@ -1898,6 +1898,7 @@ func reconcileCities(
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, path)
 		pokeCh := make(chan struct{}, 1)
 		configDirty := &atomic.Bool{}
+		demandDirty := &atomic.Bool{}
 		forceShutdown := &atomic.Bool{}
 		reloadReqCh := make(chan reloadRequest)
 		cityCtx, cityCancel := context.WithCancel(context.Background())
@@ -1916,6 +1917,7 @@ func reconcileCities(
 				WatchTargets:            watchTargets,
 				ConfigRev:               configRev,
 				ConfigDirty:             configDirty,
+				DemandDirty:             demandDirty,
 				Cfg:                     cfg,
 				SP:                      sp,
 				Publication:             publication,
@@ -1966,6 +1968,7 @@ func reconcileCities(
 		cs.ct = cityRuntime.crashTrack()
 		cs.pokeCh = pokeCh
 		cs.configDirty = configDirty
+		cs.demandDirty = demandDirty
 		cs.services = cityRuntime.svc
 		cityRuntime.setControllerState(cs)
 		cs.startBeadEventWatcher(cityCtx)
@@ -2028,7 +2031,7 @@ func reconcileCities(
 		// Start controller socket AFTER the alreadyRunning check so we
 		// never destroy a live city's socket or leak a listener.
 		sockPath := filepath.Join(path, ".gc", "controller.sock")
-		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+		lis, lisErr := startControllerSocket(path, cityCancel, forceShutdown, configDirty, demandDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		if lisErr != nil {
 			fmt.Fprintf(stderr, "gc supervisor: city '%s': controller socket: %v\n", cityName, lisErr) //nolint:errcheck
 			lock.Close()                                                                               //nolint:errcheck // no socket to race with
