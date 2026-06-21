@@ -11,9 +11,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -93,13 +95,14 @@ schedule = "*/1 * * * *"
 		t.Fatal(err)
 	}
 
-	store, err := openStoreAtForCity(dir, dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// gc-7hf34: cooldown/cron orders record each fire by advancing the durable
+	// last-run file cursor instead of minting an order-run tracking bead, so the
+	// fire signal is the cursor for "test-tick" advancing off the zero value —
+	// not an order-run bead appearing.
+	runtimeDir := citylayout.RuntimeDataDir(dir)
 	waitForCondition(t, 10*time.Second, func() bool {
-		history, err := store.ListByLabel("order-run:test-tick", 0, beads.IncludeClosed, beads.WithBothTiers)
-		return err == nil && len(history) > 0
+		lastRun, err := orders.ReadLastRun(runtimeDir, "test-tick")
+		return err == nil && !lastRun.IsZero()
 	}, "dynamic cron order fire")
 }
 
