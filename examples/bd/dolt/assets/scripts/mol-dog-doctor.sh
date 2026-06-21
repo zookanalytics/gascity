@@ -36,12 +36,10 @@ BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
 # advisory so a persistent condition collapses into one rolling alert instead of
 # a fresh bead every 5-min tick. DOLT_STATE_DIR is set by runtime.sh.
 ADVISORY_STATE_FILE="${GC_DOCTOR_ADVISORY_STATE_FILE:-$DOLT_STATE_DIR/doctor-advisory-state}"
-# Advisory compaction (gc-00rcf): the dedup state above stops NEW duplicates;
-# compaction archives EXISTING open advisory wisps that the state file cannot
-# reach — the pre-dedup pile and advisories left open by a now-superseded
-# condition set. Recipient mirrors escalate.sh's default so compaction targets
-# exactly what the advisories were addressed to; the prefix matches the [MEDIUM]
-# advisory subject without matching the CRITICAL "server unreachable" escalation.
+# Compaction targets for advisory_compact (advisory_state.sh). Recipient mirrors
+# escalate.sh's default so compaction matches what advisories were addressed to;
+# the prefix matches the [MEDIUM] advisory subject but not the CRITICAL
+# "server unreachable" escalation.
 ADVISORY_RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
 ADVISORY_SUBJECT_PREFIX="Dolt health advisory"
 
@@ -306,15 +304,10 @@ Orphan DBs: ${ORPHAN_COUNT}${ORPHAN_WARN}${BACKUP_STALE}"; then
             advisory_record "$ADVISORY_SIG" "$ADVISORY_STATE_FILE"
         fi
     else
-        # Steady warning (unchanged signature) — the common state once a
-        # persistent condition has its signature on file. The send-time dedup
-        # correctly suppresses a re-send, but neither the supersede above nor the
-        # healthy drain below runs here, so a pre-dedup pile (or advisories left
-        # by a prior run before this signature was recorded) would stay open for
-        # the life of a condition that never clears, e.g. orphan DBs. Drain the
-        # duplicates while keeping the single current advisory (--keep-newest 1)
-        # so the operator still sees one standing alert. Idempotent: once
-        # converged to one, this archives nothing.
+        # Steady warning (unchanged signature): the send-time dedup suppresses a
+        # re-send, and neither the supersede nor the healthy-drain arm runs, so a
+        # pre-dedup pile would otherwise stay open for the life of the condition.
+        # Drain the duplicates but keep the current advisory (--keep-newest 1).
         advisory_compact "$ADVISORY_RECIPIENT" "$ADVISORY_SUBJECT_PREFIX" "" 1
     fi
 else

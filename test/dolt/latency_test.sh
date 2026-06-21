@@ -140,7 +140,7 @@ if [ "$(latency_delta 1781936353500 1781936353400)" = "0" ]; then pass "latency_
 
 # Stale timestamp / unit mismatch: a seconds-scale start (10 digits) against an
 # ms-scale end (13 digits) yields ~1.78e12 ms (~56 years). That impossible
-# value — the symptom this bead exists to kill — must collapse to 0.
+# value must collapse to 0.
 if [ "$(latency_delta 1781936353 1781936353000)" = "0" ]; then pass "latency_delta stale seconds-scale start -> 0 (impossible value suppressed)"; else bad "latency_delta 1781936353 1781936353000 = $(latency_delta 1781936353 1781936353000), want 0"; fi
 
 # Ceiling boundary: delta == ceiling is kept; ceiling+1 collapses to 0.

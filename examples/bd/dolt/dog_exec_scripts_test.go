@@ -4475,15 +4475,10 @@ exit 0
 	}
 }
 
-// TestDoctorScriptSteadyWarningCompactsDuplicatesKeepingCurrent is the
-// regression test for the steady-warning / unchanged-signature state-machine
-// case (PR#75 review). Once a persistent condition has its signature recorded,
-// advisory_changed is false on every later tick, so neither the supersede arm
-// nor the healthy-drain arm runs. Without a dedicated steady-warning drain the
-// pre-dedup pile of duplicate advisories would stay open for the life of the
-// condition. The doctor must instead compact the duplicates while keeping the
-// one current advisory (--keep-newest 1), and must NOT re-send (the send-time
-// dedup still suppresses that).
+// TestDoctorScriptSteadyWarningCompactsDuplicatesKeepingCurrent asserts the
+// steady-warning (unchanged-signature) arm: tick 1 alerts and records the
+// signature; tick 2, with the signature already on file, compacts the duplicate
+// pile with --keep-newest 1 and does NOT re-send.
 func TestDoctorScriptSteadyWarningCompactsDuplicatesKeepingCurrent(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
