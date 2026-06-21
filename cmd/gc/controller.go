@@ -198,13 +198,9 @@ func handleControllerConn(
 			}
 			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
 		case line == "poke-demand":
-			// Work-routing wake (e.g. gc sling routed a new bead to a sleeping
-			// pool). Mark the demand snapshot dirty so the triggered tick
-			// rebuilds pool demand even though no session bead changed — routing
-			// a work bead leaves the session fingerprint (the snapshot freshness
-			// key) unchanged — then trigger the tick. Plain "poke" stays
-			// demand-snapshot-preserving for the high-frequency session-lifecycle
-			// wake path (gc-k8r4y / gc-qedgc).
+			// Demand-aware wake: mark demand dirty so the tick rebuilds pool
+			// demand, then trigger it. Plain "poke" stays demand-snapshot-
+			// preserving for the high-frequency session-lifecycle path.
 			if demandDirty != nil {
 				demandDirty.Store(true)
 			}

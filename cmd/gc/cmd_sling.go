@@ -166,9 +166,7 @@ Examples:
 type slingOpts = sling.SlingOpts
 
 var (
-	// slingPokeController wakes the controller after sling routes work. It uses
-	// the demand variant so a sleeping pool's demand is rebuilt this tick rather
-	// than waiting out the demand-snapshot TTL (gc-lskvo).
+	// slingPokeController wakes the controller after sling routes work.
 	slingPokeController        = pokeControllerDemand
 	slingPokeControlDispatcher = pokeControlDispatch
 	slingOpenCityStore         = openCityStoreAt
@@ -1482,10 +1480,7 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 				}
 			}
 		}
-		// No running config session — poke controller for immediate wake. Use
-		// the demand variant: routing this work changed pool demand the session
-		// fingerprint can't observe, so force a demand rebuild this tick instead
-		// of waiting out the snapshot TTL (gc-lskvo).
+		// No running session for the target — poke the controller to wake the pool.
 		if err := pokeControllerDemand(cityPath); err != nil {
 			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
 		} else {
@@ -1513,15 +1508,10 @@ func pokeController(cityPath string) error {
 	return pokeSupervisor()
 }
 
-// pokeControllerDemand is like pokeController but tells the controller that
-// routed pool demand may have changed — e.g. gc sling just created/routed a new
-// work bead for a sleeping pool. The controller forces a demand-snapshot
-// rebuild on the triggered tick so the pool wakes immediately, instead of
-// reusing the cached snapshot until the freshness TTL: routing a work bead
-// leaves every session bead (and thus the demand snapshot's fingerprint key)
-// unchanged, so a plain poke would not be observed as new demand (gc-lskvo,
-// follow-up to gc-qedgc). The supervisor fallback sends "reload", which also
-// rebuilds demand via the configChanged path.
+// pokeControllerDemand is pokeController plus a demand-rebuild signal, for
+// callers that change pool demand without mutating a session bead (e.g. gc sling
+// routing work to a sleeping pool) — a change the demand snapshot's fingerprint
+// cannot otherwise observe. The supervisor fallback ("reload") also rebuilds demand.
 func pokeControllerDemand(cityPath string) error {
 	_, err := sendControllerCommand(cityPath, "poke-demand")
 	if err == nil {

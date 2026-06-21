@@ -106,13 +106,10 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
-	// demandDirty is set by work-routing pokes (e.g. gc sling routing a new
-	// bead to a sleeping pool) to force a one-shot demand-snapshot rebuild on
-	// the next tick. Routing a work bead leaves every session bead unchanged,
-	// so the session fingerprint cannot observe the new demand; this flag is
-	// the cross-goroutine signal that the cached snapshot is stale (gc-lskvo,
-	// follow-up to gc-qedgc). Shared with the controller socket handler and the
-	// API controllerState so both the CLI and API sling paths can set it.
+	// demandDirty forces a one-shot pool-demand rebuild on the next tick. It is
+	// the signal for demand that the session fingerprint can't see — routed work
+	// for a sleeping pool mutates no session bead — set from any goroutine
+	// (controller socket, API state) and consumed by the reconciler.
 	demandDirty *atomic.Bool
 
 	fsPressureConsecutiveSkips int
@@ -2975,22 +2972,11 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	return snapshot
 }
 
-// shouldRefreshDemandSnapshot reports whether the cached demand snapshot must
-// be rebuilt this tick. The gate is trigger-independent: poke-driven ticks
-// reuse a fresh, stable snapshot exactly as patrol ticks do, rebuilding only
-// when the config (templates) changed, a work-routing poke marked demand dirty,
-// the session fingerprint changed, or the cached snapshot aged out. Forcing a
-// rebuild on every non-patrol tick made the poke→tick→bead-write feedback loop
-// run a full demand rebuild (GetReadyWork per store-group) on every poke — a
-// large share of the per-tick query volume that saturated the shared Dolt
-// server (gc-k8r4y).
-//
-// The demandDirty gate (gc-lskvo) restores immediate wake for the one poke
-// class the fingerprint cannot observe: gc sling routing a new bead to a
-// sleeping pool mutates no session bead, so without the flag the triggered
-// poke tick would reuse the cached no-demand snapshot and the pool would stay
-// cold until the freshness TTL. The flag is consumed (one-shot) so subsequent
-// stable pokes keep reusing the rebuilt snapshot.
+// shouldRefreshDemandSnapshot reports whether the cached pool-demand snapshot
+// must be rebuilt this tick. It rebuilds on a config change, a one-shot
+// demandDirty signal, a session-fingerprint change, or snapshot age; otherwise
+// poke-driven ticks reuse the cached snapshot, keeping the high-frequency
+// session-lifecycle wake path off the per-tick demand rebuild.
 func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	configChanged bool,
 	sessionFingerprint string,
@@ -2998,10 +2984,12 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 	if !cr.demandSnapshotsEnabled() {
 		return true
 	}
-	if configChanged {
-		return true
-	}
-	if cr.demandDirty != nil && cr.demandDirty.Swap(false) {
+	// Consume the one-shot demand signal before any other rebuild reason can
+	// short-circuit past it, so it is never left set for a redundant rebuild on
+	// the next tick. The flag is fail-safe: it can only force an extra rebuild,
+	// never suppress one, so routed work for a sleeping pool is never missed.
+	demandDirty := cr.demandDirty != nil && cr.demandDirty.Swap(false)
+	if configChanged || demandDirty {
 		return true
 	}
 	if cr.demandSnapshot == nil {

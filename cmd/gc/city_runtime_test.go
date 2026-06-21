@@ -740,13 +740,8 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 		t.Fatalf("buildDesiredState call count after session change = %d, want 2", buildCalls)
 	}
 
-	// gc-qedgc: a poke-driven (non-patrol) tick with a stable session
-	// fingerprint reuses the fresh cached snapshot instead of force-rebuilding.
-	// Before gc-qedgc, every non-patrol tick force-rebuilt the demand snapshot —
-	// a full GetReadyWork-per-store-group rebuild on every poke — which, under
-	// the poke→tick→bead-write feedback loop, saturated the shared Dolt server
-	// (gc-k8r4y). Poke ticks now fall through the same fingerprint+freshness
-	// gate as patrol ticks.
+	// A poke-driven (non-patrol) tick with a stable fingerprint reuses the fresh
+	// cached snapshot instead of rebuilding — the same gate patrol ticks use.
 	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count after stable poke = %d, want 2 (poke reuses fresh cache)", buildCalls)
@@ -759,16 +754,10 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 	}
 }
 
-// TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke is the regression
-// guard for gc-lskvo (codex finding on PR#69 / gc-qedgc). gc-qedgc made poke
-// ticks reuse the cached demand snapshot whenever the session fingerprint is
-// stable. But gc sling routes a new work bead and pokes the controller for an
-// immediate wake of a sleeping pool, and routing a work bead does not mutate
-// any session bead — so the fingerprint stays stable and the poke tick would
-// reuse the primed no-demand snapshot, leaving the pool cold until the 30s
-// freshness TTL. A work-routing poke marks demand dirty, which must force a
-// rebuild this tick while leaving the gc-qedgc cache-reuse win intact for the
-// high-frequency session-lifecycle poke path.
+// TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke asserts that a
+// work-routing poke (demandDirty) forces a demand rebuild even when the session
+// fingerprint is stable, so routed work for a sleeping pool is observed this
+// tick — while a plain poke still reuses the cached snapshot.
 func TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke(t *testing.T) {
 	buildCalls := 0
 	routedWork := false
@@ -805,15 +794,14 @@ func TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke(t *testing.T) {
 	}
 
 	// A plain poke with a stable fingerprint and no demand-dirty signal reuses
-	// the cache — the gc-qedgc perf win we must not regress.
+	// the cache — the perf win we must not regress.
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 	if buildCalls != 1 {
 		t.Fatalf("buildDesiredState call count after plain poke = %d, want 1 (cache reuse preserved)", buildCalls)
 	}
 
-	// gc sling routes new work for the sleeping pool and fires a work-routing
-	// poke (poke-demand), which marks demand dirty. The session fingerprint is
-	// unchanged, so only the dirty flag can force the rebuild this tick.
+	// Routing new work for the sleeping pool fires a work-routing poke that marks
+	// demand dirty. The fingerprint is unchanged, so only the flag forces a rebuild.
 	routedWork = true
 	cr.demandDirty.Store(true)
 	woken := cr.loadDemandSnapshot(sessionBeads, nil, false)
@@ -831,6 +819,55 @@ func TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke(t *testing.T) {
 	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count after consuming demand-dirty = %d, want 2 (reuse)", buildCalls)
+	}
+}
+
+// TestCityRuntimeDemandSnapshotConsumesDirtyFlagOnConfigChange asserts the
+// demandDirty consume cannot be bypassed by another rebuild reason: when a tick
+// already rebuilds for a config change while a work-routing poke also marked
+// demand dirty, the flag is still consumed, so it can't trigger a second,
+// redundant rebuild on the next stable poke.
+func TestCityRuntimeDemandSnapshotConsumesDirtyFlagOnConfigChange(t *testing.T) {
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		demandDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after prime = %d, want 1", buildCalls)
+	}
+
+	// A config-change tick that also carries a work-routing demand-dirty signal:
+	// the config change forces the rebuild, but the flag must still be consumed.
+	cr.demandDirty.Store(true)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, true)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after config-change tick = %d, want 2", buildCalls)
+	}
+	if cr.demandDirty.Load() {
+		t.Fatal("demandDirty must be consumed even when a config change also forces the rebuild")
+	}
+
+	// The next stable poke reuses the cache, proving no leftover flag forced a
+	// redundant rebuild.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after stable poke = %d, want 2 (no redundant rebuild)", buildCalls)
 	}
 }
 

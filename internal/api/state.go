@@ -111,11 +111,10 @@ type State interface {
 	// is not available (e.g., in tests).
 	Poke()
 
-	// PokeDemand marks pool demand dirty and signals an immediate reconciler
-	// tick. Used after sling routes new work so a sleeping pool wakes this tick
-	// instead of waiting out the demand-snapshot freshness TTL: routing a work
-	// bead does not mutate any session bead, so a plain Poke would reuse the
-	// cached (no-demand) snapshot. Best-effort: no-op if poke is unavailable.
+	// PokeDemand forces a pool-demand rebuild on the next reconciler tick and
+	// signals one immediately. Callers that change pool demand without mutating a
+	// session bead use it instead of Poke, whose cached demand snapshot would
+	// otherwise hide the change. Best-effort: no-op if poke is unavailable.
 	PokeDemand()
 
 	// ServiceRegistry returns the workspace service registry, or nil when
