@@ -185,14 +185,13 @@ func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
-	restoreEnv, err := withNativeDoltOpenEnv(env)
-	if err != nil {
-		return nil, err
-	}
-	defer restoreEnv()
 
 	// Process-wide collective backoff: when the shared Dolt server is saturated,
-	// fail fast without dialing rather than feeding the connection storm.
+	// fail fast without dialing rather than feeding the connection storm. Admit
+	// before taking the open-env mutex — doltServerAddrFromEnv reads the scoped
+	// env map, so it needs no prior projection — so a rejected caller fails fast
+	// with ErrDoltServerSaturated instead of serializing behind the in-flight
+	// probe, which holds nativeDoltOpenEnvMu for the whole native open.
 	gate := doltAdmissionGateFor(doltServerAddrFromEnv(env))
 	var probeToken admissionToken
 	if gate != nil {
@@ -203,17 +202,40 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		probeToken = token
 	}
 
-	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
-	if gate != nil {
-		gate.RecordOutcome(probeToken, err)
-	}
+	restoreEnv, err := withNativeDoltOpenEnv(env)
 	if err != nil {
+		// An admitted probe must report an outcome even when env projection fails,
+		// or the gate treats the probe as in flight until it times out.
+		if gate != nil {
+			gate.RecordOutcome(probeToken, err)
+		}
 		return nil, err
+	}
+	defer restoreEnv()
+
+	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
+	if err != nil {
+		if gate != nil {
+			gate.RecordOutcome(probeToken, err)
+		}
+		return nil, classifyNativeDoltOpenErr(scopeRoot, err)
 	}
 	prefix, err := storage.GetConfig(ctx, "issue_prefix")
 	if err != nil {
+		// Record the final open-boundary outcome, not just the dial: a config read
+		// that times out under load is a saturation probe failure, not a recovery.
+		// Translate it to ErrDoltServerSaturated so the store factory propagates
+		// collective backoff instead of falling back to a bd CLI that dials the
+		// same overloaded server.
+		if gate != nil {
+			gate.RecordOutcome(probeToken, err)
+		}
 		_ = storage.Close()
-		return nil, fmt.Errorf("reading native issue prefix: %w", err)
+		return nil, classifyNativeDoltOpenErr(scopeRoot, fmt.Errorf("reading native issue prefix: %w", err))
+	}
+	// The store is usable: this success is the final open-boundary outcome.
+	if gate != nil {
+		gate.RecordOutcome(probeToken, nil)
 	}
 	if accessor, ok := storage.(rawDBGetter); ok {
 		if repairErr := repairDependenciesIDDefault(accessor.DB()); repairErr != nil {
@@ -222,6 +244,23 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 		}
 	}
 	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+}
+
+// classifyNativeDoltOpenErr maps a native-open boundary failure to
+// ErrDoltServerSaturated when it carries a saturation signal (handshake or
+// config-read timeout, too-many-connections), so the store factory propagates
+// collective backoff rather than falling back to the bd CLI — which would dial
+// the same overloaded server and deepen the saturation. Non-saturation failures
+// are returned unchanged for the ordinary bd fallback. The original error stays
+// wrapped so callers that inspect it (e.g. context.DeadlineExceeded) still can.
+func classifyNativeDoltOpenErr(scopeRoot string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if doltServerSaturationOutcome(err) {
+		return fmt.Errorf("native Dolt open for %s: %w (%w)", scopeRoot, ErrDoltServerSaturated, err)
+	}
+	return err
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {

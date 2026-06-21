@@ -9,10 +9,12 @@ import (
 	"time"
 )
 
-// ErrDoltServerSaturated is returned by a native Dolt store open when the
-// process-wide admission gate is backing off because the shared Dolt server is
-// saturated. Callers treat it as a transient "back off and retry later" signal,
-// not a hard open failure.
+// ErrDoltServerSaturated signals shared-server saturation on a native Dolt store
+// open. It is returned both when the process-wide admission gate is backing off
+// (rejecting before any dial) and when an admitted open itself hits a saturation
+// signal at the handshake or config-read boundary. Callers treat it as a
+// transient "back off and retry later" signal — not a hard open failure — and
+// must not fall back to a path that dials the same overloaded server.
 var ErrDoltServerSaturated = errors.New("dolt server saturated: backing off (collective)")
 
 // Admission-gate tuning. A shared Dolt sql-server has a finite connection
