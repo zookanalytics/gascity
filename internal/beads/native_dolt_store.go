@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,6 +162,12 @@ type NativeDoltStore struct {
 	storage  beadslib.Storage
 	actor    string
 	idPrefix string
+	// scopeRoot and env are retained from the on-disk open so Reconnect can
+	// re-establish the storage handle in place after a connection
+	// invalidation (Dolt online GC). They are empty for stores constructed
+	// directly from an in-memory or test storage, which cannot reconnect.
+	scopeRoot string
+	env       map[string]string
 }
 
 var (
@@ -170,6 +177,7 @@ var (
 	_ GraphApplyStore               = (*NativeDoltStore)(nil)
 	_ StorageGraphApplyStore        = (*NativeDoltStore)(nil)
 	_ EphemeralGraphApplyStore      = (*NativeDoltStore)(nil)
+	_ reconnectableStore            = (*NativeDoltStore)(nil)
 )
 
 func newNativeDoltStoreWithStorage(storage beadslib.Storage, actor string) *NativeDoltStore {
@@ -192,21 +200,37 @@ func OpenNativeDoltStoreAt(ctx context.Context, scopeRoot string, env map[string
 }
 
 func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[string]string) (*NativeDoltStore, error) {
+	storage, prefix, err := openNativeStorageAt(parent, scopeRoot, env)
+	if err != nil {
+		return nil, err
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix)
+	store.scopeRoot = scopeRoot
+	store.env = maps.Clone(env)
+	return store, nil
+}
+
+// openNativeStorageAt opens a fresh native beads storage handle at scopeRoot
+// with the supplied scoped Dolt environment projected, reads the issue prefix,
+// and runs the idempotent dependencies.id default repair. It is shared by the
+// initial open (newNativeDoltStoreAt) and the in-place Reconnect recovery path
+// so both establish a handle identically.
+func openNativeStorageAt(parent context.Context, scopeRoot string, env map[string]string) (beadslib.Storage, string, error) {
 	ctx, cancel := nativeDoltOperationContext(parent)
 	defer cancel()
 	restoreEnv, err := withNativeDoltOpenEnv(env)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer restoreEnv()
 	storage, err := nativeDoltOpenBestAvailable(ctx, filepath.Join(scopeRoot, ".beads"))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	prefix, err := storage.GetConfig(ctx, "issue_prefix")
 	if err != nil {
 		_ = storage.Close()
-		return nil, fmt.Errorf("reading native issue prefix: %w", err)
+		return nil, "", fmt.Errorf("reading native issue prefix: %w", err)
 	}
 	if accessor, ok := storage.(rawDBGetter); ok {
 		for _, table := range idDefaultRepairTables {
@@ -217,7 +241,7 @@ func newNativeDoltStoreAt(parent context.Context, scopeRoot string, env map[stri
 			}
 		}
 	}
-	return newNativeDoltStoreWithStorageAndPrefix(storage, nativeDoltStoreActor, prefix), nil
+	return storage, prefix, nil
 }
 
 func newNativeDoltStoreForTest(storage beadslib.Storage) *NativeDoltStore {
@@ -246,6 +270,61 @@ func (s *NativeDoltStore) acquireStorage() (beadslib.Storage, func(), error) {
 		return nil, nil, fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
 	}
 	return s.storage, s.mu.RUnlock, nil
+}
+
+// Reconnect closes the current native storage handle and opens a fresh one at
+// the same scope. It is the recovery path for a connection invalidated by a
+// Dolt online GC/compaction: such a GC invalidates every connection opened
+// before it (Err1105, surfaced as "invalid connection"), and that error is NOT
+// reported as database/sql's driver.ErrBadConn, so the pooled handle is never
+// auto-evicted — every subsequent read on it fails identically until the handle
+// is explicitly reopened. The caching reconciler calls this after a
+// connection-invalidation read error so the cache converges instead of wedging
+// in cacheDegraded until a process restart.
+//
+// The new handle is opened before the old one is swapped in, so a failed reopen
+// leaves the existing handle untouched and returns an error for the caller to
+// surface (and retry on a later cycle). Stores constructed without a retained
+// scope root (in-memory or test storages) cannot reconnect and return an error
+// without side effects.
+func (s *NativeDoltStore) Reconnect(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	s.mu.RLock()
+	scopeRoot := s.scopeRoot
+	env := maps.Clone(s.env)
+	closed := s.storage == nil
+	s.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	if strings.TrimSpace(scopeRoot) == "" {
+		return fmt.Errorf("native Dolt store: cannot reconnect a store opened without a scope root")
+	}
+
+	storage, prefix, err := openNativeStorageAt(ctx, scopeRoot, env)
+	if err != nil {
+		return fmt.Errorf("native Dolt store reconnect: %w", err)
+	}
+
+	s.mu.Lock()
+	if s.storage == nil {
+		// Closed concurrently while we reopened; don't install a handle on a
+		// closed store.
+		s.mu.Unlock()
+		_ = storage.Close()
+		return fmt.Errorf("native Dolt store: %w", ErrStoreClosed)
+	}
+	old := s.storage
+	s.storage = storage
+	if prefix != "" {
+		s.idPrefix = normalizeIDPrefix(prefix)
+	}
+	s.mu.Unlock()
+
+	_ = old.Close()
+	return nil
 }
 
 // CloseStore releases the underlying native beads storage handle.
