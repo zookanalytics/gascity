@@ -791,3 +791,97 @@ interval = "5m"
 		t.Fatalf("rig-scoped order counts = %v, want one per importing rig", rigHealth)
 	}
 }
+
+// TestScanAllExplicitRigScopedFormulaOrderNeverRegistersCityWide guards
+// gc-ctcle: an explicit scope="rig" formula order carries a bare, binding-
+// qualified pool ("<binding>.polecat") that only rig-qualifies once the
+// importing rig is known. If such an order is registered city-wide (empty
+// Rig) because its pack is also imported at city scope, dispatch stamps the
+// minted work bead with the bare pool verbatim — no rig polecat claims it and
+// the bead strands open forever. The order must instantiate only per importing
+// rig, never as an empty-Rig city order.
+func TestScanAllExplicitRigScopedFormulaOrderNeverRegistersCityWide(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "doc-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "doc-audit", `[order]
+scope = "rig"
+formula = "mol-doc-audit"
+trigger = "cooldown"
+interval = "24h"
+pool = "gc-toolkit.polecat"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer},
+			},
+		},
+		// Imported at BOTH city and rig scope, mirroring a pack that the city
+		// imports and a rig also imports.
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"frontend": {packDir},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+
+	cityInstances := 0
+	rigInstances := 0
+	for _, a := range aa {
+		if a.Name != "doc-audit" {
+			continue
+		}
+		switch a.Rig {
+		case "":
+			cityInstances++
+		case "frontend":
+			rigInstances++
+		}
+	}
+	if cityInstances != 0 {
+		t.Fatalf("scope=rig order registered %d empty-Rig city instance(s), want 0 (would strand on bare pool): %#v", cityInstances, aa)
+	}
+	if rigInstances != 1 {
+		t.Fatalf("scope=rig order registered %d rig instance(s) for frontend, want 1: %#v", rigInstances, aa)
+	}
+}
+
+// TestScanAllExplicitRigScopedOrderImportedCityOnlyIsNotCityInstantiated
+// guards gc-ctcle for the city-import-only topology: an explicit scope="rig"
+// order whose pack is imported only at city scope has no importing rig, so it
+// must not be instantiated at all rather than registered as an empty-Rig city
+// order that strands on its bare pool.
+func TestScanAllExplicitRigScopedOrderImportedCityOnlyIsNotCityInstantiated(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "doc-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "doc-audit", `[order]
+scope = "rig"
+formula = "mol-doc-audit"
+trigger = "cooldown"
+interval = "24h"
+pool = "gc-toolkit.polecat"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		PackDirs: []string{packDir},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	for _, a := range aa {
+		if a.Name == "doc-audit" {
+			t.Fatalf("scope=rig order instantiated with no importing rig (Rig=%q), want it dropped: %#v", a.Rig, aa)
+		}
+	}
+}
