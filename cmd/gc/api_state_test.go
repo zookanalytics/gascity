@@ -3682,6 +3682,70 @@ func TestControllerStateApplyCacheReconcileEventDoesNotPokeController(t *testing
 	}
 }
 
+// TestControllerStateApplyOrderTrackingEventDoesNotPokeController asserts that an
+// order-tracking bead event does not poke the controller.
+func TestControllerStateApplyOrderTrackingEventDoesNotPokeController(t *testing.T) {
+	cs := &controllerState{
+		pokeCh: make(chan struct{}, 1),
+	}
+
+	payload, err := json.Marshal(api.BeadEventPayload{
+		Bead: beads.Bead{
+			ID:     "gc-ot-1",
+			Title:  "order:gascity/some-order",
+			Labels: []string{"order-run:gascity/some-order", labelOrderTracking},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal order-tracking payload: %v", err)
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadCreated,
+		Actor:   "agent-runtime",
+		Subject: "gc-ot-1",
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+		t.Fatal("order-tracking bead event must not poke controller")
+	default:
+	}
+}
+
+// TestControllerStateApplyNonOrderTrackingEventStillPokesController asserts that
+// an ordinary work-bead event still pokes the controller.
+func TestControllerStateApplyNonOrderTrackingEventStillPokesController(t *testing.T) {
+	cs := &controllerState{
+		pokeCh: make(chan struct{}, 1),
+	}
+
+	payload, err := json.Marshal(api.BeadEventPayload{
+		Bead: beads.Bead{
+			ID:     "gc-work-1",
+			Title:  "do the thing",
+			Labels: []string{"some-other-label"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal work-bead payload: %v", err)
+	}
+
+	cs.applyBeadEventToStores(events.Event{
+		Type:    events.BeadUpdated,
+		Actor:   "agent-runtime",
+		Subject: "gc-work-1",
+		Payload: payload,
+	})
+
+	select {
+	case <-cs.pokeCh:
+	default:
+		t.Fatal("ordinary work-bead event must still poke controller")
+	}
+}
+
 func newControllerStateMutationHarness(t *testing.T) (*controllerState, string) {
 	t.Helper()
 

@@ -535,11 +535,28 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 				cached.ApplyEvent(evt.Type, evt.Payload)
 			}
 		}
-		cs.Poke()
+		// Don't poke on the controller's own order-tracking writes.
+		if !isOrderTrackingBeadEvent(evt.Payload) {
+			cs.Poke()
+		}
 	}
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
 		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
 	}
+}
+
+// isOrderTrackingBeadEvent reports whether a bead-event payload describes a
+// controller-authored order-tracking bead (label labelOrderTracking, stamped by
+// dispatchOrders in order_dispatch.go).
+func isOrderTrackingBeadEvent(payload json.RawMessage) bool {
+	if len(payload) == 0 {
+		return false
+	}
+	var p api.BeadEventPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return false
+	}
+	return hasBeadLabel(p.Bead.Labels, labelOrderTracking)
 }
 
 // autocloseStoreRefLocked returns the storeRef string for the store that owns
