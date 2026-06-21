@@ -11,11 +11,8 @@ import (
 
 // ErrDoltServerSaturated is returned by a native Dolt store open when the
 // process-wide admission gate is backing off because the shared Dolt server is
-// saturated. Callers (and the store factory) treat it as a transient
-// "back off and retry later" signal rather than a hard open failure — in
-// particular, the factory does NOT fall back to the bd-CLI store on this error,
-// because that store would dial the same overloaded server and deepen the
-// saturation.
+// saturated. Callers treat it as a transient "back off and retry later" signal,
+// not a hard open failure.
 var ErrDoltServerSaturated = errors.New("dolt server saturated: backing off (collective)")
 
 // Admission-gate tuning. A shared Dolt sql-server has a finite connection
@@ -46,14 +43,11 @@ const (
 	doltSaturationCooldown = 5 * time.Second
 )
 
-// doltSaturationProbeTimeout bounds how long a probe may be considered
-// "in flight" before the gate re-arms a fresh one. It backstops the rare case
-// where an admitted probe's outcome is never recorded (e.g. a panic between
-// Admit and the open) so the gate cannot wedge open forever. It is set safely
-// beyond the native open operation timeout (bdCommandTimeout) so a slow probe
-// normally reports its outcome before the gate would re-arm; the per-admission
-// token (see admissionToken) is the durable backstop that keeps a straggler
-// probe from resolving a freshly re-armed probe's slot even if it does not.
+// doltSaturationProbeTimeout bounds how long a probe may be considered "in
+// flight" before the gate re-arms a fresh one, so a probe whose outcome is never
+// recorded (e.g. a panic between Admit and the open) cannot wedge the gate open
+// forever. Set beyond the native open timeout (bdCommandTimeout) so a slow probe
+// normally reports back before the re-arm.
 var doltSaturationProbeTimeout = 2 * bdCommandTimeout
 
 // doltAdmissionOutcome is one recorded native-open result within the window.

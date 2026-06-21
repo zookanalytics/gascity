@@ -369,11 +369,9 @@ func IsTransientControllerError(err error) bool {
 	if errors.Is(err, errTransientControllerBoundary) {
 		return true
 	}
-	// A saturated shared Dolt server is a deliberate collective back-off signal
-	// from the native store factory: callers must retry/back off, never treat it
-	// as a hard controller error. The typed check covers callers that preserve
-	// the error chain; the "dolt server saturated" needle below covers chains
-	// flattened to a string at the bead-store CLI boundary.
+	// Saturation back-off must retry, never hard-fail. The typed check covers
+	// callers that preserve the error chain; the "dolt server saturated" needle
+	// below covers chains flattened to a string at the bead-store CLI boundary.
 	if errors.Is(err, beads.ErrDoltServerSaturated) {
 		return true
 	}

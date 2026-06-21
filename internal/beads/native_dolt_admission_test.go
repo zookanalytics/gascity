@@ -189,12 +189,9 @@ func TestDoltAdmissionGateStragglerSuccessDoesNotCancelBackoff(t *testing.T) {
 	}
 }
 
-// TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored covers the race the
-// per-admission token exists for: an open admitted *before* the trip can still
-// be in flight (native opens run up to the full open timeout, far longer than
-// the cooldown) and finish *during* a later probe window. Its stale success
-// must not close the gate — only the probe's own outcome may. Without token
-// matching this straggler would resolve the gate and falsely declare recovery.
+// TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored asserts that a
+// success from a pre-trip straggler open, landing during a later probe window,
+// does not close the gate — only the live probe's own outcome may.
 func TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored(t *testing.T) {
 	g, clk := newTestAdmissionGate()
 
@@ -236,9 +233,8 @@ func TestDoltAdmissionGateStragglerSuccessDuringProbeIsIgnored(t *testing.T) {
 }
 
 // TestDoltAdmissionGateStragglerTimeoutDuringProbeDoesNotDiscardRealProbe is the
-// mirror case: a straggler that *times out* during a probe window must not
-// re-arm the cooldown, because that would consume the probe slot and discard the
-// real probe's still-pending (successful) result, wedging the gate open.
+// mirror case: a straggler timeout during a probe window must not consume the
+// probe slot, so the real probe's later success still closes the gate.
 func TestDoltAdmissionGateStragglerTimeoutDuringProbeDoesNotDiscardRealProbe(t *testing.T) {
 	g, clk := newTestAdmissionGate()
 
