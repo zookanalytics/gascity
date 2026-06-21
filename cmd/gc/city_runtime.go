@@ -338,10 +338,9 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 // before run starts, and never replaced afterward.
 func (cr *CityRuntime) setControllerState(cs *controllerState) {
 	cr.cs = cs
-	// Re-point the order dispatcher's cached-store resolver now that cr.cs is
-	// available. controllerLoop builds its CityRuntime as a struct literal (not
-	// newCityRuntime), so this is the install point for the `gc start` path that
-	// reuses the controller's pooled stores during order dispatch (gc-t5rev).
+	// Re-point the dispatcher's cached-store resolver now that cr.cs exists.
+	// controllerLoop builds CityRuntime as a struct literal (not newCityRuntime),
+	// so this is the install point for the `gc start` path.
 	cr.installOrderDispatcherCachedStores()
 }
 
@@ -1310,35 +1309,29 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 
 // installOrderDispatcherCachedStores points the active order dispatcher at the
 // controller's cached-store resolver so dispatch reuses the long-lived pooled
-// CachingStore handles (controllerState.beadStores) instead of opening — and
-// closing — a fresh native Dolt store per target every tick (gc-t5rev). It is a
-// no-op when the dispatcher is not the production memoryOrderDispatcher (tests
-// inject their own storeFn) and is safe to call before cr.cs is set: the
-// resolver reads cr.cs live at dispatch time, so it simply returns nil (and
-// dispatch falls back to per-tick opens) until controllerState is installed.
+// CachingStore handles instead of opening a fresh native Dolt store per target
+// every tick. No-op unless the dispatcher is the production memoryOrderDispatcher
+// (tests inject their own storeFn), and safe to call before cr.cs is set: the
+// resolver reads cr.cs live, returning nil until controllerState is installed.
 func (cr *CityRuntime) installOrderDispatcherCachedStores() {
 	mem, ok := cr.od.(*memoryOrderDispatcher)
 	if !ok {
 		return
 	}
 	mem.cachedStoreFn = cr.controllerCachedOrderStore
-	// Register the dispatcher so a config mutation's store swap can drain its
-	// in-flight dispatchOne goroutines before closing the cached handles they
-	// borrowed (controllerState.scheduleCloseReplacedStores). Without this the
-	// swap closes a borrowed handle on a 250ms timer that a long-running order
-	// outlives, latching it shut underneath an in-flight tracking-bead write
-	// (gc-t5rev / gascity#3157).
+	// Register the dispatcher so a config swap's store retirement can drain
+	// in-flight dispatches before closing the handles they borrowed
+	// (controllerState.scheduleCloseReplacedStores).
 	if cr.cs != nil {
 		cr.cs.inflightOrderDispatcher.Store(mem)
 	}
 }
 
 // controllerCachedOrderStore returns the controller-cached, long-lived bead
-// store for an order dispatch target, or nil when no cached store is available
-// (no controllerState — standalone/no-API mode — or the target's scope has no
-// cached handle). A non-nil result is borrowed: the dispatcher must not close it
-// because controllerState owns the 1h-lifetime pooled handle and keeps it warm
-// via the reconciler (gc-t5rev).
+// store for an order dispatch target, or nil when none is available (no
+// controllerState in standalone/no-API mode, or the scope has no cached handle).
+// A non-nil result is borrowed — the caller must not close it; controllerState
+// owns the pooled handle and keeps it warm.
 func (cr *CityRuntime) controllerCachedOrderStore(target execStoreTarget) beads.Store {
 	if cr.cs == nil {
 		return nil

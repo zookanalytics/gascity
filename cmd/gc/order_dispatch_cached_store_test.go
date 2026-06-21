@@ -11,14 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-// TestOrderDispatchReusesControllerCachedStore is the gc-t5rev regression: when
-// the controller exposes a long-lived cached bead store for a dispatch target
-// (controllerState.beadStores), memoryOrderDispatcher.dispatch must reuse that
-// borrowed handle every tick instead of opening — and closing — a fresh native
-// Dolt store per target. The per-tick reopen is the bulk of the connection
-// storm (each open is a TCP dial + connection pool + preflight subprocess fork
-// + migration pool), and closing a borrowed handle would stop its reconciler
-// and latch the native store shut (gascity#3157).
+// TestOrderDispatchReusesControllerCachedStore asserts that when the controller
+// exposes a cached store for a target, dispatch reuses that borrowed handle every
+// tick (opening zero per-tick stores) and never closes it.
 func TestOrderDispatchReusesControllerCachedStore(t *testing.T) {
 	cached := newLatchedCloseStore()
 	// fallback models storeFn (openStoreAtForCity). Reaching it means dispatch
@@ -63,7 +58,7 @@ func TestOrderDispatchReusesControllerCachedStore(t *testing.T) {
 	}
 
 	if got := atomic.LoadInt32(&storeFnCalls); got != 0 {
-		t.Fatalf("dispatch opened %d per-tick store(s) across 3 ticks; with a controller-cached handle it must open 0 (gc-t5rev: per-tick reopen drives the connection storm)", got)
+		t.Fatalf("dispatch opened %d per-tick store(s) across 3 ticks; with a controller-cached handle it must open 0", got)
 	}
 	if !rec.hasType(events.OrderFired) {
 		t.Fatal("order never fired through the cached store; reusing the cached handle must not skip dispatch")
@@ -71,7 +66,7 @@ func TestOrderDispatchReusesControllerCachedStore(t *testing.T) {
 	// Give any (buggy) deferred per-tick closer a chance to run before asserting.
 	time.Sleep(50 * time.Millisecond)
 	if cached.isClosed() {
-		t.Fatal("dispatch closed the borrowed controller-cached store; cached handles are owned by controllerState and must survive across ticks (gc-t5rev / gascity#3157)")
+		t.Fatal("dispatch closed the borrowed controller-cached store; cached handles are owned by controllerState and must survive across ticks")
 	}
 	if op, used := cached.usedAfterClose(); used {
 		t.Fatalf("cached store saw use-after-close op %q; dispatch must never close a borrowed handle", op)
@@ -81,12 +76,10 @@ func TestOrderDispatchReusesControllerCachedStore(t *testing.T) {
 	}
 }
 
-// TestOrderDispatchFallsBackToPerTickStoreWhenNoCachedHandle locks the other
-// direction of the gc-t5rev owned/borrowed distinction: when no controller
-// cached handle is available for a target (standalone/no-API mode, or the city
-// store failed to open), dispatch must fall back to storeFn (opening a per-tick
-// store) AND close that owned handle once the in-flight dispatch releases it —
-// the close path must not silently turn into a handle leak.
+// TestOrderDispatchFallsBackToPerTickStoreWhenNoCachedHandle asserts the
+// owned-store direction: when no cached handle is available, dispatch opens a
+// per-tick store via storeFn and closes it once the in-flight dispatch releases
+// it (no handle leak).
 func TestOrderDispatchFallsBackToPerTickStoreWhenNoCachedHandle(t *testing.T) {
 	opened := newLatchedCloseStore()
 	var storeFnCalls int32
@@ -135,12 +128,10 @@ func TestOrderDispatchFallsBackToPerTickStoreWhenNoCachedHandle(t *testing.T) {
 	}
 }
 
-// TestControllerCachedOrderStoreResolvesScope verifies the CityRuntime resolver
-// that gc-t5rev installs onto the dispatcher: a city-scoped target maps to the
-// controller's city store, a rig-scoped target to that rig's cached store, and
-// anything without a cached handle (unknown rig, empty rig name, unknown scope,
-// or no controllerState) resolves to nil so dispatch falls back to a per-tick
-// open.
+// TestControllerCachedOrderStoreResolvesScope asserts the resolver maps a
+// city-scoped target to the city store and a rig-scoped target to that rig's
+// store, and returns nil for an unknown rig, empty rig name, unknown scope, or
+// missing controllerState.
 func TestControllerCachedOrderStoreResolvesScope(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -171,7 +162,7 @@ func TestControllerCachedOrderStoreResolvesScope(t *testing.T) {
 
 // TestInstallOrderDispatcherCachedStoresWiresResolver verifies the installer
 // points the production dispatcher's cachedStoreFn at the CityRuntime resolver
-// (gc-t5rev) and is a no-op for non-memoryOrderDispatcher dispatchers.
+// and is a no-op for non-memoryOrderDispatcher dispatchers.
 func TestInstallOrderDispatcherCachedStoresWiresResolver(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	cr := &CityRuntime{cs: &controllerState{cityBeadStore: cityStore}}
@@ -186,9 +177,8 @@ func TestInstallOrderDispatcherCachedStoresWiresResolver(t *testing.T) {
 	if got := mad.cachedStoreFn(execStoreTarget{ScopeKind: "city"}); got != beads.Store(cityStore) {
 		t.Errorf("wired resolver: got %p, want city store %p", got, cityStore)
 	}
-	// The installer must also register the dispatcher so a config mutation's
-	// store swap can drain its in-flight borrowers before closing retired cached
-	// handles (gc-t5rev / gascity#3157).
+	// The installer must also register the dispatcher so a config swap can drain
+	// its in-flight borrowers before closing retired cached handles.
 	if got := cr.cs.inflightOrderDispatcher.Load(); got != mad {
 		t.Errorf("installOrderDispatcherCachedStores did not register the dispatcher for store-retire drain: got %p, want %p", got, mad)
 	}
@@ -205,15 +195,10 @@ type nopOrderDispatcher struct{}
 func (nopOrderDispatcher) dispatch(context.Context, string, time.Time) {}
 func (nopOrderDispatcher) drain(context.Context) bool                  { return true }
 
-// TestOrderDispatchWaitsForInflightBeforeClosingStore is the gc-t5rev codex
-// finding (PR#68): a config mutation that swaps the controller's cached bead
-// stores must not close a handle an in-flight order dispatch borrowed. update()
-// schedules the replaced handles to close after controllerStateStoreCloseDelay,
-// but a dispatchOne can hold a borrowed handle across a long exec/formula and
-// then write its tracking-bead outcome through it; closing underneath that write
-// latches the native store shut and orphans the run (gascity#3157).
-// scheduleCloseReplacedStores must wait for the dispatcher's in-flight drain
-// before retiring the handle.
+// TestOrderDispatchWaitsForInflightBeforeClosingStore asserts that retiring a
+// swapped-out cached store waits for the dispatcher's in-flight drain: while a
+// dispatch still borrows the handle it stays open, and it closes only once the
+// in-flight dispatch releases it.
 func TestOrderDispatchWaitsForInflightBeforeClosingStore(t *testing.T) {
 	restore := controllerStateStoreCloseDelay
 	controllerStateStoreCloseDelay = 0 // isolate the wait to the in-flight drain
@@ -233,7 +218,7 @@ func TestOrderDispatchWaitsForInflightBeforeClosingStore(t *testing.T) {
 	// While the dispatch is in-flight, the retired borrowed handle must stay open.
 	time.Sleep(50 * time.Millisecond)
 	if borrowed.isClosed() {
-		t.Fatal("retired borrowed store closed while an order dispatch was still in-flight (gc-t5rev use-after-close)")
+		t.Fatal("retired borrowed store closed while an order dispatch was still in-flight")
 	}
 
 	// Release the in-flight dispatch; the retire must now close the handle.
@@ -242,11 +227,9 @@ func TestOrderDispatchWaitsForInflightBeforeClosingStore(t *testing.T) {
 }
 
 // TestOrderDispatchClosesStoreAfterInflightCompletes pairs with the wait test:
-// once the in-flight dispatch finishes — writing its tracking-bead outcome
-// through the borrowed handle — the retire must close the handle, without
-// leaking it and without any use-after-close. It runs a real dispatchOne held
-// mid-exec so the post-exec tracking-bead write is exercised against the live
-// borrowed store before the close lands (gc-t5rev / gascity#3157).
+// once the in-flight dispatch finishes, the retire closes the borrowed handle
+// with no leak and no use-after-close. A real dispatchOne is held mid-exec so its
+// post-exec tracking-bead write hits the live store before the close lands.
 func TestOrderDispatchClosesStoreAfterInflightCompletes(t *testing.T) {
 	restore := controllerStateStoreCloseDelay
 	controllerStateStoreCloseDelay = 0
@@ -294,7 +277,7 @@ func TestOrderDispatchClosesStoreAfterInflightCompletes(t *testing.T) {
 	cs.scheduleCloseReplacedStores(borrowed, newLatchedCloseStore(), nil, nil)
 	time.Sleep(50 * time.Millisecond)
 	if borrowed.isClosed() {
-		t.Fatal("retired borrowed store closed while dispatchOne was still mid-exec (gc-t5rev use-after-close)")
+		t.Fatal("retired borrowed store closed while dispatchOne was still mid-exec")
 	}
 
 	// Finish the exec; dispatchOne writes its tracking-bead outcome through

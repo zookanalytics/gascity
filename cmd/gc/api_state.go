@@ -64,19 +64,10 @@ type controllerState struct {
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
 	beadEventStartSeq      uint64
 
-	// inflightOrderDispatcher points at the live order dispatcher so a config
-	// mutation's store swap can drain in-flight dispatchOne goroutines before
-	// closing the cached handles they borrowed. Order dispatch borrows
-	// cs.cityBeadStore / cs.beadStores (CityRuntime.controllerCachedOrderStore)
-	// and can hold one across a long exec/formula — well past
-	// controllerStateStoreCloseDelay — then write tracking beads through it.
-	// Closing on the blind delay timer alone would latch a native handle shut
-	// underneath that in-flight write and orphan the run (gc-t5rev /
-	// gascity#3157). Set on the controller tick goroutine when the dispatcher is
-	// installed (CityRuntime.installOrderDispatcherCachedStores); read on the API
-	// mutation goroutine in update(). Atomic so the two goroutines do not race on
-	// the pointer. nil in standalone/no-API mode and tests, where no dispatcher
-	// borrows cs stores.
+	// inflightOrderDispatcher lets a config swap's store retirement drain
+	// in-flight dispatches before closing the cached handles they borrowed.
+	// Atomic: written when the dispatcher is installed, read on the API mutation
+	// goroutine. nil in standalone/no-API mode and tests.
 	inflightOrderDispatcher atomic.Pointer[memoryOrderDispatcher]
 
 	// emergencyCh receives emergency.Record values from the gc emergency
@@ -110,15 +101,11 @@ var controllerStateOpenRigStoreAtForCity = beads.OpenStoreAtForCity
 // reference a short drain window before reload closes replaced backings.
 var controllerStateStoreCloseDelay = 250 * time.Millisecond
 
-// controllerStoreRetireDrainTimeout bounds how long a config mutation's store
-// swap waits for in-flight order dispatch to release a retired cached handle
-// before closing it. Order dispatchOne self-bounds via its own per-order
-// timeout, so the drain normally returns the moment the in-flight order
-// finishes; the cap only backstops a pathologically continuous order stream,
-// where closing falls back to the startup orphan-sweep that repairs orphaned
-// tracking beads (matching the reload path's accepted drain+sweep tradeoff). Set
-// generously larger than reloadOrderDrainTimeout so legitimate long orders are
-// never closed out from under. A var so tests can shrink it.
+// controllerStoreRetireDrainTimeout bounds how long a config swap waits for
+// in-flight order dispatch to release a retired cached handle before closing it.
+// Set well above reloadOrderDrainTimeout so legitimate long orders finish first;
+// a pathologically continuous order stream instead falls back to the startup
+// orphan-sweep. A var so tests can shrink it.
 var controllerStoreRetireDrainTimeout = 2 * time.Minute
 
 type configMutationSnapshot struct {
@@ -705,17 +692,12 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 }
 
 // scheduleCloseReplacedStores retires the bead-store handles a config swap
-// replaced, after the in-flight order dispatches that borrowed them release the
-// handles. Order dispatchOne goroutines borrow cs.cityBeadStore / cs.beadStores
-// (CityRuntime.controllerCachedOrderStore) and can hold one across a long
-// exec/formula — past controllerStateStoreCloseDelay — then write tracking beads
-// through it, so closing on the blind delay timer alone can latch a native
-// handle shut underneath an in-flight write and orphan the run (gc-t5rev /
-// gascity#3157). When an order dispatcher is wired, the close waits for its
-// in-flight drain on a detached goroutine (never blocking the mutation) before
-// the existing delay timer retires the handles; with no dispatcher
-// (standalone/no-API, tests) it closes through the delay timer directly. The
-// delay timer still covers short-lived HTTP handlers that captured a reference.
+// replaced, once the in-flight order dispatches that borrowed them release the
+// handles. With a dispatcher wired, it waits for the dispatcher's drain on a
+// detached goroutine (never blocking the mutation) before the delay timer
+// retires the handles; with none (standalone/no-API, tests) it closes through
+// the delay timer directly, which also covers short-lived HTTP handlers that
+// captured a reference.
 func (cs *controllerState) scheduleCloseReplacedStores(oldCityStore, newCityStore beads.Store, oldRigStores, newRigStores map[string]beads.Store) {
 	closeReplaced := func() {
 		if newCityStore != nil && oldCityStore != nil && oldCityStore != newCityStore {
