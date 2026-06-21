@@ -296,25 +296,28 @@ type memoryOrderDispatcher struct {
 	// that a dispatchOne goroutine is still running its (possibly slow) command.
 	// Without this gate, an exec whose runtime exceeds the order interval would be
 	// dispatched a second time on a later tick while the first copy is still in
-	// flight (gc-4nxy8). It is shared by reference across dispatcher generations
-	// so the gate survives reload/rescan dispatcher replacement — see
-	// orderInflightSet and carryInflightFrom.
+	// flight (gc-4nxy8). The set is owned by CityRuntime and injected into every
+	// dispatcher generation via adoptInflightSet, so it is shared by reference and
+	// the gate survives reload/rescan replacement — including an active -> nil ->
+	// active generation where no outgoing dispatcher exists to carry from
+	// (gc-m41lw). See orderInflightSet and adoptInflightSet.
 	inflight *orderInflightSet
 }
 
 // orderInflightSet is the in-flight gate state for cooldown/cron and event
-// orders, which mint no tracking bead (gc-7hf34). It is held by pointer and
-// shared by reference across dispatcher generations: a config reload/rescan
-// rebuilds the dispatcher, but a dispatchOne goroutine launched by the now-
-// retired dispatcher may still be running its command (the reload drain is
-// bounded by reloadOrderDrainTimeout and can return before the command
-// finishes). Carrying the SAME set into the replacement dispatcher — rather than
-// copying it, which would strand a marker the retired dispatcher's goroutine
-// clears on its own copy — keeps the gate intact so a later tick on the new
-// dispatcher still skips the concurrent re-dispatch (gc-4nxy8 reload/rescan
-// gap). Keyed by scoped order name; an entry exists for the lifetime of a
-// dispatchOne goroutine. The mutex and map travel together so every generation
-// reads and writes the gate under one lock.
+// orders, which mint no tracking bead (gc-7hf34). It is owned by CityRuntime,
+// held by pointer, and shared by reference across dispatcher generations: a
+// config reload/rescan rebuilds the dispatcher, but a dispatchOne goroutine
+// launched by the now-retired dispatcher may still be running its command (the
+// reload drain is bounded by reloadOrderDrainTimeout and can return before the
+// command finishes). Injecting the SAME runtime-owned set into every replacement
+// dispatcher — rather than copying it, which would strand a marker the retired
+// dispatcher's goroutine clears on its own copy — keeps the gate intact even
+// across an active -> nil -> active generation, so a later tick still skips the
+// concurrent re-dispatch (gc-4nxy8 reload/rescan gap; gc-m41lw nil generation).
+// Keyed by scoped order name; an entry exists for the lifetime of a dispatchOne
+// goroutine. The mutex and map travel together so every generation reads and
+// writes the gate under one lock.
 type orderInflightSet struct {
 	mu  sync.Mutex
 	set map[string]struct{}
@@ -875,19 +878,32 @@ func (m *memoryOrderDispatcher) clearOrderInflight(scoped string) {
 	m.inflight.clear(scoped)
 }
 
-// carryInflightFrom shares prev's in-flight gate with m so the marker for a
-// dispatchOne goroutine still running after a reload/rescan drain timeout keeps
-// blocking a concurrent re-dispatch on the replacement dispatcher until that
-// goroutine returns and clears it (gc-4nxy8). Unlike carryLastRunCacheFrom this
-// shares the set by reference rather than copying: the retired dispatcher's
-// goroutine clears its own *orderInflightSet on return, so a copy would leave a
-// stale marker wedged on m. Call from replaceOrderDispatcher with the outgoing
-// dispatcher as prev.
-func (m *memoryOrderDispatcher) carryInflightFrom(prev *memoryOrderDispatcher) {
-	if m == nil || prev == nil || prev.inflight == nil {
+// adoptInflightSet points m's in-flight gate at the runtime-owned shared set so
+// every dispatcher generation a CityRuntime installs reads and writes ONE gate.
+// The gate must outlive any single dispatcher: a no-bead cooldown/cron/event exec
+// (gc-7hf34) launched by one generation can still be running when a reload/rescan
+// retires that dispatcher, and the marker has to stay visible to whichever
+// dispatcher is active when the next tick fires — including across an active ->
+// nil -> active replacement, where there is no outgoing dispatcher to carry from
+// (gc-m41lw). Call before the dispatcher ticks; the set is shared by reference
+// (not copied) so the retired generation's goroutine clears the same marker the
+// live dispatcher observes. A nil set is left untouched.
+func (m *memoryOrderDispatcher) adoptInflightSet(shared *orderInflightSet) {
+	if m == nil || shared == nil {
 		return
 	}
-	m.inflight = prev.inflight
+	m.inflight = shared
+}
+
+// orderInflightSetOf returns od's in-flight gate when od is a live
+// *memoryOrderDispatcher that already has one, else a fresh set. CityRuntime
+// adopts the result as its runtime-owned gate (see CityRuntime.orderInflight) so
+// the gate's lifetime is the runtime's, not any one dispatcher generation's.
+func orderInflightSetOf(od orderDispatcher) *orderInflightSet {
+	if m, ok := od.(*memoryOrderDispatcher); ok && m.inflight != nil {
+		return m.inflight
+	}
+	return newOrderInflightSet()
 }
 
 // drain blocks until all in-flight dispatchOne goroutines complete or ctx

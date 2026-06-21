@@ -284,3 +284,122 @@ func TestReplaceOrderDispatcherCarriesInflightGateAcrossReload(t *testing.T) {
 		t.Fatalf("total exec starts = %d, want 2 (one blocked run + one post-reload re-fire)", got)
 	}
 }
+
+// TestReplaceOrderDispatcherKeepsInflightGateAcrossNilGeneration is the
+// regression for the active -> nil -> active dispatcher-generation gap in the
+// no-bead in-flight gate (PR#73 re-review, gc-m41lw follow-up). The earlier
+// per-instance carry only bridged a single active -> active hop: it read the
+// marker from the outgoing cr.od. When a reload/rescan retires a slow no-bead
+// dispatcher and then installs nil because the order set is momentarily empty
+// (manual-only or zero-order — buildOrderDispatcherFromOrderSet returns nil),
+// cr.od goes nil and the live marker is stranded on the retired dispatcher. A
+// later reload/rescan that re-adds the same cooldown/cron/event order builds a
+// fresh dispatcher with no outgoing dispatcher to carry from, so it started with
+// an empty gate and dispatched a second copy while the original run was still in
+// flight — the same concurrency the gate exists to prevent.
+//
+// The fix moves the gate onto CityRuntime (cr.orderInflight) and injects it into
+// every installed dispatcher, so the marker survives the nil generation. This
+// test retires gen0 mid-run, installs nil, then installs gen2 and asserts gen2
+// still sees gen0's in-flight marker and refuses the concurrent re-dispatch,
+// then re-fires once the shared marker clears.
+func TestReplaceOrderDispatcherKeepsInflightGateAcrossNilGeneration(t *testing.T) {
+	store := beads.NewMemStore()
+
+	starts := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseExec := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseExec() // never leak blocked goroutines, even on failure
+
+	var execStarts int32
+	slowExec := func(ctx context.Context, _ string, _ string, _ []string) ([]byte, error) {
+		atomic.AddInt32(&execStarts, 1)
+		starts <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []byte("ok\n"), nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "slow-health",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "true",
+	}}
+
+	cityPath := t.TempDir()
+	t0 := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	// Generation 0: first tick launches the blocking exec, advances the durable
+	// last-run cursor to t0, and marks the in-memory in-flight gate. The command
+	// outlives the 1s interval AND the reload drain bound.
+	gen0 := buildOrderDispatcherFromListExec(aa, store, nil, slowExec, nil)
+	if gen0 == nil {
+		t.Fatal("expected non-nil gen0 dispatcher")
+	}
+	cr := &CityRuntime{od: gen0}
+	gen0.dispatch(context.Background(), cityPath, t0)
+	select {
+	case <-starts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first exec did not start")
+	}
+
+	// Reload #1: the order set is momentarily empty (manual-only / zero-order), so
+	// the builder returns nil. Drain retires the still-running gen0, then install
+	// nil. The marker must move onto cr.orderInflight, not be stranded on gen0.
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
+	drainCancel()
+	cr.replaceOrderDispatcher(nil)
+	if cr.od != nil {
+		t.Fatal("expected nil active dispatcher after the empty-order-set reload")
+	}
+
+	// Reload #2: the same cooldown order is re-added before gen0's run returns.
+	// The fresh dispatcher has no outgoing dispatcher to carry from; it must still
+	// adopt the runtime-owned gate and see gen0's live marker.
+	gen2 := buildOrderDispatcherFromListExec(aa, store, nil, slowExec, nil)
+	if gen2 == nil {
+		t.Fatal("expected non-nil gen2 dispatcher")
+	}
+	cr.replaceOrderDispatcher(gen2)
+	if cr.od != gen2 {
+		t.Fatal("replaceOrderDispatcher did not install gen2")
+	}
+
+	// A tick on gen2 AFTER the interval elapsed (+2s > 1s) must NOT launch a
+	// concurrent second copy while gen0's run is still in flight.
+	cr.od.dispatch(context.Background(), cityPath, t0.Add(2*time.Second))
+	select {
+	case <-starts:
+		t.Fatal("second exec started across an active -> nil -> active generation while the first run was in flight; runtime-owned in-flight gate failed (gc-m41lw)")
+	case <-time.After(500 * time.Millisecond):
+		// No second start: the runtime-owned gate held across the nil generation.
+	}
+	if got := atomic.LoadInt32(&execStarts); got != 1 {
+		t.Fatalf("exec starts across nil generation while first run in flight = %d, want 1", got)
+	}
+
+	// Release the gen0 run and drain every dispatcher (active + retired) so the
+	// retired goroutine returns and clears the shared in-flight marker.
+	releaseExec()
+	cr.drainOrderDispatchers(context.Background())
+
+	// A later tick on gen2 must fire again now that the shared marker has cleared:
+	// the runtime-owned gate must not wedge the order after the nil generation.
+	cr.od.dispatch(context.Background(), cityPath, t0.Add(10*time.Second))
+	select {
+	case <-starts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("order did not re-fire after the in-flight run completed across the nil generation")
+	}
+	cr.od.drain(context.Background())
+	if got := atomic.LoadInt32(&execStarts); got != 2 {
+		t.Fatalf("total exec starts = %d, want 2 (one blocked run + one re-fire across nil generation)", got)
+	}
+}

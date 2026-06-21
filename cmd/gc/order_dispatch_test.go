@@ -9369,34 +9369,54 @@ func TestCarryLastRunCacheFrom(t *testing.T) {
 	}
 }
 
-// TestCarryInflightFrom pins the contract carryInflightFrom must satisfy for the
-// in-flight gate to survive reload/rescan dispatcher replacement (gc-4nxy8): the
-// replacement SHARES the previous dispatcher's gate by reference (not a copy),
-// so a marker cleared by the retired dispatcher's still-running goroutine is
-// observed by the replacement; nil/empty predecessors are a no-op.
-func TestCarryInflightFrom(t *testing.T) {
-	prev := &memoryOrderDispatcher{inflight: newOrderInflightSet()}
-	prev.markOrderInflight("city/slow")
+// TestAdoptInflightSet pins the contract adoptInflightSet must satisfy for the
+// runtime-owned in-flight gate to survive dispatcher replacement (gc-7hf34,
+// gc-m41lw): the dispatcher SHARES the runtime gate by reference (not a copy), so
+// a marker cleared by a retired dispatcher's still-running goroutine is observed
+// by the live dispatcher; a nil set is a no-op.
+func TestAdoptInflightSet(t *testing.T) {
+	shared := newOrderInflightSet()
+	shared.mark("city/slow")
 
 	next := &memoryOrderDispatcher{inflight: newOrderInflightSet()}
-	next.carryInflightFrom(prev)
+	next.adoptInflightSet(shared)
 
 	if !next.orderInflight("city/slow") {
-		t.Fatal("replacement does not see the carried in-flight marker")
+		t.Fatal("dispatcher does not see the adopted in-flight marker")
 	}
 
-	// Shared by reference: the retired dispatcher clearing its own set must be
-	// visible through the replacement. A copy would leave next wedged.
-	prev.clearOrderInflight("city/slow")
+	// Shared by reference: clearing the shared set (as a retired dispatcher's
+	// goroutine does on return) must be visible through the dispatcher. A copy
+	// would leave next wedged.
+	shared.clear("city/slow")
 	if next.orderInflight("city/slow") {
-		t.Fatal("clear on the retired dispatcher not visible on the replacement; gate was copied, not shared")
+		t.Fatal("clear on the shared set not visible on the dispatcher; gate was copied, not shared")
 	}
 
-	// nil/empty predecessors are no-ops that leave the existing set intact.
+	// A nil set is a no-op that leaves the existing set intact.
 	keep := next.inflight
-	next.carryInflightFrom(nil)
-	next.carryInflightFrom(&memoryOrderDispatcher{}) // prev.inflight == nil
+	next.adoptInflightSet(nil)
 	if next.inflight != keep {
-		t.Fatal("no-op carry replaced the in-flight set")
+		t.Fatal("no-op adopt replaced the in-flight set")
+	}
+}
+
+// TestOrderInflightSetOf verifies the helper CityRuntime uses to seed its
+// runtime-owned gate: a live *memoryOrderDispatcher with a set yields that exact
+// set (shared by reference), while a nil dispatcher, a non-memory dispatcher, or
+// one whose gate is still nil yields a fresh, non-nil set.
+func TestOrderInflightSetOf(t *testing.T) {
+	withSet := &memoryOrderDispatcher{inflight: newOrderInflightSet()}
+	if got := orderInflightSetOf(withSet); got != withSet.inflight {
+		t.Fatal("orderInflightSetOf did not return the dispatcher's own set by reference")
+	}
+
+	if got := orderInflightSetOf(nil); got == nil {
+		t.Fatal("orderInflightSetOf(nil) returned a nil set, want fresh")
+	}
+
+	nilGate := &memoryOrderDispatcher{} // inflight == nil
+	if got := orderInflightSetOf(nilGate); got == nil {
+		t.Fatal("orderInflightSetOf on a dispatcher with a nil gate returned nil, want fresh")
 	}
 }

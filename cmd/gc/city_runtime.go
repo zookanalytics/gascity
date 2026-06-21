@@ -76,6 +76,7 @@ type CityRuntime struct {
 	mat                     maxSessionAgeTracker
 	wg                      wispGC
 	od                      orderDispatcher
+	orderInflight           *orderInflightSet // runtime-owned no-bead in-flight gate; survives active->nil->active replacement — see replaceOrderDispatcher (gc-7hf34, gc-m41lw)
 	retiredOrderDispatchers []orderDispatcher
 	orderSet                []orders.Order
 	orderSetSignature       string
@@ -296,6 +297,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		mat:                     mat,
 		wg:                      wg,
 		od:                      od,
+		orderInflight:           orderInflightSetOf(od),
 		orderSet:                orderSnapshot.Orders,
 		orderSetSignature:       orderSnapshot.Signature,
 		orderRescanEnabled:      true,
@@ -1302,16 +1304,25 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
 // warm last-run data from the outgoing dispatcher so a rebuild (reload or
 // rescan) reuses it instead of cold-starting and re-querying every order
-// (#3201). It also shares the outgoing dispatcher's in-flight gate forward so a
-// dispatchOne goroutine still running after a timed-out drain keeps blocking a
-// concurrent re-dispatch on the replacement (gc-4nxy8). Call after draining the
+// (#3201). It also injects the runtime-owned in-flight gate (cr.orderInflight)
+// into the replacement so a no-bead cooldown/cron/event exec (gc-7hf34) launched
+// by an earlier generation keeps blocking a concurrent re-dispatch — even across
+// an active -> nil -> active replacement, where the marker would otherwise be
+// stranded on a retired dispatcher with no outgoing dispatcher to carry it
+// forward (gc-4nxy8 reload gap; gc-m41lw nil generation). Call after draining the
 // outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
-	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
-		if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+	// Seed the runtime-owned gate from the outgoing dispatcher the first time we
+	// install one, so a marker recorded before the runtime adopted the gate (a
+	// dispatcher built standalone, e.g. in tests) is preserved.
+	if cr.orderInflight == nil {
+		cr.orderInflight = orderInflightSetOf(cr.od)
+	}
+	if nextMem, ok := next.(*memoryOrderDispatcher); ok {
+		if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
 			nextMem.carryLastRunCacheFrom(prev)
-			nextMem.carryInflightFrom(prev)
 		}
+		nextMem.adoptInflightSet(cr.orderInflight)
 	}
 	cr.od = next
 }
