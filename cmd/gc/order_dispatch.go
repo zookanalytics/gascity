@@ -290,6 +290,16 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+
+	// inflightOrders is the in-memory per-order in-flight gate. Cooldown/cron
+	// and event orders mint no tracking bead (gc-7hf34), so the open-work gate
+	// cannot see that a dispatchOne goroutine is still running its (possibly
+	// slow) command. Without this gate, an exec whose runtime exceeds the order
+	// interval would be dispatched a second time on a later tick while the first
+	// copy is still in flight (gc-4nxy8). Keyed by scoped order name; an entry
+	// exists for the lifetime of a dispatchOne goroutine.
+	inflightOrdersMu sync.Mutex
+	inflightOrders   map[string]struct{}
 }
 
 type orderDispatchTrackingIndex struct {
@@ -641,6 +651,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			continue
 		}
 
+		// In-memory in-flight gate. Cooldown/cron and event orders mint no
+		// tracking bead, so the open-work gate above cannot see a dispatchOne
+		// goroutine that is still running a command longer than the order
+		// interval. Skip this fire if a previous dispatch of the same order is
+		// still in flight; the cursor is left unadvanced so the order fires
+		// promptly once the in-flight run completes (gc-4nxy8).
+		if m.orderInflight(scoped) {
+			continue
+		}
+
 		trackingID := ""
 		switch {
 		case a.Trigger == "event":
@@ -698,7 +718,10 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 
 		// Fire with timeout; inflight tracks the spawned goroutine so drain can
 		// wait for any tracking-bead outcome persistence before controller exit
-		// or config reload.
+		// or config reload. markOrderInflight records the in-memory gate that
+		// dispatchOne clears on return (gc-4nxy8); set it here, in the tick
+		// goroutine, before launching so a later tick sees it.
+		m.markOrderInflight(scoped)
 		m.addInflight()
 		inFlight.Add(1)
 		m.launchDispatchOne(ctx, store, target, a, cityPath, trackingID, inFlight.Done)
@@ -771,6 +794,37 @@ func (m *memoryOrderDispatcher) doneInflight() {
 		m.inflightDone = nil
 	}
 	m.inflightMu.Unlock()
+}
+
+// orderInflight reports whether a dispatchOne goroutine for the scoped order is
+// still running. It is the in-memory in-flight gate for orders that mint no
+// tracking bead (cooldown/cron, event), preventing a second dispatch while a
+// command that outlives the order interval is still in flight (gc-4nxy8).
+func (m *memoryOrderDispatcher) orderInflight(scoped string) bool {
+	m.inflightOrdersMu.Lock()
+	defer m.inflightOrdersMu.Unlock()
+	_, ok := m.inflightOrders[scoped]
+	return ok
+}
+
+// markOrderInflight records that a dispatchOne goroutine for the scoped order is
+// about to start. Called synchronously from dispatch on the tick goroutine,
+// before launch, and paired with clearOrderInflight in dispatchOne's defer.
+func (m *memoryOrderDispatcher) markOrderInflight(scoped string) {
+	m.inflightOrdersMu.Lock()
+	if m.inflightOrders == nil {
+		m.inflightOrders = make(map[string]struct{})
+	}
+	m.inflightOrders[scoped] = struct{}{}
+	m.inflightOrdersMu.Unlock()
+}
+
+// clearOrderInflight removes the in-flight marker for the scoped order when its
+// dispatchOne goroutine returns, allowing a later tick to dispatch it again.
+func (m *memoryOrderDispatcher) clearOrderInflight(scoped string) {
+	m.inflightOrdersMu.Lock()
+	delete(m.inflightOrders, scoped)
+	m.inflightOrdersMu.Unlock()
 }
 
 // drain blocks until all in-flight dispatchOne goroutines complete or ctx
@@ -1100,6 +1154,11 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 	defer cancel()
 
 	scoped := a.ScopedName()
+	// Clear the in-memory in-flight gate on return. Registered after
+	// doneInflight so it runs first (LIFO): the gate is cleared before drain
+	// observes inflightN reaching zero, so a post-drain tick can re-dispatch
+	// without spuriously seeing this run as still in flight (gc-4nxy8).
+	defer m.clearOrderInflight(scoped)
 	m.rec.Record(events.Event{
 		Type:    events.OrderFired,
 		Actor:   "controller",

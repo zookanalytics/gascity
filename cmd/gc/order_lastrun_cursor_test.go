@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -86,5 +88,92 @@ func assertNoOrderTrackingBeads(t *testing.T, store beads.Store, scoped string) 
 	}
 	if got := trackingBeads(t, store, labelOrderTracking); len(got) != 0 {
 		t.Fatalf("order-tracking beads = %d, want 0 (cooldown mints none)", len(got))
+	}
+}
+
+// TestOrderDispatchCooldownExecInflightGateBlocksConcurrentDispatch is the
+// regression for gc-4nxy8: once cooldown/cron orders stopped minting a per-fire
+// tracking bead (gc-7hf34), they lost the in-flight marker that bead provided.
+// The advanced last-run cursor only suppresses re-fire WITHIN the interval, so a
+// slow exec whose runtime exceeds the interval would be dispatched a second time
+// while the first copy is still running. The in-memory per-order in-flight gate
+// must block that concurrent dispatch and clear once the run completes so the
+// order can fire again normally.
+func TestOrderDispatchCooldownExecInflightGateBlocksConcurrentDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+
+	// starts receives one signal each time the exec command begins. release
+	// gates the (blocking) command so it outlives the order interval, modeling a
+	// command whose runtime exceeds its cooldown.
+	starts := make(chan struct{}, 8)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseExec := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseExec() // never leak blocked goroutines, even on failure
+
+	var execStarts int32
+	slowExec := func(ctx context.Context, _ string, _ string, _ []string) ([]byte, error) {
+		atomic.AddInt32(&execStarts, 1)
+		starts <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []byte("ok\n"), nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "slow-health",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "true",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, slowExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+
+	cityPath := t.TempDir()
+	t0 := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+
+	// First tick: never run → due → launches the blocking exec and advances the
+	// cursor to t0. The command stays in flight (longer than the 1s interval).
+	ad.dispatch(context.Background(), cityPath, t0)
+	select {
+	case <-starts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first exec did not start")
+	}
+
+	// Second tick AFTER the interval elapsed (+2s > 1s) while the first run is
+	// still in flight. The cursor no longer suppresses it, so the in-flight gate
+	// is the only thing that can prevent a concurrent second copy.
+	ad.dispatch(context.Background(), cityPath, t0.Add(2*time.Second))
+	select {
+	case <-starts:
+		t.Fatal("second exec started while the first run was in flight; in-flight gate failed to block concurrent cooldown dispatch (gc-4nxy8)")
+	case <-time.After(500 * time.Millisecond):
+		// No second start: the in-flight gate held.
+	}
+	if got := atomic.LoadInt32(&execStarts); got != 1 {
+		t.Fatalf("exec starts while first run in flight = %d, want 1", got)
+	}
+
+	// Release the first run and drain so its in-flight marker clears.
+	releaseExec()
+	ad.drain(context.Background())
+
+	// A later tick (interval elapsed, nothing in flight) must fire again: the
+	// in-flight gate clears on completion and does not wedge the order.
+	ad.dispatch(context.Background(), cityPath, t0.Add(10*time.Second))
+	select {
+	case <-starts:
+	case <-time.After(5 * time.Second):
+		t.Fatal("order did not re-fire after the in-flight run completed; in-flight gate did not clear")
+	}
+	ad.drain(context.Background())
+	if got := atomic.LoadInt32(&execStarts); got != 2 {
+		t.Fatalf("total exec starts = %d, want 2 (one blocked run + one re-fire)", got)
 	}
 }
