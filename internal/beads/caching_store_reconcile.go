@@ -283,6 +283,37 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 	return dueAt.Sub(now)
 }
 
+// reconnectableStore is implemented by backing stores that can re-establish a
+// dead connection in place (NativeDoltStore). bd-subprocess and in-memory
+// stores neither implement nor need it: each bd invocation opens a fresh
+// process, and an in-memory store has no connection to lose.
+type reconnectableStore interface {
+	Reconnect(ctx context.Context) error
+}
+
+// reconnectBacking attempts to re-establish the backing store's connection
+// after a connection-invalidation read error and reports whether retrying the
+// failed read is worth attempting. It returns false when the backing store
+// cannot reconnect (no Reconnect support) or the reconnect itself fails; the
+// triggering error is recorded for operator visibility. Called without c.mu
+// held — recordProblem and the backing reconnect take their own locks.
+func (c *CachingStore) reconnectBacking(cause error) bool {
+	reconnector, ok := c.backing.(reconnectableStore)
+	if !ok {
+		return false
+	}
+	if err := reconnector.Reconnect(context.Background()); err != nil {
+		c.recordProblem("reconcile cache reconnect", fmt.Errorf("after %w: %w", cause, err))
+		return false
+	}
+	rig := c.idPrefix
+	if rig == "" {
+		rig = "(no-prefix)"
+	}
+	log.Printf("beads cache: reconnected backing store after connection invalidation rig=%s cause=%v", rig, cause)
+	return true
+}
+
 func (c *CachingStore) runReconciliation() {
 	start := time.Now()
 
@@ -292,6 +323,16 @@ func (c *CachingStore) runReconciliation() {
 
 	bdStart := time.Now()
 	fresh, err := c.backing.List(cacheFullScanQuery())
+	if err != nil && isBdAmbiguousWriteError(err) && c.reconnectBacking(err) {
+		// A Dolt online GC can invalidate the long-lived reconcile connection
+		// (Err1105, surfaced as "invalid connection"); it is not reported as
+		// driver.ErrBadConn, so the pooled handle is never auto-evicted and
+		// reuse of the dead handle fails identically every cycle — wedging the
+		// cache in cacheDegraded, which in turn strands newly-created session
+		// beads (gc-6njbf). Reconnect the backing store and retry the scan once
+		// before treating the cycle as a failure.
+		fresh, err = c.backing.List(cacheFullScanQuery())
+	}
 	if err != nil {
 		bdLatency := time.Since(bdStart)
 		c.mu.Lock()
