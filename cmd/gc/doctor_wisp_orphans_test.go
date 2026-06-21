@@ -10,11 +10,9 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// fakeWispDB models one Dolt database's wisp tables with enough fidelity that
-// orphan detection and cleanup behave like the real engine: a row is a live
-// auxiliary row when its issue_id is present in wispIDs, and an orphan
-// otherwise. Cleanup that removes a live row would be a test failure, so the
-// fake stores real issue_ids per row rather than just counts.
+// fakeWispDB models one Dolt database's wisp tables: a row is live when its
+// issue_id is present in wispIDs, an orphan otherwise. It stores real issue_ids
+// per row (not just counts) so a cleanup that drops a live row fails the test.
 type fakeWispDB struct {
 	hasWisps bool
 	wispIDs  map[string]bool
@@ -336,9 +334,7 @@ func TestWispOrphanSQL_OwningIssueIDPredicateAndBoundedDelete(t *testing.T) {
 }
 
 func TestWispOrphanTables_AreTheUnconstrainedAuxiliaryTables(t *testing.T) {
-	// These four tables are owned by wisps via issue_id; the labels/events/
-	// comments tables carry no FK to wisps, so a bare DELETE FROM wisps leaks
-	// their rows. Lock the set so a future edit can't silently drop one.
+	// Lock the auxiliary-table set so a future edit can't silently drop one.
 	want := []string{"wisp_comments", "wisp_dependencies", "wisp_events", "wisp_labels"}
 	got := append([]string(nil), wispOrphanTables...)
 	sort.Strings(got)

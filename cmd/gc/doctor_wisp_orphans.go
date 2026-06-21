@@ -14,22 +14,15 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// wispOrphanTables are the wisp auxiliary tables owned by a wisp through their
-// issue_id column. The beads schema (migration 0021_create_wisp_auxiliary)
-// gives wisp_dependencies a FOREIGN KEY ... ON DELETE CASCADE back to wisps,
-// but wisp_labels, wisp_events, and wisp_comments carry NO foreign key. A bare
-// `DELETE FROM wisps` therefore leaves their rows behind as orphans — the leak
-// that saturates a busy Dolt server (≈1M orphaned wisp_events rows observed on
-// a live city). wisp_dependencies is included for completeness and defense in
-// depth: if FK enforcement ever lapses on the dolt_ignore'd working-set tables,
-// source-orphaned dependency rows are cleaned too.
+// wispOrphanTables are the wisp auxiliary tables keyed by the owning issue_id.
+// wisp_labels, wisp_events, and wisp_comments carry no foreign key to wisps, so
+// a bare `DELETE FROM wisps` orphans their rows; wisp_dependencies has an
+// ON DELETE CASCADE FK and is included only as defense in depth.
 //
-// All four tables are keyed on the owning issue_id only. We never key cleanup
-// on wisp_dependencies' target columns (depends_on_issue_id / depends_on_wisp_id
-// / depends_on_external): a dependency's target can legitimately be an issue or
-// an external reference rather than a wisp, so a target absent from `wisps` is
-// not proof the row is orphaned. Only the owning issue_id absent from `wisps`
-// proves the row has no live owner.
+// Cleanup keys on the owning issue_id alone, never on wisp_dependencies' target
+// columns: a dependency's target may legitimately be a non-wisp issue or an
+// external reference, so a target absent from wisps is not proof of an orphan —
+// only an absent owner is.
 var wispOrphanTables = []string{
 	"wisp_labels",
 	"wisp_events",
@@ -38,24 +31,19 @@ var wispOrphanTables = []string{
 }
 
 const (
-	// wispOrphanWarnThreshold is the orphan-row count above which the doctor
-	// check escalates from an informational OK to an advisory Warning (and
-	// becomes eligible for `gc doctor --fix`). Trivial residue below this — a
-	// handful of rows from a wisp purged moments before its auxiliary rows —
-	// is not worth a Dolt-wide delete sweep; the threshold keeps the check
-	// quiet until the backlog is operationally significant.
+	// wispOrphanWarnThreshold is the orphan-row count above which the check
+	// warns and offers --fix. Below it, trivial residue (a wisp purged moments
+	// before its auxiliary rows) isn't worth a Dolt-wide delete sweep.
 	wispOrphanWarnThreshold = 1000
 
-	// wispOrphanDeleteBatch bounds each DELETE so a multi-hundred-thousand-row
-	// cleanup never runs as one statement that monopolizes the Dolt server.
-	// Each batch is its own statement; partial progress persists, so an
-	// interrupted cleanup is safely resumable by re-running --fix.
+	// wispOrphanDeleteBatch bounds each DELETE so a large cleanup never runs as
+	// one statement that monopolizes Dolt. Partial progress persists per batch,
+	// so an interrupted cleanup resumes safely by re-running --fix.
 	wispOrphanDeleteBatch = 5000
 
-	// wispOrphanScanTimeout bounds the read-only scan. COUNT over a saturated
-	// (≈1M row) auxiliary table scans the whole table probing the wisps PK, so
-	// the budget is generous; an over-budget scan reports what it counted
-	// rather than hanging `gc doctor`.
+	// wispOrphanScanTimeout bounds the read-only scan. The budget is generous
+	// because COUNT over a large auxiliary table scans the whole table; an
+	// over-budget scan reports what it counted rather than hanging `gc doctor`.
 	wispOrphanScanTimeout = 60 * time.Second
 
 	// wispOrphanFixTimeout bounds the whole batched cleanup. Individual batches
@@ -67,19 +55,16 @@ const (
 // so the scan is skipped rather than failed.
 var errWispOrphanNoManagedDolt = errors.New("managed Dolt server not running")
 
-// wispOrphanCountSQL builds the COUNT statement for orphan rows in table: rows
-// whose owning issue_id has no matching wisps.id. The database is selected with
-// USE before this runs, so the table is referenced unqualified. wisps.id is the
-// non-null primary key, so `NOT IN (SELECT id FROM wisps)` is safe from the
-// SQL NULL-semantics trap.
+// wispOrphanCountSQL builds the COUNT of orphan rows in table — those whose
+// owning issue_id has no matching wisps.id. wisps.id is a non-null primary key,
+// so the `NOT IN (SELECT id FROM wisps)` subquery is safe from NULL semantics.
 func wispOrphanCountSQL(table string) string {
 	return fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE issue_id NOT IN (SELECT id FROM `wisps`)", table)
 }
 
-// wispOrphanDeleteSQL builds the bounded DELETE for orphan rows in table. The
-// LIMIT keeps each statement bounded; callers loop until a batch deletes fewer
-// than limit rows. Dolt's SQL engine supports DELETE ... LIMIT (vitess Delete
-// carries a Limit; go-mysql-server wraps the delete source in a Limit node).
+// wispOrphanDeleteSQL builds the bounded DELETE for orphan rows in table; the
+// LIMIT caps each statement so callers can delete in batches. Dolt supports
+// DELETE ... LIMIT.
 func wispOrphanDeleteSQL(table string, limit int) string {
 	return fmt.Sprintf("DELETE FROM `%s` WHERE issue_id NOT IN (SELECT id FROM `wisps`) LIMIT %d", table, limit)
 }
@@ -191,10 +176,9 @@ func scanWispOrphans(ctx context.Context, client wispOrphanClient) wispOrphanSca
 }
 
 // cleanupWispOrphans removes orphan rows across every managed user database
-// that has wisp tables, deleting in bounded batches so no single statement
-// monopolizes Dolt. Each table loops until a batch removes fewer than batch
-// rows (i.e. no orphans remain). Errors are recorded but never abort the sweep;
-// a context deadline stops cleanly with partial progress preserved.
+// that has wisp tables, deleting in bounded batches. Each table loops until a
+// batch removes fewer than batch rows. Errors are recorded but never abort the
+// sweep; a context deadline stops cleanly with partial progress preserved.
 func cleanupWispOrphans(ctx context.Context, client wispOrphanClient, batch int) wispOrphanCleanupResult {
 	var res wispOrphanCleanupResult
 	if batch <= 0 {
@@ -354,7 +338,6 @@ func (c *wispOrphanCheck) Fix(ctx *doctor.CheckContext) error {
 		fmt.Fprintf(out, "  wisp-orphans: removed %d orphan rows from %s.%s\n", removed.Count, removed.Database, removed.Table) //nolint:errcheck // best-effort output
 	}
 	if res.Total > 0 {
-		// Guidance (acceptance): reclaim disk with Dolt GC after large removals.
 		fmt.Fprintf(out, "  wisp-orphans: removed %d orphaned wisp auxiliary rows; run Dolt GC maintenance (CALL DOLT_GC, or `gc dolt-cleanup --force`) to reclaim disk after large removals\n", res.Total) //nolint:errcheck // best-effort output
 	}
 	for _, e := range res.Errors {
