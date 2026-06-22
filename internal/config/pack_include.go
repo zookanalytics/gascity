@@ -277,6 +277,42 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 	return strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:") == commit
 }
 
+// BundledSourcePinForImport reports the canonical pinned commit a recognized
+// bundled builtin source resolves to when it carries no packs.lock entry, and
+// ok=false for any source that must instead be installed for real.
+//
+// It is the (pin, ok) form of the lock-free bundled-source gate, and exists
+// because BundledSourcePinnedVersion is unsafe to use as a fallback on its
+// own: that function returns the default bundled pin for EVERY source, so a
+// caller that has not already proved the source is bundled would treat an
+// ordinary remote import as if it were pinned to the bundled commit. Two
+// cases therefore return ok=false:
+//
+//   - A non-bundled source (builtinpacks.IsSource is false): it has no
+//     canonical pin and must be resolved through the lockfile.
+//   - A bundled source whose declaredVersion pins a non-canonical commit:
+//     only the canonical pin is pre-seeded from embedded content, so any
+//     other pin must be fetched for real exactly like an ordinary remote
+//     import.
+//
+// Both the config loader (resolveBundledSourceWithoutLock) and the
+// import-path inspector resolve through this helper so the rule stays
+// single-sourced.
+func BundledSourcePinForImport(source, declaredVersion string) (string, bool) {
+	if !builtinpacks.IsSource(source) {
+		return "", false
+	}
+	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
+	if commit == "" {
+		return "", false
+	}
+	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
+		strings.TrimPrefix(declared, "sha:") != commit {
+		return "", false
+	}
+	return commit, true
+}
+
 // resolveBundledSourceWithoutLock resolves a bundled builtin source that has
 // no packs.lock entry to the binary's canonical pin, hydrating the synthetic
 // cache when needed. The lock stays the source of truth when an entry
@@ -285,12 +321,8 @@ func IsBundledSourceAtCanonicalPin(source, commit string) bool {
 // fallback keeps cities composable before the first "gc import install"
 // writes the lock.
 func resolveBundledSourceWithoutLock(source, declaredVersion string) (string, bool, error) {
-	if !builtinpacks.IsSource(source) {
-		return "", false, nil
-	}
-	commit := strings.TrimPrefix(BundledSourcePinnedVersion(source), "sha:")
-	if declared := strings.TrimSpace(declaredVersion); declared != "" &&
-		strings.TrimPrefix(declared, "sha:") != commit {
+	commit, ok := BundledSourcePinForImport(source, declaredVersion)
+	if !ok {
 		return "", false, nil
 	}
 	cacheRoot, err := GlobalRepoCacheRoot()

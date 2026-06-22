@@ -3394,3 +3394,49 @@ transitive = false
 		t.Fatalf("doImportPath = %q, want %q", got, want)
 	}
 }
+
+func TestDoImportPathReportsUnlockedNonBundledImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCmdCachedPackGit(t)
+
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	// An ordinary remote import (not a bundled pack) carrying an unresolved
+	// version constraint and no packs.lock. The canonical-pin fallback must
+	// NOT apply here: BundledSourcePinnedVersion returns the default bundled
+	// pin for EVERY source, so an ungated fallback would derive a cache path
+	// from that pin and fail as "not materialized" — masking the real fault,
+	// which is that the import was never locked. transitive = false isolates
+	// resolveImportNodeDir as the sole check.
+	writePackToml(t, dir, `
+[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+transitive = false
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "tools", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for unlocked non-bundled import, got 0 (stdout=%q)", stdout.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected no stdout on error, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not locked") {
+		t.Fatalf("expected 'not locked' in stderr, got %q", stderr.String())
+	}
+	// Guard the regression directly: the bundled-pin fallback must not leak a
+	// derived cache path into a "not materialized" error for a non-bundled
+	// source.
+	if strings.Contains(stderr.String(), "not materialized") {
+		t.Fatalf("unlocked non-bundled import must fail as 'not locked', not 'not materialized': %q", stderr.String())
+	}
+}

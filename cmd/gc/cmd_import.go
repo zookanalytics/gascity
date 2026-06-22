@@ -1140,12 +1140,17 @@ func resolveImportNodeDir(cityPath string, node *importGraphNode) (string, error
 		// cache at its canonical pin and needs no lockfile entry, so fall
 		// back to that pin when the closure carries no lock for it. This
 		// lets scripts resolve a transitive bundled base even from a
-		// sub-pack directory that has no packs.lock of its own.
-		if pin := strings.TrimPrefix(config.BundledSourcePinnedVersion(source), "sha:"); pin != "" {
-			commit = pin
-		} else {
+		// sub-pack directory that has no packs.lock of its own. The gate is
+		// strict bundled-source recognition (BundledSourcePinForImport, not
+		// the bare BundledSourcePinnedVersion, which returns the default pin
+		// for every source): an ordinary unlocked remote import must fail as
+		// "not locked" rather than resolve to a cache path derived from a pin
+		// it was never locked to.
+		pin, ok := config.BundledSourcePinForImport(source, node.Import.Version)
+		if !ok {
 			return "", fmt.Errorf("import %q is not locked; run \"gc import install\"", display)
 		}
+		commit = pin
 	}
 	dir, err := packman.CachedPackDir(source, commit)
 	if err != nil {

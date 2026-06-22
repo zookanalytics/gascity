@@ -442,6 +442,42 @@ func TestBundledSourcePinnedVersionNormalizesSpellings(t *testing.T) {
 	}
 }
 
+// TestBundledSourcePinForImport pins the lock-free bundled-source gate shared
+// by resolveImportNodeDir and resolveBundledSourceWithoutLock. It returns the
+// canonical pin only for a recognized bundled source whose declared version
+// is empty or the canonical pin; every other input returns ok=false. The
+// ok=false cases are load-bearing: BundledSourcePinnedVersion returns the
+// default bundled pin for EVERY source, so a non-bundled source (or a bundled
+// source pinned off-canonical) must not resolve to a pin through this gate.
+func TestBundledSourcePinForImport(t *testing.T) {
+	gastownPin := strings.TrimPrefix(BundledSourcePinnedVersion(PublicGastownPackSource), "sha:")
+	corePin := strings.TrimPrefix(BundledSourcePinnedVersion(bundledPackSource()), "sha:")
+	tests := []struct {
+		name            string
+		source          string
+		declaredVersion string
+		wantPin         string
+		wantOK          bool
+	}{
+		{"bundled public source, no version", PublicGastownPackSource, "", gastownPin, true},
+		{"bundled public source, canonical version", PublicGastownPackSource, PublicGastownPackVersion, gastownPin, true},
+		{"bundled core source, no version", bundledPackSource(), "", corePin, true},
+		{"bundled source, off-canonical sha pin", PublicGastownPackSource, "sha:0000000000000000000000000000000000000000", "", false},
+		{"bundled source, semver constraint", PublicGastownPackSource, "^1.4", "", false},
+		{"non-bundled source, no version", "https://example.com/tools.git", "", "", false},
+		{"non-bundled source, with version", "https://example.com/tools.git", "^1.4", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pin, ok := BundledSourcePinForImport(tt.source, tt.declaredVersion)
+			if ok != tt.wantOK || pin != tt.wantPin {
+				t.Fatalf("BundledSourcePinForImport(%q, %q) = (%q, %v), want (%q, %v)",
+					tt.source, tt.declaredVersion, pin, ok, tt.wantPin, tt.wantOK)
+			}
+		})
+	}
+}
+
 // TestValidateInstalledRemoteCacheRequiresGitForNonCanonicalBundledPin pins
 // the new semantics for bundled sources locked at a non-canonical commit:
 // they behave exactly like ordinary remote imports. With no cache present
