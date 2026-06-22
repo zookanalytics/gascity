@@ -1,6 +1,8 @@
 package formula
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -323,5 +325,68 @@ title = "Own step"
 	}
 	if got != "Overlaid inherited" {
 		t.Errorf("patch did not overlay the extends-inherited step: %q", got)
+	}
+}
+
+// TestResolvePatchDescriptionFiles_InlinesPackLocalFile proves a patch step's
+// description_file is read relative to the pack directory and inlined into the
+// step's Description, mirroring how ParseFile handles a formula file's prompts.
+func TestResolvePatchDescriptionFiles_InlinesPackLocalFile(t *testing.T) {
+	packDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(packDir, "merge-prompt.md"), []byte("PACK LOCAL MERGE PROMPT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := &Patch{
+		Formula:     "mol-refinery-patrol",
+		Steps:       []*Step{{ID: "merge", DescriptionFile: "merge-prompt.md"}},
+		AppendSteps: []*Step{{ID: "gate", DescriptionFile: "merge-prompt.md"}},
+	}
+	parser := NewParser(filepath.Join(packDir, "formulas"))
+	if err := parser.ResolvePatchDescriptionFiles(patch, packDir); err != nil {
+		t.Fatalf("ResolvePatchDescriptionFiles: %v", err)
+	}
+	for _, s := range append(patch.Steps, patch.AppendSteps...) {
+		if s.DescriptionFile != "" {
+			t.Errorf("step %q: description_file not consumed: %q", s.ID, s.DescriptionFile)
+		}
+		if s.Description != "PACK LOCAL MERGE PROMPT" {
+			t.Errorf("step %q: description = %q, want inlined pack-local body", s.ID, s.Description)
+		}
+	}
+}
+
+// TestResolvePatchDescriptionFiles_MissingFileIsStrictError proves a patch step
+// naming a description_file that does not resolve is a hard error, not a
+// silently dropped prompt body — patch steps get no later parse pass to surface
+// the omission.
+func TestResolvePatchDescriptionFiles_MissingFileIsStrictError(t *testing.T) {
+	packDir := t.TempDir()
+	patch := &Patch{
+		Formula:     "mol-refinery-patrol",
+		AppendSteps: []*Step{{ID: "gate", DescriptionFile: "does-not-exist.md"}},
+	}
+	parser := NewParser(filepath.Join(packDir, "formulas"))
+	err := parser.ResolvePatchDescriptionFiles(patch, packDir)
+	if err == nil {
+		t.Fatal("expected strict error for missing description_file")
+	}
+	if !strings.Contains(err.Error(), "does-not-exist.md") {
+		t.Errorf("error %q should name the missing file", err)
+	}
+}
+
+// TestResolvePatchDescriptionFiles_NoFilesIsNoOp proves the common overlay that
+// only adjusts titles/vars is untouched (no spurious error, no mutation).
+func TestResolvePatchDescriptionFiles_NoFilesIsNoOp(t *testing.T) {
+	patch := &Patch{
+		Formula: "mol-refinery-patrol",
+		Steps:   []*Step{{ID: "merge", Title: "Merge with ff-canonical"}},
+	}
+	parser := NewParser(filepath.Join(t.TempDir(), "formulas"))
+	if err := parser.ResolvePatchDescriptionFiles(patch, t.TempDir()); err != nil {
+		t.Fatalf("no-op resolve errored: %v", err)
+	}
+	if patch.Steps[0].Title != "Merge with ff-canonical" || patch.Steps[0].Description != "" {
+		t.Errorf("step mutated unexpectedly: %+v", patch.Steps[0])
 	}
 }

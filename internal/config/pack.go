@@ -1486,7 +1486,23 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedSkills = append(includedSkills, skills...)
-	// This pack's own [[patches.formula]] join the closure's overlays.
+	// This pack's own [[patches.formula]] join the closure's overlays. Resolve
+	// each patch step's description_file relative to THIS pack's directory
+	// before the patches propagate, mirroring how a formula file shipped in the
+	// same pack resolves its prompt bodies. Imported packs' patches arrive
+	// already resolved — each pack inlines its own at the point it was loaded.
+	if len(tc.Patches.Formulas) > 0 {
+		packDir, err := filepath.Abs(topoDir)
+		if err != nil {
+			packDir = topoDir
+		}
+		patchParser := formula.NewParser(filepath.Join(packDir, "formulas"))
+		for i := range tc.Patches.Formulas {
+			if err := patchParser.ResolvePatchDescriptionFiles(&tc.Patches.Formulas[i], packDir); err != nil {
+				return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("pack %s: %w", topoPath, err)
+			}
+		}
+	}
 	includedFormulaPatches = append(includedFormulaPatches, tc.Patches.Formulas...)
 
 	// Apply pack-level patches to the merged agent list.

@@ -123,6 +123,38 @@ func ApplyPatch(base *Formula, patch *Patch) (*Formula, error) {
 	return out, nil
 }
 
+// ResolvePatchDescriptionFiles inlines description_file references on a patch's
+// override and append steps, resolving them relative to packDir — the directory
+// of the pack.toml that authored the [[patches.formula]]. It mirrors the
+// description_file handling ParseFile performs for formula files, with two
+// differences suited to patch steps:
+//
+//   - Resolution is always strict. A [[patches.formula.step]] that names a
+//     description_file which does not resolve is a hard error, never a silently
+//     dropped prompt body. Patch steps get no later parse pass, so a missing
+//     file would otherwise vanish for legacy targets or only surface as an
+//     "unresolved description_file" failure deep in graph compilation.
+//   - The base directory is the pack root (packDir): the patch is authored in
+//     pack.toml, not in a formula file. ../assets/ shadowing still resolves
+//     through the Parser's search paths exactly as for formula files, so a
+//     parser constructed over <packDir>/formulas makes ../assets/<x> resolve to
+//     <packDir>/assets/<x>.
+//
+// Steps without a description_file are left untouched, so this is a no-op for
+// the common overlay that only adjusts titles, metadata, or vars.
+func (p *Parser) ResolvePatchDescriptionFiles(patch *Patch, packDir string) error {
+	if patch == nil {
+		return nil
+	}
+	if err := p.resolveDescriptionFiles(patch.Steps, packDir, true, patch.Vars); err != nil {
+		return fmt.Errorf("formula patch %q override step: %w", patch.Formula, err)
+	}
+	if err := p.resolveDescriptionFiles(patch.AppendSteps, packDir, true, patch.Vars); err != nil {
+		return fmt.Errorf("formula patch %q append step: %w", patch.Formula, err)
+	}
+	return nil
+}
+
 // clonePatchable returns a shallow struct copy of f with its mutable
 // containers (Steps, Template, Vars) re-allocated so overlay edits never
 // reach back into the source formula. The contained *Step / *VarDef pointers

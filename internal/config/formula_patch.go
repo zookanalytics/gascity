@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -63,56 +65,118 @@ func formulaPatchKey(p formula.Patch) string {
 }
 
 // validateFormulaPatches fails config load when a collected [[patches.formula]]
-// targets a formula that does not resolve, or overlays a step that does not
-// exist. It resolves each distinct target once, with the patches applied, over
-// the union of all formula search layers. A no-op when no patches were
-// collected.
+// targets a formula that does not resolve in any scope, or overlays a step that
+// does not exist in the formula as a runtime consumer would resolve it. A no-op
+// when no patches were collected.
+//
+// Validation runs against each EFFECTIVE search-path set a runtime consumer
+// resolves against (the city layers and every rig's layers, per
+// FormulaLayers.SearchPaths), never against a single union of all layers. A
+// union collapses same-named formulas from different rigs and resolves them
+// with nondeterministic last-layer-wins precedence, so the patch could be
+// validated against a different rig's formula than the one that will actually
+// run — masking a genuinely broken overlay or rejecting a valid one. Checking
+// each scope independently is deterministic and matches dispatch.
+//
+// A target that resolves in NO scope is an unknown-formula error. A target that
+// resolves but the patch fails to apply in EVERY scope it resolves in is an
+// apply error (the overlay cannot work anywhere). A target that applies cleanly
+// in at least one scope is accepted: the same global patch set is applied in
+// every rig at dispatch, and a same-named-but-incompatible formula in an
+// unrelated scope must not reject an overlay that is valid where it is meant to
+// run (see the gascity-keeper refinery overlay, whose patched mol-refinery
+// formula is shipped by the keeper pack a single rig imports).
 func validateFormulaPatches(cfg *City) error {
 	if len(cfg.FormulaPatches) == 0 {
 		return nil
 	}
-	paths := unionFormulaSearchPaths(cfg.FormulaLayers)
-	if len(paths) == 0 {
+	scopes := effectiveFormulaSearchScopes(cfg.FormulaLayers)
+	if len(scopes) == 0 {
 		return fmt.Errorf("config declares [[patches.formula]] but no formula search paths are configured")
 	}
 
-	parser := formula.NewParser(paths...).WithPatches(cfg.FormulaPatches...)
+	// Distinct target names, first-seen order, for deterministic error output.
 	seen := make(map[string]bool, len(cfg.FormulaPatches))
+	var targets []string
 	for _, p := range cfg.FormulaPatches {
 		if seen[p.Formula] {
 			continue
 		}
 		seen[p.Formula] = true
-		loaded, err := parser.LoadByName(p.Formula)
-		if err != nil {
-			return fmt.Errorf("patches.formula targets unknown formula %q: %w", p.Formula, err)
+		targets = append(targets, p.Formula)
+	}
+
+	for _, target := range targets {
+		resolvedInScope := false
+		appliedCleanly := false
+		var applyErr error
+		var applyScope string
+		for _, scope := range scopes {
+			parser := formula.NewParser(scope.paths...).WithPatches(cfg.FormulaPatches...)
+			loaded, err := parser.LoadByName(target)
+			if err != nil {
+				continue // target formula is not visible in this scope
+			}
+			resolvedInScope = true
+			if _, err := parser.Resolve(loaded); err != nil {
+				applyErr = err
+				applyScope = scope.label
+				continue
+			}
+			appliedCleanly = true
+			break
 		}
-		if _, err := parser.Resolve(loaded); err != nil {
-			return fmt.Errorf("patches.formula %q: %w", p.Formula, err)
+		if !resolvedInScope {
+			return fmt.Errorf("patches.formula targets unknown formula %q: not found in any configured formula search path", target)
+		}
+		if !appliedCleanly {
+			return fmt.Errorf("patches.formula %q (%s): %w", target, applyScope, applyErr)
 		}
 	}
 	return nil
 }
 
-// unionFormulaSearchPaths returns the deduplicated union of every scope's
-// formula layers (city and all rigs), preserving first-seen order. A patch may
-// target a city- or a rig-scoped formula, so existence must be checked against
-// all layers.
-func unionFormulaSearchPaths(fl FormulaLayers) []string {
-	seen := make(map[string]bool)
-	var out []string
-	add := func(paths []string) {
+// formulaSearchScope is one effective formula search-path set a runtime
+// consumer resolves against: the city layers, or a single rig's layers.
+type formulaSearchScope struct {
+	label string
+	paths []string
+}
+
+// effectiveFormulaSearchScopes returns the distinct effective search-path sets
+// runtime consumers resolve formulas against — the city layers and each rig's
+// layers (mirroring FormulaLayers.SearchPaths). Empty path sets are dropped;
+// byte-identical sets are de-duplicated so a rig that contributes no rig-local
+// layers (its SearchPaths collapses to the city layers) is not validated twice.
+// Rig scopes are visited in sorted name order for deterministic error output.
+func effectiveFormulaSearchScopes(fl FormulaLayers) []formulaSearchScope {
+	var scopes []formulaSearchScope
+	seenSet := make(map[string]bool)
+	add := func(label string, paths []string) {
+		nonEmpty := make([]string, 0, len(paths))
 		for _, p := range paths {
-			if p == "" || seen[p] {
-				continue
+			if strings.TrimSpace(p) != "" {
+				nonEmpty = append(nonEmpty, p)
 			}
-			seen[p] = true
-			out = append(out, p)
 		}
+		if len(nonEmpty) == 0 {
+			return
+		}
+		key := strings.Join(nonEmpty, "\x00")
+		if seenSet[key] {
+			return
+		}
+		seenSet[key] = true
+		scopes = append(scopes, formulaSearchScope{label: label, paths: nonEmpty})
 	}
-	add(fl.City)
-	for _, paths := range fl.Rigs {
-		add(paths)
+	add("city scope", fl.City)
+	rigNames := make([]string, 0, len(fl.Rigs))
+	for name := range fl.Rigs {
+		rigNames = append(rigNames, name)
 	}
-	return out
+	sort.Strings(rigNames)
+	for _, name := range rigNames {
+		add(fmt.Sprintf("rig %q scope", name), fl.Rigs[name])
+	}
+	return scopes
 }

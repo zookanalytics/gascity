@@ -59,14 +59,16 @@ type Invocation struct {
 	Deprecations []string
 }
 
-// LoadFormula resolves a formula without compiling it to a recipe.
-func LoadFormula(formulaName string, searchPaths []string) (*formula.Formula, error) {
-	resolved, _, err := loadFormulaWithParser(formulaName, searchPaths)
+// LoadFormula resolves a formula without compiling it to a recipe. Any
+// [[patches.formula]] overlays whose target matches are applied at resolve
+// time, so name-pinned callers observe the same formula the compile path does.
+func LoadFormula(formulaName string, searchPaths []string, patches ...formula.Patch) (*formula.Formula, error) {
+	resolved, _, err := loadFormulaWithParser(formulaName, searchPaths, patches...)
 	return resolved, err
 }
 
-func loadFormulaWithParser(formulaName string, searchPaths []string) (*formula.Formula, *formula.Parser, error) {
-	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv())
+func loadFormulaWithParser(formulaName string, searchPaths []string, patches ...formula.Patch) (*formula.Formula, *formula.Parser, error) {
+	parser := formula.NewParser(searchPaths...).SetSource(formula.SourceFromEnv()).WithPatches(patches...)
 	f, err := parser.LoadByName(formulaName)
 	if err != nil {
 		return nil, nil, err
@@ -79,9 +81,10 @@ func loadFormulaWithParser(formulaName string, searchPaths []string) (*formula.F
 }
 
 // IsGraphV2Formula reports whether the named formula uses graph compiler
-// semantics.
-func IsGraphV2Formula(formulaName string, searchPaths []string) (bool, *formula.Formula, error) {
-	resolved, err := LoadFormula(formulaName, searchPaths)
+// semantics. Formula overlays are applied before the check so a patch that
+// changes the compiler contract is observed.
+func IsGraphV2Formula(formulaName string, searchPaths []string, patches ...formula.Patch) (bool, *formula.Formula, error) {
+	resolved, err := LoadFormula(formulaName, searchPaths, patches...)
 	if err != nil {
 		return false, nil, err
 	}
@@ -89,9 +92,13 @@ func IsGraphV2Formula(formulaName string, searchPaths []string) (bool, *formula.
 }
 
 // PrepareInvocation validates and normalizes a graph.v2 invocation. Non-graph
-// formulas are returned with Formula set and no input convoy.
-func PrepareInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, vars map[string]string) (Invocation, error) {
-	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
+// formulas are returned with Formula set and no input convoy. Any
+// [[patches.formula]] overlays are applied throughout (resolve, validation
+// recipe, and drain-item formulas) so target detection, runtime-var checks, and
+// deprecation scans run against the patched formula a name-pinned dispatcher
+// will actually materialize.
+func PrepareInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, vars map[string]string, patches ...formula.Patch) (Invocation, error) {
+	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths, patches...)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -115,7 +122,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if err != nil {
 		return Invocation{}, err
 	}
-	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars)
+	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars, patches...)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -149,7 +156,7 @@ func PrepareInvocation(ctx context.Context, store beads.Store, formulaName strin
 	if err := molecule.ValidateRecipeRuntimeVars(recipe, molecule.Options{Vars: varsWithConvoyPlaceholder(inv.Vars)}); err != nil {
 		return Invocation{}, err
 	}
-	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars); err != nil {
+	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars, patches...); err != nil {
 		return Invocation{}, err
 	}
 	if store == nil {
@@ -236,18 +243,18 @@ func EffectiveRuntimeVars(f *formula.Formula, vars map[string]string) map[string
 	return out
 }
 
-func compileValidationRecipe(ctx context.Context, formulaName string, searchPaths []string, vars map[string]string) (*formula.Recipe, error) {
+func compileValidationRecipe(ctx context.Context, formulaName string, searchPaths []string, vars map[string]string, patches ...formula.Patch) (*formula.Recipe, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	validationVars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(vars))
-	return formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, validationVars)
+	return formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, validationVars, patches...)
 }
 
-func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *formula.Recipe, parentVars map[string]string) error {
+func validateDrainItemFormulas(parentName string, searchPaths []string, recipe *formula.Recipe, parentVars map[string]string, patches ...formula.Patch) error {
 	for _, itemFormula := range drainItemFormulaNames(recipe) {
 		vars := varsWithConvoyPlaceholder(nonReservedRuntimeVars(parentVars))
-		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, searchPaths, vars)
+		recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), itemFormula, searchPaths, vars, patches...)
 		if err != nil {
 			return fmt.Errorf("validating drain item formula %q for v2 formula %q: %w", itemFormula, parentName, err)
 		}
@@ -412,9 +419,11 @@ func CreateSingleItemInputConvoy(store beads.Store, target beads.Bead) (beads.Be
 // a configured agent identity (for example a workflow root's gc.routed_to
 // value) rather than a bead or convoy ID; routing identities have no
 // bead-store entry, so the preview substitutes a synthetic input convoy
-// instead of resolving the target through the store.
-func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string) (Invocation, error) {
-	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths)
+// instead of resolving the target through the store. Any [[patches.formula]]
+// overlays are applied so a preview matches what a name-pinned dispatcher
+// materializes.
+func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaName string, searchPaths []string, targetID string, targetIsRoutingIdentity bool, userVars map[string]string, patches ...formula.Patch) (Invocation, error) {
+	resolved, parser, err := loadFormulaWithParser(formulaName, searchPaths, patches...)
 	if err != nil {
 		return Invocation{}, fmt.Errorf("loading formula %q: %w", formulaName, err)
 	}
@@ -435,7 +444,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 	if err != nil {
 		return Invocation{}, err
 	}
-	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars)
+	recipe, err := compileValidationRecipe(ctx, formulaName, searchPaths, inv.Vars, patches...)
 	if err != nil {
 		return Invocation{}, err
 	}
@@ -489,7 +498,7 @@ func PreparePreviewInvocation(ctx context.Context, store beads.Store, formulaNam
 		}
 		inv.Vars[LegacyIssueVar] = memberID
 	}
-	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars); err != nil {
+	if err := validateDrainItemFormulas(formulaName, searchPaths, recipe, inv.Vars, patches...); err != nil {
 		return Invocation{}, err
 	}
 	return inv, nil

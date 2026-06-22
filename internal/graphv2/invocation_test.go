@@ -14,8 +14,42 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 )
+
+// TestLoadFormula_AppliesFormulaPatches proves the graphv2 load/probe entry
+// points thread [[patches.formula]] overlays through resolution, so a
+// name-pinned dispatcher's preflight (target detection, runtime-var checks)
+// observes the same patched formula the materialization path compiles.
+func TestLoadFormula_AppliesFormulaPatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mol-z.toml"), []byte(`formula = "mol-z"
+[[steps]]
+id = "s"
+title = "base title"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	patch := formula.Patch{
+		Formula: "mol-z",
+		Steps:   []*formula.Step{{ID: "s", Title: "patched title"}},
+	}
+	resolved, err := LoadFormula("mol-z", []string{dir}, patch)
+	if err != nil {
+		t.Fatalf("LoadFormula: %v", err)
+	}
+	if resolved.Steps[0].Title != "patched title" {
+		t.Errorf("overlay not applied by LoadFormula: title = %q", resolved.Steps[0].Title)
+	}
+	_, resolved2, err := IsGraphV2Formula("mol-z", []string{dir}, patch)
+	if err != nil {
+		t.Fatalf("IsGraphV2Formula: %v", err)
+	}
+	if resolved2.Steps[0].Title != "patched title" {
+		t.Errorf("overlay not applied by IsGraphV2Formula: title = %q", resolved2.Steps[0].Title)
+	}
+}
 
 func TestPrepareInvocationCreatesInputConvoyForBeadTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)

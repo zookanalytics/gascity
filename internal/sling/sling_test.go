@@ -3660,6 +3660,43 @@ func TestSlingFormulaPatches(t *testing.T) {
 	}
 }
 
+// TestValidateSlingFormulaRuntimeVars_AppliesFormulaPatches proves the sling
+// preflight var validation observes [[patches.formula]] overlays. An overlay
+// that relaxes a required var must make a dispatch that omits it pass, where the
+// unpatched recipe would reject it — guarding the finding that the preflight
+// helpers compiled/validated against the UNPATCHED formula even though the
+// materialization path applies the overlay.
+func TestValidateSlingFormulaRuntimeVars_AppliesFormulaPatches(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "mol-x.toml"), []byte(`formula = "mol-x"
+[vars.mode]
+required = true
+
+[[steps]]
+id = "s"
+title = "Do the work"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	searchPaths := []string{dir}
+	opts := molecule.Options{Vars: map[string]string{}} // "mode" deliberately omitted
+
+	// Without the overlay: required var "mode" is unmet → preflight rejects.
+	if err := validateSlingFormulaRuntimeVars(context.Background(), "mol-x", searchPaths, opts); err == nil {
+		t.Fatal("expected rejection without patch: required var mode is unmet")
+	}
+
+	// With an overlay relaxing "mode" to optional-with-default: preflight passes.
+	modeDefault := "build"
+	patch := formula.Patch{
+		Formula: "mol-x",
+		Vars:    map[string]*formula.VarDef{"mode": {Default: &modeDefault}},
+	}
+	if err := validateSlingFormulaRuntimeVars(context.Background(), "mol-x", searchPaths, opts, patch); err != nil {
+		t.Fatalf("expected pass with overlay relaxing mode: %v", err)
+	}
+}
+
 // TestSlingFormulaSearchPaths_RigPathKey_TrailingSlash: agent.Dir with a
 // trailing slash should match the rig path after normalization. Strict
 // string equality (which the first version of this fix used) re-introduces
