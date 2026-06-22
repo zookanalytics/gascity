@@ -88,14 +88,6 @@ func restartTarget(args []string) (cityPath, nameOverride string, err error) {
 	return cityPath, nameOverride, nil
 }
 
-// restartRegistrationName returns just the machine-local registration name for
-// the restart target (empty when unregistered), delegating to restartTarget so
-// the resolve-once-thread-both-legs path remains the single source of truth.
-func restartRegistrationName(args []string) (string, error) {
-	_, nameOverride, err := restartTarget(args)
-	return nameOverride, err
-}
-
 // newRigRestartCmd creates the "gc rig restart <name>" subcommand.
 func newRigRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
