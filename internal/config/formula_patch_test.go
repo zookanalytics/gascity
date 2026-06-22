@@ -105,8 +105,14 @@ func TestExpandPacks_CollectsRigPackFormulaPatches(t *testing.T) {
 	if len(cfg.FormulaPatches) != 1 {
 		t.Fatalf("got %d collected formula patches, want 1", len(cfg.FormulaPatches))
 	}
-	if cfg.FormulaPatches[0].Formula != "mol-refinery-patrol" {
-		t.Errorf("collected patch target = %q", cfg.FormulaPatches[0].Formula)
+	if cfg.FormulaPatches[0].Patch.Formula != "mol-refinery-patrol" {
+		t.Errorf("collected patch target = %q", cfg.FormulaPatches[0].Patch.Formula)
+	}
+	// The overlay is tagged with the contributing rig's scope so it stays
+	// confined to that rig at dispatch, not applied to other rigs' same-named
+	// formulas.
+	if cfg.FormulaPatches[0].Rig != "gascity" {
+		t.Errorf("collected patch scope = %q, want rig %q", cfg.FormulaPatches[0].Rig, "gascity")
 	}
 }
 
@@ -134,10 +140,10 @@ includes = ["packs/keeper"]
 		t.Fatalf("collected %d patches, want 1", len(cfg.FormulaPatches))
 	}
 
-	// Resolve the formula the way a name-pinned consumer would, with the
-	// collected patches applied.
+	// Resolve the formula the way a name-pinned consumer dispatching in the
+	// gascity rig would, with the scope-filtered patches applied.
 	paths := cfg.FormulaLayers.SearchPaths("gascity")
-	parser := formula.NewParser(paths...).WithPatches(cfg.FormulaPatches...)
+	parser := formula.NewParser(paths...).WithPatches(cfg.FormulaPatchesForRig("gascity")...)
 	loaded, err := parser.LoadByName("mol-refinery-patrol")
 	if err != nil {
 		t.Fatalf("LoadByName: %v", err)
@@ -249,18 +255,30 @@ func TestAppendUniqueFormulaPatches_Dedup(t *testing.T) {
 		Formula:     "mol-x",
 		AppendSteps: []*formula.Step{{ID: "added", Title: "Added"}},
 	}
-	// Same patch arriving twice (diamond / multi-rig) must collapse to one;
-	// applying an append twice would otherwise fail the duplicate-id guard.
-	out := appendUniqueFormulaPatches(nil, p, p)
+	// Same patch at the same scope arriving twice (diamond / multi-rig) must
+	// collapse to one; applying an append twice would otherwise fail the
+	// duplicate-id guard.
+	out := appendUniqueFormulaPatches(nil, "gascity", p, p)
 	if len(out) != 1 {
 		t.Fatalf("dedup: got %d, want 1", len(out))
+	}
+	if out[0].Rig != "gascity" {
+		t.Errorf("scope = %q, want %q", out[0].Rig, "gascity")
 	}
 
 	// A genuinely different overlay of the same formula is kept.
 	other := formula.Patch{Formula: "mol-x", Vars: map[string]*formula.VarDef{"v": {Default: fpStr("1")}}}
-	out = appendUniqueFormulaPatches(out, other)
+	out = appendUniqueFormulaPatches(out, "gascity", other)
 	if len(out) != 2 {
 		t.Fatalf("distinct overlays: got %d, want 2", len(out))
+	}
+
+	// The SAME overlay contributed at a different scope is kept — scope is part
+	// of the dedup key, so a city-level and a rig-level copy of one patch both
+	// survive (FormulaPatchesForRig de-duplicates them per dispatch).
+	out = appendUniqueFormulaPatches(out, "", p)
+	if len(out) != 3 {
+		t.Fatalf("same overlay at a new scope: got %d, want 3", len(out))
 	}
 }
 
@@ -310,7 +328,7 @@ includes = ["packs/keeper"]
 		t.Fatalf("collected %d patches, want 1", len(cfg.FormulaPatches))
 	}
 	var merge *formula.Step
-	for _, s := range cfg.FormulaPatches[0].Steps {
+	for _, s := range cfg.FormulaPatches[0].Patch.Steps {
 		if s.ID == "merge" {
 			merge = s
 		}
@@ -387,9 +405,11 @@ title = "Merge"
 			City: []string{filepath.Join(dir, "city")}, // exists in config, ships no mol-x
 			Rigs: map[string][]string{"alpha": {filepath.Join(dir, "rig-alpha")}},
 		},
-		FormulaPatches: []formula.Patch{{
-			Formula: "mol-x",
-			Steps:   []*formula.Step{{ID: "merge", Title: "patched merge"}},
+		FormulaPatches: []ScopedFormulaPatch{{
+			Patch: formula.Patch{
+				Formula: "mol-x",
+				Steps:   []*formula.Step{{ID: "merge", Title: "patched merge"}},
+			},
 		}},
 	}
 	if err := validateFormulaPatches(cfg); err != nil {
@@ -397,13 +417,16 @@ title = "Merge"
 	}
 }
 
-// TestValidateFormulaPatches_PerScopeAcceptsRigCompatibleAcrossSameNamedFormulas
-// proves the per-scope rewrite is deterministic where the old union was not. Two
-// rigs ship same-named-but-different formulas; the patch is valid in the rig
-// whose formula carries the targeted step. Per-scope validation accepts it,
-// regardless of map iteration order; the old union+last-layer-wins could reject
-// it depending on which rig's formula won the merge.
-func TestValidateFormulaPatches_PerScopeAcceptsRigCompatibleAcrossSameNamedFormulas(t *testing.T) {
+// TestValidateFormulaPatches_RigScopedPatchConfinedToItsRig proves the fix for
+// the codex finding: a RIG-scoped overlay is validated — and at dispatch applied
+// — only in its own rig. Two rigs ship same-named-but-different formulas; the
+// patch targets a step present only in alpha's mol-dup and is scoped to alpha.
+// It is accepted (alpha is compatible) and, crucially, FormulaPatchesForRig
+// never hands it to beta, so beta's incompatible mol-dup is never poisoned with
+// "cannot override unknown step id" at dispatch. The pre-fix global overlay was
+// accepted "because it applied in one scope" but runtime then applied it to beta
+// and failed.
+func TestValidateFormulaPatches_RigScopedPatchConfinedToItsRig(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "alpha/mol-dup.toml", `formula = "mol-dup"
 [[steps]]
@@ -428,13 +451,74 @@ title = "Deploy"
 				"beta":  {filepath.Join(dir, "beta")},
 			},
 		},
-		FormulaPatches: []formula.Patch{{
-			Formula: "mol-dup",
-			Steps:   []*formula.Step{{ID: "merge", Title: "patched merge"}},
+		FormulaPatches: []ScopedFormulaPatch{{
+			Patch: formula.Patch{
+				Formula: "mol-dup",
+				Steps:   []*formula.Step{{ID: "merge", Title: "patched merge"}},
+			},
+			Rig: "alpha",
 		}},
 	}
 	if err := validateFormulaPatches(cfg); err != nil {
-		t.Fatalf("validateFormulaPatches: %v (patch is valid in alpha's scope and must be accepted)", err)
+		t.Fatalf("validateFormulaPatches: %v (rig-scoped patch is valid in alpha and must be accepted)", err)
+	}
+	// Dispatch view: the overlay reaches alpha, never beta.
+	if got := cfg.FormulaPatchesForRig("alpha"); len(got) != 1 {
+		t.Fatalf(`FormulaPatchesForRig("alpha") = %d patches, want 1`, len(got))
+	}
+	if got := cfg.FormulaPatchesForRig("beta"); len(got) != 0 {
+		t.Fatalf(`FormulaPatchesForRig("beta") = %d patches, want 0 (rig-scoped overlay must not leak across rigs)`, len(got))
+	}
+}
+
+// TestValidateFormulaPatches_RejectsCityScopedPatchBrokenInSomeRig proves the
+// other half of the fix: a CITY-scoped overlay claims to apply everywhere, so a
+// configuration runtime cannot dispatch must be rejected at load. The patch is
+// compatible with alpha's mol-dup but not beta's; because it is city-scoped it
+// would be applied in beta too and fail, so validation fails instead of shipping
+// a config whose dispatch breaks in beta.
+func TestValidateFormulaPatches_RejectsCityScopedPatchBrokenInSomeRig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "alpha/mol-dup.toml", `formula = "mol-dup"
+[[steps]]
+id = "load"
+title = "Load"
+[[steps]]
+id = "merge"
+title = "Merge"
+`)
+	writeFile(t, dir, "beta/mol-dup.toml", `formula = "mol-dup"
+[[steps]]
+id = "load"
+title = "Load"
+[[steps]]
+id = "deploy"
+title = "Deploy"
+`)
+	cfg := &City{
+		FormulaLayers: FormulaLayers{
+			Rigs: map[string][]string{
+				"alpha": {filepath.Join(dir, "alpha")},
+				"beta":  {filepath.Join(dir, "beta")},
+			},
+		},
+		FormulaPatches: []ScopedFormulaPatch{{
+			Patch: formula.Patch{
+				Formula: "mol-dup",
+				Steps:   []*formula.Step{{ID: "merge", Title: "patched merge"}},
+			},
+			// city-scoped: applies to every rig.
+		}},
+	}
+	err := validateFormulaPatches(cfg)
+	if err == nil {
+		t.Fatal("expected error: a city-scoped overlay that cannot apply in beta must be rejected")
+	}
+	if !strings.Contains(err.Error(), "merge") {
+		t.Errorf("error %q should name the unknown step the overlay overrides", err)
+	}
+	if !strings.Contains(err.Error(), "beta") {
+		t.Errorf("error %q should name the rig scope where the overlay fails", err)
 	}
 }
 
@@ -452,9 +536,11 @@ title = "Load"
 		FormulaLayers: FormulaLayers{
 			Rigs: map[string][]string{"alpha": {filepath.Join(dir, "alpha")}},
 		},
-		FormulaPatches: []formula.Patch{{
-			Formula: "mol-x",
-			Steps:   []*formula.Step{{ID: "ghost", Title: "x"}},
+		FormulaPatches: []ScopedFormulaPatch{{
+			Patch: formula.Patch{
+				Formula: "mol-x",
+				Steps:   []*formula.Step{{ID: "ghost", Title: "x"}},
+			},
 		}},
 	}
 	err := validateFormulaPatches(cfg)
@@ -479,7 +565,7 @@ title = "Step"
 		FormulaLayers: FormulaLayers{
 			Rigs: map[string][]string{"alpha": {filepath.Join(dir, "alpha")}},
 		},
-		FormulaPatches: []formula.Patch{{Formula: "mol-absent"}},
+		FormulaPatches: []ScopedFormulaPatch{{Patch: formula.Patch{Formula: "mol-absent"}}},
 	}
 	err := validateFormulaPatches(cfg)
 	if err == nil {

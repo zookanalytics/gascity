@@ -180,7 +180,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...,
 			)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
-			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, topoDir)...)
+			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, rig.Name, cachedPackFormulaPatches(cache, topoDir)...)
 			skills := cachedPackSkills(cache, topoDir)
 			if packName == "" && len(skills) > 0 {
 				return fmt.Errorf("rig %q pack %q: discovered skills require [pack].name for binding", rig.Name, ref)
@@ -423,7 +423,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
-				cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, impDir)...)
+				cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, rig.Name, cachedPackFormulaPatches(cache, impDir)...)
 
 				if len(providers) > 0 {
 					if cfg.Providers == nil {
@@ -601,7 +601,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		}
 		cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...)
 		cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
-		cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, topoDir)...)
+		cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, "", cachedPackFormulaPatches(cache, topoDir)...)
 		skills := cachedPackSkills(cache, topoDir)
 		if packName == "" && len(skills) > 0 {
 			return nil, nil, nil, fmt.Errorf("city pack %q: discovered skills require [pack].name for shared binding", ref)
@@ -784,7 +784,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			cfg.Services = append(cfg.Services, services...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
-			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, impDir)...)
+			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, "", cachedPackFormulaPatches(cache, impDir)...)
 			// Bootstrap-managed implicit imports own their skill
 			// materialization through the compat path; explicit user
 			// imports (including [imports.core]) contribute skills like

@@ -250,7 +250,7 @@ func slingFormula(opts SlingOpts, deps SlingDeps) (SlingResult, error) {
 	if isGraph {
 		formulaVars = inv.Vars
 	}
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars, SlingFormulaPatches(deps)...)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(context.Background(), opts.BeadOrFormula, searchPaths, formulaVars, SlingFormulaPatches(deps, a)...)
 	if err != nil {
 		return SlingResult{Target: a.QualifiedName()}, fmt.Errorf("instantiating formula %q: %w", opts.BeadOrFormula, err)
 	}
@@ -290,7 +290,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 		if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  formulaVars,
-		}, SlingFormulaPatches(deps)...); err != nil {
+		}, SlingFormulaPatches(deps, a)...); err != nil {
 			return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
 		}
 		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
@@ -325,7 +325,7 @@ func slingOnFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, beadID 
 	if err := validateSlingFormulaRuntimeVars(context.Background(), opts.OnFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
 		Vars:  formulaVars,
-	}, SlingFormulaPatches(deps)...); err != nil {
+	}, SlingFormulaPatches(deps, a)...); err != nil {
 		return result, fmt.Errorf("instantiating formula %q on %s: %w", opts.OnFormula, beadID, err)
 	}
 	checkAttachments := CheckNoMoleculeChildren
@@ -402,7 +402,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 		if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  defaultVars,
-		}, SlingFormulaPatches(deps)...); err != nil {
+		}, SlingFormulaPatches(deps, a)...); err != nil {
 			return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
 		}
 		return withGraphV2SourceWorkflowLock(context.Background(), deps, beadID, func() (SlingResult, error) {
@@ -437,7 +437,7 @@ func slingDefaultFormula(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 	if err := validateSlingFormulaRuntimeVars(context.Background(), defaultFormula, searchPaths, molecule.Options{
 		Title: opts.Title,
 		Vars:  defaultVars,
-	}, SlingFormulaPatches(deps)...); err != nil {
+	}, SlingFormulaPatches(deps, a)...); err != nil {
 		return result, fmt.Errorf("instantiating default formula %q on %s: %w", defaultFormula, beadID, err)
 	}
 	checkAttachments := CheckNoMoleculeChildren
@@ -1124,7 +1124,7 @@ func prepareGraphV2FormulaInvocation(ctx context.Context, formulaName, targetID 
 	// Thread the config-collected formula overlays so graph-v2 target
 	// detection, runtime-var checks, and deprecation scans run against the
 	// patched formula a name-pinned dispatcher will materialize.
-	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars, SlingFormulaPatches(deps)...)
+	inv, err := graphv2.PrepareInvocation(ctx, deps.Store, formulaName, searchPaths, targetID, vars, SlingFormulaPatches(deps, a)...)
 	if err != nil {
 		return graphv2.Invocation{}, false, err
 	}
@@ -1165,7 +1165,7 @@ func validateBatchSlingFormulaRuntimeVars(ctx context.Context, formulaName strin
 		if err := validateSlingFormulaRuntimeVars(ctx, formulaName, searchPaths, molecule.Options{
 			Title: opts.Title,
 			Vars:  childVars,
-		}, SlingFormulaPatches(deps)...); err != nil {
+		}, SlingFormulaPatches(deps, a)...); err != nil {
 			return fmt.Errorf("child %s: %w", child.ID, err)
 		}
 	}
@@ -1317,7 +1317,7 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		formulaVars := BuildSlingFormulaVars(useFormula, "", opts.Vars, a, deps)
 		searchPaths := SlingFormulaSearchPaths(deps, a)
 		var err error
-		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars, SlingFormulaPatches(deps)...)
+		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars, SlingFormulaPatches(deps, a)...)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
 		}

@@ -3645,18 +3645,43 @@ func TestSlingFormulaSearchPaths_CityScoped(t *testing.T) {
 }
 
 // TestSlingFormulaPatches proves the dispatcher forwards the config-collected
-// formula overlays into the compile path (nil-safe). The overlay semantics
-// themselves are covered by internal/formula and internal/config tests.
+// formula overlays into the compile path (nil-safe) AND scopes them to the
+// target agent's rig, so a rig-scoped overlay never reaches another rig's
+// same-named formula. The overlay semantics themselves are covered by
+// internal/formula and internal/config tests.
 func TestSlingFormulaPatches(t *testing.T) {
-	if got := SlingFormulaPatches(SlingDeps{}); got != nil {
+	if got := SlingFormulaPatches(SlingDeps{}, config.Agent{}); got != nil {
 		t.Errorf("SlingFormulaPatches(no cfg) = %v, want nil", got)
 	}
+
 	cfg := &config.City{
-		FormulaPatches: []formula.Patch{{Formula: "mol-refinery-patrol"}},
+		Rigs: []config.Rig{
+			{Name: "gascity", Path: "/work/gascity"},
+			{Name: "other", Path: "/work/other"},
+		},
+		FormulaPatches: []config.ScopedFormulaPatch{
+			{Patch: formula.Patch{Formula: "mol-city-wide"}},                       // city scope
+			{Patch: formula.Patch{Formula: "mol-refinery-patrol"}, Rig: "gascity"}, // rig scope
+		},
 	}
-	got := SlingFormulaPatches(SlingDeps{Cfg: cfg})
-	if len(got) != 1 || got[0].Formula != "mol-refinery-patrol" {
-		t.Fatalf("SlingFormulaPatches = %v, want the collected patch", got)
+
+	// A gascity agent sees the city-wide overlay AND its own rig overlay.
+	gas := SlingFormulaPatches(SlingDeps{Cfg: cfg}, config.Agent{Name: "polecat", Dir: "gascity"})
+	if len(gas) != 2 {
+		t.Fatalf("gascity dispatch = %v, want city-wide + rig-scoped (2)", gas)
+	}
+
+	// A different rig sees only the city-wide overlay; the gascity-scoped
+	// overlay must NOT leak into it (the codex finding).
+	other := SlingFormulaPatches(SlingDeps{Cfg: cfg}, config.Agent{Name: "polecat", Dir: "other"})
+	if len(other) != 1 || other[0].Formula != "mol-city-wide" {
+		t.Fatalf("other-rig dispatch = %v, want only the city-wide overlay", other)
+	}
+
+	// A city-scoped agent (no Dir) sees only city-scoped overlays.
+	city := SlingFormulaPatches(SlingDeps{Cfg: cfg}, config.Agent{})
+	if len(city) != 1 || city[0].Formula != "mol-city-wide" {
+		t.Fatalf("city-scoped dispatch = %v, want only the city-wide overlay", city)
 	}
 }
 

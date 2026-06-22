@@ -897,15 +897,22 @@ func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {
 	return deps.Cfg.FormulaLayers.SearchPaths(rigName)
 }
 
-// SlingFormulaPatches returns the [[patches.formula]] overlays collected during
-// config load. They are applied at formula-resolve time so the formula this
-// dispatcher (a name-pinned consumer) materializes reflects the overlay,
-// without renaming the formula. Returns nil when no config is wired.
-func SlingFormulaPatches(deps SlingDeps) []formula.Patch {
+// SlingFormulaPatches returns the [[patches.formula]] overlays that apply when
+// dispatching to agent a. They are applied at formula-resolve time so the
+// formula this dispatcher (a name-pinned consumer) materializes reflects the
+// overlay, without renaming the formula.
+//
+// The set is scoped to a's rig: every city-scoped overlay plus the overlays
+// contributed by a's own rig packs, and NOTHING contributed by another rig.
+// Returning the whole global set here is the bug behind "cannot override unknown
+// step id" — a rig-scoped overlay (e.g. the gascity-keeper refinery overlay)
+// would be applied against an unrelated rig's same-named formula that lacks the
+// overridden step. Returns nil when no config is wired or nothing applies.
+func SlingFormulaPatches(deps SlingDeps, a config.Agent) []formula.Patch {
 	if deps.Cfg == nil {
 		return nil
 	}
-	return deps.Cfg.FormulaPatches
+	return deps.Cfg.FormulaPatchesForRig(rigNameForAgent(deps.Cfg, a))
 }
 
 // rigNameForAgent returns the rig name for an agent. Handles both
@@ -1247,7 +1254,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
 	}
 	compileStart := time.Now()
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars, SlingFormulaPatches(deps)...)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars, SlingFormulaPatches(deps, a)...)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
 		return nil, err

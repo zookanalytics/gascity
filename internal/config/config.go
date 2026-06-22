@@ -14,7 +14,6 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
-	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -267,10 +266,13 @@ type City struct {
 	// Populated during pack expansion in LoadWithIncludes. Not from TOML.
 	FormulaLayers FormulaLayers `toml:"-" json:"-"`
 	// FormulaPatches holds [[patches.formula]] overlays collected (and
-	// deduplicated) from every loaded pack's import closure. Applied at
-	// formula-resolve time, keyed by target name. Populated during pack
-	// expansion, not authored directly in city.toml.
-	FormulaPatches []formula.Patch `toml:"-" json:"-"`
+	// deduplicated) from every loaded pack's import closure, each tagged with
+	// the dispatch scope (city or a specific rig) that contributed it. Applied
+	// at formula-resolve time, keyed by target name; the scope confines a
+	// rig-scoped overlay to its own rig so it cannot poison an unrelated rig's
+	// same-named formula. Read scope-filtered via FormulaPatchesForRig.
+	// Populated during pack expansion, not authored directly in city.toml.
+	FormulaPatches []ScopedFormulaPatch `toml:"-" json:"-"`
 	// PackDirs is the ordered, deduplicated list of pack directories
 	// from all loaded city packs (includes resolved). Consumers derive
 	// resource-specific search paths by scanning subdirectories:

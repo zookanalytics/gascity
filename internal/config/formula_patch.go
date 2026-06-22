@@ -10,6 +10,36 @@ import (
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
+// ScopedFormulaPatch pairs a collected [[patches.formula]] overlay with the
+// dispatch scope that contributed it. A patch shipped by a city-level pack
+// applies to every dispatch scope (the city and every rig); a patch shipped by a
+// rig-scoped pack applies only when dispatching in that rig.
+//
+// Carrying the scope is load-bearing. The overlays are applied at
+// formula-resolve time against the TARGET rig's search paths (see
+// Parser.WithPatches / Parser.Resolve), so a rig-scoped overlay that is allowed
+// to reach an unrelated rig's same-named formula would be applied to a formula
+// that lacks the overridden step and fail dispatch with "cannot override unknown
+// step id" — even though config load succeeded. Scoping confines a rig-scoped
+// overlay (e.g. the gascity-keeper refinery overlay, shipped by a sub-pack a
+// single rig imports) to the rig whose packs contributed it.
+type ScopedFormulaPatch struct {
+	// Patch is the overlay itself.
+	Patch formula.Patch
+	// Rig is the rig name whose dispatch scope this patch applies to. Empty
+	// means the patch was contributed at city scope and applies to every scope
+	// (the city and every rig).
+	Rig string
+}
+
+// appliesToRig reports whether this patch is active when dispatching in the
+// given rig scope. City-scoped patches (Rig == "") are active everywhere;
+// rig-scoped patches are active only in their own rig. rigName "" is the city
+// scope, which sees only city-scoped patches.
+func (sp ScopedFormulaPatch) appliesToRig(rigName string) bool {
+	return sp.Rig == "" || sp.Rig == rigName
+}
+
 // cachedPackFormulaPatches returns the formula overlays a loaded pack and its
 // closure contributed, from the load cache. Mirrors cachedPackDoctors. Patches
 // are copied so callers cannot mutate the cached canonical result.
@@ -28,28 +58,37 @@ func cachedPackFormulaPatches(cache *packLoadCache, topoDir string) []formula.Pa
 	return append([]formula.Patch(nil), result.formulaPatches...)
 }
 
-// appendUniqueFormulaPatches appends src to dst, skipping any patch whose
-// content is byte-identical (canonical JSON) to one already present. The same
-// pack patch reaches collection more than once through diamond-shaped import
-// graphs or several rigs importing the same pack; without dedup an
-// [[...append_step]] would be applied twice and the second application would
-// fail its own duplicate-id guard. Two genuinely different overlays of the
-// same formula (different content) are both kept — a real conflict between
-// them surfaces at apply time, which is correct.
-func appendUniqueFormulaPatches(dst []formula.Patch, src ...formula.Patch) []formula.Patch {
+// appendUniqueFormulaPatches appends each patch in src — tagged with the given
+// dispatch scope (rig name, or "" for city scope) — to dst, skipping any whose
+// (scope, content) pair is already present. The same pack patch reaches
+// collection more than once through diamond-shaped import graphs or several rigs
+// importing the same pack; without dedup an [[...append_step]] would be applied
+// twice and the second application would fail its own duplicate-id guard. Two
+// genuinely different overlays of the same formula (different content), and the
+// same overlay contributed at two different scopes, are both kept — only a
+// same-scope content collision is collapsed. A real conflict between two
+// distinct overlays surfaces at apply time, which is correct.
+func appendUniqueFormulaPatches(dst []ScopedFormulaPatch, rig string, src ...formula.Patch) []ScopedFormulaPatch {
 	seen := make(map[string]bool, len(dst))
 	for _, p := range dst {
-		seen[formulaPatchKey(p)] = true
+		seen[scopedFormulaPatchKey(p.Rig, p.Patch)] = true
 	}
 	for _, p := range src {
-		key := formulaPatchKey(p)
+		key := scopedFormulaPatchKey(rig, p)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		dst = append(dst, p)
+		dst = append(dst, ScopedFormulaPatch{Patch: p, Rig: rig})
 	}
 	return dst
+}
+
+// scopedFormulaPatchKey returns a dedup key combining the contributing scope
+// with the patch's stable content key, so the same overlay can coexist at two
+// scopes while diamond/multi-rig duplicates within one scope collapse.
+func scopedFormulaPatchKey(rig string, p formula.Patch) string {
+	return rig + "\x00" + formulaPatchKey(p)
 }
 
 // formulaPatchKey returns a stable content key for dedup. JSON marshaling
@@ -64,28 +103,53 @@ func formulaPatchKey(p formula.Patch) string {
 	return string(b)
 }
 
+// FormulaPatchesForRig returns the [[patches.formula]] overlays that apply when
+// dispatching in the given rig's scope: every city-scoped patch plus the patches
+// contributed by that rig's own packs. Patches scoped to OTHER rigs are excluded
+// so a rig-scoped overlay never reaches a same-named formula in an unrelated rig
+// (the scenario that produced "cannot override unknown step id" at dispatch).
+// Results are de-duplicated by content, so an overlay contributed both at city
+// scope and by the rig is returned once. rigName "" selects the city scope,
+// which sees only city-scoped patches. Returns nil when nothing applies.
+func (c *City) FormulaPatchesForRig(rigName string) []formula.Patch {
+	if c == nil || len(c.FormulaPatches) == 0 {
+		return nil
+	}
+	var out []formula.Patch
+	seen := make(map[string]bool, len(c.FormulaPatches))
+	for _, sp := range c.FormulaPatches {
+		if !sp.appliesToRig(rigName) {
+			continue
+		}
+		key := formulaPatchKey(sp.Patch)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, sp.Patch)
+	}
+	return out
+}
+
 // validateFormulaPatches fails config load when a collected [[patches.formula]]
-// targets a formula that does not resolve in any scope, or overlays a step that
-// does not exist in the formula as a runtime consumer would resolve it. A no-op
-// when no patches were collected.
+// targets a formula that does not resolve in any scope where the patch is
+// active, or overlays a step that does not exist in the formula as a runtime
+// consumer would resolve it. A no-op when no patches were collected.
 //
-// Validation runs against each EFFECTIVE search-path set a runtime consumer
-// resolves against (the city layers and every rig's layers, per
-// FormulaLayers.SearchPaths), never against a single union of all layers. A
-// union collapses same-named formulas from different rigs and resolves them
-// with nondeterministic last-layer-wins precedence, so the patch could be
-// validated against a different rig's formula than the one that will actually
-// run — masking a genuinely broken overlay or rejecting a valid one. Checking
-// each scope independently is deterministic and matches dispatch.
+// Validation mirrors dispatch exactly: each dispatch scope (the city layers and
+// every rig's layers, per FormulaLayers.SearchPaths) is checked against the SAME
+// patch set a runtime consumer applies there — FormulaPatchesForRig(scope) — so
+// any configuration accepted at load time is one runtime can actually dispatch.
+// Because patches are scoped to the pack closure that contributed them, a
+// rig-scoped overlay is validated (and later applied) only in its own rig: a
+// same-named-but-incompatible formula in an unrelated rig neither rejects a valid
+// overlay nor hides a broken one. A city-scoped overlay claims to apply
+// everywhere, so it must apply cleanly in every scope its target resolves in;
+// otherwise that scope's dispatch would fail and load fails instead.
 //
-// A target that resolves in NO scope is an unknown-formula error. A target that
-// resolves but the patch fails to apply in EVERY scope it resolves in is an
-// apply error (the overlay cannot work anywhere). A target that applies cleanly
-// in at least one scope is accepted: the same global patch set is applied in
-// every rig at dispatch, and a same-named-but-incompatible formula in an
-// unrelated scope must not reject an overlay that is valid where it is meant to
-// run (see the gascity-keeper refinery overlay, whose patched mol-refinery
-// formula is shipped by the keeper pack a single rig imports).
+// A patch whose target resolves in NONE of its active scopes is a dead overlay
+// (unknown-formula error — typically a typo). A patch whose target resolves but
+// fails to apply in an active scope is an apply error.
 func validateFormulaPatches(cfg *City) error {
 	if len(cfg.FormulaPatches) == 0 {
 		return nil
@@ -95,88 +159,87 @@ func validateFormulaPatches(cfg *City) error {
 		return fmt.Errorf("config declares [[patches.formula]] but no formula search paths are configured")
 	}
 
-	// Distinct target names, first-seen order, for deterministic error output.
-	seen := make(map[string]bool, len(cfg.FormulaPatches))
-	var targets []string
-	for _, p := range cfg.FormulaPatches {
-		if seen[p.Formula] {
+	// Track, per collected patch, whether its target resolved in at least one
+	// scope where the patch is active. A patch that resolves nowhere it could
+	// run is a dead overlay and is rejected after every scope has been checked.
+	resolvedSomewhere := make([]bool, len(cfg.FormulaPatches))
+
+	for _, scope := range scopes {
+		patchSet := cfg.FormulaPatchesForRig(scope.rig)
+		if len(patchSet) == 0 {
 			continue
 		}
-		seen[p.Formula] = true
-		targets = append(targets, p.Formula)
-	}
-
-	for _, target := range targets {
-		resolvedInScope := false
-		appliedCleanly := false
-		var applyErr error
-		var applyScope string
-		for _, scope := range scopes {
-			parser := formula.NewParser(scope.paths...).WithPatches(cfg.FormulaPatches...)
-			loaded, err := parser.LoadByName(target)
+		parser := formula.NewParser(scope.paths...).WithPatches(patchSet...)
+		for i := range cfg.FormulaPatches {
+			sp := cfg.FormulaPatches[i]
+			if !sp.appliesToRig(scope.rig) {
+				continue
+			}
+			loaded, err := parser.LoadByName(sp.Patch.Formula)
 			if err != nil {
 				continue // target formula is not visible in this scope
 			}
-			resolvedInScope = true
+			resolvedSomewhere[i] = true
 			if _, err := parser.Resolve(loaded); err != nil {
-				applyErr = err
-				applyScope = scope.label
-				continue
+				return fmt.Errorf("patches.formula %q (%s): %w", sp.Patch.Formula, scope.label, err)
 			}
-			appliedCleanly = true
-			break
 		}
-		if !resolvedInScope {
-			return fmt.Errorf("patches.formula targets unknown formula %q: not found in any configured formula search path", target)
-		}
-		if !appliedCleanly {
-			return fmt.Errorf("patches.formula %q (%s): %w", target, applyScope, applyErr)
+	}
+
+	for i := range cfg.FormulaPatches {
+		if !resolvedSomewhere[i] {
+			return fmt.Errorf("patches.formula targets unknown formula %q: not found in any configured formula search path", cfg.FormulaPatches[i].Patch.Formula)
 		}
 	}
 	return nil
 }
 
-// formulaSearchScope is one effective formula search-path set a runtime
-// consumer resolves against: the city layers, or a single rig's layers.
+// formulaSearchScope is one effective formula search-path set a runtime consumer
+// resolves against: the city layers, or a single rig's layers. rig is the rig
+// name the scope dispatches as ("" for the city scope); it selects the scope's
+// active patch set via FormulaPatchesForRig.
 type formulaSearchScope struct {
+	rig   string
 	label string
 	paths []string
 }
 
-// effectiveFormulaSearchScopes returns the distinct effective search-path sets
-// runtime consumers resolve formulas against — the city layers and each rig's
-// layers (mirroring FormulaLayers.SearchPaths). Empty path sets are dropped;
-// byte-identical sets are de-duplicated so a rig that contributes no rig-local
-// layers (its SearchPaths collapses to the city layers) is not validated twice.
-// Rig scopes are visited in sorted name order for deterministic error output.
+// effectiveFormulaSearchScopes returns the effective search-path sets runtime
+// consumers resolve formulas against — the city layers and each rig's layers
+// (mirroring FormulaLayers.SearchPaths). Empty path sets are dropped. Each rig
+// is its own scope even when its paths match another's, because the active patch
+// set is keyed by rig: two rigs with identical layers can still see different
+// rig-scoped overlays, so collapsing them would skip validating one rig's
+// overlay. Rig scopes are visited in sorted name order for deterministic error
+// output.
 func effectiveFormulaSearchScopes(fl FormulaLayers) []formulaSearchScope {
-	var scopes []formulaSearchScope
-	seenSet := make(map[string]bool)
-	add := func(label string, paths []string) {
-		nonEmpty := make([]string, 0, len(paths))
+	nonEmptyPaths := func(paths []string) []string {
+		out := make([]string, 0, len(paths))
 		for _, p := range paths {
 			if strings.TrimSpace(p) != "" {
-				nonEmpty = append(nonEmpty, p)
+				out = append(out, p)
 			}
 		}
-		if len(nonEmpty) == 0 {
-			return
-		}
-		key := strings.Join(nonEmpty, "\x00")
-		if seenSet[key] {
-			return
-		}
-		seenSet[key] = true
-		scopes = append(scopes, formulaSearchScope{label: label, paths: nonEmpty})
+		return out
 	}
-	add("city scope", fl.City)
+
+	var scopes []formulaSearchScope
+	if paths := nonEmptyPaths(fl.City); len(paths) > 0 {
+		scopes = append(scopes, formulaSearchScope{rig: "", label: "city scope", paths: paths})
+	}
 	rigNames := make([]string, 0, len(fl.Rigs))
 	for name := range fl.Rigs {
 		rigNames = append(rigNames, name)
 	}
 	sort.Strings(rigNames)
 	for _, name := range rigNames {
-		add(fmt.Sprintf("rig %q scope", name), fl.Rigs[name])
+		if paths := nonEmptyPaths(fl.Rigs[name]); len(paths) > 0 {
+			scopes = append(scopes, formulaSearchScope{
+				rig:   name,
+				label: fmt.Sprintf("rig %q scope", name),
+				paths: paths,
+			})
+		}
 	}
 	return scopes
 }
