@@ -284,6 +284,15 @@ type memoryOrderDispatcher struct {
 	cacheMu              sync.Mutex
 	lastRunCache         map[string]time.Time
 
+	// MEASUREMENT-ONLY (gc-k8r4y.1): per-store-open instrumentation. Both
+	// fields are inert unless instrumentOpens is true (set from the
+	// GC_ORDER_DISPATCH_INSTRUMENT env switch at construction), so an
+	// uninstrumented build behaves identically to main. boundRigNames is the
+	// set of rigs the controller caches a handle for (see boundRigNameSet),
+	// used to classify whether an open is eliminable by cached-store reuse.
+	instrumentOpens bool
+	boundRigNames   map[string]struct{}
+
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
 
@@ -415,6 +424,8 @@ func buildOrderDispatcherFromOrderSet(cityPath string, cfg *config.City, allAA [
 		cityPath:             cityPath,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
+		instrumentOpens:      orderDispatchInstrumentEnabled(),
+		boundRigNames:        boundRigNameSet(cfg),
 	}
 }
 
@@ -488,6 +499,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		store, ok := stores[storeKey]
 		if !ok {
 			store, err = m.storeFn(target)
+			m.recordStoreOpen(target, err) // MEASUREMENT-ONLY (gc-k8r4y.1); no-op unless instrumented.
 			if err != nil {
 				logDispatchError(m.stderr, "gc: order dispatch: opening %s store for %s: %v", target.ScopeKind, a.ScopedName(), err)
 				continue
@@ -962,6 +974,7 @@ func (m *memoryOrderDispatcher) legacyCityStoreForTarget(cityPath string, target
 		return store, true
 	}
 	store, err := m.storeFn(legacyTarget)
+	m.recordStoreOpen(legacyTarget, err) // MEASUREMENT-ONLY (gc-k8r4y.1); no-op unless instrumented.
 	if err != nil {
 		logDispatchError(m.stderr, "gc: order dispatch: opening legacy city store for rig order fallback: %v", err)
 		return nil, false
