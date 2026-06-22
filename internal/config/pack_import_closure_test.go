@@ -78,8 +78,10 @@ func TestResolveAgentImportClosurePaths_CityRootPrecedence(t *testing.T) {
 	}
 }
 
-// A subpath present in more than one imported pack is ambiguous and must be a
-// hard config-load error rather than an arbitrary silent pick.
+// A subpath present in more than one imported pack within a single agent's
+// scope is ambiguous and must be a hard config-load error rather than an
+// arbitrary silent pick. Two city-level packs are both in scope for a city
+// agent, so a shared subpath across them is genuinely ambiguous.
 func TestResolveAgentImportClosurePaths_Ambiguous(t *testing.T) {
 	const sub = "agents/polecat/prompt.template.md"
 	packA := writePackWithAsset(t, "gastown", sub)
@@ -87,12 +89,92 @@ func TestResolveAgentImportClosurePaths_Ambiguous(t *testing.T) {
 	cityRoot := t.TempDir()
 
 	cfg := &City{
-		PackDirs:    []string{packA},
-		RigPackDirs: map[string][]string{"r": {packB}},
-		Agents:      []Agent{{Name: "polecat", PromptTemplate: sub}},
+		PackDirs: []string{packA, packB},
+		Agents:   []Agent{{Name: "polecat", PromptTemplate: sub}},
 	}
 	if err := resolveAgentImportClosurePaths(fsys.OSFS{}, cfg, cityRoot); err == nil {
 		t.Fatal("expected ambiguity error for subpath in multiple packs, got nil")
+	}
+}
+
+// Cross-rig isolation (gc-fvqg9): two rigs each import a pack carrying the same
+// convention subpath (agents/polecat/prompt.template.md). A rig-scoped agent
+// resolves the plain relative path against ITS OWN rig's pack only — never the
+// other rig's. Under a single global import closure this subpath reads as
+// ambiguous (both packs match); scoping the fallback to the agent's effective
+// rig via PackDirsForRig(a.Dir) — mirroring runtime prompt rendering — yields a
+// unique per-rig match instead.
+func TestResolveAgentImportClosurePaths_RigScopedNoCrossRigAmbiguity(t *testing.T) {
+	const sub = "agents/polecat/prompt.template.md"
+	packAlpha := writePackWithAsset(t, "alpha-pack", sub)
+	packBeta := writePackWithAsset(t, "beta-pack", sub)
+	cityRoot := t.TempDir()
+
+	// Rig-scoped agents carry Dir == rigName (stamped at pack load, pack.go).
+	cfg := &City{
+		RigPackDirs: map[string][]string{
+			"alpha": {packAlpha},
+			"beta":  {packBeta},
+		},
+		Agents: []Agent{
+			{Name: "polecat", Dir: "alpha", PromptTemplate: sub},
+			{Name: "polecat", Dir: "beta", PromptTemplate: sub},
+		},
+	}
+	if err := resolveAgentImportClosurePaths(fsys.OSFS{}, cfg, cityRoot); err != nil {
+		t.Fatalf("resolveAgentImportClosurePaths: %v", err)
+	}
+	if want := filepath.Join(packAlpha, filepath.FromSlash(sub)); cfg.Agents[0].PromptTemplate != want {
+		t.Errorf("alpha agent prompt_template = %q, want %q (its own rig's pack)",
+			cfg.Agents[0].PromptTemplate, want)
+	}
+	if want := filepath.Join(packBeta, filepath.FromSlash(sub)); cfg.Agents[1].PromptTemplate != want {
+		t.Errorf("beta agent prompt_template = %q, want %q (its own rig's pack)",
+			cfg.Agents[1].PromptTemplate, want)
+	}
+}
+
+// City/rig isolation (gc-fvqg9): a city agent (empty Dir) does not see
+// rig-imported packs. A subpath present only in a rig's pack is left unchanged
+// for a city agent, matching runtime PackDirsForRig("") = city packs only. The
+// converse of the cross-rig test: scoping must not leak a rig asset into a city
+// agent.
+func TestResolveAgentImportClosurePaths_CityAgentExcludesRigPacks(t *testing.T) {
+	const sub = "agents/polecat/prompt.template.md"
+	rigPack := writePackWithAsset(t, "rig-pack", sub)
+	cityRoot := t.TempDir()
+
+	cfg := &City{
+		RigPackDirs: map[string][]string{"alpha": {rigPack}},
+		Agents:      []Agent{{Name: "city-agent", PromptTemplate: sub}}, // Dir == "" → city scope
+	}
+	if err := resolveAgentImportClosurePaths(fsys.OSFS{}, cfg, cityRoot); err != nil {
+		t.Fatalf("resolveAgentImportClosurePaths: %v", err)
+	}
+	if got := cfg.Agents[0].PromptTemplate; got != sub {
+		t.Errorf("city agent resolved against a rig pack: got %q, want unchanged %q", got, sub)
+	}
+}
+
+// A rig-scoped agent still resolves city-level pack assets (PackDirsForRig
+// includes city packs as well as the agent's own rig packs), so the rig
+// scoping narrows the closure without dropping the city tier.
+func TestResolveAgentImportClosurePaths_RigAgentSeesCityPacks(t *testing.T) {
+	const sub = "agents/polecat/prompt.template.md"
+	cityPack := writePackWithAsset(t, "city-pack", sub)
+	cityRoot := t.TempDir()
+
+	cfg := &City{
+		PackDirs:    []string{cityPack},
+		RigPackDirs: map[string][]string{"alpha": {writePackWithAsset(t, "alpha-pack", "agents/other/unrelated.md")}},
+		Agents:      []Agent{{Name: "polecat", Dir: "alpha", PromptTemplate: sub}},
+	}
+	if err := resolveAgentImportClosurePaths(fsys.OSFS{}, cfg, cityRoot); err != nil {
+		t.Fatalf("resolveAgentImportClosurePaths: %v", err)
+	}
+	if want := filepath.Join(cityPack, filepath.FromSlash(sub)); cfg.Agents[0].PromptTemplate != want {
+		t.Errorf("rig agent prompt_template = %q, want %q (city pack still in scope)",
+			cfg.Agents[0].PromptTemplate, want)
 	}
 }
 

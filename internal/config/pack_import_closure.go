@@ -3,47 +3,38 @@ package config
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// importClosureDirs returns the imported-pack directories across the city- and
-// rig-level closures in a deterministic order (city packs first, then rig
-// packs by sorted rig name). This is the same closure packDirsByName walks; it
-// is enumerated here without the name index because closure fallthrough keys
-// off the asset subpath, not the pack name.
-func importClosureDirs(cfg *City) []string {
-	dirs := make([]string, 0, len(cfg.PackDirs))
-	dirs = append(dirs, cfg.PackDirs...)
-	rigNames := make([]string, 0, len(cfg.RigPackDirs))
-	for name := range cfg.RigPackDirs {
-		rigNames = append(rigNames, name)
-	}
-	sort.Strings(rigNames)
-	for _, name := range rigNames {
-		dirs = append(dirs, cfg.RigPackDirs[name]...)
-	}
-	return dirs
-}
-
 // resolveAgentImportClosurePaths rewrites each agent's relative path field
 // (prompt_template, overlay_dir, namepool) that does not resolve
 // city-root-relative to its absolute location inside an imported pack, when
-// exactly one pack in the import closure contains that subpath. This lets a
-// native agent reference an imported pack's asset with a plain relative path
-// (e.g. "agents/polecat/prompt.template.md") — no "<pack>//" token required.
+// exactly one pack in the agent's effective import closure contains that
+// subpath. This lets a native agent reference an imported pack's asset with a
+// plain relative path (e.g. "agents/polecat/prompt.template.md") — no
+// "<pack>//" token required.
+//
+// The closure is scoped to the agent's effective rig via PackDirsForRig(a.Dir),
+// mirroring runtime prompt rendering (which renders against
+// cfg.PackDirsForRig(rigName) precisely so one rig's fragments cannot override
+// another rig's same-named fragments). A city agent (empty Dir) sees only
+// city-level packs; a rig agent (Dir == its rig name, stamped at pack load)
+// sees city packs plus its own rig's packs — never another rig's. Without this
+// scoping, a convention subpath shared by two rigs' packs (e.g. a common
+// agents/polecat/prompt.template.md) would read as ambiguous for either rig's
+// native agent, or silently bind another rig's asset.
 //
 // Resolution is deterministic:
 //   - empty or absolute paths are left unchanged (absolute paths are already
 //     resolved, e.g. by resolvePackQualifiedAgentPaths or supplied absolute);
 //   - a path that exists city-root-relative wins and is left unchanged (the
 //     city takes precedence over the import closure);
-//   - a path found in exactly one imported pack is rewritten to the absolute
-//     path there;
-//   - a path found in more than one imported pack is a hard config-load error
-//     (ambiguous) rather than an arbitrary silent pick;
+//   - a path found in exactly one in-scope imported pack is rewritten to the
+//     absolute path there;
+//   - a path found in more than one in-scope imported pack is a hard
+//     config-load error (ambiguous) rather than an arbitrary silent pick;
 //   - a path found nowhere is left unchanged, preserving the prior graceful
 //     behavior where an unreachable asset renders empty. The change is purely
 //     additive.
@@ -55,10 +46,7 @@ func resolveAgentImportClosurePaths(fs fsys.FS, cfg *City, cityRoot string) erro
 		return nil
 	}
 
-	var dirs []string
-	dirsInit := false
-
-	resolve := func(field, val string) (string, error) {
+	resolve := func(dirs []string, field, val string) (string, error) {
 		if val == "" || filepath.IsAbs(val) {
 			return val, nil
 		}
@@ -66,10 +54,6 @@ func resolveAgentImportClosurePaths(fs fsys.FS, cfg *City, cityRoot string) erro
 		// City-root precedence: an existing city-root-relative asset wins.
 		if pathExists(fs, filepath.Join(cityRoot, rel)) {
 			return val, nil
-		}
-		if !dirsInit {
-			dirs = importClosureDirs(cfg)
-			dirsInit = true
 		}
 		var matches []string
 		for _, dir := range dirs {
@@ -94,6 +78,9 @@ func resolveAgentImportClosurePaths(fs fsys.FS, cfg *City, cityRoot string) erro
 
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
+		// Scope the closure to the agent's effective rig (empty Dir → city
+		// packs only), matching the runtime PackDirsForRig render path.
+		dirs := cfg.PackDirsForRig(a.Dir)
 		for _, f := range []struct {
 			field string
 			ptr   *string
@@ -102,7 +89,7 @@ func resolveAgentImportClosurePaths(fs fsys.FS, cfg *City, cityRoot string) erro
 			{"overlay_dir", &a.OverlayDir},
 			{"namepool", &a.Namepool},
 		} {
-			resolved, err := resolve(f.field, *f.ptr)
+			resolved, err := resolve(dirs, f.field, *f.ptr)
 			if err != nil {
 				return fmt.Errorf("agent %q: %w", a.Name, err)
 			}
