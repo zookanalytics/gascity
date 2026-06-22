@@ -471,3 +471,16 @@ func cachedPackDir(source, cachePath string) string {
 	}
 	return cachePath
 }
+
+// CachedPackDir returns the on-disk directory of the materialized pack for
+// the given source and commit, accounting for any subpath encoded in the
+// source. It derives the path from the shared repo cache root and does not
+// verify the pack is present on disk; callers that require a materialized
+// pack should stat filepath.Join(dir, "pack.toml").
+func CachedPackDir(source, commit string) (string, error) {
+	cachePath, err := RepoCachePath(source, commit)
+	if err != nil {
+		return "", err
+	}
+	return cachedPackDir(source, cachePath), nil
+}

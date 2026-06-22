@@ -98,6 +98,7 @@ func newImportCmd(stdout, stderr io.Writer) *cobra.Command {
 		newImportListCmd(stdout, stderr),
 		newImportStatusCmd(stdout, stderr),
 		newImportWhyCmd(stdout, stderr),
+		newImportPathCmd(stdout, stderr),
 		newImportMigrateCmd(stdout, stderr),
 		newImportPruneCmd(stdout, stderr),
 	)
@@ -266,6 +267,35 @@ func newImportWhyCmd(stdout, stderr io.Writer) *cobra.Command {
 				return errExit
 			}
 			if doImportWhy(cityPath, args[0], stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+	}
+}
+
+func newImportPathCmd(stdout, stderr io.Writer) *cobra.Command {
+	return &cobra.Command{
+		Use:   "path <name>",
+		Short: "Print the resolved on-disk directory of an imported pack",
+		Long: `Print the absolute path to the materialized directory of an imported pack.
+
+The import is resolved through the city's import closure, so transitive
+imports (a pack pulled in by another imported pack) resolve too. Scripts
+capture the path to locate a base pack on disk, e.g.:
+
+    BASE=$(gc import path gastown)
+
+Exits non-zero (with a message on stderr) when the import is unknown,
+ambiguous, not locked, or not yet materialized in the repo cache.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			cityPath, err := resolveImportRoot()
+			if err != nil {
+				fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+				return errExit
+			}
+			if doImportPath(cityPath, args[0], stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -487,6 +517,7 @@ func collectAllImportsFS(fs fsys.FS, cityPath string) (map[string]config.Import,
 	return all, nil
 }
 
+//nolint:unparam // keep fs injectable for parity with the other import helpers and direct tests.
 func collectInspectableImportsFS(fs fsys.FS, cityPath string, scope *importScopeState) (map[string]config.Import, error) {
 	imports := copyImports(scope.imports)
 	if !scope.isRootPackScope() {
@@ -1048,6 +1079,85 @@ func doImportWhy(cityPath, target string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func doImportPath(cityPath, target string, stdout, stderr io.Writer) int {
+	scope, err := loadImportScopeFS(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	lock, err := readImportLockfile(fsys.OSFS{}, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	inspectImports, err := collectInspectableImportsFS(fsys.OSFS{}, cityPath, scope)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	graph, err := buildImportGraph(inspectImports, lock)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	matches, err := findImportWhyMatches(graph, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	// findImportWhyMatches rejects ambiguous name matches (more than one
+	// source) before returning, so every match here resolves to the same
+	// pack; the last node on the first path is that import.
+	path := matches[0]
+	node := path[len(path)-1]
+	dir, err := resolveImportNodeDir(cityPath, node)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc import path: %v\n", err) //nolint:errcheck
+		return 1
+	}
+	fmt.Fprintln(stdout, dir) //nolint:errcheck
+	return 0
+}
+
+// resolveImportNodeDir resolves an import graph node to the absolute on-disk
+// directory of its pack. Path imports resolve relative to the city root.
+// Remote imports resolve through the repo cache: the commit comes from the
+// lockfile, falling back to a bundled pack's canonical pin when the closure
+// carries no lock for it. The resolved directory must be materialized — an
+// unresolvable commit or absent cache directory is an error so callers never
+// receive a path that does not exist.
+func resolveImportNodeDir(cityPath string, node *importGraphNode) (string, error) {
+	source := node.Import.Source
+	display := importDisplayName(node.Name)
+	if !isRemoteImportSource(source) {
+		return resolveImportAddPath(cityPath, source)
+	}
+	commit := strings.TrimSpace(node.Resolved.Commit)
+	if !node.HasLock || commit == "" {
+		// A bundled pack (e.g. gastown) materializes in the shared repo
+		// cache at its canonical pin and needs no lockfile entry, so fall
+		// back to that pin when the closure carries no lock for it. This
+		// lets scripts resolve a transitive bundled base even from a
+		// sub-pack directory that has no packs.lock of its own.
+		if pin := strings.TrimPrefix(config.BundledSourcePinnedVersion(source), "sha:"); pin != "" {
+			commit = pin
+		} else {
+			return "", fmt.Errorf("import %q is not locked; run \"gc import install\"", display)
+		}
+	}
+	dir, err := packman.CachedPackDir(source, commit)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "pack.toml")); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("import %q is not materialized at %s; run \"gc import install\"", display, dir)
+		}
+		return "", fmt.Errorf("checking materialized pack for import %q at %s: %w", display, dir, err)
+	}
+	return dir, nil
 }
 
 func writeImportTree(stdout io.Writer, imports map[string]config.Import, lock *packman.Lockfile) error {

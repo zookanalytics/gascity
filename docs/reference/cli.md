@@ -1639,6 +1639,7 @@ gc import
 | [gc import check](#gc-import-check) | Validate installed pack import state |
 | [gc import install](#gc-import-install) | Install imports from pack.toml and packs.lock |
 | [gc import list](#gc-import-list) | List imported packs |
+| [gc import path](#gc-import-path) | Print the resolved on-disk directory of an imported pack |
 | [gc import prune](#gc-import-prune) | Remove unreferenced clones from the global pack cache |
 | [gc import remove](#gc-import-remove) | Remove a pack import |
 | [gc import status](#gc-import-status) | Report declared imports and packs.lock pins |
@@ -1714,6 +1715,23 @@ gc import list [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--tree` | bool |  | Show the import dependency tree |
+
+## gc import path
+
+Print the absolute path to the materialized directory of an imported pack.
+
+The import is resolved through the city's import closure, so transitive
+imports (a pack pulled in by another imported pack) resolve too. Scripts
+capture the path to locate a base pack on disk, e.g.:
+
+    BASE=$(gc import path gastown)
+
+Exits non-zero (with a message on stderr) when the import is unknown,
+ambiguous, not locked, or not yet materialized in the repo cache.
+
+```
+gc import path <name>
+```
 
 ## gc import prune
 

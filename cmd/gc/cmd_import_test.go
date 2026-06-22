@@ -3180,3 +3180,217 @@ func TestDefaultImportHeadCommitIgnoresPoisonedGitEnv(t *testing.T) {
 		t.Fatalf("defaultImportHeadCommit = %q, want %q (must resolve the requested source)", got, wantHead)
 	}
 }
+
+func TestDoImportPathResolvesTransitiveImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCmdCachedPackGit(t)
+
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `
+[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.4.2", Commit: "tools"},
+			"https://example.com/base.git":  {Version: "2.0.0", Commit: "base"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCmdCachedPack(t, "https://example.com/tools.git", "tools", `
+[pack]
+name = "tools"
+schema = 1
+
+[imports.base]
+source = "https://example.com/base.git"
+version = "^2.0"
+`)
+	stageCmdCachedPack(t, "https://example.com/base.git", "base", `
+[pack]
+name = "base"
+schema = 1
+`)
+
+	want, err := packman.RepoCachePath("https://example.com/base.git", "base")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "base", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("doImportPath = %q, want %q", got, want)
+	}
+}
+
+func TestDoImportPathResolvesDirectRemoteImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCmdCachedPackGit(t)
+
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `
+[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+`)
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.4.2", Commit: "tools"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+	stageCmdCachedPack(t, "https://example.com/tools.git", "tools", `
+[pack]
+name = "tools"
+schema = 1
+`)
+
+	want, err := packman.RepoCachePath("https://example.com/tools.git", "tools")
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "tools", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("doImportPath = %q, want %q", got, want)
+	}
+}
+
+func TestDoImportPathReportsUnknownImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	writePackToml(t, dir, `[pack]
+name = "demo"
+schema = 1
+`)
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "nope", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for unknown import, got 0 (stdout=%q)", stdout.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "" {
+		t.Fatalf("expected no stdout on error, got %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not found") {
+		t.Fatalf("expected 'not found' in stderr, got %q", stderr.String())
+	}
+}
+
+func TestDoImportPathReportsUnmaterializedImport(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	stubCmdCachedPackGit(t)
+
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	// transitive = false so graph construction does not read the (absent)
+	// cache while discovering children — this isolates the materialization
+	// guard in resolveImportNodeDir as the sole check.
+	writePackToml(t, dir, `
+[pack]
+name = "demo"
+schema = 1
+
+[imports.tools]
+source = "https://example.com/tools.git"
+version = "^1.4"
+transitive = false
+`)
+	// Locked but never staged into the cache → not materialized.
+	if err := packman.WriteLockfile(fsys.OSFS{}, dir, &packman.Lockfile{
+		Schema: packman.LockfileSchema,
+		Packs: map[string]packman.LockedPack{
+			"https://example.com/tools.git": {Version: "1.4.2", Commit: "tools"},
+		},
+	}); err != nil {
+		t.Fatalf("WriteLockfile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "tools", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("expected non-zero exit for unmaterialized import, got 0 (stdout=%q)", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "not materialized") {
+		t.Fatalf("expected 'not materialized' in stderr, got %q", stderr.String())
+	}
+}
+
+func TestDoImportPathResolvesBundledImportWithoutLock(t *testing.T) {
+	clearGCEnv(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := config.PublicGastownPackSource
+	commit := strings.TrimPrefix(config.PublicGastownPackVersion, "sha:")
+
+	writeCityToml(t, dir, "[workspace]\nname = \"demo\"\n")
+	// gastown is a bundled pack imported with no packs.lock present — it
+	// must resolve from its canonical pin rather than a lock entry.
+	writePackToml(t, dir, fmt.Sprintf(`
+[pack]
+name = "demo"
+schema = 1
+
+[imports.gastown]
+source = %q
+version = %q
+transitive = false
+`, source, config.PublicGastownPackVersion))
+
+	// Materialize the bundled pack at the canonical pin's cache dir.
+	want, err := packman.CachedPackDir(source, commit)
+	if err != nil {
+		t.Fatalf("CachedPackDir: %v", err)
+	}
+	if err := os.MkdirAll(want, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(want, "pack.toml"), []byte("[pack]\nname = \"gastown\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doImportPath(dir, "gastown", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != want {
+		t.Fatalf("doImportPath = %q, want %q", got, want)
+	}
+}

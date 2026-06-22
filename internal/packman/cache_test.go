@@ -394,3 +394,44 @@ func TestEnsureRepoInCacheReclonesCacheFileWithoutGit(t *testing.T) {
 		t.Fatalf("EnsureRepoInCache path = %q, want %q", got, path)
 	}
 }
+
+func TestCachedPackDirNoSubpathReturnsCacheRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := "https://example.com/repo.git"
+	commit := "abc123"
+	want, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	got, err := CachedPackDir(source, commit)
+	if err != nil {
+		t.Fatalf("CachedPackDir: %v", err)
+	}
+	if got != want {
+		t.Fatalf("CachedPackDir = %q, want %q", got, want)
+	}
+}
+
+func TestCachedPackDirAppendsSubpath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+
+	source := "file:///tmp/repo.git//packs/base"
+	commit := "abc123"
+	root, err := RepoCachePath(source, commit)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	got, err := CachedPackDir(source, commit)
+	if err != nil {
+		t.Fatalf("CachedPackDir: %v", err)
+	}
+	want := filepath.Join(root, "packs", "base")
+	if got != want {
+		t.Fatalf("CachedPackDir = %q, want %q", got, want)
+	}
+}

@@ -36,10 +36,7 @@ func ReadCachedPackImports(source, commit string) (map[string]config.Import, err
 	if err != nil {
 		return nil, err
 	}
-	packPath := cachePath
-	if subpath := normalizeRemoteSource(source).Subpath; subpath != "" {
-		packPath = filepath.Join(packPath, subpath)
-	}
+	packPath := cachedPackDir(source, cachePath)
 	root, err := RepoCacheRoot()
 	if err != nil {
 		return nil, err
