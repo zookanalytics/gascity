@@ -52,6 +52,11 @@ type Parser struct {
 
 	// resolvingChain tracks the order of formulas being resolved (for error messages).
 	resolvingChain []string
+
+	// patches holds formula overlays keyed by target formula name. Applied by
+	// Resolve after the extends chain is merged, so name-pinned consumers read
+	// the patched formula. nil/empty means no overlays. See WithPatches.
+	patches map[string][]*Patch
 }
 
 // NewParser creates a new formula parser.
@@ -73,6 +78,26 @@ func NewParser(searchPaths ...string) *Parser {
 		resolvingSet:   make(map[string]bool),
 		resolvingChain: nil,
 	}
+}
+
+// WithPatches registers formula overlays, indexed by target formula
+// name, and returns the Parser for chained construction. Patches are applied
+// by Resolve after the extends chain is merged; a patch targeting a formula
+// the Parser never resolves is simply never applied. Multiple patches for the
+// same target are applied in the order given (later overlays win on
+// overlapping step/var IDs). Calling it more than once accumulates patches.
+func (p *Parser) WithPatches(patches ...Patch) *Parser {
+	if len(patches) == 0 {
+		return p
+	}
+	if p.patches == nil {
+		p.patches = make(map[string][]*Patch, len(patches))
+	}
+	for i := range patches {
+		patch := patches[i]
+		p.patches[patch.Formula] = append(p.patches[patch.Formula], &patch)
+	}
+	return p
 }
 
 // SetSource swaps the formula-file Source used by the Parser. A nil
@@ -211,9 +236,43 @@ func (p *Parser) ParseTOML(data []byte) (*Formula, error) {
 	return &formula, nil
 }
 
-// Resolve fully resolves a formula, processing extends and expansions.
-// Returns a new formula with all inheritance applied.
+// Resolve fully resolves a formula, processing extends and expansions, then
+// applies any registered formula patches (WithPatches) for the
+// resolved name. Returns a new formula with all inheritance and overlays
+// applied. Patches run after the extends chain is merged so an overlay can
+// target steps contributed by a parent, and before name-pinned consumers read
+// the formula.
 func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
+	resolved, err := p.resolveInner(formula)
+	if err != nil {
+		return nil, err
+	}
+	return p.applyPatches(resolved)
+}
+
+// applyPatches overlays any patches registered for f's name, in order.
+// It is a no-op (returning f unchanged) when no patches target f.
+func (p *Parser) applyPatches(f *Formula) (*Formula, error) {
+	patches := p.patches[f.Formula]
+	if len(patches) == 0 {
+		return f, nil
+	}
+	out := f
+	for _, patch := range patches {
+		var err error
+		out, err = ApplyPatch(out, patch)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// resolveInner performs extends/inheritance resolution without applying
+// formula patches. Resolve wraps it to add patch application; the recursive
+// parent resolution below goes through Resolve so a patched parent is overlaid
+// before it is merged into the child.
+func (p *Parser) resolveInner(formula *Formula) (*Formula, error) {
 	// Check for cycles
 	if p.resolvingSet[formula.Formula] {
 		// Build the cycle chain for a clear error message

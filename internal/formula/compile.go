@@ -34,8 +34,8 @@ import (
 //  9. MaterializeExpansion — standalone expansion formula handling
 //  10. ApplyRalph — expand inline Ralph run/check steps
 //  11. toRecipe — flatten step tree to Recipe
-func Compile(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, error) {
-	return compileFormula(name, searchPaths, vars, true)
+func Compile(_ context.Context, name string, searchPaths []string, vars map[string]string, patches ...Patch) (*Recipe, error) {
+	return compileFormula(name, searchPaths, vars, true, patches)
 }
 
 // CompileWithoutRuntimeVarValidation compiles a formula while deferring
@@ -44,14 +44,14 @@ func Compile(_ context.Context, name string, searchPaths []string, vars map[stri
 // display surfaces and runtime paths that need recipe-level validation to
 // preserve idempotency or report residual title placeholders alongside missing
 // vars.
-func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPaths []string, vars map[string]string) (*Recipe, error) {
-	return compileFormula(name, searchPaths, vars, false)
+func CompileWithoutRuntimeVarValidation(_ context.Context, name string, searchPaths []string, vars map[string]string, patches ...Patch) (*Recipe, error) {
+	return compileFormula(name, searchPaths, vars, false, patches)
 }
 
 const explicitGraphRequirementError = `requires: formulas that use graph-only constructs must declare [requires] formula_compiler = ">=2.0.0" or the deprecated contract = "graph.v2" explicitly`
 
-func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool) (*Recipe, error) {
-	parser := NewParser(searchPaths...).SetSource(SourceFromEnv())
+func compileFormula(name string, searchPaths []string, vars map[string]string, validateRuntimeVars bool, patches []Patch) (*Recipe, error) {
+	parser := NewParser(searchPaths...).SetSource(SourceFromEnv()).WithPatches(patches...)
 	v2Enabled := IsFormulaV2Enabled()
 	var composedRequirements []formulaCompilerConstraint
 	collectComposedRequirements := func(f *Formula) error {
