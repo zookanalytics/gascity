@@ -686,6 +686,15 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		return nil, nil, fmt.Errorf("%s: %w", path, err)
 	}
 
+	// Fall through: a native agent's plain relative prompt_template/overlay_dir/
+	// namepool that does not resolve city-root-relative resolves against the
+	// same imported-pack closure. City-root paths win; multi-pack refs are an
+	// ambiguity error. Lets a native agent reuse an imported pack's asset
+	// without the "<pack>//" token.
+	if err := resolveAgentImportClosurePaths(fs, root, cityRoot); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", path, err)
+	}
+
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
 
