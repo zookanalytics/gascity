@@ -15,6 +15,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -60,15 +61,23 @@ type PackConfig struct {
 }
 
 // PackPatches holds the patch operations valid in pack.toml. City
-// configuration may patch agents, rigs, and providers; packs may only patch
-// agents visible within that pack load.
+// configuration may patch agents, rigs, and providers; packs may patch agents
+// visible within that pack load and overlay formulas in the import closure by
+// name.
 type PackPatches struct {
 	Agents []AgentPatch `toml:"agent,omitempty"`
+	// Formulas overlays imported formulas BY NAME ([[patches.formula]]),
+	// without renaming or copying them. Collected across the import closure
+	// into City.FormulaPatches and applied at formula-resolve time. This is
+	// the only way to adjust a formula whose name is pinned by the engine
+	// (e.g. the patrol formulas) since same-named formulas otherwise fully
+	// replace and the extends primitive requires a different name.
+	Formulas []formula.Patch `toml:"formula,omitempty"`
 }
 
 // IsEmpty reports whether the pack declares no supported patch entries.
 func (p *PackPatches) IsEmpty() bool {
-	return p == nil || len(p.Agents) == 0
+	return p == nil || (len(p.Agents) == 0 && len(p.Formulas) == 0)
 }
 
 // PackDefaults holds [defaults] entries used to seed generated rig
@@ -171,6 +180,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...,
 			)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
+			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, topoDir)...)
 			skills := cachedPackSkills(cache, topoDir)
 			if packName == "" && len(skills) > 0 {
 				return fmt.Errorf("rig %q pack %q: discovered skills require [pack].name for binding", rig.Name, ref)
@@ -413,6 +423,7 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				rigAgents = append(rigAgents, agents...)
 				rigNamedSessions = append(rigNamedSessions, namedSessions...)
 				cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
+				cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, impDir)...)
 
 				if len(providers) > 0 {
 					if cfg.Providers == nil {
@@ -590,6 +601,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		}
 		cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, stampDefaultBinding(cachedPackCommands(cache, topoDir), packName)...)
 		cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, cachedPackDoctors(cache, topoDir)...)
+		cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, topoDir)...)
 		skills := cachedPackSkills(cache, topoDir)
 		if packName == "" && len(skills) > 0 {
 			return nil, nil, nil, fmt.Errorf("city pack %q: discovered skills require [pack].name for shared binding", ref)
@@ -772,6 +784,7 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			cfg.Services = append(cfg.Services, services...)
 			cfg.PackCommands = appendDiscoveredCommands(cfg.PackCommands, commands...)
 			cfg.PackDoctors = appendDiscoveredDoctors(cfg.PackDoctors, doctors...)
+			cfg.FormulaPatches = appendUniqueFormulaPatches(cfg.FormulaPatches, cachedPackFormulaPatches(cache, impDir)...)
 			// Bootstrap-managed implicit imports own their skill
 			// materialization through the compat path; explicit user
 			// imports (including [imports.core]) contribute skills like
@@ -1019,6 +1032,7 @@ type packLoadResult struct {
 	commands       []DiscoveredCommand
 	doctors        []DiscoveredDoctor
 	skills         []DiscoveredSkillCatalog
+	formulaPatches []formula.Patch
 	localWarnings  []string
 	warnings       []string
 }
@@ -1184,6 +1198,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedCommands []DiscoveredCommand
 	var includedDoctors []DiscoveredDoctor
 	var includedSkills []DiscoveredSkillCatalog
+	var includedFormulaPatches []formula.Patch
 	var inheritedWarnings []string
 	includedProviders := make(map[string]ProviderSpec)
 
@@ -1210,6 +1225,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, cachedPackCommands(cache, incTopoDir)...)
 		includedDoctors = append(includedDoctors, cachedPackDoctors(cache, incTopoDir)...)
 		includedSkills = append(includedSkills, cachedPackSkills(cache, incTopoDir)...)
+		includedFormulaPatches = append(includedFormulaPatches, cachedPackFormulaPatches(cache, incTopoDir)...)
 
 		// Merge providers: included first, no overwrite.
 		for name, spec := range incProviders {
@@ -1353,6 +1369,11 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, impCommands...)
 		includedDoctors = append(includedDoctors, impDoctors...)
 		includedSkills = append(includedSkills, impSkills...)
+		// Formula overlays propagate across the closure by target name and are
+		// not gated by the import's transitive flag (which governs nested-agent
+		// visibility, not name-targeted config). cachedPackFormulaPatches
+		// returns the import's full closure of patches.
+		includedFormulaPatches = append(includedFormulaPatches, cachedPackFormulaPatches(cache, impDir)...)
 
 		for name, spec := range impProviders {
 			if _, exists := includedProviders[name]; !exists {
@@ -1465,6 +1486,8 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedSkills = append(includedSkills, skills...)
+	// This pack's own [[patches.formula]] join the closure's overlays.
+	includedFormulaPatches = append(includedFormulaPatches, tc.Patches.Formulas...)
 
 	// Apply pack-level patches to the merged agent list.
 	if !tc.Patches.IsEmpty() {
@@ -1545,6 +1568,7 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		commands:       includedCommands,
 		doctors:        includedDoctors,
 		skills:         includedSkills,
+		formulaPatches: includedFormulaPatches,
 		localWarnings:  append([]string(nil), packWarnings...),
 		warnings:       appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
 	})
@@ -1571,6 +1595,7 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		commands:       deepCopyCommands(in.commands),
 		doctors:        deepCopyDoctors(in.doctors),
 		skills:         deepCopySkills(in.skills),
+		formulaPatches: append([]formula.Patch(nil), in.formulaPatches...),
 		localWarnings:  append([]string(nil), in.localWarnings...),
 		warnings:       append([]string(nil), in.warnings...),
 	}

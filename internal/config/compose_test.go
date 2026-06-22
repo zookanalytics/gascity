@@ -445,7 +445,7 @@ dir = "legacy-formulas"
 name = "app"
 prefix = "ga"
 `,
-			want: "[[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+			want: "[[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] and [[patches.formula]] only",
 		},
 		{
 			name: "provider_patches",
@@ -454,7 +454,7 @@ prefix = "ga"
 name = "local"
 command = "false"
 `,
-			want: "[[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] only",
+			want: "[[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] and [[patches.formula]] only",
 		},
 	}
 

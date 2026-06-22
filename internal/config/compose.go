@@ -587,6 +587,12 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	root.FormulaLayers = ComputeFormulaLayers(
 		cityTopoFormulas, cityLocalFormulas, rigFormulaDirs, root.Rigs, cityRoot)
 
+	// Fail fast when a collected [[patches.formula]] targets a formula or step
+	// that does not resolve, now that formula layers are known.
+	if err := validateFormulaPatches(root); err != nil {
+		return nil, nil, fmt.Errorf("applying patches: %w", err)
+	}
+
 	// Inject implicit agents for built-in providers not already defined.
 	// Must happen after all composition (fragments, packs, patches) so
 	// explicit agents always take precedence.

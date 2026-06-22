@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/gastownhall/gascity/internal/formula"
 )
 
 const agentsAliasWarning = "[agents] is a deprecated compatibility alias for [agent_defaults]; rewrite the table name to [agent_defaults]"
@@ -82,10 +83,10 @@ func validatePackAuthoringSurface(md toml.MetaData, source string) error {
 		return fmt.Errorf("%s: [formulas].dir is no longer supported; use the well-known formulas/ directory", source)
 	}
 	if md.IsDefined("patches", "rigs") {
-		return fmt.Errorf("%s: [[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] only", source)
+		return fmt.Errorf("%s: [[patches.rigs]] is only valid in city.toml; pack.toml supports [[patches.agent]] and [[patches.formula]] only", source)
 	}
 	if md.IsDefined("patches", "providers") {
-		return fmt.Errorf("%s: [[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] only", source)
+		return fmt.Errorf("%s: [[patches.providers]] is only valid in city.toml; pack.toml supports [[patches.agent]] and [[patches.formula]] only", source)
 	}
 	return nil
 }
@@ -198,6 +199,7 @@ func knownTOMLKeys() []string {
 		reflect.TypeOf(Rig{}),
 		reflect.TypeOf(ProviderSpec{}),
 		reflect.TypeOf(AgentPatch{}),
+		reflect.TypeOf(formula.Patch{}),
 		reflect.TypeOf(AgentOverride{}),
 		reflect.TypeOf(BeadsConfig{}),
 		reflect.TypeOf(BeadPolicyConfig{}),

@@ -14,6 +14,7 @@ import (
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
@@ -3640,6 +3641,22 @@ func TestSlingFormulaSearchPaths_CityScoped(t *testing.T) {
 	want := []string{"/city/formulas"}
 	if len(got) != 1 || got[0] != want[0] {
 		t.Fatalf("SlingFormulaSearchPaths(city-scoped) = %v, want %v", got, want)
+	}
+}
+
+// TestSlingFormulaPatches proves the dispatcher forwards the config-collected
+// formula overlays into the compile path (nil-safe). The overlay semantics
+// themselves are covered by internal/formula and internal/config tests.
+func TestSlingFormulaPatches(t *testing.T) {
+	if got := SlingFormulaPatches(SlingDeps{}); got != nil {
+		t.Errorf("SlingFormulaPatches(no cfg) = %v, want nil", got)
+	}
+	cfg := &config.City{
+		FormulaPatches: []formula.Patch{{Formula: "mol-refinery-patrol"}},
+	}
+	got := SlingFormulaPatches(SlingDeps{Cfg: cfg})
+	if len(got) != 1 || got[0].Formula != "mol-refinery-patrol" {
+		t.Fatalf("SlingFormulaPatches = %v, want the collected patch", got)
 	}
 }
 

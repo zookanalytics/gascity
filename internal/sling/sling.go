@@ -897,6 +897,17 @@ func SlingFormulaSearchPaths(deps SlingDeps, a config.Agent) []string {
 	return deps.Cfg.FormulaLayers.SearchPaths(rigName)
 }
 
+// SlingFormulaPatches returns the [[patches.formula]] overlays collected during
+// config load. They are applied at formula-resolve time so the formula this
+// dispatcher (a name-pinned consumer) materializes reflects the overlay,
+// without renaming the formula. Returns nil when no config is wired.
+func SlingFormulaPatches(deps SlingDeps) []formula.Patch {
+	if deps.Cfg == nil {
+		return nil
+	}
+	return deps.Cfg.FormulaPatches
+}
+
 // rigNameForAgent returns the rig name for an agent. Handles both
 // configuration shapes:
 //   - a.Dir is a rig name (`dir = "gascity"`) — return as-is after a
@@ -1236,7 +1247,7 @@ func InstantiateSlingFormula(ctx context.Context, formulaName string, searchPath
 		opts.PriorityOverride = BeadPriorityOverride(deps.Store, sourceBeadID)
 	}
 	compileStart := time.Now()
-	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars)
+	recipe, err := formula.CompileWithoutRuntimeVarValidation(ctx, formulaName, searchPaths, opts.Vars, SlingFormulaPatches(deps)...)
 	if err != nil {
 		SlingTracef("instantiate compile-error formula=%s dur=%s err=%v", formulaName, time.Since(compileStart), err)
 		return nil, err

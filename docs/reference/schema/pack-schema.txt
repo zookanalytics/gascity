@@ -637,6 +637,277 @@
       ],
       "description": "AgentPatch modifies an existing agent identified by (Dir, Name)."
     },
+    "BondPoint": {
+      "properties": {
+        "ID": {
+          "type": "string",
+          "description": "ID is the unique identifier for this bond point."
+        },
+        "Description": {
+          "type": "string",
+          "description": "Description explains what should be attached here."
+        },
+        "after_step": {
+          "type": "string",
+          "description": "AfterStep is the step ID after which to attach.\nMutually exclusive with BeforeStep."
+        },
+        "before_step": {
+          "type": "string",
+          "description": "BeforeStep is the step ID before which to attach.\nMutually exclusive with AfterStep."
+        },
+        "Parallel": {
+          "type": "boolean",
+          "description": "Parallel makes attached steps run in parallel with the anchor step."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "ID",
+        "Description",
+        "Parallel"
+      ],
+      "description": "BondPoint is a named attachment site for composition."
+    },
+    "BranchRule": {
+      "properties": {
+        "From": {
+          "type": "string",
+          "description": "From is the step ID that precedes the parallel paths.\nAll branch steps will depend on this step."
+        },
+        "Steps": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Steps are the step IDs that run in parallel.\nThese steps will all depend on From."
+        },
+        "Join": {
+          "type": "string",
+          "description": "Join is the step ID that follows all parallel paths.\nThis step will depend on all Steps completing."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "From",
+        "Steps",
+        "Join"
+      ],
+      "description": "BranchRule defines parallel execution paths that rejoin."
+    },
+    "ComposeRules": {
+      "properties": {
+        "bond_points": {
+          "items": {
+            "$ref": "#/$defs/BondPoint"
+          },
+          "type": "array",
+          "description": "BondPoints are named locations where other formulas can attach."
+        },
+        "Hooks": {
+          "items": {
+            "$ref": "#/$defs/Hook"
+          },
+          "type": "array",
+          "description": "Hooks are automatic attachments triggered by labels or conditions."
+        },
+        "Expand": {
+          "items": {
+            "$ref": "#/$defs/ExpandRule"
+          },
+          "type": "array",
+          "description": "Expand applies an expansion template to a single target step.\nThe target step is replaced by the expanded template steps."
+        },
+        "Map": {
+          "items": {
+            "$ref": "#/$defs/MapRule"
+          },
+          "type": "array",
+          "description": "Map applies an expansion template to all steps matching a pattern.\nEach matching step is replaced by the expanded template steps."
+        },
+        "Branch": {
+          "items": {
+            "$ref": "#/$defs/BranchRule"
+          },
+          "type": "array",
+          "description": "Branch defines fork-join parallel execution patterns.\nEach rule creates dependencies for parallel paths that rejoin."
+        },
+        "Gate": {
+          "items": {
+            "$ref": "#/$defs/GateRule"
+          },
+          "type": "array",
+          "description": "Gate defines conditional waits before steps.\nEach rule adds a condition that must be satisfied at runtime."
+        },
+        "Aspects": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Aspects lists aspect formula names to apply to this formula.\nAspects are applied after expansions, adding before/after/around\nsteps to matching targets based on the aspect's advice rules.\nExample: [\"security-audit\", \"logging\"]"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Hooks",
+        "Expand",
+        "Map",
+        "Branch",
+        "Gate",
+        "Aspects"
+      ],
+      "description": "ComposeRules define how formulas can be bonded together."
+    },
+    "DrainItemSpec": {
+      "properties": {
+        "single_lane": {
+          "type": "boolean",
+          "description": "SingleLane is reserved for future shared drains."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DrainItemSpec contains per-item drain execution controls."
+    },
+    "DrainSpec": {
+      "properties": {
+        "context": {
+          "type": "string",
+          "description": "Context controls item execution isolation. \"separate\" creates one item\nroot per member. \"shared\" materializes one single-lane item root at a time\nwith continuation affinity metadata."
+        },
+        "formula": {
+          "type": "string",
+          "description": "Formula is the graph.v2 formula to run for each one-member unit convoy."
+        },
+        "continuation_group": {
+          "type": "string",
+          "description": "ContinuationGroup is the shared execution group suffix. It is valid only\nwith context=\"shared\"; the runtime also records the drain control id."
+        },
+        "member_access": {
+          "type": "string",
+          "description": "MemberAccess declares whether item work may mutate the underlying convoy\nmember. \"exclusive\" records a per-member drain reservation before\nmaterializing item work."
+        },
+        "max_units": {
+          "type": "integer",
+          "description": "MaxUnits caps one drain expansion to prevent accidental runaway materialization."
+        },
+        "on_item_failure": {
+          "type": "string",
+          "description": "OnItemFailure controls drain completion behavior when an item root fails."
+        },
+        "item": {
+          "$ref": "#/$defs/DrainItemSpec",
+          "description": "Item contains per-unit execution controls."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "DrainSpec defines a graph.v2 drain control step."
+    },
+    "ExpandRule": {
+      "properties": {
+        "Target": {
+          "type": "string",
+          "description": "Target is the step ID to expand."
+        },
+        "With": {
+          "type": "string",
+          "description": "With is the name of the expansion formula to apply."
+        },
+        "Vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Vars are variable overrides for the expansion."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Target",
+        "With",
+        "Vars"
+      ],
+      "description": "ExpandRule applies an expansion template to a single target step."
+    },
+    "Gate": {
+      "properties": {
+        "Type": {
+          "type": "string",
+          "description": "Type is the condition type: gh:run, gh:pr, timer, human, mail."
+        },
+        "ID": {
+          "type": "string",
+          "description": "ID is the condition identifier (e.g., workflow name for gh:run)."
+        },
+        "Timeout": {
+          "type": "string",
+          "description": "Timeout is how long to wait before escalation (e.g., \"1h\", \"24h\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Type",
+        "ID",
+        "Timeout"
+      ],
+      "description": "Gate defines an async wait condition for formula steps."
+    },
+    "GateRule": {
+      "properties": {
+        "Before": {
+          "type": "string",
+          "description": "Before is the step ID that the gate applies to.\nThe condition must be satisfied before this step can start."
+        },
+        "Condition": {
+          "type": "string",
+          "description": "Condition is the expression to evaluate.\nFormat matches condition evaluator syntax (e.g., \"tests.status == 'complete'\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Before",
+        "Condition"
+      ],
+      "description": "GateRule defines a condition that must be satisfied before a step proceeds."
+    },
+    "Hook": {
+      "properties": {
+        "Trigger": {
+          "type": "string",
+          "description": "Trigger is what activates this hook.\nFormats: \"label:security\", \"type:bug\", \"priority:0-1\"."
+        },
+        "Attach": {
+          "type": "string",
+          "description": "Attach is the formula to attach when triggered."
+        },
+        "At": {
+          "type": "string",
+          "description": "At is the bond point to attach at (default: end)."
+        },
+        "Vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Vars are variable overrides for the attached formula."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Trigger",
+        "Attach",
+        "At",
+        "Vars"
+      ],
+      "description": "Hook defines automatic formula attachment based on conditions."
+    },
     "Import": {
       "properties": {
         "source": {
@@ -654,6 +925,75 @@
         "source"
       ],
       "description": "Import defines a named import of another pack."
+    },
+    "LoopSpec": {
+      "properties": {
+        "Count": {
+          "type": "integer",
+          "description": "Count is the fixed number of iterations.\nWhen set, the loop body is expanded Count times."
+        },
+        "Until": {
+          "type": "string",
+          "description": "Until is a condition that ends the loop.\nFormat matches condition evaluator syntax (e.g., \"step.status == 'complete'\")."
+        },
+        "Max": {
+          "type": "integer",
+          "description": "Max is the maximum iterations for conditional loops.\nRequired when Until is set, to prevent unbounded loops."
+        },
+        "Range": {
+          "type": "string",
+          "description": "Range specifies a computed range for iteration.\nFormat: \"start..end\" where start and end can be:\n  - Integers: \"1..10\"\n  - Expressions: \"1..2^{disks}\" (evaluated at cook time)\n  - Variables: \"{start}..{count}\" (substituted from Vars)\nSupports: + - * / ^ (power) and parentheses."
+        },
+        "Var": {
+          "type": "string",
+          "description": "Var is the variable name exposed to body steps.\nFor Range loops, this is set to the current iteration value.\nExample: var: \"move_num\" with range: \"1..7\" exposes {move_num}=1,2,...,7"
+        },
+        "Body": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array",
+          "description": "Body contains the steps to repeat."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Count",
+        "Until",
+        "Max",
+        "Range",
+        "Var",
+        "Body"
+      ],
+      "description": "LoopSpec defines iteration over a body of steps."
+    },
+    "MapRule": {
+      "properties": {
+        "Select": {
+          "type": "string",
+          "description": "Select is a glob pattern matching step IDs to expand.\nExamples: \"*.implement\", \"shiny.*\""
+        },
+        "With": {
+          "type": "string",
+          "description": "With is the name of the expansion formula to apply."
+        },
+        "Vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Vars are variable overrides for the expansion."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Select",
+        "With",
+        "Vars"
+      ],
+      "description": "MapRule applies an expansion template to all matching steps."
     },
     "ModelPricing": {
       "properties": {
@@ -721,6 +1061,42 @@
         "template"
       ],
       "description": "NamedSession defines a canonical persistent session backed by an agent template."
+    },
+    "OnCompleteSpec": {
+      "properties": {
+        "for_each": {
+          "type": "string",
+          "description": "ForEach is the path to the iterable collection in step output.\nFormat: \"output.\u003cfield\u003e\" or \"output.\u003cfield\u003e.\u003cnested\u003e\"\nThe collection must be an array at runtime."
+        },
+        "Bond": {
+          "type": "string",
+          "description": "Bond is the formula to instantiate for each item.\nA new molecule is created for each element in the ForEach collection."
+        },
+        "Vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Vars are variable bindings for each iteration.\nSupports placeholders:\n  - {item} - the current item value (for primitives)\n  - {item.field} - a field from the current item (for objects)\n  - {index} - the zero-based iteration index"
+        },
+        "Parallel": {
+          "type": "boolean",
+          "description": "Parallel runs all bonded molecules concurrently (default behavior).\nSet to true to make this explicit."
+        },
+        "Sequential": {
+          "type": "boolean",
+          "description": "Sequential runs bonded molecules one at a time.\nEach molecule starts only after the previous one completes.\nMutually exclusive with Parallel."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Bond",
+        "Vars",
+        "Parallel",
+        "Sequential"
+      ],
+      "description": "OnCompleteSpec defines actions triggered when a step completes."
     },
     "OptionChoice": {
       "properties": {
@@ -954,6 +1330,13 @@
             "$ref": "#/$defs/AgentPatch"
           },
           "type": "array"
+        },
+        "formula": {
+          "items": {
+            "$ref": "#/$defs/Patch"
+          },
+          "type": "array",
+          "description": "Formulas overlays imported formulas BY NAME ([[patches.formula]]),\nwithout renaming or copying them. Collected across the import closure\ninto City.FormulaPatches and applied at formula-resolve time. This is\nthe only way to adjust a formula whose name is pinned by the engine\n(e.g. the patrol formulas) since same-named formulas otherwise fully\nreplace and the extends primitive requires a different name."
         }
       },
       "additionalProperties": false,
@@ -982,6 +1365,49 @@
         "agent"
       ],
       "description": "PackRequirement declares an agent that must exist in the expanded config for this pack's formulas/orders to function."
+    },
+    "Patch": {
+      "properties": {
+        "formula": {
+          "type": "string",
+          "description": "Formula is the target formula name (required). It MUST match the name of\nthe formula being patched; the overlay never renames its target."
+        },
+        "description": {
+          "type": "string",
+          "description": "Description overrides the target's description when non-empty. This\nmirrors the child-wins description rule in Resolve."
+        },
+        "vars": {
+          "additionalProperties": {
+            "$ref": "#/$defs/VarDef"
+          },
+          "type": "object",
+          "description": "Vars adds or overrides template variables. Existing vars with the same\nname are replaced; new vars are added. Mirrors the child var-override\nloop in Resolve."
+        },
+        "step": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array",
+          "description": "Steps override existing steps BY ID, preserving position. Every step\nlisted here MUST already exist in the resolved target; overriding a\nstep that does not exist is a hard error (a typo would otherwise\nsilently append a broken step). Authored as `[[patches.formula.step]]`."
+        },
+        "append_step": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array",
+          "description": "AppendSteps append NEW steps at the end. Every step listed here MUST\ncarry an ID that does not already exist in the resolved target; reusing\nan existing ID is a hard error (use Steps to override instead).\nAuthored as `[[patches.formula.append_step]]`."
+        },
+        "compose": {
+          "$ref": "#/$defs/ComposeRules",
+          "description": "Compose merges composition rules into the target via mergeComposeRules\n(bond points override by ID; hooks/expand/map append)."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "formula"
+      ],
+      "description": "Patch overlays a single named formula in place, without renaming or copying it."
     },
     "PoolOverride": {
       "properties": {
@@ -1214,6 +1640,55 @@
       "type": "object",
       "description": "ProviderSpec defines a named provider's startup parameters."
     },
+    "RalphCheckSpec": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "description": "Mode is the checker implementation. V0 supports only \"exec\"."
+        },
+        "path": {
+          "type": "string",
+          "description": "Path is the repo-relative or absolute script path to execute."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Timeout bounds script execution (for example \"2m\")."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RalphCheckSpec defines the validation step for a Ralph attempt."
+    },
+    "RalphSpec": {
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "description": "MaxAttempts bounds the total number of run/check attempts, including the first."
+        },
+        "check": {
+          "$ref": "#/$defs/RalphCheckSpec",
+          "description": "Check defines how each attempt is validated."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RalphSpec defines an inline run/check retry loop."
+    },
+    "RetrySpec": {
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "description": "MaxAttempts bounds the total number of attempts, including the first."
+        },
+        "on_exhausted": {
+          "type": "string",
+          "description": "OnExhausted controls the terminal outcome when a transient failure\nexhausts the attempt budget. Supported values: \"hard_fail\", \"soft_fail\"."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "RetrySpec defines first-class transient retry semantics for an executable step."
+    },
     "Service": {
       "properties": {
         "name": {
@@ -1313,6 +1788,170 @@
       "type": "object",
       "description": "ServiceWorkflowConfig configures controller-owned workflow services."
     },
+    "Step": {
+      "properties": {
+        "ID": {
+          "type": "string",
+          "description": "ID is the unique identifier within this formula.\nUsed for dependency references and bond points."
+        },
+        "Title": {
+          "type": "string",
+          "description": "Title is the issue title (supports {{variable}} substitution)."
+        },
+        "Description": {
+          "type": "string",
+          "description": "Description is the issue description (supports substitution)."
+        },
+        "description_file": {
+          "type": "string",
+          "description": "DescriptionFile is a path to a file whose contents replace Description.\nResolved relative to the formula file's directory at compile time.\nIf both Description and DescriptionFile are set, DescriptionFile wins."
+        },
+        "Notes": {
+          "type": "string",
+          "description": "Notes are additional notes for the issue (supports substitution)."
+        },
+        "Type": {
+          "type": "string",
+          "description": "Type is the issue type: task, bug, feature, epic, chore."
+        },
+        "Priority": {
+          "type": "integer",
+          "description": "Priority is the issue priority (0-4)."
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Labels are applied to the created issue.\nTOML key is \"tags\" (formula author facing); JSON/Go name is \"labels\" (bead facing)."
+        },
+        "metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Metadata is copied to the cooked issue metadata as string key/value pairs.\nReserved runtime keys under the gc.* namespace may be added by transforms."
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "DependsOn lists step IDs this step blocks on (within the formula)."
+        },
+        "needs": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Needs is a simpler alias for DependsOn - lists sibling step IDs that must complete first.\nEither Needs or DependsOn can be used; they are merged during cooking."
+        },
+        "waits_for": {
+          "type": "string",
+          "description": "WaitsFor specifies a fanout gate type for this step.\nValues: \"all-children\" (wait for all dynamic children) or \"any-children\" (wait for first).\nWhen set, the cooked issue gets a \"gate:\u003cvalue\u003e\" label."
+        },
+        "Assignee": {
+          "type": "string",
+          "description": "Assignee is the default assignee (supports substitution)."
+        },
+        "Expand": {
+          "type": "string",
+          "description": "Expand references an expansion formula to inline here.\nWhen set, this step is replaced by the expansion's template steps.\nSee ApplyInlineExpansions in expand.go for implementation."
+        },
+        "expand_vars": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "ExpandVars are variable overrides for the expansion.\nMerged with the expansion formula's default vars during inline expansion."
+        },
+        "Condition": {
+          "type": "string",
+          "description": "Condition makes this step optional based on a variable.\nFormat: \"{{var}}\" (truthy), \"!{{var}}\" (negated), \"{{var}} == value\", \"{{var}} != value\".\nEvaluated at cook/pour time via FilterStepsByCondition."
+        },
+        "Children": {
+          "items": {
+            "$ref": "#/$defs/Step"
+          },
+          "type": "array",
+          "description": "Children are nested steps (for creating epic hierarchies)."
+        },
+        "Gate": {
+          "$ref": "#/$defs/Gate",
+          "description": "Gate defines an async wait condition for this step.\nWhen set, bd cook creates a gate issue that blocks this step.\nClose the gate issue (bd close bd-xxx.gate-stepid) to unblock."
+        },
+        "Loop": {
+          "$ref": "#/$defs/LoopSpec",
+          "description": "Loop defines iteration for this step.\nWhen set, the step becomes a container that expands its body."
+        },
+        "on_complete": {
+          "$ref": "#/$defs/OnCompleteSpec",
+          "description": "OnComplete defines actions triggered when this step completes.\nUsed for runtime expansion over step output (the for-each construct)."
+        },
+        "tally": {
+          "$ref": "#/$defs/TallySpec",
+          "description": "Tally aggregates outputs from voters spawned by OnComplete.\nRequires OnComplete to be set. A tally control step is injected\nafter the fanout; downstream steps are automatically rewritten to\nwait for the tally result rather than the source step."
+        },
+        "ralph": {
+          "$ref": "#/$defs/RalphSpec",
+          "description": "Ralph wraps this step in an inline run/check retry loop.\nThe original step becomes a logical container, and the actionable work is\nemitted as first-class graph steps.\nJSON storage intentionally retains the legacy \"ralph\" field name for\nbackward-compatible step snapshots; the parser also accepts canonical\npublic \"check\" input."
+        },
+        "retry": {
+          "$ref": "#/$defs/RetrySpec",
+          "description": "Retry wraps an executable step in an inline attempt/eval retry loop.\nThe original step becomes a stable logical container, and the actionable\nwork is emitted as first-class graph steps."
+        },
+        "drain": {
+          "$ref": "#/$defs/DrainSpec",
+          "description": "Drain scatters the input convoy into one-member unit convoys and runs an\nitem formula for each unit. Drain is graph.v2-only and materializes as a\ncontroller-owned control bead."
+        },
+        "timeout": {
+          "type": "string",
+          "description": "Timeout is the maximum duration for this step's Ralph check script.\nGate condition scripts use gate.timeout instead.\nFormat: Go duration string (e.g., \"5m\", \"2m30s\", \"300s\").\nOverrides DefaultGateTimeout (5m) unless check.timeout is set."
+        },
+        "SourceFormula": {
+          "type": "string",
+          "description": "SourceFormula is the formula name where this step was defined.\nFor inherited steps, this is the parent formula, not the final composed formula."
+        },
+        "SourceLocation": {
+          "type": "string",
+          "description": "SourceLocation is the path within the source formula.\nFormat: \"steps[0]\", \"steps[2].children[1]\", \"advice[0].after\", \"loop.body[0]\""
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "ID",
+        "Title",
+        "Description",
+        "Notes",
+        "Type",
+        "Priority",
+        "Assignee",
+        "Expand",
+        "Condition",
+        "Children",
+        "Gate",
+        "Loop",
+        "SourceFormula",
+        "SourceLocation"
+      ],
+      "description": "Step defines a work item to create when the formula is instantiated."
+    },
+    "TallySpec": {
+      "properties": {
+        "vote_field": {
+          "type": "string",
+          "description": "VoteField is the dot-separated JSON path within each voter's\ngc.output_json to extract as the vote value (e.g. \"answer\",\n\"result.verdict\"). If empty, the raw gc.outcome (\"pass\"/\"fail\")\nof each voter bead is used directly."
+        },
+        "mode": {
+          "type": "string",
+          "description": "Mode controls the aggregation logic. Supported values:\n  \"majority\"   (default) — the most common vote must have \u003e50% share\n  \"unanimous\"            — every voter must produce the same value\n  \"any-pass\"             — at least one voter's gc.outcome must be \"pass\""
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "TallySpec defines how to aggregate outputs from voter fragments spawned by an OnComplete fanout."
+    },
     "Tier": {
       "properties": {
         "prompt_usd_per_1m": {
@@ -1337,6 +1976,48 @@
         "cache_creation_usd_per_1m"
       ],
       "description": "Tier defines per-token-type rates in USD per 1 million tokens."
+    },
+    "VarDef": {
+      "properties": {
+        "Description": {
+          "type": "string",
+          "description": "Description explains what this variable is for."
+        },
+        "Default": {
+          "type": "string",
+          "description": "Default is the value to use if not provided.\nnil means no default (variable must be provided if referenced).\nNon-nil (including \u0026\"\") means the variable has an explicit default."
+        },
+        "Required": {
+          "type": "boolean",
+          "description": "Required indicates the variable must be provided (no default)."
+        },
+        "Enum": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Enum lists the allowed values (if non-empty)."
+        },
+        "Pattern": {
+          "type": "string",
+          "description": "Pattern is a regex pattern the value must match."
+        },
+        "Type": {
+          "type": "string",
+          "description": "Type is the expected value type: string (default), int, bool."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "Description",
+        "Default",
+        "Required",
+        "Enum",
+        "Pattern",
+        "Type"
+      ],
+      "description": "VarDef defines a template variable with optional validation."
     }
   },
   "title": "Gas City Pack Manifest",
