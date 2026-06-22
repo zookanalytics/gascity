@@ -2255,39 +2255,26 @@ func adjustPackPatchPaths(patches *PackPatches, topoDir, cityRoot string) {
 // When a patch has Dir == "", it matches by Name alone — this is the
 // normal case for pack authors who don't know which rig will use their
 // pack (agents are rig-stamped during recursive loadPack before patches
-// run). A bare Name without a dot matches the first agent with that
-// Name regardless of binding (legacy behavior). When Name contains a
-// dot, the prefix (split on the last dot) is treated as a binding-name
-// filter and the suffix as the bare-name match, letting pack authors
-// disambiguate between imported packs that share a bare name. When Dir
-// is set, both Dir and Name must match exactly.
+// run). When Dir is set, both Dir and Name must match.
 // Returns an error if a patch targets a nonexistent agent.
 func applyPackAgentPatches(agents []Agent, patches []AgentPatch) error {
 	for i, p := range patches {
 		target := qualifiedNameFromPatch(p.Dir, p.Name)
-		binding, bare := "", p.Name
-		if p.Dir == "" {
-			if dot := strings.LastIndex(p.Name, "."); dot >= 0 {
-				binding, bare = p.Name[:dot], p.Name[dot+1:]
-			}
-		}
 		found := false
 		for j := range agents {
 			if p.Dir == "" {
-				if agents[j].Name != bare {
-					continue
+				// Name-only match: pack patches don't know the rig name.
+				if agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], &patches[i])
+					found = true
+					break
 				}
-				if binding != "" && agents[j].BindingName != binding {
-					continue
+			} else {
+				if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
+					applyAgentPatchFields(&agents[j], &patches[i])
+					found = true
+					break
 				}
-				applyAgentPatchFields(&agents[j], &patches[i])
-				found = true
-				break
-			}
-			if agents[j].Dir == p.Dir && agents[j].Name == p.Name {
-				applyAgentPatchFields(&agents[j], &patches[i])
-				found = true
-				break
 			}
 		}
 		if !found {
