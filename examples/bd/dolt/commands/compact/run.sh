@@ -1664,6 +1664,10 @@ flatten_database() {
   head_before_reset=""
   post_verify_head=""
   writer_race_detected=0
+  # Reset here (not only inside the pending_push block) because the
+  # post-flatten push path reads it after the block; without a per-db reset
+  # it would leak a stale=1 from a prior db in the flatten loop (gc-xeuxl).
+  pending_push_not_fresh=0
 
   if [ -n "$only_dbs" ]; then
     case ",$only_dbs," in
@@ -1854,9 +1858,11 @@ flatten_database() {
       # operator (write_compact_marker preserves created_at across rewrites, so
       # the "failing since" signal survives) and fall THROUGH to the
       # threshold/flatten path instead of returning. If a flatten runs, the
-      # post-flatten push_remote_after_compaction refreshes the marker's
-      # compacted_from_head against the rewritten history and never force-pushes
-      # a diverged remote (its ancestry gate defers instead).
+      # post-flatten step (guarded by pending_push_not_fresh) supersedes this
+      # marker with the rewritten compacted_from_head and leaves the push
+      # deferred — it must NOT call the normal push_remote_after_compaction,
+      # which force-pushes and clears the marker in the verified/equal remote
+      # case, silently performing the deferred push (gc-xeuxl).
       # ensure_remote_push_retry_fresh already logged the manual-review reason.
       printf 'compact: db=%s pending_push deferred for manual review — proceeding to local flatten+GC (remote push stays pending)\n' "$db" >&2
     elif [ -n "$dry_run" ]; then
@@ -2365,6 +2371,21 @@ flatten_database() {
   if run_full_gc "$db" "flatten ok commits=$count->${after_count:-?} but" \
     "commits=$count->${after_count:-?}" "$start"; then
     clear_compact_marker "$pending_gc_dir" "$db"
+    if [ "$pending_push_not_fresh" = "1" ] && [ -n "$remote" ]; then
+      # The stale pending_push marker that fell through above deferred the
+      # remote push for manual review. Local flatten+GC has now run, but the
+      # deferred push must STILL NOT happen automatically: in the verified/equal
+      # remote case push_remote_after_compaction force-pushes and clears the
+      # marker, silently performing the very push being deferred (gc-xeuxl).
+      # Supersede the marker with this run's rewritten compacted_from_head and
+      # freshly-probed remote contract (write_compact_marker preserves
+      # created_at, so the "failing since" signal survives) and leave the push
+      # for the operator.
+      printf 'compact: db=%s flatten+GC ran but pending_push stays deferred for manual review — superseding marker, remote push not attempted\n' "$db" >&2
+      write_pending_push_marker "$db" "$remote" "$expected_remote_head" "${expected_remote_head_verified:-0}" "$compacted_from_head" \
+        "pending_push deferred for manual review; local flatten+GC ran but remote push still requires manual review" "$local_branch" "$remote_branch" || return 1
+      return 0
+    fi
     push_remote_after_compaction "$db" "$remote" "$expected_remote_head" "$expected_remote_head_verified" "initial" "$compacted_from_head" "$local_branch" "$remote_branch"
     return $?
   fi
