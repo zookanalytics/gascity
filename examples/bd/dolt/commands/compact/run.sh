@@ -45,8 +45,12 @@
 #   5. Run CALL DOLT_GC('--full') to reclaim chunks orphaned by the flatten.
 #
 # Remote push failures are recorded in compact-pending-push markers and do not
-# fail local compaction. Later runs retry those markers before threshold skips,
-# and unverified remote heads must become ancestry-verifiable before push.
+# fail local compaction. Fresh markers retry the push before threshold skips; a
+# marker too old to retry safely (stale, or with an unparseable created_at)
+# defers the push for manual review and falls through to local flatten+GC, so
+# remote-push state never blocks local bloat recovery. Unverified remote heads
+# must become ancestry-verifiable before push, and a diverged remote is never
+# force-pushed automatically.
 # Surgical mode (preserve recent N commits via interactive rebase) is
 # intentionally not implemented; flatten is sufficient for bloat recovery
 # and avoids the rebase-vs-concurrent-write hazards.
@@ -73,7 +77,8 @@
 #                     default lives in runtime.sh.
 #   GC_DOLT_COMPACT_PENDING_PUSH_MAX_AGE_SECS
 #     (default: 172800) — maximum age for automatic pending remote-push retry.
-#                       Older markers require manual review before push.
+#                       Older markers defer the push for manual review but do
+#                       not block local flatten+GC.
 #   GC_DOLT_COMPACT_REMOTE               (optional) — remote to fetch/push.
 #                                         Defaults to origin when present;
 #                                         ambiguous multi-remote stores fail.
@@ -1734,12 +1739,32 @@ flatten_database() {
           ;;
       esac
     fi
+    pending_gc_push_deferred=0
     if [ -n "$pending_remote" ]; then
-      ensure_remote_push_retry_fresh "$pending_gc_dir" "$db" "pending_gc" || return 1
+      # Same defect as the pending_push gate below (gc-ai5n7): a stale (or
+      # unparseable-created_at) marker means the deferred REMOTE push needs
+      # manual review, but that must NOT block the LOCAL DOLT_GC this marker
+      # guards — skipping it lets chunk-store bloat grow unbounded. Run the
+      # local GC anyway; the deferred push is handed off below.
+      if ! ensure_remote_push_retry_fresh "$pending_gc_dir" "$db" "pending_gc"; then
+        pending_gc_push_deferred=1
+      fi
     fi
     printf 'compact: db=%s pending_gc=present — retrying DOLT_GC --full\n' "$db"
     start=$(date +%s)
     if run_full_gc "$db" "pending-GC retry" "pending-GC retry" "$start"; then
+      if [ "$pending_gc_push_deferred" = "1" ]; then
+        # Local GC succeeded; the push stays deferred for manual review. Hand it
+        # off to a pending_push marker (carrying the same remote/head contract)
+        # and clear pending_gc so the GC is not re-run every tick. No diverged
+        # remote is force-pushed. ensure_remote_push_retry_fresh already logged
+        # the manual-review reason.
+        printf 'compact: db=%s pending_gc local GC succeeded; remote push stays deferred for manual review — handing off to pending_push\n' "$db" >&2
+        write_pending_push_marker "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "$pending_compacted_from_head" \
+          "pending_gc retry ran local GC but remote push deferred for manual review" "$pending_local_branch" "$pending_remote_branch" || return 1
+        clear_compact_marker "$pending_gc_dir" "$db"
+        return 0
+      fi
       push_rc=0
       push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch" || push_rc=$?
       if [ "$push_rc" -eq 0 ] || { [ -n "$pending_remote" ] && has_compact_marker "$pending_push_dir" "$db"; }; then
@@ -1814,16 +1839,34 @@ flatten_database() {
           ;;
       esac
     fi
+    pending_push_not_fresh=0
     if [ "$legacy_pending_push_recovered" != "1" ]; then
-      ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push" || return 1
+      if ! ensure_remote_push_retry_fresh "$pending_push_dir" "$db" "pending_push"; then
+        pending_push_not_fresh=1
+      fi
     fi
-    if [ -n "$dry_run" ]; then
+    if [ "$pending_push_not_fresh" = "1" ]; then
+      # A stale (or unparseable-created_at) pending_push marker means the
+      # deferred REMOTE push needs manual review. That is a backup concern and
+      # must NOT block LOCAL compaction (flatten + DOLT_GC), which prevents
+      # commit-graph/chunk-store bloat regardless of remote state — the
+      # production town-down defect (gc-ai5n7). Retain the marker for the
+      # operator (write_compact_marker preserves created_at across rewrites, so
+      # the "failing since" signal survives) and fall THROUGH to the
+      # threshold/flatten path instead of returning. If a flatten runs, the
+      # post-flatten push_remote_after_compaction refreshes the marker's
+      # compacted_from_head against the rewritten history and never force-pushes
+      # a diverged remote (its ancestry gate defers instead).
+      # ensure_remote_push_retry_fresh already logged the manual-review reason.
+      printf 'compact: db=%s pending_push deferred for manual review — proceeding to local flatten+GC (remote push stays pending)\n' "$db" >&2
+    elif [ -n "$dry_run" ]; then
       printf 'compact: db=%s pending_push=present — dry-run (would retry remote push)\n' "$db"
       return 0
+    else
+      printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
+      push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
+      return $?
     fi
-    printf 'compact: db=%s pending_push=present — retrying remote push before threshold check\n' "$db"
-    push_remote_after_compaction "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "retry" "$pending_compacted_from_head" "$pending_local_branch" "$pending_remote_branch"
-    return $?
   fi
 
   if ! count=$(commit_count "$db"); then

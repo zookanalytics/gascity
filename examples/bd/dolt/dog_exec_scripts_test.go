@@ -241,6 +241,34 @@ func compactMarkerValue(t *testing.T, markerPath, key string) string {
 	return ""
 }
 
+// resetCompactFixtureForRerun rewinds the fake-dolt state so the next
+// fixture.run behaves like a fresh compactor tick on a database that has
+// re-accumulated commits past the threshold: HEAD/value-hash return to their
+// pre-flatten values, the per-mode call counters are cleared, and the dolt
+// call log is truncated so assertions observe only the next run's calls. It
+// deliberately does NOT touch the on-disk pending markers — those carry the
+// state under test across runs.
+func resetCompactFixtureForRerun(t *testing.T, fixture compactScriptFixture) {
+	t.Helper()
+	if err := os.WriteFile(fixture.stateFile, []byte("headcommit\n"), 0o644); err != nil {
+		t.Fatalf("reset fake dolt head state: %v", err)
+	}
+	if err := os.WriteFile(fixture.hashStateFile, []byte("hash-before\n"), 0o644); err != nil {
+		t.Fatalf("reset fake dolt hash state: %v", err)
+	}
+	for _, suffix := range []string{".fetch-calls", ".remote-head-calls", ".gc-calls", ".compact-head-calls"} {
+		if err := os.Remove(fixture.stateFile + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("reset fake dolt counter %s: %v", suffix, err)
+		}
+	}
+	if err := os.Remove(filepath.Join(fixture.binDir, "row-count-calls")); err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reset fake dolt row-count counter: %v", err)
+	}
+	if err := os.WriteFile(fixture.doltLog, nil, 0o644); err != nil {
+		t.Fatalf("truncate fake dolt log: %v", err)
+	}
+}
+
 func rewriteLegacyPendingPushMarker(t *testing.T, markerPath, createdAt string) {
 	t.Helper()
 	if err := os.WriteFile(markerPath, []byte(
@@ -1692,54 +1720,77 @@ func TestCompactScriptRecordsPendingPushWhenRemotePushFails(t *testing.T) {
 	}
 }
 
-func TestCompactScriptBlocksStalePendingPushRetryBeforeForcePush(t *testing.T) {
+func TestCompactScriptStalePendingPushFallsThroughToLocalCompaction(t *testing.T) {
+	// A stale pending_push marker must NOT short-circuit flatten_database: the
+	// deferred REMOTE push is a backup concern, while flatten + DOLT_GC are
+	// local bloat recovery that must proceed regardless of remote state
+	// (gc-ai5n7). remote_ahead models a diverged remote, so the post-flatten
+	// push is correctly ancestry-deferred — the local compaction still runs and
+	// no diverged remote is force-pushed.
 	fixture := newCompactScriptFixture(t)
-	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
-		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+		t.Fatalf("first compact should succeed locally while remote push stays pending: %v\n%s", err, firstOut)
 	}
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 
-	secondOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("stale pending-push retry succeeded without manual review:\n%s", secondOut)
+	resetCompactFixtureForRerun(t, fixture)
+	secondOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("stale pending-push marker must not block local flatten+GC: %v\n%s", err, secondOut)
 	}
 	if !strings.Contains(secondOut, "pending_push marker is stale") ||
 		!strings.Contains(secondOut, "manual review required") {
-		t.Fatalf("retry missing stale-marker manual-review explanation:\n%s", secondOut)
+		t.Fatalf("stale fall-through must still log the push manual-review reason:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "proceeding to local flatten+GC") {
+		t.Fatalf("stale fall-through must announce that local compaction proceeds:\n%s", secondOut)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
-		t.Fatalf("stale pending-push retry must not attempt another force push:\n%s", logData)
+	log := string(logData)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("stale pending-push fall-through should still flatten+GC; missing %s:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "CALL DOLT_PUSH('--force'") {
+		t.Fatalf("stale pending-push fall-through must not force-push a diverged remote:\n%s", log)
 	}
 	if _, err := os.Stat(pendingPush); err != nil {
-		t.Fatalf("stale retry should keep pending-push marker: %v", err)
+		t.Fatalf("stale fall-through should retain the pending-push marker for manual review: %v", err)
+	}
+	if got := compactMarkerValue(t, pendingPush, "created_at"); got != "1970-01-01T00:00:00Z" {
+		t.Fatalf("stale fall-through must preserve the marker created_at (failing-since signal): got %q\n%s", got, secondOut)
 	}
 }
 
 func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
-	firstOut, err := fixture.run(t, "remote_push_failure", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	firstOut, err := fixture.run(t, "remote_ahead", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
 	if err != nil {
-		t.Fatalf("first compact should succeed locally despite remote push failure: %v\n%s", err, firstOut)
+		t.Fatalf("first compact should succeed locally while remote push stays pending: %v\n%s", err, firstOut)
 	}
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	replaceCompactMarkerCreatedAt(t, pendingPush, "1970-01-01T00:00:00Z")
 
-	dryRunOut, err := fixture.run(t, "remote_success",
+	resetCompactFixtureForRerun(t, fixture)
+	dryRunOut, err := fixture.run(t, "remote_ahead",
 		"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
 		"GC_DOLT_COMPACT_DRY_RUN=1",
 	)
-	if err == nil {
-		t.Fatalf("dry-run stale pending-push retry succeeded without manual review:\n%s", dryRunOut)
+	if err != nil {
+		t.Fatalf("dry-run with a stale pending-push marker should fall through to the flatten dry-run: %v\n%s", err, dryRunOut)
 	}
 	if !strings.Contains(dryRunOut, "pending_push marker is stale") ||
 		!strings.Contains(dryRunOut, "manual review required") {
 		t.Fatalf("dry-run missing stale-marker manual-review explanation:\n%s", dryRunOut)
+	}
+	if !strings.Contains(dryRunOut, "would flatten") {
+		t.Fatalf("dry-run with a stale marker should report it would flatten:\n%s", dryRunOut)
 	}
 	if strings.Contains(dryRunOut, "would retry remote push") {
 		t.Fatalf("dry-run should not claim it would retry a stale pending push:\n%s", dryRunOut)
@@ -1748,8 +1799,12 @@ func TestCompactScriptDryRunReportsStalePendingPushMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
-	if strings.Count(string(logData), "CALL DOLT_PUSH('--force', '--set-upstream', 'origin', 'main')") != 1 {
-		t.Fatalf("dry-run stale pending-push retry must not attempt another force push:\n%s", logData)
+	log := string(logData)
+	if strings.Contains(log, "CALL DOLT_PUSH('--force'") {
+		t.Fatalf("dry-run stale pending-push must not attempt any force push:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_RESET") {
+		t.Fatalf("dry-run must not actually flatten:\n%s", log)
 	}
 }
 
@@ -3083,6 +3138,61 @@ func TestCompactScriptRetriesPendingGCThenPushesRemote(t *testing.T) {
 	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
 	if _, err := os.Stat(pendingPush); !os.IsNotExist(err) {
 		t.Fatalf("successful pending-GC retry should not leave pending-push marker, stat err=%v", err)
+	}
+}
+
+func TestCompactScriptStalePendingGCRunsLocalGCAndDefersPush(t *testing.T) {
+	// The pending_gc freshness gate guards the same remote push as pending_push,
+	// so a stale marker there must likewise NOT block the LOCAL DOLT_GC it
+	// guards (gc-ai5n7). The retry runs the GC, then hands the still-pending
+	// push off to a pending_push marker for manual review — no diverged remote
+	// is force-pushed and the local GC is not re-run every tick.
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact should fail after a one-shot DOLT_GC failure writes the pending-GC marker:\n%s", firstOut)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, err := os.Stat(pendingGC); err != nil {
+		t.Fatalf("GC failure should write pending-GC marker: %v", err)
+	}
+	replaceCompactMarkerCreatedAt(t, pendingGC, "1970-01-01T00:00:00Z")
+
+	secondOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("stale pending-GC marker must not block the local GC retry: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "pending_gc marker is stale") ||
+		!strings.Contains(secondOut, "manual review required") {
+		t.Fatalf("stale pending-GC retry must still log the push manual-review reason:\n%s", secondOut)
+	}
+	if !strings.Contains(secondOut, "remote push stays deferred") ||
+		!strings.Contains(secondOut, "handing off to pending_push") {
+		t.Fatalf("stale pending-GC retry must announce the deferred-push handoff:\n%s", secondOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if strings.Count(log, "DOLT_GC") < 2 {
+		t.Fatalf("stale pending-GC retry should still run the local full GC:\n%s", log)
+	}
+	if strings.Contains(log, "CALL DOLT_PUSH('--force'") {
+		t.Fatalf("stale pending-GC retry must not force-push a diverged remote:\n%s", log)
+	}
+	if _, err := os.Stat(pendingGC); !os.IsNotExist(err) {
+		t.Fatalf("stale pending-GC retry should clear the pending-GC marker after running the local GC, stat err=%v", err)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("stale pending-GC retry should hand the deferred push to a pending-push marker: %v\n%s", err, secondOut)
+	}
+	if got := compactMarkerValue(t, pendingPush, "compacted_from_head"); got != "headcommit" {
+		t.Fatalf("deferred-push handoff should carry the compacted_from_head contract: got %q", got)
+	}
+	if got := compactMarkerValue(t, pendingPush, "remote"); got != "origin" {
+		t.Fatalf("deferred-push handoff should carry the remote contract: got %q", got)
 	}
 }
 
