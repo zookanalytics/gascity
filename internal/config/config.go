@@ -251,9 +251,9 @@ type City struct {
 	// AgentDefaults provides root city defaults for agents that don't override
 	// them (canonical TOML key: agent_defaults). Pack-local defaults use the
 	// same table shape in pack.toml. The runtime currently applies provider,
-	// default_sling_formula, and append_fragments; the attachment-list fields
-	// remain tombstones, and the other fields are parsed/composed but not yet
-	// inherited automatically.
+	// default_sling_formula, append_fragments, and env; the attachment-list
+	// fields remain tombstones, and the other fields are parsed/composed but
+	// not yet inherited automatically.
 	AgentDefaults AgentDefaults `toml:"agent_defaults,omitempty"`
 	// AgentsDefaults is a temporary compatibility alias for [agent_defaults].
 	// Parse/load normalize it into AgentDefaults and prefer [agent_defaults]
@@ -2859,8 +2859,8 @@ func (c *City) PackDirsForRig(rigName string) []string {
 
 // AgentDefaults provides agent defaults declared via [agent_defaults] in
 // city.toml or pack.toml. The runtime currently applies provider,
-// default_sling_formula, and append_fragments; the remaining fields are parsed
-// and composed but are not yet inherited onto agents automatically.
+// default_sling_formula, append_fragments, and env; the remaining fields are
+// parsed and composed but are not yet inherited onto agents automatically.
 type AgentDefaults struct {
 	// Provider is the default provider name for agents that do not set their
 	// own provider. It also counts as a configured provider for implicit agent
@@ -2896,6 +2896,13 @@ type AgentDefaults struct {
 	// V2 migration convenience — replaces global_fragments/inject_fragments
 	// for config-wide defaults.
 	AppendFragments []string `toml:"append_fragments,omitempty"`
+	// Env sets baseline environment variables inherited by every agent at
+	// composition time. Per-agent [[agent.env]] keys win on collision, so
+	// agents can override defaults without restating the rest. Useful for
+	// city-wide wiring (PATH augmentation, locale, common feature flags)
+	// that would otherwise be duplicated across every [[agent]] entry.
+	// Control-dispatcher agents are skipped.
+	Env map[string]string `toml:"env,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
 	// compatibility. Parsed and composed for migration visibility, but
 	// attachment-list fields are accepted but ignored by the active
@@ -2931,6 +2938,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "append_fragments") {
 		dst.AppendFragments = append([]string(nil), src.AppendFragments...)
+	}
+	if !meta.IsDefined("agent_defaults", "env") {
+		dst.Env = cloneStringMap(src.Env)
 	}
 	if !meta.IsDefined("agent_defaults", "skills") {
 		dst.Skills = append([]string(nil), src.Skills...)
@@ -4286,6 +4296,33 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	applyAgentEnvDefaults(cfg.Agents, cfg.AgentDefaults)
+}
+
+// applyAgentEnvDefaults merges agent_defaults.env into each agent's Env map.
+// Per-agent keys win on collision so explicit [[agent.env]] entries always
+// override the city-wide baseline. Control-dispatcher agents are skipped
+// because they are infrastructure, not work agents, and inherit nothing
+// from agent_defaults.
+func applyAgentEnvDefaults(agents []Agent, defaults AgentDefaults) {
+	if len(defaults.Env) == 0 {
+		return
+	}
+	for i := range agents {
+		if agents[i].Name == ControlDispatcherAgentName {
+			continue
+		}
+		if agents[i].Env == nil {
+			agents[i].Env = make(map[string]string, len(defaults.Env))
+		}
+		for k, v := range defaults.Env {
+			if _, exists := agents[i].Env[k]; exists {
+				continue
+			}
+			agents[i].Env[k] = v
+		}
+	}
 }
 
 // DefaultOrderTrackingDeleteAfterClose is the canonical default closed-bead
@@ -4426,6 +4463,20 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 	}
 	if len(src.AppendFragments) > 0 {
 		dst.AppendFragments = appendUnique(dst.AppendFragments, src.AppendFragments...)
+	}
+	if len(src.Env) > 0 {
+		if dst.Env == nil {
+			dst.Env = make(map[string]string, len(src.Env))
+		}
+		for k, v := range src.Env {
+			if prov != nil {
+				if existing, ok := dst.Env[k]; ok && existing != v {
+					prov.Warnings = append(prov.Warnings,
+						fmt.Sprintf("agent_defaults.env[%q] redefined by %q", k, label))
+				}
+			}
+			dst.Env[k] = v
+		}
 	}
 	if len(src.Skills) > 0 {
 		dst.Skills = appendUnique(dst.Skills, src.Skills...)
