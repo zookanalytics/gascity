@@ -3266,6 +3266,94 @@ func TestCompactScriptStalePendingGCRunsLocalGCAndDefersPush(t *testing.T) {
 	if got := compactMarkerValue(t, pendingPush, "remote"); got != "origin" {
 		t.Fatalf("deferred-push handoff should carry the remote contract: got %q", got)
 	}
+	// The handoff must carry the stale pending_gc marker's created_at across so
+	// the deferred push stays deferred for manual review; a fresh created_at here
+	// would make the next compactor tick treat the push as retryable and
+	// auto-force-push the very remote the stale marker defers (gc-7bgl9).
+	if got := compactMarkerValue(t, pendingPush, "created_at"); got != staleCompactMarkerCreatedAt {
+		t.Fatalf("deferred-push handoff must preserve the stale created_at (failing-since signal): got %q\n%s", got, secondOut)
+	}
+}
+
+func TestCompactScriptStalePendingGCHandoffStaysDeferredOnNextTick(t *testing.T) {
+	// Finding 2 from codex review on PR#83 (gc-7bgl9): the pending_gc→pending_push
+	// handoff must preserve the stale marker's age/state across BOTH the handoff
+	// and the following compactor tick. write_compact_marker only preserves
+	// created_at from an existing destination marker, so without an explicit
+	// carry the handed-off pending_push marker is stamped fresh — and the next
+	// tick's freshness gate then treats the deferred push as retryable and
+	// force-pushes the verified/equal remote, silently performing the very push
+	// the stale marker defers for manual review. Drive three ticks: (1) a
+	// one-shot DOLT_GC failure writes the pending-GC marker, (2) the stale marker
+	// runs the local GC and hands the deferred push off — preserving the stale
+	// created_at — and (3) the next tick, now with a verified/equal remote, must
+	// STILL refuse the push (fall through to local flatten+GC, supersede the
+	// marker, no force-push).
+	fixture := newCompactScriptFixture(t)
+
+	// Tick 1: DOLT_GC fails once, writing the pending-GC marker.
+	firstOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("first compact should fail after a one-shot DOLT_GC failure writes the pending-GC marker:\n%s", firstOut)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if _, err := os.Stat(pendingGC); err != nil {
+		t.Fatalf("GC failure should write pending-GC marker: %v", err)
+	}
+	markCompactMarkerStale(t, pendingGC)
+
+	// Tick 2: the stale pending-GC marker runs the local GC and hands the still
+	// deferred push off to a pending-push marker, carrying the stale created_at.
+	secondOut, err := fixture.run(t, "remote_gc_failure_once", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("stale pending-GC marker must not block the local GC retry: %v\n%s", err, secondOut)
+	}
+	if !strings.Contains(secondOut, "handing off to pending_push") {
+		t.Fatalf("stale pending-GC retry must announce the deferred-push handoff:\n%s", secondOut)
+	}
+	pendingPush := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-push", "beads")
+	if got := compactMarkerValue(t, pendingPush, "created_at"); got != staleCompactMarkerCreatedAt {
+		t.Fatalf("deferred-push handoff must preserve the stale created_at so the push stays deferred: got %q\n%s", got, secondOut)
+	}
+
+	// Tick 3: the handed-off pending-push marker is still stale, and the remote
+	// head is now verified/equal (remote_success) — the case the normal push path
+	// would force-push. The deferred push must STILL be refused: local flatten+GC
+	// proceeds, the marker is superseded (not cleared), and no force-push fires.
+	resetCompactFixtureForRerun(t, fixture)
+	thirdOut, err := fixture.run(t, "remote_success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("stale handed-off pending-push marker must not block local flatten+GC on the next tick: %v\n%s", err, thirdOut)
+	}
+	if !strings.Contains(thirdOut, "pending_push marker is stale") ||
+		!strings.Contains(thirdOut, "manual review required") {
+		t.Fatalf("next tick must still log the push manual-review reason:\n%s", thirdOut)
+	}
+	if !strings.Contains(thirdOut, "proceeding to local flatten+GC") {
+		t.Fatalf("next tick must announce that local compaction proceeds:\n%s", thirdOut)
+	}
+	if !strings.Contains(thirdOut, "remote push not attempted") {
+		t.Fatalf("next tick must announce the deferred push is not attempted:\n%s", thirdOut)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	for _, want := range []string{"DOLT_RESET", "DOLT_COMMIT", "DOLT_GC"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("next tick should still flatten+GC; missing %s:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "CALL DOLT_PUSH('--force'") {
+		t.Fatalf("next tick must not auto-force-push the deferred remote:\n%s", log)
+	}
+	if _, err := os.Stat(pendingPush); err != nil {
+		t.Fatalf("next tick must retain the pending-push marker for manual review: %v", err)
+	}
+	if got := compactMarkerValue(t, pendingPush, "created_at"); got != staleCompactMarkerCreatedAt {
+		t.Fatalf("superseded marker must preserve the stale created_at (failing-since signal): got %q\n%s", got, thirdOut)
+	}
 }
 
 func TestCompactScriptKeepsPendingGCWhenPendingPushHandoffCannotBeWritten(t *testing.T) {

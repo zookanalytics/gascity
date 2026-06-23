@@ -1149,6 +1149,19 @@ write_compact_marker() {
         ;;
     esac
   fi
+  # compact_marker_created_at_override carries a created_at across a marker
+  # handoff where the destination does not yet exist — specifically the
+  # pending_gc→pending_push deferral handoff, which must keep the stale
+  # "failing since" age so the deferred push stays deferred for manual review
+  # instead of resetting to fresh and being auto-retried/force-pushed on the
+  # next tick (gc-7bgl9). It is applied verbatim (a stale, or even invalid,
+  # value MUST survive so the next freshness gate still defers) and only when
+  # the destination marker has no valid created_at of its own to preserve, so
+  # a re-probe of an existing marker still wins. Callers set it around a single
+  # write and clear it immediately so it cannot leak to later marker writes.
+  if [ -z "$created_at" ] && [ -n "${compact_marker_created_at_override:-}" ]; then
+    created_at="$compact_marker_created_at_override"
+  fi
   if [ -z "$created_at" ]; then
     created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   fi
@@ -1763,9 +1776,23 @@ flatten_database() {
         # and clear pending_gc so the GC is not re-run every tick. No diverged
         # remote is force-pushed. ensure_remote_push_retry_fresh already logged
         # the manual-review reason.
+        #
+        # Carry the stale pending_gc marker's created_at into the new
+        # pending_push marker: write_compact_marker only preserves created_at
+        # from an existing destination, and the pending_push marker does not
+        # exist yet, so without this the handoff would stamp a fresh created_at.
+        # A fresh marker reads as not-stale next tick, and the freshness gate
+        # then auto-retries/force-pushes the very remote this stale marker
+        # defers for manual review (gc-7bgl9). Clear the override on every
+        # return path so it cannot leak to later marker writes in the per-db
+        # flatten loop.
         printf 'compact: db=%s pending_gc local GC succeeded; remote push stays deferred for manual review — handing off to pending_push\n' "$db" >&2
+        compact_marker_created_at_override=$(compact_marker_value "$pending_gc_dir" "$db" created_at || true)
         write_pending_push_marker "$db" "$pending_remote" "$pending_expected_remote_head" "${pending_expected_remote_head_verified:-0}" "$pending_compacted_from_head" \
-          "pending_gc retry ran local GC but remote push deferred for manual review" "$pending_local_branch" "$pending_remote_branch" || return 1
+          "pending_gc retry ran local GC but remote push deferred for manual review" "$pending_local_branch" "$pending_remote_branch"
+        pending_gc_handoff_rc=$?
+        compact_marker_created_at_override=""
+        [ "$pending_gc_handoff_rc" -eq 0 ] || return 1
         clear_compact_marker "$pending_gc_dir" "$db"
         return 0
       fi
