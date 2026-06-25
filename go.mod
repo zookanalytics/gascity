@@ -245,12 +245,11 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// gc is built only on this host (zookanalytics build box), via
-// ~/loomington/build-optimized.sh. Replace beads with the local ~/beads
-// checkout — the same tree the `bd` binary is built from — so gc and bd always
-// link an identical beads core and the version_compat preflight passes via the
-// source-build ("(devel)") path. A versioned pin can't satisfy that gate (bd
-// reports a frozen 1.0.5 while fork main is 200+ commits past the v1.0.5 tag)
-// and goes stale; a filesystem replace tracks the working tree and fails loudly
-// if ~/beads is absent. Tracking: gc-j7e16.
-replace github.com/steveyegge/beads => /home/zook/beads
+// Beads fork pin. MUST stay a versioned (portable) replace, NOT a filesystem
+// path: CI runners and clean clones build from this committed go.mod and have
+// no ~/beads, so `=> /home/zook/beads` breaks ALL CI (that was PR #86, reverted
+// here — gc-j7e16). Local optimized builds get a warning-free "(devel)" gc by
+// injecting a filesystem replace to ~/beads via ~/loomington/build-optimized.sh;
+// CI and everything else resolve this portable pin. Refresh to fork main with:
+//   go list -m github.com/zookanalytics/beads@main  →  go mod edit -replace
+replace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260625154543-d05de7acf095
