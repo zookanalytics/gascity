@@ -245,4 +245,12 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260623014633-126bceaf0f14
+// gc is built only on this host (zookanalytics build box), via
+// ~/loomington/build-optimized.sh. Replace beads with the local ~/beads
+// checkout — the same tree the `bd` binary is built from — so gc and bd always
+// link an identical beads core and the version_compat preflight passes via the
+// source-build ("(devel)") path. A versioned pin can't satisfy that gate (bd
+// reports a frozen 1.0.5 while fork main is 200+ commits past the v1.0.5 tag)
+// and goes stale; a filesystem replace tracks the working tree and fails loudly
+// if ~/beads is absent. Tracking: gc-j7e16.
+replace github.com/steveyegge/beads => /home/zook/beads
