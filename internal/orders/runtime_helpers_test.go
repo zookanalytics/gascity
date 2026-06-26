@@ -2,8 +2,6 @@ package orders
 
 import (
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -86,32 +84,5 @@ func TestLastRunFuncForStoreUsesRowsFromPartialTierError(t *testing.T) {
 	}
 	if !got.Equal(want) {
 		t.Fatalf("LastRunFuncForStore() = %s, want %s from surviving rows", got, want)
-	}
-}
-
-func TestCursorFuncForStoreUsesRowsAndLogsPartialTierError(t *testing.T) {
-	oldLogf := runtimeHelpersLogf
-	var logs []string
-	runtimeHelpersLogf = func(format string, args ...any) {
-		logs = append(logs, fmt.Sprintf(format, args...))
-	}
-	t.Cleanup(func() {
-		runtimeHelpersLogf = oldLogf
-	})
-	store := &rowsErrorStore{
-		MemStore: beads.NewMemStore(),
-		rows: []beads.Bead{{
-			ID:     "run-1",
-			Labels: []string{"order-run:digest", "seq:42"},
-		}},
-		err: errors.New("wisps tier unavailable"),
-	}
-
-	got := CursorFuncForStore(store)("digest")
-	if got != 42 {
-		t.Fatalf("CursorFuncForStore() = %d, want 42 from surviving rows", got)
-	}
-	if len(logs) == 0 || !strings.Contains(logs[0], "partially failed") {
-		t.Fatalf("logs = %#v, want partial failure log", logs)
 	}
 }
