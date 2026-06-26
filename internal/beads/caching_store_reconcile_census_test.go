@@ -97,6 +97,10 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,
+		// notifyChange's emission-dedup memo and its dedicated lock. Written only
+		// on the outbound notify path, never by the reconcile seam, so they hold no
+		// merged state for the oracle to compare.
+		"notifyMu": true, "lastEmittedHash": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
