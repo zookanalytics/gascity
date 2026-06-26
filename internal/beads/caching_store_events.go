@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -707,6 +708,9 @@ func (c *CachingStore) notifyChange(eventType string, b Bead) {
 	// step_id is the semantic native execution step carried explicitly by the
 	// lifecycle bead. Non-work beads (sessions, mail, …) carry none → omitted.
 	stepID := b.Metadata[beadmeta.StepIDMetadataKey]
+	if !c.shouldEmit(eventType, b.ID, payload) {
+		return
+	}
 	c.onChange(eventType, b.ID, runID, sessionID, stepID, nativeStepDependencies(b.Metadata, stepID), payload)
 }
 
@@ -742,6 +746,39 @@ func nativeStepDependencies(metadata map[string]string, stepID string) *[]string
 func validTopologyStepID(id string) bool {
 	return len(id) <= 256 && utf8.ValidString(id) && strings.TrimSpace(id) != ""
 }
+
+// shouldEmit returns true when (eventType, beadID, payload) is a fresh
+// emission distinct from the previous one for the same (eventType,
+// beadID). It suppresses byte-identical re-emissions so callers that
+// produce no-op notifications — direct writes that don't change the
+// wire payload, reconciler diffs that flag a change but marshal to the
+// same bytes after omitempty — don't pump duplicates onto the event
+// bus. Keys are scoped by eventType so a bead.updated never suppresses
+// a later bead.closed for the same bead.
+func (c *CachingStore) shouldEmit(eventType, beadID string, payload []byte) bool {
+	hash := sha256.Sum256(payload)
+	key := eventType + "|" + beadID
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	if prev, ok := c.lastEmittedHash[key]; ok && prev == hash {
+		return false
+	}
+	// The memo is keyed by (eventType, beadID) and would otherwise grow for the
+	// life of the process — one entry per bead per event type, unbounded in a
+	// long-lived controller. Suppression is an optimization, not a correctness
+	// guarantee, so drop the whole memo once it exceeds the cap: the only cost
+	// is that each live key may re-emit once more before it re-settles.
+	if len(c.lastEmittedHash) >= maxEmittedHashEntries {
+		clear(c.lastEmittedHash)
+	}
+	c.lastEmittedHash[key] = hash
+	return true
+}
+
+// maxEmittedHashEntries caps notifyChange's dedup memo. Sized well above a
+// realistic working set of actively-changing beads so steady-state dedup is
+// never lost to the cap, while still bounding memory on a long-lived store.
+const maxEmittedHashEntries = 8192
 
 type cacheNotification struct {
 	eventType string
