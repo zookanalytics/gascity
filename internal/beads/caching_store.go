@@ -77,6 +77,16 @@ type CachingStore struct {
 	// once the rolling window has drained — see recomputeCadenceLocked.
 	latencyDriverActive bool
 
+	// notifyMu protects lastEmittedHash. Held only inside notifyChange's
+	// dedup check; never with c.mu, so dedup can't block cache reads/writes.
+	notifyMu sync.Mutex
+	// lastEmittedHash is keyed by "<eventType>|<beadID>" and stores the
+	// SHA-256 of the last-emitted JSON payload for that pair. Used to
+	// suppress byte-identical re-emissions and keep the event bus
+	// idempotent regardless of whether the caller is the writes path or
+	// the reconciler's diff scan.
+	lastEmittedHash map[string][32]byte
+
 	applyEventBeforeCommitForTest func()
 }
 
@@ -288,16 +298,17 @@ func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Durat
 
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID, runID, sessionID, stepID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
-		backing:     backing,
-		idPrefix:    normalizeIDPrefix(idPrefix),
-		beads:       make(map[string]Bead),
-		deps:        make(map[string][]Dep),
-		dirty:       make(map[string]struct{}),
-		beadSeq:     make(map[string]uint64),
-		localBeadAt: make(map[string]time.Time),
-		deletedSeq:  make(map[string]uint64),
-		problemLog:  make(map[string]cacheProblemLogState),
-		onChange:    onChange,
+		backing:         backing,
+		idPrefix:        normalizeIDPrefix(idPrefix),
+		beads:           make(map[string]Bead),
+		deps:            make(map[string][]Dep),
+		dirty:           make(map[string]struct{}),
+		beadSeq:         make(map[string]uint64),
+		localBeadAt:     make(map[string]time.Time),
+		deletedSeq:      make(map[string]uint64),
+		problemLog:      make(map[string]cacheProblemLogState),
+		onChange:        onChange,
+		lastEmittedHash: make(map[string][32]byte),
 		problemf: func(msg string) {
 			log.Printf("beads cache: %s", msg)
 		},
