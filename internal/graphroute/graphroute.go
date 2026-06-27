@@ -319,27 +319,26 @@ func resolveControlDispatcherBinding(_ beads.Store, _ string, cfg *config.City, 
 	if deps.Resolver == nil {
 		return GraphRouteBinding{}, fmt.Errorf("ResolveAgent not configured")
 	}
-	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
-	if !ok {
-		agentCfg, ok = configuredControlDispatcherForScope(cfg, rigContext)
+	// Primary lookup: find the deterministic control-dispatcher directly, by
+	// behavior (IsDeterministicControlDispatcher) rather than bare-name string
+	// match. Since 9fa6b7fec the dispatcher ships bound (core.control-dispatcher),
+	// so AgentMatchesIdentity rejects the bare-name fallback for it and the
+	// per-rig fleet makes the bare-name scan ambiguous — both break a
+	// Resolver-based lookup. PreferredDeterministicControlDispatcher prefers the
+	// city-level singleton (Dir == "") across every scope, keeping the stamped
+	// route on the one session that actually runs (max_active_sessions=1) and
+	// curing the stranded-control-bead.
+	if agentCfg, ok := config.PreferredDeterministicControlDispatcher(cfg, rigContext); ok {
+		return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
 	}
+	// Fallback for configs without a deterministic dispatcher (e.g. a plain
+	// control-dispatcher agent carrying no convoy-control StartCommand): defer
+	// to the name-based resolver path, preserving the rig-context preference.
+	agentCfg, ok := deps.Resolver.ResolveAgent(cfg, config.ControlDispatcherAgentName, rigContext)
 	if !ok {
 		return GraphRouteBinding{}, fmt.Errorf("control-dispatcher agent %q not found", config.ControlDispatcherAgentName)
 	}
 	return GraphRouteBinding{QualifiedName: agentCfg.QualifiedName(), MetadataOnly: true}, nil
-}
-
-func configuredControlDispatcherForScope(cfg *config.City, rigContext string) (config.Agent, bool) {
-	rigContext = strings.TrimSpace(rigContext)
-	for _, a := range cfg.Agents {
-		if !config.IsDeterministicControlDispatcher(&a) {
-			continue
-		}
-		if strings.TrimSpace(a.Dir) == rigContext {
-			return a, true
-		}
-	}
-	return config.Agent{}, false
 }
 
 // ResolveGraphStepBinding resolves the routing binding for a graph step
