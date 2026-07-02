@@ -146,6 +146,31 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Pool re-pour: an explicit sling of an existing OPEN bead to a pool
+	// puts it (back) on the routed queue, so a stale assignee must be
+	// cleared. Pool demand is ready work with assignee="" and
+	// gc.routed_to=<target> — the shared predicate behind both reconciler
+	// spawn (scale_check) and worker claim (work_query Tier 3); see
+	// engdocs/architecture/dispatch.md "scale_check ↔ work_query
+	// correspondence". Without this, a handback assignee (e.g. a named
+	// session) pins the bead invisibly: scale_check never counts it, no
+	// session spawns, and the chain stalls silently (gc-q40pm). Only open
+	// beads are normalized — in_progress marks a live claim (`bd update
+	// --claim` flips open→in_progress atomically) owned by a session;
+	// reclaiming dead claims is releaseOrphanedPoolAssignments' job, not
+	// sling's. Custom sling_query agents own their routing contract and
+	// are exempt.
+	if !opts.DryRun && !opts.IsFormula && a.SupportsInstanceExpansion() && !IsCustomSlingQuery(a) {
+		cleared, err := clearStaleOpenAssigneeForPoolRoute(opts.BeadOrFormula, deps)
+		if err != nil {
+			return result, fmt.Errorf("clearing stale assignee for pool re-pour of %s: %w", opts.BeadOrFormula, err)
+		}
+		if cleared != "" {
+			result.BeadWarnings = append(result.BeadWarnings,
+				fmt.Sprintf("cleared stale assignee %q on open bead %s for pool re-dispatch", cleared, opts.BeadOrFormula))
+		}
+	}
+
 	// Dry-run: return early with preview info.
 	if opts.DryRun {
 		result.DryRun = true
@@ -1557,4 +1582,35 @@ func clearAssigneeInStore(store beads.Store, beadID string, b beads.Bead) error 
 	}
 	empty := ""
 	return store.Update(beadID, beads.UpdateOpts{Assignee: &empty})
+}
+
+// clearStaleOpenAssigneeForPoolRoute unsets the assignee on an OPEN bead
+// being routed to a pool target so the bead re-enters the canonical
+// pool-demand shape (ready + unassigned + routed). Returns the assignee it
+// cleared, or "" when nothing was cleared. No-op when the bead is missing
+// (e.g. --force routing against an absent bead), the store is unavailable,
+// the assignee is already empty, or the bead is not open — in_progress
+// marks a live claim that sling must not strip; orphaned claims are
+// recovered by the controller's releaseOrphanedPoolAssignments instead.
+// See the pool re-pour block in preflight (gc-q40pm).
+func clearStaleOpenAssigneeForPoolRoute(beadID string, deps SlingDeps) (string, error) {
+	if deps.Store == nil {
+		return "", nil
+	}
+	b, err := deps.Store.Get(beadID)
+	if err != nil {
+		return "", nil
+	}
+	if b.Status != "open" {
+		return "", nil
+	}
+	assignee := strings.TrimSpace(b.Assignee)
+	if assignee == "" {
+		return "", nil
+	}
+	empty := ""
+	if err := deps.Store.Update(beadID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+		return "", err
+	}
+	return assignee, nil
 }
