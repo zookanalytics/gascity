@@ -1587,20 +1587,66 @@ func clearAssigneeInStore(store beads.Store, beadID string, b beads.Bead) error 
 // clearStaleOpenAssigneeForPoolRoute unsets the assignee on an OPEN bead
 // being routed to a pool target so the bead re-enters the canonical
 // pool-demand shape (ready + unassigned + routed). Returns the assignee it
-// cleared, or "" when nothing was cleared. No-op when the bead is missing
-// (e.g. --force routing against an absent bead), the store is unavailable,
-// the assignee is already empty, or the bead is not open — in_progress
-// marks a live claim that sling must not strip; orphaned claims are
-// recovered by the controller's releaseOrphanedPoolAssignments instead.
-// See the pool re-pour block in preflight (gc-q40pm).
+// cleared, or "" when nothing was cleared. It checks the city primary store
+// (deps.Store) first; if the bead is not there it sweeps the source-workflow
+// stores (deps.SourceWorkflowStores) so rig-prefixed beads — whose record
+// lives in a rig store, not deps.Store — are normalized too. Without that
+// sweep a rig-store bead keeps its stale assignee and stays invisible to
+// scale_check/work_query, the exact gc-q40pm stall this normalization exists
+// to prevent (the same store-topology gap fixed for --reassign in #3408).
+//
+// No-op when the bead is missing from every store (e.g. --force routing
+// against an absent bead), no store is available, the assignee is already
+// empty, or the bead is not open — in_progress marks a live claim that sling
+// must not strip; orphaned claims are recovered by the controller's
+// releaseOrphanedPoolAssignments instead. Errors on a real (non-ErrNotFound)
+// store read failure or a SourceWorkflowStores listing failure: silently
+// swallowing those would risk leaving a stale assignee uncleared and
+// re-introducing the stall. See the pool re-pour block in preflight (gc-q40pm).
 func clearStaleOpenAssigneeForPoolRoute(beadID string, deps SlingDeps) (string, error) {
-	if deps.Store == nil {
+	if deps.Store != nil {
+		b, err := deps.Store.Get(beadID)
+		if err == nil {
+			return clearStaleOpenAssigneeInStore(deps.Store, beadID, b)
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return "", fmt.Errorf("reading %s from primary store to clear stale pool assignee: %w", beadID, err)
+		}
+		// ErrNotFound: the record is not in the city primary store. For
+		// rig-prefixed beads it lives in a rig store, so fall through to the
+		// source-workflow sweep below.
+	}
+	// Sweep the source-workflow stores and clear the bead in whichever one
+	// holds it. Mirrors clearHumanAssignee and sourceWorkflowRootByID.
+	if deps.SourceWorkflowStores == nil {
 		return "", nil
 	}
-	b, err := deps.Store.Get(beadID)
+	stores, err := deps.SourceWorkflowStores()
 	if err != nil {
-		return "", nil
+		return "", fmt.Errorf("listing source-workflow stores to clear stale pool assignee for %s: %w", beadID, err)
 	}
+	for _, info := range stores {
+		if info.Store == nil {
+			continue
+		}
+		b, err := info.Store.Get(beadID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return "", fmt.Errorf("reading %s from store %q to clear stale pool assignee: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+		}
+		return clearStaleOpenAssigneeInStore(info.Store, beadID, b)
+	}
+	return "", nil
+}
+
+// clearStaleOpenAssigneeInStore unsets the assignee on b in store when b is an
+// OPEN bead with a non-empty assignee, returning the assignee it cleared (or
+// "" when nothing was cleared). The open guard lives here so it is applied
+// against whichever store actually holds the bead: an in_progress bead in a
+// rig store keeps its assignee just as one in the primary store would.
+func clearStaleOpenAssigneeInStore(store beads.Store, beadID string, b beads.Bead) (string, error) {
 	if b.Status != "open" {
 		return "", nil
 	}
@@ -1609,7 +1655,7 @@ func clearStaleOpenAssigneeForPoolRoute(beadID string, deps SlingDeps) (string, 
 		return "", nil
 	}
 	empty := ""
-	if err := deps.Store.Update(beadID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+	if err := store.Update(beadID, beads.UpdateOpts{Assignee: &empty}); err != nil {
 		return "", err
 	}
 	return assignee, nil

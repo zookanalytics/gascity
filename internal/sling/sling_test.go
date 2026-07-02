@@ -3738,6 +3738,219 @@ func TestDoSling_Reassign_ClearsHumanAssignee_RigStore(t *testing.T) {
 	}
 }
 
+// TestClearStaleOpenAssigneeForPoolRoute_RigStore: the bare pool re-pour clear
+// reaches a rig-prefixed bead whose record lives in a source-workflow (rig)
+// store rather than the city primary store, mirroring the multi-store fallback
+// clearHumanAssignee gained for #3408. Before the sweep the rig-store bead kept
+// its stale assignee and stayed invisible to scale_check/work_query — the exact
+// gc-q40pm stall the re-pour normalization exists to prevent. Regression for
+// the PR#88 signoff finding.
+func TestClearStaleOpenAssigneeForPoolRoute_RigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps := SlingDeps{
+		Store: cityStore,
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("clearStaleOpenAssigneeForPoolRoute: %v", err)
+	}
+	if cleared != "keeper" {
+		t.Fatalf("cleared = %q, want %q (the stale rig-store assignee)", cleared, "keeper")
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after clear in rig store", got.Assignee)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_RigStorePreservesInProgress: the
+// open-guard must hold in whichever store contains the bead. An in_progress
+// bead in a rig store is a live claim, so the pool re-pour clear must leave its
+// assignee intact — the same safety boundary the primary-store path enforces.
+func TestClearStaleOpenAssigneeForPoolRoute_RigStorePreservesInProgress(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(bead.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("clearStaleOpenAssigneeForPoolRoute: %v", err)
+	}
+	if cleared != "" {
+		t.Fatalf("cleared = %q, want empty (in_progress claim must survive)", cleared)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "keeper" {
+		t.Fatalf("Assignee = %q, want %q (in_progress claim in a rig store must survive)", got.Assignee, "keeper")
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_PrimaryStoreReadError: a non-ErrNotFound
+// failure from the city primary store aborts the clear with a contextual error
+// rather than swallowing it or falling through to the source-workflow sweep. A
+// real read failure would otherwise be treated like a miss, so a bare pool
+// re-pour could proceed with the stale assignee uncleared and re-introduce the
+// gc-q40pm stall. Mirrors TestClearHumanAssignee_PrimaryStoreReadError.
+func TestClearStaleOpenAssigneeForPoolRoute_PrimaryStoreReadError(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	sourceSwept := false
+	deps := SlingDeps{
+		Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")},
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			sourceSwept = true
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want primary read failure")
+	}
+	if cleared != "" {
+		t.Fatalf("cleared = %q, want empty on a read failure", cleared)
+	}
+	if !strings.Contains(err.Error(), "backend unavailable") {
+		t.Fatalf("error = %q, want wrapped primary read failure", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %q, want store failure, not a not-found miss", err)
+	}
+	if sourceSwept {
+		t.Fatal("source-workflow stores swept after a primary read failure; want abort before fallback")
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "keeper" {
+		t.Fatalf("Assignee = %q, want unchanged (clear must not run after a primary read failure)", got.Assignee)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_SourceStoreReadError: a non-ErrNotFound
+// failure while reading a source-workflow store during the rig-store sweep
+// aborts with a store-ref-qualified error instead of silently skipping the
+// store, which would leave the bead pool-invisible under partial store failure.
+func TestClearStaleOpenAssigneeForPoolRoute_SourceStoreReadError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("rig store unreadable")}, StoreRef: "rig:myrig"},
+			}, nil
+		},
+	}
+	_, err := clearStaleOpenAssigneeForPoolRoute("gc-123", deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want source-store read failure")
+	}
+	if !strings.Contains(err.Error(), "rig store unreadable") {
+		t.Fatalf("error = %q, want wrapped source-store read failure", err)
+	}
+	if !strings.Contains(err.Error(), "rig:myrig") {
+		t.Fatalf("error = %q, want store-ref context to localize the failing store", err)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_SourceStoreListError: a failure from
+// the SourceWorkflowStores lister itself aborts the clear with a bead-qualified
+// error instead of silently no-op'ing, so a bare pool re-pour cannot proceed as
+// though the bead were absent everywhere and leave it stale-assigned.
+func TestClearStaleOpenAssigneeForPoolRoute_SourceStoreListError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here (ErrNotFound), so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return nil, fmt.Errorf("stores unavailable")
+		},
+	}
+	_, err := clearStaleOpenAssigneeForPoolRoute("gc-456", deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want source-workflow store listing failure")
+	}
+	if !strings.Contains(err.Error(), "listing source-workflow stores") {
+		t.Fatalf("error = %q, want wrapped source-workflow store listing failure", err)
+	}
+	if !strings.Contains(err.Error(), "stores unavailable") {
+		t.Fatalf("error = %q, want underlying lister error preserved", err)
+	}
+	if !strings.Contains(err.Error(), "gc-456") {
+		t.Fatalf("error = %q, want bead ID context to localize the failed clear", err)
+	}
+}
+
+// TestDoSling_BareSlingClearsOpenAssignee_RigStore: a bare sling (no --reassign)
+// of an OPEN rig-prefixed bead to a pool clears the stale assignee even when the
+// bead's record lives only in the rig store. End-to-end regression matching
+// TestDoSling_Reassign_ClearsHumanAssignee_RigStore for the pool re-pour path —
+// the store topology the PR#88 signoff flagged as still-reachable.
+func TestDoSling_BareSlingClearsOpenAssignee_RigStore(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+	}
+	// Force routing: the bead lives only in the rig store, so the city-store
+	// existence validation must be bypassed to reach the pool re-pour clear.
+	// No Reassign — the clear must come from the bare pool re-pour path.
+	opts := SlingOpts{
+		Target:        a,
+		BeadOrFormula: bead.ID,
+		NoFormula:     true,
+		NoConvoy:      true,
+		Force:         true,
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling bare pool re-pour on rig-store bead: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after bare pool re-pour", got.Assignee)
+	}
+}
+
 // TestSlingFormulaSearchPaths_RigNameKey: agent.Dir = rig name should
 // resolve to the rig-specific FormulaLayers entry. This is the legacy
 // shape and was already working pre-#1801.
