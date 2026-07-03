@@ -340,6 +340,37 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	return n, errors.Join(err, refreshErr)
 }
 
+// writeWithReconnect runs a backing write and, if it fails with a
+// connection-invalidation error, reconnects the backing store once and
+// retries. It mirrors the reconcile READ-path guard in runReconciliation
+// (caching_store_reconcile.go), which reconnects and retries the full scan
+// once on the same error class.
+//
+// A Dolt online GC / compaction can invalidate the supervisor's long-lived
+// Dolt connection (Err1105, surfaced as "invalid connection"); it is not
+// reported as driver.ErrBadConn, so the pooled handle is never auto-evicted
+// and every subsequent write on the dead handle fails identically. On the
+// session-lifecycle metadata-commit path (SetMetadata/SetMetadataBatch) that
+// wedges EVERY new session start — bead-hosts, threads, pool starts — until a
+// supervisor restart. gc-6njbf / PR#77 fixed the sibling read path; this is
+// the write-path follow-up (gc-mzdaq).
+//
+// Retry-once is safe here: the triggering errors ("failed to begin
+// transaction", "dolt commit: invalid connection") mean the commit did NOT
+// durably land, and the only writes routed through this helper are set-key
+// metadata merges — an idempotent overlay with no increment/append — so
+// re-applying after reconnect is overlay-safe. MUST be called without c.mu
+// held (reconnectBacking takes its own locks); both call sites invoke it
+// before their c.mu.Lock(). It is deliberately NOT used for the Tx path,
+// which cannot transparently replay an arbitrary open-transaction callback.
+func (c *CachingStore) writeWithReconnect(fn func() error) error {
+	err := fn()
+	if err != nil && isBdAmbiguousWriteError(err) && c.reconnectBacking(err) {
+		err = fn()
+	}
+	return err
+}
+
 // SetMetadata sets a single metadata key-value on a bead.
 func (c *CachingStore) SetMetadata(id, key, value string) error {
 	// Idempotence: if the cached bead already has metadata[key] == value,
@@ -354,7 +385,9 @@ func (c *CachingStore) SetMetadata(id, key, value string) error {
 	if c.metadataAlreadyMatchesCached(id, map[string]string{key: value}) {
 		return nil
 	}
-	if err := c.backing.SetMetadata(id, key, value); err != nil {
+	if err := c.writeWithReconnect(func() error {
+		return c.backing.SetMetadata(id, key, value)
+	}); err != nil {
 		return err
 	}
 
@@ -409,7 +442,9 @@ func (c *CachingStore) SetMetadataBatch(id string, kvs map[string]string) error 
 	if c.metadataAlreadyMatchesCached(id, kvs) {
 		return nil
 	}
-	if err := c.backing.SetMetadataBatch(id, kvs); err != nil {
+	if err := c.writeWithReconnect(func() error {
+		return c.backing.SetMetadataBatch(id, kvs)
+	}); err != nil {
 		return err
 	}
 
