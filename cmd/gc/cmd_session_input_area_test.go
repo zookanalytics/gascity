@@ -44,7 +44,7 @@ func newInputAreaTestSession(t *testing.T) (sessionID string, fake *fakeInputAre
 	fake = &fakeInputAreaProvider{Fake: runtime.NewFake()}
 	fake.SetPeekOutput("runtime-session", "stripped\n")
 	oldBuild := buildSessionProviderByName
-	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return fake, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
@@ -168,7 +168,7 @@ func TestCmdSessionInputAreaUnsupportedProviderExits1(t *testing.T) {
 	// InputArea capability, so input-area must report unsupported (exit 1).
 	bare := runtime.NewFake()
 	oldBuild := buildSessionProviderByName
-	buildSessionProviderByName = func(string, config.SessionConfig, string, string) (runtime.Provider, error) {
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
 		return bare, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
