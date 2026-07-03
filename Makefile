@@ -342,11 +342,33 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## TMPDIR defaults to /var/tmp, not /tmp. `make check` runs `go test -p=4
+## ./...`; the parallel link phase of large CGO/ICU test binaries can peak
+## past a small tmpfs-backed /tmp and fail with "No space left on device"
+## mid-link — a spurious rebase/refinery preflight failure (gc-v2z1p).
+## /var/tmp is conventionally a persistent (non-tmpfs) disk with more room.
+## Every make test target flows through this wrapper, so scripts it invokes
+## (test-*-shard, test-local-parallel) inherit the same TMPDIR. Export
+## TMPDIR to override (e.g. TMPDIR=/tmp make check).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
 GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
 GOROOT_VAL    := $(shell go env GOROOT)
+
+## ISOLATED_GITCONFIG: seeded global git config for tests. HOME is allowlisted
+## below but SSH_AUTH_SOCK is not, so a host ~/.gitconfig with commit.gpgsign=true
+## + gpg.format=ssh makes every test that execs `git commit` fail with "Couldn't
+## get agent socket?". Pointing GIT_CONFIG_GLOBAL here neutralizes the host config
+## for every test binary at once, so individual tests need no per-test opt-in.
+## Must be a real writable file, never /dev/null: ensure_beads_role runs
+## `git config --global beads.role maintainer` and cannot lock /dev/null. Tests
+## that WRITE global config still call testutil.IsolatedGitConfig for a per-test
+## file, so writes don't leak through this shared one. Keep contents in sync with
+## internal/testutil/gitconfig.go (isolatedGitConfigContents).
+ISOLATED_GITCONFIG := $(shell d="$${TMPDIR:-/var/tmp}/gascity-testcfg"; mkdir -p "$$d" && printf '[user]\n\tname = Gas City Test\n\temail = gascity-test@example.invalid\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n' > "$$d/gitconfig" && printf '%s' "$$d/gitconfig")
+
 TEST_ENV = env -i \
 	PATH="$$PATH" \
 	HOME="$$HOME" \
@@ -355,6 +377,8 @@ TEST_ENV = env -i \
 	SHELL="$$SHELL" \
 	LANG="$$LANG" \
 	TMPDIR="$${TMPDIR:-/var/tmp}" \
+	GIT_CONFIG_GLOBAL="$(ISOLATED_GITCONFIG)" \
+	GIT_CONFIG_SYSTEM=/dev/null \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
