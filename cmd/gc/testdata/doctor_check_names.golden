@@ -65,6 +65,7 @@ order-tracking-retention
 session-model
 dolt-server
 fork-rate
+tmp-scratch-space
 dolt-noms-size
 dolt-journal-size
 dolt-config
