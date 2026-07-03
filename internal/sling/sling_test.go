@@ -329,6 +329,109 @@ func TestCheckBeadStatePinnedDefaultBDQueryRemainsIdempotent(t *testing.T) {
 	}
 }
 
+// poolCheckAgent returns a pool-shaped agent (instance expansion on) whose
+// qualified name is "hello-world/polecat", for CheckBeadState pool-semantics
+// tests.
+func poolCheckAgent() config.Agent {
+	return config.Agent{
+		Name:              "polecat",
+		Dir:               "hello-world",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(3),
+	}
+}
+
+// TestCheckBeadStatePoolRoutedTemplateAssigneeNotIdempotent guards the
+// re-pour path (gc-q40pm): for a pool target, gc.routed_to==target with
+// assignee==target is NOT a settled routed state. Pool demand is ready work
+// with an empty assignee — "assigning the pool template itself is not pool
+// demand" (engdocs/architecture/dispatch.md, scale_check ↔ work_query
+// correspondence) — so the template-assigned shape is invisible to both
+// scale_check and every work_query tier. CheckBeadState must fall through so
+// the preflight re-pour normalization can clear the assignee.
+func TestCheckBeadStatePoolRoutedTemplateAssigneeNotIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	// Live tracking convoy: rules out the convoy-recovery escape so the
+	// assignee semantics are the only thing under test.
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: "hello-world/polecat",
+		Metadata: map[string]string{"gc.routed_to": "hello-world/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, poolCheckAgent(), SlingDeps{Store: store})
+
+	if result.Idempotent {
+		t.Fatal("expected Idempotent=false for pool target with assignee==template (stuck shape, not pool demand)")
+	}
+}
+
+// TestCheckBeadStatePoolRoutedUnassignedRemainsIdempotent pins the settled
+// pool shape: routed to the pool with no assignee (and a live tracking
+// convoy) is the canonical pool-demand state, so a repeat sling is a no-op.
+func TestCheckBeadStatePoolRoutedUnassignedRemainsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Metadata: map[string]string{"gc.routed_to": "hello-world/polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, poolCheckAgent(), SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for unassigned routed pool bead, got %+v", result)
+	}
+}
+
+// TestCheckBeadStateSingletonRoutedSelfAssigneeRemainsIdempotent pins the
+// singleton counterpart: routed to a named singleton with assignee==target is
+// exactly the shape singleton routing stamps (Tier 1 visibility), so it stays
+// idempotent. The pool-side change must not leak into singleton semantics.
+func TestCheckBeadStateSingletonRoutedSelfAssigneeRemainsIdempotent(t *testing.T) {
+	store := beads.NewMemStore()
+	convoy, err := store.Create(beads.Bead{Title: "convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("store.Create(convoy): %v", err)
+	}
+	bead, err := store.Create(beads.Bead{
+		Title:    "route me",
+		Type:     "task",
+		Status:   "open",
+		ParentID: convoy.ID,
+		Assignee: "mayor",
+		Metadata: map[string]string{"gc.routed_to": "mayor"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(): %v", err)
+	}
+
+	result := CheckBeadState(store, bead.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, SlingDeps{Store: store})
+
+	if !result.Idempotent {
+		t.Fatalf("expected Idempotent=true for singleton routed self-assigned bead, got %+v", result)
+	}
+}
+
 // TestCheckBeadStateRoutedWithoutConvoyIsNotIdempotent guards the recovery
 // path: a bead with gc.routed_to set (e.g. declared via bd create --metadata
 // rather than routed through gc sling) but no convoy parent must not be
@@ -3371,17 +3474,39 @@ func TestDoSling_Reassign_ClearsHumanAssignee(t *testing.T) {
 	}
 }
 
-// TestDoSling_Reassign_PreservesAssigneeWithoutFlag: without --reassign
-// the existing human assignee is preserved (current warn-only behavior).
-// Locks in backward compatibility for the existing two-step flow.
-func TestDoSling_Reassign_PreservesAssigneeWithoutFlag(t *testing.T) {
+// TestDoSling_BareSlingClearsOpenAssigneeForPool: a bare sling (no
+// --reassign) of an OPEN bead to a pool clears the stale assignee. The old
+// warn-only behavior left the bead routed-but-unclaimable — the exact
+// failure --reassign was added to work around in #1007 and the re-pour
+// stall diagnosed in gc-q40pm. The pool re-pour normalization makes the
+// safe subset (open beads, i.e. unclaimed) automatic.
+func TestDoSling_BareSlingClearsOpenAssigneeForPool(t *testing.T) {
 	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
 	if _, err := DoSling(opts, deps, nil); err != nil {
 		t.Fatalf("DoSling: %v", err)
 	}
 	got, _ := store.Get(bead.ID)
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty (open bead slung to a pool re-enters the unassigned pool-demand shape)", got.Assignee)
+	}
+}
+
+// TestDoSling_BareSlingPreservesInProgressAssignee: an in_progress bead is
+// a live claim, so a bare sling must preserve its assignee — only an
+// explicit --reassign (or the controller's orphan release) may strip a
+// claim. Locks in the safety boundary of the pool re-pour normalization.
+func TestDoSling_BareSlingPreservesInProgressAssignee(t *testing.T) {
+	opts, deps, store, bead := reassignTestSetup(t, "stephanie")
+	inProgress := "in_progress"
+	if err := store.Update(bead.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	got, _ := store.Get(bead.ID)
 	if got.Assignee != "stephanie" {
-		t.Fatalf("Assignee = %q, want %q (preserved without --reassign)", got.Assignee, "stephanie")
+		t.Fatalf("Assignee = %q, want %q (in_progress claim must survive a bare sling)", got.Assignee, "stephanie")
 	}
 }
 
@@ -3610,6 +3735,219 @@ func TestDoSling_Reassign_ClearsHumanAssignee_RigStore(t *testing.T) {
 	}
 	if got.Assignee != "" {
 		t.Fatalf("Assignee = %q, want empty after --reassign", got.Assignee)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_RigStore: the bare pool re-pour clear
+// reaches a rig-prefixed bead whose record lives in a source-workflow (rig)
+// store rather than the city primary store, mirroring the multi-store fallback
+// clearHumanAssignee gained for #3408. Before the sweep the rig-store bead kept
+// its stale assignee and stayed invisible to scale_check/work_query — the exact
+// gc-q40pm stall the re-pour normalization exists to prevent. Regression for
+// the PR#88 signoff finding.
+func TestClearStaleOpenAssigneeForPoolRoute_RigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps := SlingDeps{
+		Store: cityStore,
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("clearStaleOpenAssigneeForPoolRoute: %v", err)
+	}
+	if cleared != "keeper" {
+		t.Fatalf("cleared = %q, want %q (the stale rig-store assignee)", cleared, "keeper")
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after clear in rig store", got.Assignee)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_RigStorePreservesInProgress: the
+// open-guard must hold in whichever store contains the bead. An in_progress
+// bead in a rig store is a live claim, so the pool re-pour clear must leave its
+// assignee intact — the same safety boundary the primary-store path enforces.
+func TestClearStaleOpenAssigneeForPoolRoute_RigStorePreservesInProgress(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := rigStore.Update(bead.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("seed in_progress: %v", err)
+	}
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err != nil {
+		t.Fatalf("clearStaleOpenAssigneeForPoolRoute: %v", err)
+	}
+	if cleared != "" {
+		t.Fatalf("cleared = %q, want empty (in_progress claim must survive)", cleared)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "keeper" {
+		t.Fatalf("Assignee = %q, want %q (in_progress claim in a rig store must survive)", got.Assignee, "keeper")
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_PrimaryStoreReadError: a non-ErrNotFound
+// failure from the city primary store aborts the clear with a contextual error
+// rather than swallowing it or falling through to the source-workflow sweep. A
+// real read failure would otherwise be treated like a miss, so a bare pool
+// re-pour could proceed with the stale assignee uncleared and re-introduce the
+// gc-q40pm stall. Mirrors TestClearHumanAssignee_PrimaryStoreReadError.
+func TestClearStaleOpenAssigneeForPoolRoute_PrimaryStoreReadError(t *testing.T) {
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	sourceSwept := false
+	deps := SlingDeps{
+		Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("backend unavailable")},
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			sourceSwept = true
+			return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+		},
+	}
+	cleared, err := clearStaleOpenAssigneeForPoolRoute(bead.ID, deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want primary read failure")
+	}
+	if cleared != "" {
+		t.Fatalf("cleared = %q, want empty on a read failure", cleared)
+	}
+	if !strings.Contains(err.Error(), "backend unavailable") {
+		t.Fatalf("error = %q, want wrapped primary read failure", err)
+	}
+	if strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %q, want store failure, not a not-found miss", err)
+	}
+	if sourceSwept {
+		t.Fatal("source-workflow stores swept after a primary read failure; want abort before fallback")
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "keeper" {
+		t.Fatalf("Assignee = %q, want unchanged (clear must not run after a primary read failure)", got.Assignee)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_SourceStoreReadError: a non-ErrNotFound
+// failure while reading a source-workflow store during the rig-store sweep
+// aborts with a store-ref-qualified error instead of silently skipping the
+// store, which would leave the bead pool-invisible under partial store failure.
+func TestClearStaleOpenAssigneeForPoolRoute_SourceStoreReadError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here, so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return []SourceWorkflowStore{
+				{Store: &getErrStore{Store: beads.NewMemStore(), err: fmt.Errorf("rig store unreadable")}, StoreRef: "rig:myrig"},
+			}, nil
+		},
+	}
+	_, err := clearStaleOpenAssigneeForPoolRoute("gc-123", deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want source-store read failure")
+	}
+	if !strings.Contains(err.Error(), "rig store unreadable") {
+		t.Fatalf("error = %q, want wrapped source-store read failure", err)
+	}
+	if !strings.Contains(err.Error(), "rig:myrig") {
+		t.Fatalf("error = %q, want store-ref context to localize the failing store", err)
+	}
+}
+
+// TestClearStaleOpenAssigneeForPoolRoute_SourceStoreListError: a failure from
+// the SourceWorkflowStores lister itself aborts the clear with a bead-qualified
+// error instead of silently no-op'ing, so a bare pool re-pour cannot proceed as
+// though the bead were absent everywhere and leave it stale-assigned.
+func TestClearStaleOpenAssigneeForPoolRoute_SourceStoreListError(t *testing.T) {
+	deps := SlingDeps{
+		Store: beads.NewMemStore(), // bead is absent here (ErrNotFound), so the sweep runs
+		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
+			return nil, fmt.Errorf("stores unavailable")
+		},
+	}
+	_, err := clearStaleOpenAssigneeForPoolRoute("gc-456", deps)
+	if err == nil {
+		t.Fatal("clearStaleOpenAssigneeForPoolRoute error = nil, want source-workflow store listing failure")
+	}
+	if !strings.Contains(err.Error(), "listing source-workflow stores") {
+		t.Fatalf("error = %q, want wrapped source-workflow store listing failure", err)
+	}
+	if !strings.Contains(err.Error(), "stores unavailable") {
+		t.Fatalf("error = %q, want underlying lister error preserved", err)
+	}
+	if !strings.Contains(err.Error(), "gc-456") {
+		t.Fatalf("error = %q, want bead ID context to localize the failed clear", err)
+	}
+}
+
+// TestDoSling_BareSlingClearsOpenAssignee_RigStore: a bare sling (no --reassign)
+// of an OPEN rig-prefixed bead to a pool clears the stale assignee even when the
+// bead's record lives only in the rig store. End-to-end regression matching
+// TestDoSling_Reassign_ClearsHumanAssignee_RigStore for the pool re-pour path —
+// the store topology the PR#88 signoff flagged as still-reachable.
+func TestDoSling_BareSlingClearsOpenAssignee_RigStore(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs: []config.Rig{
+			{Name: "myrig", Path: "/myrig", Prefix: "gc"},
+		},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	rigStore := beads.NewMemStore()
+	bead, err := rigStore.Create(beads.Bead{Title: "task", Type: "task", Assignee: "keeper"})
+	if err != nil {
+		t.Fatalf("rig Create: %v", err)
+	}
+	deps.SourceWorkflowStores = func() ([]SourceWorkflowStore, error) {
+		return []SourceWorkflowStore{{Store: rigStore, StoreRef: "rig:myrig"}}, nil
+	}
+	// Force routing: the bead lives only in the rig store, so the city-store
+	// existence validation must be bypassed to reach the pool re-pour clear.
+	// No Reassign — the clear must come from the bare pool re-pour path.
+	opts := SlingOpts{
+		Target:        a,
+		BeadOrFormula: bead.ID,
+		NoFormula:     true,
+		NoConvoy:      true,
+		Force:         true,
+	}
+	if _, err := DoSling(opts, deps, nil); err != nil {
+		t.Fatalf("DoSling bare pool re-pour on rig-store bead: %v", err)
+	}
+	got, err := rigStore.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("rig Get: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty after bare pool re-pour", got.Assignee)
 	}
 }
 
