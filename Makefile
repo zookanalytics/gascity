@@ -254,6 +254,15 @@ vet:
 ## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
 ## this wrapper, internal/testenv scrubs these vars at test-binary init in every
 ## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
+##
+## TMPDIR defaults to /var/tmp, not /tmp. `make check` runs `go test -p=4
+## ./...`; the parallel link phase of large CGO/ICU test binaries can peak
+## past a small tmpfs-backed /tmp and fail with "No space left on device"
+## mid-link — a spurious rebase/refinery preflight failure (gc-v2z1p).
+## /var/tmp is conventionally a persistent (non-tmpfs) disk with more room.
+## Every make test target flows through this wrapper, so scripts it invokes
+## (test-*-shard, test-local-parallel) inherit the same TMPDIR. Export
+## TMPDIR to override (e.g. TMPDIR=/tmp make check).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -266,7 +275,7 @@ TEST_ENV = env -i \
 	LOGNAME="$$LOGNAME" \
 	SHELL="$$SHELL" \
 	LANG="$$LANG" \
-	TMPDIR="$${TMPDIR:-/tmp}" \
+	TMPDIR="$${TMPDIR:-/var/tmp}" \
 	OBSERVABLE_TEST_LOG="$${OBSERVABLE_TEST_LOG-}" \
 	OBSERVABLE_FAILURE_LINES="$${OBSERVABLE_FAILURE_LINES-}" \
 	GC_TEST_NO_SLICE="$${GC_TEST_NO_SLICE-}" \
