@@ -302,6 +302,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
+	// Host-level build-scratch watch: surfaces low free space on the filesystem
+	// backing $TMPDIR (default /tmp, a size-capped tmpfs on this class of host).
+	// Parallel `make check` CGO/ICU linking can exhaust it and surface as
+	// spurious ENOSPC test failures; the managed-Dolt/store-maintenance guards
+	// watch only the Dolt data dir, so this closes that monitoring gap (gc-yiqil).
+	// Advisory + read-only (statfs); no config needed.
+	register(newTmpScratchSpaceCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
 	}

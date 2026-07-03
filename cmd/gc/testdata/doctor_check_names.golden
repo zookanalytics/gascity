@@ -64,6 +64,7 @@ session-model
 session-stuck-creating
 dolt-server
 fork-rate
+tmp-scratch-space
 dolt-noms-size
 dolt-journal-size
 dolt-config
