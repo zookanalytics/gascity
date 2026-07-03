@@ -41,6 +41,7 @@ var (
 	_ runtime.InterruptedTurnResetProvider  = (*Provider)(nil)
 	_ runtime.ProcessTableScanner           = (*Provider)(nil)
 	_ runtime.ServerLifecycleProvider       = (*Provider)(nil)
+	_ InputAreaCapturer                     = (*Provider)(nil)
 )
 
 // NewProvider returns a [Provider] backed by a real tmux installation
@@ -582,6 +583,12 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 		return p.tm.CapturePaneAll(name)
 	}
 	return p.tm.CapturePane(name, lines)
+}
+
+// InputArea returns the structured input-area state for the named session,
+// delegating to the underlying tmux executor. Implements [InputAreaCapturer].
+func (p *Provider) InputArea(ctx context.Context, session string) (*InputAreaState, error) {
+	return p.tm.InputArea(ctx, session)
 }
 
 // ListRunning returns all tmux session names matching the given prefix.

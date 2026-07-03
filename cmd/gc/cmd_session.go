@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -65,6 +67,7 @@ continuity.`,
 		newSessionRenameCmd(stdout, stderr),
 		newSessionPruneCmd(stdout, stderr),
 		newSessionPeekCmd(stdout, stderr),
+		newSessionInputAreaCmd(stdout, stderr),
 		newSessionKillCmd(stdout, stderr),
 		newSessionNudgeCmd(stdout, stderr),
 		newSessionLogsCmd(stdout, stderr),
@@ -2166,6 +2169,13 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 		return 1
 	}
 
+	return writeSessionPeekResult(output, sessionID, target, lines, jsonOutput, stdout, stderr)
+}
+
+// writeSessionPeekResult renders a captured pane string as either a JSONL
+// record or a plain trailing-newline-normalized dump. Shared by the plain and
+// raw peek fallbacks.
+func writeSessionPeekResult(output, sessionID, target string, lines int, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, sessionPeekJSONResult{
 			SchemaVersion: "1",
@@ -2186,6 +2196,157 @@ func doSessionPeekFallback(target string, lines int, jsonOutput bool, stdout, st
 		fmt.Fprintln(stdout) //nolint:errcheck // best-effort stdout
 	}
 	return 0
+}
+
+// resolveRuntimeSessionName resolves a session id to its live runtime session
+// name via the worker handle, so live-pane captures (raw peek, input-area)
+// target the correct pane. Returns an empty name without error when the
+// session has no live runtime presence (e.g. stopped), so callers can report a
+// not-running condition distinctly from a resolution failure.
+func resolveRuntimeSessionName(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, sessionID string) (string, error) {
+	handle, err := workerHandleForSessionWithConfig(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		return "", err
+	}
+	state, err := handle.State(context.Background())
+	if err != nil {
+		return "", err
+	}
+	return state.SessionName, nil
+}
+
+// sessionInputAreaJSON is the typed JSON contract emitted by
+// "gc session input-area". It mirrors [tmux.InputAreaState] with an added
+// session field so a consumer capturing several sessions can attribute each
+// record.
+type sessionInputAreaJSON struct {
+	Session    string                 `json:"session"`
+	Provider   tmux.InputAreaProvider `json:"provider"`
+	PromptChar string                 `json:"prompt_char"`
+	Busy       bool                   `json:"busy"`
+	Typed      string                 `json:"typed"`
+	Ghost      string                 `json:"ghost"`
+	Detected   time.Time              `json:"detected"`
+}
+
+// newSessionInputAreaCmd creates the "gc session input-area <id-or-alias>"
+// command. It returns a typed, ghost-text-aware snapshot of a session's input
+// area for programmatic consumers (prompt templates, health checks) that must
+// distinguish operator-typed buffered input from styled ghost-text
+// suggestions. See engdocs/design/input-area-state.md §5.2.
+func newSessionInputAreaCmd(stdout, stderr io.Writer) *cobra.Command {
+	var format string
+	cmd := &cobra.Command{
+		Use:   "input-area <session-id-or-alias>",
+		Short: "Inspect a session's input area (typed vs ghost text, busy, prompt)",
+		Long: `Report the current input-area state of a session as structured data.
+
+Unlike "gc session peek", which returns raw pane text, input-area parses the
+pane with per-provider rendering knowledge and separates operator-typed
+buffered input (typed) from styled ghost-text suggestions (ghost). This is the
+stable contract prompt templates and health checks consume instead of
+re-rolling fragile pane-text pattern matches.
+
+Exit codes: 0 = state captured, 2 = session not found, 1 = other error.`,
+		Args:              cobra.ExactArgs(1),
+		ValidArgsFunction: completeSessionIDs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			return exitForCode(cmdSessionInputArea(args[0], format, stdout, stderr))
+		},
+	}
+	cmd.Flags().StringVar(&format, "format", "json", "output format: json|kv|text")
+	return cmd
+}
+
+// cmdSessionInputArea captures and renders a session's input-area state. It
+// reads the live pane via the provider's [tmux.InputAreaCapturer] capability;
+// the supervisor cache cannot serve it (it holds only stripped text). Returns
+// a CLI exit code: 0 success, 2 session not found, 1 other error.
+func cmdSessionInputArea(target, format string, stdout, stderr io.Writer) int {
+	switch format {
+	case "json", "kv", "text":
+	default:
+		fmt.Fprintf(stderr, "gc session input-area: invalid --format %q (want json|kv|text)\n", format) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, code := openCityStore(stderr, "gc session input-area")
+	if store == nil {
+		return code
+	}
+	var cfg *config.City
+	cfg, _ = loadCityConfig(cityPath, stderr)
+	sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+
+	sp := newSessionProvider()
+	capturer, ok := sp.(tmux.InputAreaCapturer)
+	if !ok {
+		fmt.Fprintf(stderr, "gc session input-area: not supported for this session's runtime provider\n") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	name, err := resolveRuntimeSessionName(cityPath, store, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if name == "" {
+		fmt.Fprintf(stderr, "gc session input-area: session %q is not running\n", target) //nolint:errcheck // best-effort stderr
+		return 2
+	}
+
+	state, err := capturer.InputArea(context.Background(), name)
+	if err != nil {
+		if errors.Is(err, runtime.ErrSessionNotFound) {
+			fmt.Fprintf(stderr, "gc session input-area: session %q not found\n", target) //nolint:errcheck // best-effort stderr
+			return 2
+		}
+		fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	return writeSessionInputArea(state, target, format, stdout, stderr)
+}
+
+// writeSessionInputArea renders an [tmux.InputAreaState] in the requested
+// format.
+func writeSessionInputArea(state *tmux.InputAreaState, target, format string, stdout, stderr io.Writer) int {
+	switch format {
+	case "kv":
+		line := fmt.Sprintf("session=%q provider=%s prompt_char=%q busy=%t typed=%q ghost=%q\n",
+			target, state.Provider, state.PromptChar, state.Busy, state.Typed, state.Ghost)
+		fmt.Fprint(stdout, line) //nolint:errcheck // best-effort stdout
+		return 0
+	case "text":
+		line := fmt.Sprintf("%s session %s: prompt=%q busy=%t typed=%q ghost=%q\n",
+			state.Provider, target, state.PromptChar, state.Busy, state.Typed, state.Ghost)
+		fmt.Fprint(stdout, line) //nolint:errcheck // best-effort stdout
+		return 0
+	default: // json
+		out := sessionInputAreaJSON{
+			Session:    target,
+			Provider:   state.Provider,
+			PromptChar: state.PromptChar,
+			Busy:       state.Busy,
+			Typed:      state.Typed,
+			Ghost:      state.Ghost,
+			Detected:   state.Detected,
+		}
+		if err := writeCLIJSONLine(stdout, out); err != nil {
+			fmt.Fprintf(stderr, "gc session input-area: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 }
 
 func outputLineCount(output string) int {
