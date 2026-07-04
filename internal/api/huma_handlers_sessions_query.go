@@ -23,20 +23,21 @@ import (
 // /v0/city/{cityName}/sessions.
 //
 // The "view" query parameter selects how much per-session detail the response
-// carries:
+// carries. The default is the cheap summary projection; only view=full enriches:
 //
-//   - view=summary returns only the cheap read-model + bead-metadata fields
-//     (id, alias, title, state, rig, pool, agent_kind, reason, options,
-//     metadata, submission_capabilities). These come from the cache-first read
-//     model via ListSummaryFromInfos with no fan-out and no live runtime probe.
-//     The enrichment and live-observation fields stay at their zero values:
-//     running=false, active_bead="", model="", context_pct=null,
-//     last_output="", attached=false, last_active="". summary takes precedence
-//     over peek.
-//   - view=full, empty (the default), or any unrecognized value runs
-//     enrichSessionResponse per session: running is a live State() probe,
-//     active_bead is a per-rig bead lookup, and model/context_pct come from
-//     transcript I/O. last_output is added only when peek=true.
+//   - The default (empty, view=summary, or any unrecognized value) returns only
+//     the cheap read-model + bead-metadata fields (id, alias, title, state, rig,
+//     pool, agent_kind, reason, options, metadata, submission_capabilities).
+//     These come from the cache-first read model via ListSummaryFromInfos with
+//     no fan-out and no live runtime probe. The enrichment and live-observation
+//     fields stay at their zero values: running=false, active_bead="", model="",
+//     context_pct=null, last_output="", attached=false, last_active="". The
+//     summary default takes precedence over peek.
+//   - view=full runs enrichSessionResponse per session: running is a live
+//     State() probe, active_bead is a per-rig bead lookup, and attached/
+//     last_active come from live provider observation. last_output is added only
+//     when peek=true. The transcript tier (model, context_pct, context_window,
+//     input_tokens, activity) is NOT computed on the list — it is detail-only.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -49,9 +50,10 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
-	// view=summary returns only the cheap read-model fields and skips
-	// enrichSessionResponse for every session; it takes precedence over peek.
-	summary := input.View == sessionViewSummary
+	// The default (empty, view=summary, or any unrecognized value) returns only
+	// the cheap read-model fields and skips enrichSessionResponse for every
+	// session; only view=full enriches. summary takes precedence over peek.
+	summary := input.View != sessionViewFull
 	// Cache only the first page (no cursor) of non-peek session lists; peek
 	// output is too volatile and cursor-mode pages are a low-value walk.
 	wantPeek := input.Peek && !summary
