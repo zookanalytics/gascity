@@ -655,6 +655,12 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 	if peek {
 		params.Peek = &peek
 	}
+	// Request the enriched projection. `gc session list` renders the
+	// live-observation last_active column, which the summary default (the
+	// post-flip GET /sessions default) omits; opt in explicitly to preserve
+	// the CLI's historical output.
+	view := "full"
+	params.View = &view
 	resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
 	if err != nil {
 		return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}

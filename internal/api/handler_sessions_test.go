@@ -839,15 +839,15 @@ func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Session")
 
-	// Precondition: the default (full) view enriches. Running is derived from
-	// a live State() probe, so it is true for this active session. If this
-	// stopped holding, the summary assertions below would pass vacuously.
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	// Precondition: view=full enriches. Running is derived from a live State()
+	// probe, so it is true for this active session. If this stopped holding, the
+	// summary assertions below would pass vacuously.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
 	if !full[0].Running {
-		t.Fatalf("full: running=false, want true (default view must enrich)")
+		t.Fatalf("full: running=false, want true (view=full must enrich)")
 	}
 
 	// view=summary must skip enrichment entirely: the live State() probe never
@@ -881,27 +881,38 @@ func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
 	}
 }
 
-// TestHandleSessionListFullViewStillEnriches guards the default contract: no
-// view param, view=full, and any unrecognized view value all run enrichment
-// (Running is set from the live probe).
-func TestHandleSessionListFullViewStillEnriches(t *testing.T) {
+// TestHandleSessionListDefaultIsSummaryOnlyFullEnriches guards the flipped
+// default contract: only view=full runs enrichment (Running set from the live
+// probe). The default (no view param) and any unrecognized value fall through
+// to the cheap summary projection, leaving the live-observation fields zero —
+// the symmetry that keeps unknown values from returning 422.
+func TestHandleSessionListDefaultIsSummaryOnlyFullEnriches(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Full Session")
 
+	// Only view=full enriches.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
+	if len(full) != 1 {
+		t.Fatalf("view=full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Error("view=full: running=false, want true (must enrich)")
+	}
+
+	// The default and any unrecognized value get the cheap summary projection.
 	for _, path := range []string{
 		"/sessions?state=active",            // default (no view)
-		"/sessions?state=active&view=full",  // explicit full
-		"/sessions?state=active&view=other", // unknown value falls through to full
+		"/sessions?state=active&view=other", // unknown value falls through to summary
 	} {
 		items := listSessionsForViewTest(t, h, cityURL(fs, path))
 		if len(items) != 1 {
 			t.Fatalf("%s: got %d items, want 1", path, len(items))
 		}
-		if !items[0].Running {
-			t.Errorf("%s: running=false, want true (must enrich)", path)
+		if items[0].Running {
+			t.Errorf("%s: running=true, want false (must use the cheap summary default)", path)
 		}
 	}
 }
@@ -938,12 +949,12 @@ func TestLegacyHandleSessionListSummaryView(t *testing.T) {
 
 	createTestSession(t, fs.cityBeadStore, fs.sp, "Legacy Session")
 
-	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active")
+	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=full")
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
 	if !full[0].Running {
-		t.Fatalf("full: running=false, want true (default must enrich)")
+		t.Fatalf("full: running=false, want true (view=full must enrich)")
 	}
 
 	sum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
@@ -1029,7 +1040,7 @@ func TestHandleSessionListSummaryViewSkipsLiveProvider(t *testing.T) {
 	// wired through the manager and an active session would otherwise trigger
 	// live probes. Without this a green summary assertion could be vacuous.
 	spy.reset()
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
@@ -1217,6 +1228,68 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	}
 	if resp.Items[0].Model != "" || resp.Items[0].ContextPct != nil {
 		t.Fatalf("session list used workdir-only Codex transcript discovery: model=%q context=%v", resp.Items[0].Model, resp.Items[0].ContextPct)
+	}
+}
+
+// TestHandleSessionListOmitsTranscriptTierWhileDetailKeepsIt locks the
+// detail-only contract for the transcript tier (model/context_pct/...). Before
+// this change the session LIST performed a "cheap" session-key transcript
+// lookup for non-Codex providers, paying per-session filesystem I/O
+// (DiscoverTranscript + TailMeta) that no list consumer reads. The enriched
+// list (view=full) must now leave the transcript fields zero, while the
+// per-session detail endpoint still surfaces them. The session is running and
+// has a discoverable keyed transcript, so a model="" on the list proves the
+// tier was deliberately skipped rather than absent.
+func TestHandleSessionListOmitsTranscriptTierWhileDetailKeepsIt(t *testing.T) {
+	fs := newSessionFakeState(t)
+	searchBase := t.TempDir()
+	srv := New(fs)
+	srv.sessionLogSearchPaths = []string{searchBase}
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	mgr := session.NewManager(fs.cityBeadStore, fs.sp)
+	resume := session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
+	workDir := t.TempDir()
+	info, err := mgr.Create(context.Background(), "myrig/worker", "Claude Chat", "claude", workDir, "claude", nil, resume, runtime.Config{})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if info.SessionKey == "" {
+		t.Fatalf("SessionKey empty; the cheap session-key lookup would not have run, making this test vacuous")
+	}
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q must be running or the transcript block is skipped regardless of view", info.SessionName)
+	}
+	writeNamedSessionJSONL(t, searchBase, workDir, info.SessionKey+".jsonl",
+		`{"type":"assistant","message":{"role":"assistant","model":"claude-opus-4-5-20251101","usage":{"input_tokens":10000,"cache_read_input_tokens":5000,"cache_creation_input_tokens":2000}}}`,
+	)
+
+	// Enriched LIST (view=full): transcript tier must stay zero even though the
+	// keyed transcript is discoverable. Running proves enrichment ran.
+	listItems := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
+	if len(listItems) != 1 || listItems[0].ID != info.ID {
+		t.Fatalf("list items = %#v, want one session %s", listItems, info.ID)
+	}
+	if !listItems[0].Running {
+		t.Fatal("list: running=false, want true (view=full must enrich; otherwise model='' is vacuous)")
+	}
+	if listItems[0].Model != "" || listItems[0].ContextPct != nil {
+		t.Fatalf("list surfaced transcript tier: model=%q context_pct=%v, want empty (detail-only)", listItems[0].Model, listItems[0].ContextPct)
+	}
+
+	// DETAIL endpoint must still surface the transcript tier.
+	req := httptest.NewRequest("GET", cityURL(fs, "/session/")+info.ID, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var detail sessionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+		t.Fatalf("decode detail: %v", err)
+	}
+	if detail.Model != "claude-opus-4-5-20251101" {
+		t.Fatalf("detail model = %q, want claude-opus-4-5-20251101 (detail must keep the transcript tier)", detail.Model)
 	}
 }
 
@@ -2197,8 +2270,10 @@ func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 		t.Fatalf("set reset metadata: %v", err)
 	}
 
+	// reset-pending is liveness-gated, so it surfaces only under the enriched
+	// view=full projection; the summary default deliberately skips the live probe.
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", cityURL(fs, "/sessions"), nil)
+	r := httptest.NewRequest("GET", cityURL(fs, "/sessions?view=full"), nil)
 	h.ServeHTTP(w, r)
 
 	if w.Code != http.StatusOK {
@@ -2244,10 +2319,10 @@ func TestHandleSessionListSummaryViewReasonSkipsLiveness(t *testing.T) {
 		t.Fatalf("set reset metadata: %v", err)
 	}
 
-	// Precondition: the full view consults liveness and surfaces reset-pending.
+	// Precondition: view=full consults liveness and surfaces reset-pending.
 	// Without this the summary assertion below could pass vacuously (e.g. if the
 	// reset marker stopped being liveness-gated).
-	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=full"))
 	if len(full) != 1 {
 		t.Fatalf("full: got %d items, want 1", len(full))
 	}
