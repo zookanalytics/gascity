@@ -350,6 +350,16 @@ func TestRenderPromptConfigDirResolves(t *testing.T) {
 	}
 }
 
+func TestRenderPromptDefaultMergeStrategy(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Strategy: {{ .DefaultMergeStrategy }}")
+	ctx := PromptContext{DefaultMergeStrategy: "mr"}
+	got := renderPrompt(f, "/city", "", "prompts/test.md.tmpl", ctx, "", io.Discard, nil, nil, nil)
+	if got != "Strategy: mr" {
+		t.Errorf("renderPrompt(DefaultMergeStrategy) = %q, want %q", got, "Strategy: mr")
+	}
+}
+
 func TestDefaultBranchForRig_PrefersStoredValue(t *testing.T) {
 	rigs := []config.Rig{
 		{Name: "scamper", Path: "/scamper", DefaultBranch: "master"},
@@ -376,6 +386,49 @@ func TestDefaultBranchForRig_EmptyRigName(t *testing.T) {
 	got := defaultBranchForRig("", nil, "")
 	if got != "main" {
 		t.Errorf("defaultBranchForRig() with empty rig = %q, want %q", got, "main")
+	}
+}
+
+func TestMergeStrategyForRig_PrefersRigValue(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "scamper", Path: "/scamper", DefaultMergeStrategy: "direct"},
+		{Name: "other", Path: "/other"},
+	}
+	cfg := &config.City{DefaultMergeStrategy: "mr"}
+	got := mergeStrategyForRig("scamper", rigs, cfg)
+	if got != "direct" {
+		t.Errorf("mergeStrategyForRig(scamper) = %q, want %q (rig value)", got, "direct")
+	}
+}
+
+func TestMergeStrategyForRig_FallsBackToCity(t *testing.T) {
+	rigs := []config.Rig{
+		{Name: "scamper", Path: "/scamper"},
+	}
+	cfg := &config.City{DefaultMergeStrategy: "mr"}
+	got := mergeStrategyForRig("scamper", rigs, cfg)
+	if got != "mr" {
+		t.Errorf("mergeStrategyForRig(scamper) = %q, want %q (city fallback)", got, "mr")
+	}
+}
+
+func TestMergeStrategyForRig_EmptyWhenUnset(t *testing.T) {
+	rigs := []config.Rig{{Name: "scamper", Path: "/scamper"}}
+	cfg := &config.City{}
+	got := mergeStrategyForRig("scamper", rigs, cfg)
+	if got != "" {
+		t.Errorf("mergeStrategyForRig() = %q, want empty", got)
+	}
+	if got := mergeStrategyForRig("", nil, nil); got != "" {
+		t.Errorf("mergeStrategyForRig() with empty rig, nil city = %q, want empty", got)
+	}
+}
+
+func TestMergeStrategyForRig_EmptyRigNameUsesCity(t *testing.T) {
+	cfg := &config.City{DefaultMergeStrategy: "mr"}
+	got := mergeStrategyForRig("", nil, cfg)
+	if got != "mr" {
+		t.Errorf("mergeStrategyForRig() with empty rig = %q, want %q (city default)", got, "mr")
 	}
 }
 
