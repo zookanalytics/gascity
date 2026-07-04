@@ -55,9 +55,17 @@ func (c *SessionCatalog) GetWithPersistedResponse(id string) (SessionInfo, Sessi
 	return c.manager.GetWithPersistedResponse(id)
 }
 
-// ListFullFromBeads expands a bead set into full session listing results.
+// ListFullFromBeads expands a bead set into full session listing results,
+// enriching each session with live runtime observation.
 func (c *SessionCatalog) ListFullFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
 	return c.manager.ListFullFromBeads(all, stateFilter, templateFilter)
+}
+
+// ListSummaryFromBeads expands a bead set into session listing results using
+// only stored metadata, with no live runtime observation. It backs the
+// view=summary session list, which must not fork tmux or touch the runtime.
+func (c *SessionCatalog) ListSummaryFromBeads(all []beads.Bead, stateFilter, templateFilter string) *SessionListResult {
+	return c.manager.ListSummaryFromBeads(all, stateFilter, templateFilter)
 }
 
 // SubmissionCapabilities reports whether the session can accept submit-style input.
