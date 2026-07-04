@@ -437,6 +437,10 @@ export function createSupervisorApi(options: CreateSupervisorApiOptions = {}): S
         getV0CityByCityNameSessions({
           client,
           path: { cityName },
+          // view=full: the dashboard reads the enriched live-observation fields
+          // (running, active_bead, attached, last_active) off list items; the
+          // GET /sessions default is now the cheap summary projection, so opt in.
+          query: { view: 'full' },
         }) as Promise<SupervisorResult<ListBodySessionResponse>>,
         'gc supervisor sessions response was empty',
       );

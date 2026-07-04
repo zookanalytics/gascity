@@ -259,7 +259,7 @@ describe('supervisor client wrapper', () => {
       total: 1,
     });
     expect(requestedUrl(fetchSpy.mock.calls[0]?.[0])).toBe(
-      'http://gc-supervisor.test/v0/city/test-city/sessions',
+      'http://gc-supervisor.test/v0/city/test-city/sessions?view=full',
     );
   });
 
