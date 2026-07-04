@@ -106,6 +106,11 @@ type CityRuntime struct {
 	asyncStarts        asyncStartTracker
 	asyncStops         asyncStartTracker
 	demandSnapshot     *runtimeDemandSnapshot
+	// demandDirty forces a one-shot pool-demand rebuild on the next tick. It is
+	// the signal for demand that the session fingerprint can't see — routed work
+	// for a sleeping pool mutates no session bead — set from any goroutine
+	// (controller socket, API state) and consumed by the reconciler.
+	demandDirty *atomic.Bool
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -163,6 +168,7 @@ type CityRuntimeParams struct {
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
 	ConfigDirty  *atomic.Bool
+	DemandDirty  *atomic.Bool
 
 	Cfg                     *config.City
 	SP                      runtime.Provider
@@ -229,6 +235,10 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 	if configDirty == nil {
 		configDirty = &atomic.Bool{}
 	}
+	demandDirty := p.DemandDirty
+	if demandDirty == nil {
+		demandDirty = &atomic.Bool{}
+	}
 
 	it := buildIdleTracker(p.Cfg, p.CityName, p.CityPath, p.SP)
 	mat := buildMaxSessionAgeTracker(p.Cfg, p.CityName, p.SP)
@@ -287,6 +297,7 @@ func newCityRuntime(p CityRuntimeParams) *CityRuntime {
 		watchTargets:            p.WatchTargets,
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
+		demandDirty:             demandDirty,
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publication:             p.Publication,
@@ -1176,7 +1187,7 @@ func (cr *CityRuntime) tick(
 		return
 	}
 	phaseStart = time.Now()
-	demand := cr.loadDemandSnapshot(sessionBeads, trace, trigger, configChanged)
+	demand := cr.loadDemandSnapshot(sessionBeads, trace, configChanged)
 	recordPhase(TraceSiteDemandSnapshot, "load_demand_snapshot", phaseStart, map[string]any{
 		"config_changed": configChanged,
 		"trigger":        trigger,
@@ -3074,11 +3085,10 @@ func (cr *CityRuntime) buildDesiredState(sessionBeads *sessionBeadSnapshot, trac
 func (cr *CityRuntime) loadDemandSnapshot(
 	sessionBeads *sessionBeadSnapshot,
 	trace *sessionReconcilerTraceCycle,
-	trigger string,
 	configChanged bool,
 ) runtimeDemandSnapshot {
 	sessionFingerprint := sessionBeadSnapshotFingerprint(sessionBeads)
-	if cr.shouldRefreshDemandSnapshot(trigger, configChanged, sessionFingerprint) {
+	if cr.shouldRefreshDemandSnapshot(configChanged, sessionFingerprint) {
 		result := cr.buildDesiredState(sessionBeads, trace)
 		var openSessionBeads []beads.Bead
 		if sessionBeads != nil {
@@ -3111,15 +3121,21 @@ func (cr *CityRuntime) loadDemandSnapshot(
 	return snapshot
 }
 
+// shouldRefreshDemandSnapshot reports whether the cached pool-demand snapshot
+// must be rebuilt this tick. It rebuilds on a config change, a one-shot
+// demandDirty signal, a session-fingerprint change, or snapshot age; otherwise
+// poke-driven ticks reuse the cached snapshot, keeping the high-frequency
+// session-lifecycle wake path off the per-tick demand rebuild.
 func (cr *CityRuntime) shouldRefreshDemandSnapshot(
-	trigger string,
 	configChanged bool,
 	sessionFingerprint string,
 ) bool {
-	// Non-patrol triggers (config reloads and controller pokes — e.g. from
-	// sling-dispatched work) always rebuild immediately; only patrol-cadence
-	// re-evaluation is throttled below.
-	if configChanged || trigger != "patrol" {
+	// Consume the one-shot demand signal before any other rebuild reason can
+	// short-circuit past it, so it is never left set for a redundant rebuild on
+	// the next tick. The flag is fail-safe: it can only force an extra rebuild,
+	// never suppress one, so routed work for a sleeping pool is never missed.
+	demandDirty := cr.demandDirty != nil && cr.demandDirty.Swap(false)
+	if configChanged || demandDirty {
 		return true
 	}
 	if cr.demandSnapshot == nil {
@@ -3137,7 +3153,9 @@ func (cr *CityRuntime) shouldRefreshDemandSnapshot(
 
 // demandSnapshotPatrolMaxAge reports how long a cached demand snapshot may be
 // reused across consecutive patrol ticks, or 0 when patrol must rebuild every
-// tick. Non-patrol triggers bypass this entirely (see shouldRefreshDemandSnapshot).
+// tick. A work-routing poke (demandDirty) forces an immediate rebuild regardless
+// of this age, so routed work for a sleeping pool is observed without waiting for
+// the floor (see shouldRefreshDemandSnapshot).
 func (cr *CityRuntime) demandSnapshotPatrolMaxAge() time.Duration {
 	if cr.demandSnapshotsEnabled() {
 		return runtimeDemandSnapshotMaxAge

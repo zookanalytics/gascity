@@ -602,6 +602,13 @@ func TestSlingPoolTarget(t *testing.T) {
 	if resp["status"] != "slung" {
 		t.Fatalf("status = %q, want slung", resp["status"])
 	}
+
+	// Slinging to a sleeping pool (MinActiveSessions=0) must demand-poke the
+	// controller, not just plain-poke it, so the pool's demand is rebuilt and it
+	// wakes this tick.
+	if state.demandPokeCount == 0 {
+		t.Fatalf("slinging to a sleeping pool = %d demand-pokes, want >0 (must force a demand-snapshot rebuild)", state.demandPokeCount)
+	}
 }
 
 // TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo is the write-side guard for

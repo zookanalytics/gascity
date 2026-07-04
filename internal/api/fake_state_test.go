@@ -53,6 +53,7 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	pokeCount         int
+	demandPokeCount   int
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -144,6 +145,7 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	return f.autos
 }
 func (f *fakeState) Poke()                                    { f.pokeCount++ }
+func (f *fakeState) PokeDemand()                              { f.demandPokeCount++ }
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry   { return f.services }
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }

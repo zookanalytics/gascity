@@ -126,6 +126,7 @@ func startControllerSocket(
 	cancelFn context.CancelFunc,
 	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
+	demandDirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
@@ -147,7 +148,7 @@ func startControllerSocket(
 			if err != nil {
 				return // listener closed
 			}
-			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+			go handleControllerConn(conn, cityPath, cancelFn, forceShutdown, dirty, demandDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 		}
 	}()
 	return lis, nil
@@ -163,6 +164,7 @@ func handleControllerConn(
 	cancelFn context.CancelFunc,
 	forceShutdown *atomic.Bool,
 	dirty *atomic.Bool,
+	demandDirty *atomic.Bool,
 	reloadReqCh chan reloadRequest,
 	convergenceReqCh chan convergenceRequest,
 	pokeCh chan struct{},
@@ -190,6 +192,18 @@ func handleControllerConn(
 		case line == "poke":
 			// Non-blocking send: triggers immediate reconciler tick for
 			// event-driven wake after sling assigns work.
+			select {
+			case pokeCh <- struct{}{}:
+			default: // poke already pending
+			}
+			conn.Write([]byte("ok\n")) //nolint:errcheck // best-effort ack
+		case line == "poke-demand":
+			// Demand-aware wake: mark demand dirty so the tick rebuilds pool
+			// demand, then trigger it. Plain "poke" stays demand-snapshot-
+			// preserving for the high-frequency session-lifecycle path.
+			if demandDirty != nil {
+				demandDirty.Store(true)
+			}
 			select {
 			case pokeCh <- struct{}{}:
 			default: // poke already pending
@@ -1262,10 +1276,11 @@ func runController(
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
+	demandDirty := &atomic.Bool{}
 
 	sockPath := controllerSocketPath(cityPath)
 	forceShutdown := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
+	lis, err := startControllerSocket(cityPath, cancel, forceShutdown, configDirty, demandDirty, reloadReqCh, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1303,6 +1318,7 @@ func runController(
 		WatchTargets:            initialWatchTargets,
 		ConfigRev:               configRev,
 		ConfigDirty:             configDirty,
+		DemandDirty:             demandDirty,
 		Cfg:                     cfg,
 		SP:                      sp,
 		Publication:             supervisor.PublicationConfig{},
@@ -1328,6 +1344,7 @@ func runController(
 	cs.ct = cr.crashTrack()
 	cs.pokeCh = pokeCh
 	cs.configDirty = configDirty
+	cs.demandDirty = demandDirty
 	cs.services = cr.svc
 	cs.emergencyCh = make(chan emergency.Record, 64)
 	cr.setControllerState(cs)
