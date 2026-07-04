@@ -16114,7 +16114,7 @@ export type GetV0CityByCityNameSessionsData = {
          */
         peek?: boolean;
         /**
-         * Response detail level. "summary" returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, options, metadata) built from stored metadata with no live runtime probe; it skips per-session enrichment (live running probe, active-bead lookup, model/context transcript read) and also leaves the live-observation fields running, active_bead, model, context_pct, last_output, attached, and last_active at their zero values. It takes precedence over peek. Empty or "full" (the default, and any unrecognized value) returns the enriched response.
+         * Response detail level. The default (empty, "summary", or any unrecognized value) returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, options, metadata) built from stored metadata with no live runtime probe and no per-session enrichment; the live-observation fields running, active_bead, last_output, attached, and last_active stay at their zero values. "full" opts into per-session enrichment: a live running probe, active-bead lookup, and live attached/last_active observation, with last_output included only when peek=true (peek is honored only under view=full). The transcript tier (model, context_pct, context_window, input_tokens, activity) is detail-only and is never returned by the list.
          */
         view?: string;
     };
