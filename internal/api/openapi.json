@@ -619,6 +619,10 @@
           "display_name": {
             "type": "string"
           },
+          "input_tokens": {
+            "format": "int64",
+            "type": "integer"
+          },
           "last_output": {
             "type": "string"
           },
@@ -7461,6 +7465,10 @@
           },
           "id": {
             "type": "string"
+          },
+          "input_tokens": {
+            "format": "int64",
+            "type": "integer"
           },
           "kind": {
             "type": "string"

@@ -978,6 +978,72 @@ func TestAgentModelAndContext(t *testing.T) {
 	} else if *resp.ContextWindow != 200000 {
 		t.Errorf("ContextWindow = %d, want 200000", *resp.ContextWindow)
 	}
+	if resp.InputTokens == nil {
+		t.Error("expected non-nil InputTokens")
+	} else if *resp.InputTokens != 17000 {
+		t.Errorf("InputTokens = %d, want 17000", *resp.InputTokens)
+	}
+}
+
+// TestAgentInputTokensUnknownModel locks in that input_tokens reaches the
+// API response for a model ID that ModelContextWindow does not recognize.
+// The absolute-token field has to survive that path because callers
+// (cycle-recycle) trigger on it specifically to be decoupled from the
+// model-window table.
+func TestAgentInputTokensUnknownModel(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Workspace.Provider = "claude"
+	state.cfg.Agents = []config.Agent{
+		{Name: "worker", Dir: "myrig", Provider: "claude", MaxActiveSessions: intPtr(1)},
+	}
+	state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
+	state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}) //nolint:errcheck
+
+	searchDir := t.TempDir()
+	slug := sessionlog.ProjectSlug("/tmp/myrig")
+	slugDir := filepath.Join(searchDir, slug)
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sessionFile := filepath.Join(slugDir, "test-session.jsonl")
+	lines := `{"type":"assistant","message":{"role":"assistant","model":"future-model-2099","usage":{"input_tokens":10000,"cache_read_input_tokens":5000,"cache_creation_input_tokens":2000}}}` + "\n"
+	if err := os.WriteFile(sessionFile, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(state)
+	srv.sessionLogSearchPaths = []string{searchDir}
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/worker"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp agentResponse
+	json.NewDecoder(rec.Body).Decode(&resp) //nolint:errcheck
+	if resp.Model != "future-model-2099" {
+		t.Errorf("Model = %q, want %q", resp.Model, "future-model-2099")
+	}
+	// ContextPct and ContextWindow remain gated on the model-window
+	// table; they are correctly absent here.
+	if resp.ContextPct != nil {
+		t.Errorf("ContextPct = %d, want nil for unknown model", *resp.ContextPct)
+	}
+	if resp.ContextWindow != nil {
+		t.Errorf("ContextWindow = %d, want nil for unknown model", *resp.ContextWindow)
+	}
+	// InputTokens must still be set — that's the whole point of the field.
+	if resp.InputTokens == nil {
+		t.Fatal("expected non-nil InputTokens for unknown model with usage")
+	}
+	if *resp.InputTokens != 17000 {
+		t.Errorf("InputTokens = %d, want 17000", *resp.InputTokens)
+	}
 }
 
 func TestAgentActivityFromSessionLog(t *testing.T) {
