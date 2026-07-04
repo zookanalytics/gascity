@@ -229,6 +229,20 @@ func (s *Server) cachedResponseWithinAge(key string, maxAge time.Duration) (any,
 	return entry.value, true
 }
 
+// invalidateResponseCacheByPrefix drops cached entries with matching key prefix.
+func (s *Server) invalidateResponseCacheByPrefix(prefix string) {
+	if prefix == "" {
+		return
+	}
+	s.responseCacheMu.Lock()
+	defer s.responseCacheMu.Unlock()
+	for k := range s.responseCacheEntries {
+		if strings.HasPrefix(k, prefix) {
+			delete(s.responseCacheEntries, k)
+		}
+	}
+}
+
 // cachedResponseAs is a generic helper: retrieve the cached value and
 // deep-copy it via a JSON roundtrip before returning.
 func cachedResponseAs[T any](s *Server, key string, index uint64) (T, bool) {
