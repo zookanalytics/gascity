@@ -456,6 +456,8 @@ func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchIn
 		return nil, humaSessionManagerError(err)
 	}
 
+	s.invalidateResponseCacheByPrefix("sessions")
+
 	info, presponse, err := sessionGetEnriched(session.NewStore(store), mgr, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
