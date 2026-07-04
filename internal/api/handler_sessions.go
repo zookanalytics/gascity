@@ -18,12 +18,16 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-// sessionViewSummary is the value of the session-list "view" query parameter
-// that requests the cheap, read-model-only projection: the handler skips
-// enrichSessionResponse (live State() probe, active-bead lookup, and
-// transcript I/O) for every session. Any other value — including empty and
-// "full" — keeps the default enriched projection.
-const sessionViewSummary = "summary"
+// sessionViewSummary and sessionViewFull are the values of the session-list
+// "view" query parameter. Summary — the default, also selected by empty or any
+// unrecognized value — requests the cheap, read-model-only projection: the
+// handler skips enrichSessionResponse (live State() probe, active-bead lookup,
+// and transcript I/O) for every session. sessionViewFull opts into the enriched
+// projection.
+const (
+	sessionViewSummary = "summary"
+	sessionViewFull    = "full"
+)
 
 // sessionResponse is the JSON representation of a chat session.
 type sessionResponse struct {
@@ -252,9 +256,10 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
 	templateFilter := q.Get("template")
-	// view=summary returns only the cheap read-model fields and skips
-	// enrichSessionResponse for every session; it takes precedence over peek.
-	summary := q.Get("view") == sessionViewSummary
+	// The default (empty, view=summary, or any unrecognized value) returns only
+	// the cheap read-model fields and skips enrichSessionResponse for every
+	// session; only view=full enriches. summary takes precedence over peek.
+	summary := q.Get("view") != sessionViewFull
 	wantPeek := q.Get("peek") == "true" && !summary
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
@@ -647,8 +652,13 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 	}
 
-	// Model + context usage (best-effort).
-	if resp.Running && info.WorkDir != "" {
+	// Model + context usage (best-effort). This transcript tier is detail-only:
+	// the session LIST never computes it. No list consumer reads
+	// model/context_pct/context_window/input_tokens/activity, and
+	// DiscoverTranscript+TailMeta is per-session filesystem I/O that dominated
+	// the list's latency. Only the per-session detail endpoint (which passes
+	// allowWorkdirTranscriptDiscovery=true) pays for the transcript read.
+	if resp.Running && info.WorkDir != "" && allowWorkdirTranscriptDiscovery {
 		workDir := info.WorkDir
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
@@ -663,9 +673,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if strings.TrimSpace(provider) == "" && cfg != nil {
 			provider, _ = resolveProviderInfo(provider, cfg)
 		}
-		if !allowWorkdirTranscriptDiscovery && !canUseCheapTranscriptLookup(provider, info.SessionKey) {
-			return
-		}
 		sessionFile := factory.DiscoverTranscript(provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
@@ -679,17 +686,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
-}
-
-func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
-	if strings.TrimSpace(sessionKey) == "" {
-		return false
-	}
-	p := strings.ToLower(strings.TrimSpace(provider))
-	if strings.Contains(p, "codex") || strings.Contains(p, "gemini") {
-		return false
-	}
-	return true
 }
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
