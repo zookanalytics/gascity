@@ -56,6 +56,7 @@ type sessionResponse struct {
 	Model         string `json:"model,omitempty"`
 	ContextPct    *int   `json:"context_pct,omitempty"`
 	ContextWindow *int   `json:"context_window,omitempty"`
+	InputTokens   *int   `json:"input_tokens,omitempty"`
 
 	// Activity indicates session turn state: "idle", "in-turn", or omitted.
 	Activity string `json:"activity,omitempty"`
@@ -663,6 +664,7 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
 				resp.Model = meta.Model
+				resp.InputTokens = meta.InputTokens
 				if meta.ContextUsage != nil {
 					resp.ContextPct = &meta.ContextUsage.Percentage
 					resp.ContextWindow = &meta.ContextUsage.ContextWindow
