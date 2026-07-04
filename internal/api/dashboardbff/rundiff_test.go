@@ -10,6 +10,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // initGitRepo creates a minimal git repo at dir and returns dir. It is used by
@@ -17,6 +19,7 @@ import (
 // path so an in-city execution path is accepted end-to-end.
 func initGitRepo(t *testing.T, dir string) string {
 	t.Helper()
+	testutil.IsolatedGitConfig(t)
 	for _, args := range [][]string{
 		{"init", "-q"},
 		{"-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"},
@@ -144,6 +147,7 @@ func jsonString(s string) string {
 // files to exercise the full run-diff (tracked + untracked) path.
 func gitRepoWithTrackedFile(t *testing.T, dir string) {
 	t.Helper()
+	testutil.IsolatedGitConfig(t)
 	run := func(args ...string) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
