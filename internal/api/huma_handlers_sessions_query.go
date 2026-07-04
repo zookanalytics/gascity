@@ -24,29 +24,36 @@ import (
 // /v0/city/{cityName}/sessions.
 //
 // The "view" query parameter selects how much per-session detail the response
-// carries:
+// carries. The default is the cheap summary projection; only view=full enriches:
 //
-//   - view=summary returns only the cheap read-model + bead-metadata fields
-//     (id, alias, title, state, rig, pool, agent_kind, reason, options,
-//     metadata, submission_capabilities). These come from the cache-first read
-//     model via ListSummaryFromBeads with no fan-out and no live runtime probe.
-//     The enrichment and live-observation fields stay at their zero values:
-//     running=false, active_bead="", model="", context_pct=null,
-//     last_output="", attached=false, last_active="". summary takes precedence
-//     over peek.
-//   - view=full, empty (the default), or any unrecognized value runs
-//     enrichSessionResponse per session: running is a live State() probe,
-//     active_bead is a per-rig bead lookup, and model/context_pct come from
-//     transcript I/O. last_output is added only when peek=true.
+//   - The default (empty, "summary", or any unrecognized value) returns only
+//     the cheap read-model + bead-metadata fields (id, alias, title, state, rig,
+//     pool, agent_kind, reason, options, metadata, submission_capabilities).
+//     These come from the cache-first read model via ListSummaryFromBeads with
+//     no fan-out and no live runtime probe. The live-observation fields stay at
+//     their zero values: running=false, active_bead="", last_output="",
+//     attached=false, last_active="".
+//   - view=full runs enrichSessionResponse per session: running is a live
+//     State() probe, active_bead is a per-rig bead lookup, and attached/
+//     last_active come from live provider observation. last_output is added
+//     only when peek=true (peek is honored only under view=full). The transcript
+//     tier (model, context_pct, context_window, input_tokens, activity) is NOT
+//     computed on the list — it is detail-only (GET .../session/{id}).
+//
+// Per-field freshness: read-model fields are current as of the request; the
+// view=full live-observation fields (running, active_bead, attached,
+// last_active) reflect a per-request provider probe; last_output is live; the
+// transcript tier is detail-only.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, huma.Error503ServiceUnavailable("no bead store configured")
 	}
-	// view=summary returns only the cheap read-model fields and skips
-	// enrichSessionResponse for every session; it takes precedence over peek.
-	summary := input.View == sessionViewSummary
-	wantPeek := input.Peek && !summary
+	// The default returns only the cheap read-model fields and skips
+	// enrichSessionResponse for every session; only view=full enriches. peek is
+	// an enrichment field, so it is honored only under view=full.
+	full := input.View == sessionViewFull
+	wantPeek := input.Peek && full
 	index := s.latestIndex()
 	cacheKey := ""
 	// Skip caching for peek (terminal text is too volatile) and for
@@ -72,16 +79,17 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	// In summary mode the listing itself must not observe live runtime state:
+	// The default (summary) listing must not observe live runtime state:
 	// ListFullFromBeads expands each bead through infoFromBead, which probes the
 	// provider (IsRunning/IsAttached/GetLastActivity) for active sessions — a
-	// tmux fork on the tmux provider, violating the view=summary "no live probe"
-	// contract. ListSummaryFromBeads is the metadata-only projection.
+	// tmux fork on the tmux provider, violating the cheap-default "no live probe"
+	// contract. ListSummaryFromBeads is the metadata-only projection; only
+	// view=full pays for the live expansion.
 	var listResult *session.ListResult
-	if summary {
-		listResult = mgr.ListSummaryFromBeads(all, input.State, input.Template)
-	} else {
+	if full {
 		listResult = mgr.ListFullFromBeads(all, input.State, input.Template)
+	} else {
+		listResult = mgr.ListSummaryFromBeads(all, input.State, input.Template)
 	}
 	sessions := listResult.Sessions
 
@@ -92,20 +100,20 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	// In summary mode the reason must come from the pure, no-liveness
-	// projection: the reset-pending branch probes provider IsRunning (a live
-	// tmux fork for the tmux provider), which violates the view=summary
+	// In the default (summary) listing the reason must come from the pure,
+	// no-liveness projection: the reset-pending branch probes provider IsRunning
+	// (a live tmux fork for the tmux provider), which violates the cheap-default
 	// "no live probe" contract. A nil provider makes
 	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
 	// metadata-only reason.
 	reasonProvider := s.state.SessionProvider()
-	if summary {
+	if !full {
 		reasonProvider = nil
 	}
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, reasonProvider, hasDeferredQueue)
-		if !summary {
+		if full {
 			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 		}
 	}
