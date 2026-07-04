@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -5046,5 +5047,237 @@ func TestCompactScriptSkipFetchRejectsInvalidValue(t *testing.T) {
 		if strings.Contains(string(logData), "DOLT_GC") {
 			t.Fatalf("invalid skip-fetch value must exit before any DOLT_GC call:\n%s", logData)
 		}
+	}
+}
+
+// writeDoctorPathADolt installs a dolt shim that satisfies the doctor's
+// SQL probes (active_branch, PROCESSLIST count, SHOW DATABASES) and
+// reports a per-database `dolt backup -v` mapping derived from urlsByDB.
+//
+// urlsByDB keys are database names that appear in SHOW DATABASES. The
+// value is the URL printed in column 2 of `dolt backup -v` when invoked
+// inside that database's data directory; a database absent from the map
+// gets no named backup (empty `dolt backup -v` output). This matches
+// the Path A enrollment shape: each database has exactly one
+// `<db>-backup` whose URL points at its own dedicated artifact dir.
+func writeDoctorPathADolt(t *testing.T, binDir string, urlsByDB map[string]string) {
+	t.Helper()
+	var lines []string
+	lines = append(lines,
+		"#!/usr/bin/env bash",
+		"set -euo pipefail",
+		`case "$*" in`,
+		`  *"SELECT active_branch()"*) exit 0 ;;`,
+		`  *"COUNT(*) FROM information_schema.PROCESSLIST"*)`,
+		`    printf 'COUNT(*)\n1\n'; exit 0 ;;`,
+	)
+	// Build SHOW DATABASES response from the urlsByDB keys, sorted for
+	// determinism. The doctor only cares about user DBs; system schemas
+	// would be filtered out anyway.
+	var dbs []string
+	for db := range urlsByDB {
+		dbs = append(dbs, db)
+	}
+	sort.Strings(dbs)
+	dbCSV := "Database"
+	for _, db := range dbs {
+		dbCSV += "\n" + db
+	}
+	dbCSV += "\n"
+	lines = append(lines,
+		`  *"SHOW DATABASES"*)`,
+		fmt.Sprintf(`    printf %s; exit 0 ;;`, shellQuote(dbCSV)),
+		`esac`,
+	)
+	// `dolt backup` branch: differentiate by $PWD's basename so a single
+	// shim serves every per-DB invocation. Real `dolt backup` lists the
+	// configured backups whether or not `-v` is passed (the doctor's
+	// eligibility check uses bare `dolt backup`; named_backup_url_for_db
+	// uses `dolt backup -v`), so answer both forms identically — the
+	// "<name> <url> {}" line satisfies the eligibility awk ($1=name) and
+	// the URL-discovery awk ($2=url).
+	lines = append(lines,
+		`if [ "${1:-}" = "backup" ]; then`,
+		`  db="$(basename "$PWD")"`,
+		`  case "$db" in`,
+	)
+	for _, db := range dbs {
+		url := urlsByDB[db]
+		if url == "" {
+			lines = append(lines, fmt.Sprintf(`    %s) exit 0 ;;`, shellQuote(db)))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf(
+			`    %s) printf '%%s-backup %%s {}\n' %s %s; exit 0 ;;`,
+			shellQuote(db), shellQuote(db), shellQuote(url),
+		))
+	}
+	lines = append(lines, `  esac`, `  exit 0`, `fi`, `exit 0`)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), strings.Join(lines, "\n")+"\n")
+}
+
+// makePathABackupDir creates the file:// artifact directory the doctor
+// will probe when discovering Path A freshness for a database. Returns
+// the absolute path so the caller can stamp mtimes after writing files.
+func makePathABackupDir(t *testing.T, root, db string) string {
+	t.Helper()
+	dir := filepath.Join(root, db)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir path-A backup dir: %v", err)
+	}
+	return dir
+}
+
+// TestDoctorScriptUsesPathANamedBackupURLForFreshness verifies the
+// regression fix from gc-lhq4yu: under Path A enrollment, the doctor
+// must learn each DB's backup URL from `dolt backup -v` rather than
+// assuming a single local `.dolt-backup` directory. A fresh artifact
+// at the named URL must satisfy the freshness check even if no legacy
+// $GC_BACKUP_ARTIFACT_DIR exists.
+func TestDoctorScriptUsesPathANamedBackupURLForFreshness(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	// Path A artifact root lives outside cityPath — under Path A
+	// operators commonly point at a mount like /media/psf/.../backups
+	// that has no relation to the city directory.
+	backupRoot := t.TempDir()
+	prodBackup := makePathABackupDir(t, backupRoot, "prod")
+	freshArtifact := filepath.Join(prodBackup, "manifest")
+	writeTestFile(t, freshArtifact, "artifact")
+	now := time.Now()
+	if err := os.Chtimes(freshArtifact, now, now); err != nil {
+		t.Fatalf("chtimes fresh artifact: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorPathADolt(t, binDir, map[string]string{
+		"prod": "file://" + prodBackup,
+	})
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if strings.Contains(gcLog, "prod backup missing") {
+		t.Fatalf("fresh Path A artifact should satisfy freshness check, log:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "backup artifact dir missing") {
+		t.Fatalf("Path A enrollment must not trigger the legacy 'dir missing' advisory, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptDetectsStalePathABackup verifies that when Path A's
+// named backup URL points at an old artifact, the doctor reports it
+// stale — same staleness math as Path B, just sourced from the URL.
+func TestDoctorScriptDetectsStalePathABackup(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	backupRoot := t.TempDir()
+	prodBackup := makePathABackupDir(t, backupRoot, "prod")
+	staleArtifact := filepath.Join(prodBackup, "manifest")
+	writeTestFile(t, staleArtifact, "artifact")
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(staleArtifact, old, old); err != nil {
+		t.Fatalf("chtimes stale artifact: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorPathADolt(t, binDir, map[string]string{
+		"prod": "file://" + prodBackup,
+	})
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if !strings.Contains(gcLog, "prod backup is") {
+		t.Fatalf("stale Path A artifact should trigger freshness advisory, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptSkipsRemotePathABackupsSilently verifies that a
+// remote URL (s3://, http://, etc.) advertised via `dolt backup -v` is
+// neither freshness-checked locally nor reported as missing: remote
+// freshness is the remote's problem, and the doctor has no business
+// hitting external services from a 5-minute-cadence health probe.
+func TestDoctorScriptSkipsRemotePathABackupsSilently(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorPathADolt(t, binDir, map[string]string{
+		"prod": "s3://example-bucket/prod",
+	})
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if strings.Contains(gcLog, "prod backup") {
+		t.Fatalf("remote Path A backups should be silently skipped, log:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "backup artifact dir missing") {
+		t.Fatalf("remote-only Path A enrollment must not trigger legacy 'dir missing' advisory, log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptReportsMissingPathABackupArtifact verifies that
+// when a DB has a file:// named backup but the URL directory is
+// empty (or absent), the doctor reports the artifact missing — this
+// preserves the "backup missing" signal for misconfigured Path A
+// setups where the URL was created but no sync has produced data yet.
+func TestDoctorScriptReportsMissingPathABackupArtifact(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	backupRoot := t.TempDir()
+	prodBackup := makePathABackupDir(t, backupRoot, "prod") // empty dir
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeDoctorPathADolt(t, binDir, map[string]string{
+		"prod": "file://" + prodBackup,
+	})
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("unexpected doctor output:\n%s", out)
+	}
+	gcLogData, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	gcLog := string(gcLogData)
+	if !strings.Contains(gcLog, "prod backup missing") {
+		t.Fatalf("empty Path A backup dir should report 'backup missing', log:\n%s", gcLog)
 	}
 }
