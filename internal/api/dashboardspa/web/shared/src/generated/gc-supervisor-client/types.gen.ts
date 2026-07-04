@@ -2663,7 +2663,10 @@ export type RigResponse = {
     last_activity?: string;
     name: string;
     path: string;
-    prefix?: string;
+    /**
+     * Effective bead-ID prefix. Always populated — explicit when configured, otherwise derived from the rig name.
+     */
+    prefix: string;
     running_count: number;
     suspended: boolean;
 };
