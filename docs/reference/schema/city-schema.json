@@ -398,6 +398,13 @@
           "type": "array",
           "description": "AppendFragments lists named template fragments to auto-append to\n.template.md prompts after rendering. Legacy .md.tmpl prompts are\nstill supported during the transition; plain .md remains inert.\nV2 migration convenience — replaces global_fragments/inject_fragments\nfor config-wide defaults."
         },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "Env sets baseline environment variables inherited by every agent at\ncomposition time. Per-agent [[agent.env]] keys win on collision, so\nagents can override defaults without restating the rest. Useful for\ncity-wide wiring (PATH augmentation, locale, common feature flags)\nthat would otherwise be duplicated across every [[agent]] entry.\nControl-dispatcher agents are skipped."
+        },
         "skills": {
           "items": {
             "type": "string"
@@ -1202,7 +1209,7 @@
         },
         "agent_defaults": {
           "$ref": "#/$defs/AgentDefaults",
-          "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, and append_fragments; the attachment-list fields\nremain tombstones, and the other fields are parsed/composed but not yet\ninherited automatically."
+          "description": "AgentDefaults provides root city defaults for agents that don't override\nthem (canonical TOML key: agent_defaults). Pack-local defaults use the\nsame table shape in pack.toml. The runtime currently applies provider,\ndefault_sling_formula, append_fragments, and env; the attachment-list\nfields remain tombstones, and the other fields are parsed/composed but\nnot yet inherited automatically."
         },
         "pricing": {
           "items": {
