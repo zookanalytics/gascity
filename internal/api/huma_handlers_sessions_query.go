@@ -31,6 +31,21 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
+	// Cache only the first page (no cursor) of non-peek session lists; peek
+	// output is too volatile and cursor-mode pages are a low-value walk.
+	wantPeek := input.Peek
+	index := s.latestIndex()
+	cacheKey := ""
+	if !wantPeek && input.Cursor == "" {
+		cacheKey = cacheKeyFor("sessions", input)
+		if body, ok := cachedResponseAs[ListBody[sessionResponse]](s, cacheKey, index); ok {
+			return &ListOutput[sessionResponse]{
+				Index:     index,
+				CacheAgeS: cacheAgeSeconds(store.Store),
+				Body:      body,
+			}, nil
+		}
+	}
 	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
@@ -40,7 +55,6 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
 
-	wantPeek := input.Peek
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
@@ -79,16 +93,20 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	for j, i := range pageIdx {
 		page[j] = items[i]
 	}
+	body := ListBody[sessionResponse]{
+		Items:         page,
+		Total:         total,
+		NextCursor:    nextCursor,
+		Partial:       len(partialErrors) > 0,
+		PartialErrors: partialErrors,
+	}
+	if cacheKey != "" {
+		s.storeResponse(cacheKey, index, body)
+	}
 	return &ListOutput[sessionResponse]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(store.Store),
-		Body: ListBody[sessionResponse]{
-			Items:         page,
-			Total:         total,
-			NextCursor:    nextCursor,
-			Partial:       len(partialErrors) > 0,
-			PartialErrors: partialErrors,
-		},
+		Body:      body,
 	}, nil
 }
 
