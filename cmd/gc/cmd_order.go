@@ -718,6 +718,18 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		}
 	}
 
+	// Advance the durable event cursor before minting the wisp (consumer-offset),
+	// matching controller dispatch and event exec orders. The cursor must move
+	// before the side effect: if instantiation ran first, an advance failure (or a
+	// crash between instantiate and advance) would leave the wisp visible while the
+	// file cursor stayed stale, and a restart would reprocess the same event window.
+	if a.Trigger == "event" && ep != nil {
+		if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
+			fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+
 	cookResult, err := molecule.Instantiate(context.Background(), genericStore, recipe, molecule.Options{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -730,12 +742,6 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	update := beads.UpdateOpts{
 		Labels: []string{"order-run:" + scoped},
 	}
-	if a.Trigger == "event" && ep != nil {
-		update.Labels = append(update.Labels,
-			"order:"+scoped,
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
 	if a.Pool != "" {
 		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
 	}
@@ -744,19 +750,24 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		return 1
 	}
 
-	// Record the run in the order-tracking history index so a manual formula
+	// Event orders advance the durable event cursor (above) as their progress
+	// marker, so they mint no tracking bead — the no-op tracking beads otherwise
+	// churned ~6k/day via nudge-on-route (gc-9hxxv), and the exec path already
+	// skips them (doOrderRunExecTracked). Cooldown/cron orders have no cursor and
+	// record the run in the order-tracking history index here so a manual formula
 	// `gc order run` advances the cooldown clock, matching dispatcher-driven
-	// (order_dispatch.go) and event-exec (doOrderRunExecTracked) runs. The wisp
-	// root above carries only "order-run:<scoped>" — never labelOrderTracking,
-	// since molecule roots don't auto-close — so without a dedicated tracking
-	// bead the run is invisible to the labelOrderTracking history index. Post-PR
-	// the index-hit gate suppresses the per-order fallback, so an unindexed manual
-	// run no longer advances cooldown and the order can re-fire mid-cooldown
-	// (#3294). Create it closed: its CreatedAt is the cooldown marker, and a
-	// lingering open tracking bead would read as in-flight work and block
+	// (order_dispatch.go) runs. The wisp root above carries only "order-run:<scoped>"
+	// — never labelOrderTracking, since molecule roots don't auto-close — so without
+	// a dedicated tracking bead the run is invisible to the labelOrderTracking history
+	// index. Post-PR the index-hit gate suppresses the per-order fallback, so an
+	// unindexed manual run no longer advances cooldown and the order can re-fire
+	// mid-cooldown (#3294). Create it closed: its CreatedAt is the cooldown marker,
+	// and a lingering open tracking bead would read as in-flight work and block
 	// re-dispatch (ga-jra/ga-lo8c). Best-effort: the wisp already launched.
-	if _, err := orders.NewStore(store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
-		fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
+	if a.Trigger != "event" {
+		if _, err := orders.NewStore(store).CreateRunClosed(scoped, orders.RunOutcomeNone, nil, ""); err != nil {
+			fmt.Fprintf(stderr, "gc order run: recording tracking bead: %v\n", err) //nolint:errcheck
+		}
 	}
 
 	if jsonOutput {
@@ -780,45 +791,41 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	return 0
 }
 
+// doOrderRunExecTracked runs a manual exec order. Event orders advance the
+// durable file cursor (consumer-offset) before the command and mint no tracking
+// bead — the per-fire no-op tracking beads otherwise churned ~6k/day via
+// nudge-on-route (gc-9hxxv), and a bead cursor would emit bead.updated and
+// self-trigger orders watching bead.* events. Cooldown/cron orders have no
+// cursor, so they record a tracking bead (via the order front door) that
+// `gc order check` reads to advance the cooldown clock (#3570).
 func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, front *orders.Store, ep events.Provider, stdout, stderr io.Writer) int {
 	scoped := a.ScopedName()
 
-	// Event-triggered orders capture the event cursor before the side effect so
-	// the controller cursor isn't left stale; cooldown/cron orders only need the
-	// run record. Reading the cursor up front keeps a cursor failure from leaving
-	// an orphaned tracking bead.
-	//
-	// The order front door is injected (constructed once at the composition
-	// root) so this exec-tracking leaf holds no raw beads.Store.
-	var cursor *orders.EventCursor
+	// Event orders: advance the file cursor before the side effect so a crash
+	// can't leave it stale and replay the same event window on restart. No bead.
 	if a.Trigger == "event" && ep != nil {
 		headSeq, err := ep.LatestSeq()
 		if err != nil {
-			fmt.Fprintf(stderr, "gc order run: reading event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc order run: reading event head for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		c := orders.EventCursor(headSeq)
-		cursor = &c
+		if err := orders.AdvanceEventCursor(citylayout.RuntimeDataDir(cityPath), scoped, headSeq); err != nil {
+			fmt.Fprintf(stderr, "gc order run: advancing event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return doOrderRunExecResult(a, cityPath, cfg, stdout, stderr).code
 	}
 
-	// Record the run with a scoped tracking bead so `gc order check` advances the
-	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
-	// formula path. Without this, a manual `gc order run --rig` is invisible to
-	// the labelOrderTracking history index and the order re-fires every tick
-	// (#3570).
+	// Cooldown/cron: record a tracking bead so the run is visible to the
+	// labelOrderTracking history index and the order does not re-fire every tick
+	// (#3570). Closed on return (deferred) so a lingering open bead is not read as
+	// in-flight work and does not block re-dispatch.
 	run, err := front.CreateRun(scoped, orders.RunOpts{})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	defer front.CloseRun(run.ID, "") //nolint:errcheck // best-effort close
-
-	if cursor != nil {
-		if err := front.SetCursor(run.ID, scoped, *cursor); err != nil {
-			fmt.Fprintf(stderr, "gc order run: labeling exec event cursor for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-	}
 
 	result := doOrderRunExecResult(a, cityPath, cfg, stdout, stderr)
 	outcome := orders.RunOutcomeExec
@@ -1061,16 +1068,14 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				}
 				return last, err
 			}
-			cursorFn := orders.CursorAcrossStores(stores...)
+			var cursorFn orders.CursorFunc
 			if a.Trigger == "event" {
-				cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+				cursor, err := eventCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), a.ScopedName(), false, stores...)
 				if err != nil {
 					fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 					return 1
 				}
-				cursorFn = func(string) uint64 {
-					return cursor
-				}
+				cursorFn = func(string) uint64 { return cursor }
 			}
 			triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 			if err != nil {
@@ -1131,16 +1136,14 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			}
 			return last, err
 		}
-		cursorFn := orders.CursorAcrossStores(stores...)
+		var cursorFn orders.CursorFunc
 		if a.Trigger == "event" {
-			cursor, err := bdCursorAcrossStores(a.ScopedName(), stores...)
+			cursor, err := eventCursorWithLegacyFallback(citylayout.RuntimeDataDir(cityPath), a.ScopedName(), false, stores...)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order check: reading event cursor for %s: %v\n", a.ScopedName(), err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			cursorFn = func(string) uint64 {
-				return cursor
-			}
+			cursorFn = func(string) uint64 { return cursor }
 		}
 		triggerOpts, err := orderTriggerOptions(cityPath, cfg, a)
 		if err != nil {
@@ -1676,6 +1679,42 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 		}
 	}
 	return orders.Order{}, false
+}
+
+// eventCursorWithLegacyFallback resolves the event cursor for a scoped order,
+// preferring the durable file cursor and falling back to the legacy
+// order:<scoped> + seq:<N> tracking-bead cursor when the file has no record yet.
+//
+// This bridges the migration from per-order bead cursors to the file cursor: an
+// existing city's last-processed event seq lives in those beads, and treating a
+// missing file entry as 0 would make every historical matching event appear due,
+// replaying the event window once on the first post-upgrade read. A read error
+// (file or legacy beads) propagates so the caller fails closed and retries.
+//
+// When seed is true and the fallback supplies a value, the file cursor is seeded
+// from it so future reads are file-only and the legacy beads can be pruned
+// without resurrecting the historical window. Seeding is best-effort: the
+// returned cursor is already correct for this read, and the dispatch loop's own
+// AdvanceEventCursor persists head when the order fires. Read-only callers
+// (gc order check) pass seed=false.
+func eventCursorWithLegacyFallback(runtimeDir, scoped string, seed bool, stores ...beads.Store) (uint64, error) {
+	seq, err := orders.ReadEventCursor(runtimeDir, scoped)
+	if err != nil {
+		return 0, fmt.Errorf("reading event cursor file for %q: %w", scoped, err)
+	}
+	if seq > 0 {
+		return seq, nil
+	}
+	legacy, err := bdCursorAcrossStores(scoped, stores...)
+	if err != nil {
+		return 0, err
+	}
+	if legacy > 0 && seed {
+		if err := orders.AdvanceEventCursor(runtimeDir, scoped, legacy); err != nil {
+			orderLogf("gc order: seeding event cursor for %s from legacy seq %d failed: %v", scoped, legacy, err)
+		}
+	}
+	return legacy, nil
 }
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
