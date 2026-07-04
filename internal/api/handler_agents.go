@@ -74,6 +74,7 @@ type agentResponse struct {
 	Model         string `json:"model,omitempty"`
 	ContextPct    *int   `json:"context_pct,omitempty"`
 	ContextWindow *int   `json:"context_window,omitempty"`
+	InputTokens   *int   `json:"input_tokens,omitempty"`
 }
 
 type sessionInfo struct {
@@ -474,6 +475,7 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 		return
 	}
 	resp.Model = meta.Model
+	resp.InputTokens = meta.InputTokens
 	if meta.ContextUsage != nil {
 		resp.ContextPct = &meta.ContextUsage.Percentage
 		resp.ContextWindow = &meta.ContextUsage.ContextWindow
