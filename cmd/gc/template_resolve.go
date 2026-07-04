@@ -365,6 +365,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
 		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
 		ConfigDir:               configDir,
+		DefaultMergeStrategy:    mergeStrategyForRig(rigName, p.rigs, p.city),
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
