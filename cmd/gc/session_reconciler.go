@@ -2793,6 +2793,31 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
+						if isManualSessionBead(*session) {
+							// Operator-owned shadow: no standing wake reason, so a
+							// config-drift drain is an unrecoverable kill, not a
+							// restart-in-place. Accept the core drift like the pool
+							// sweep and leave the shadow running.
+							//
+							// Rebaseline ONLY the core fingerprint, never the live
+							// fingerprint. If this same config edit also changed
+							// session_live, stamping started_live_hash here would
+							// make the next tick believe the live config was already
+							// applied when RunLive never ran — silently dropping the
+							// live change. Leaving the live hash stale lets the
+							// live-drift path below re-apply session_live via RunLive
+							// on the next tick (live changes need no restart).
+							if err := silentRebaselineSessionCoreHash(session, sessFront, agentCfg); err != nil {
+								fmt.Fprintf(stderr, "session reconciler: rebaselining manual-session config-drift hash for %s: %v\n", name, err) //nolint:errcheck
+							}
+							cancelSessionConfigDriftDrain(*session, sp, dt)
+							if trace != nil {
+								trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
+									"active_reason": "manual_session",
+								}))
+							}
+							continue
+						}
 						if isNamedSessionBead(*session) {
 							// Defer config-drift restart for named sessions
 							// that are actively in use (pending interaction,
@@ -5246,6 +5271,38 @@ func silentRebaselineSessionHashes(session *beads.Bead, sessFront *sessionpkg.St
 	// path re-reads started_config_hash off a fresh store.Get — so Step 5c dropped
 	// the raw session.Metadata mirror.
 	return patch, nil
+}
+
+// silentRebaselineSessionCoreHash advances ONLY the core fingerprint baseline
+// (started_config_hash + core_hash_breakdown), leaving the live fingerprint
+// fields (started_live_hash, live_hash) stale. The reconciler uses this to
+// accept core config drift for a session it must not restart (an operator-owned
+// manual shadow) without masking a concurrent session_live change: stamping the
+// live half here would make the next tick believe session_live was already
+// applied when RunLive never ran. Leaving the live hash stale lets the
+// live-drift path re-apply session_live via RunLive on the next tick.
+func silentRebaselineSessionCoreHash(session *beads.Bead, sessFront *sessionpkg.Store, agentCfg runtime.Config) error {
+	if session == nil || sessFront == nil {
+		return nil
+	}
+	breakdownJSON, err := json.Marshal(runtime.CoreFingerprintBreakdown(agentCfg))
+	if err != nil {
+		return fmt.Errorf("marshaling core_hash_breakdown: %w", err)
+	}
+	patch := map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(agentCfg),
+		"core_hash_breakdown": string(breakdownJSON),
+	}
+	if err := sessFront.ApplyPatch(session.ID, patch); err != nil {
+		return fmt.Errorf("rebaselining core hash: %w", err)
+	}
+	if session.Metadata == nil {
+		session.Metadata = make(map[string]string, len(patch))
+	}
+	for k, v := range patch {
+		session.Metadata[k] = v
+	}
+	return nil
 }
 
 // relaunchAgentForLaunchDrift handles a launch-only config-drift (B2.3): the
