@@ -18,12 +18,17 @@ import (
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
-// sessionViewSummary is the value of the session-list "view" query parameter
-// that requests the cheap, read-model-only projection: the handler skips
-// enrichSessionResponse (live State() probe, active-bead lookup, and
-// transcript I/O) for every session. Any other value — including empty and
-// "full" — keeps the default enriched projection.
-const sessionViewSummary = "summary"
+// sessionViewFull is the value of the session-list "view" query parameter that
+// opts into the enriched projection. The default — any other value, including
+// empty, "summary", and unrecognized strings — is the cheap, read-model-only
+// summary projection: the handler builds the listing from stored bead metadata
+// via ListSummaryFromBeads and skips enrichSessionResponse (no live State()
+// probe, no active-bead lookup, no transcript I/O) for every session. Only
+// "full" runs the per-session live observation (running, active_bead, attached,
+// last_active). The parameter is deliberately not enum-constrained, so an
+// unrecognized value falls back to the summary default rather than returning
+// 422 — old clients that omit it get the cheap response.
+const sessionViewFull = "full"
 
 // sessionResponse is the JSON representation of a chat session.
 type sessionResponse struct {
@@ -267,26 +272,28 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	stateFilter := q.Get("state")
 	templateFilter := q.Get("template")
-	// view=summary returns only the cheap read-model fields and skips
-	// enrichSessionResponse for every session; it takes precedence over peek.
-	summary := q.Get("view") == sessionViewSummary
-	wantPeek := q.Get("peek") == "true" && !summary
+	// The default returns only the cheap read-model fields and skips
+	// enrichSessionResponse for every session; only view=full enriches. peek is
+	// an enrichment field, so it is honored only under view=full.
+	full := q.Get("view") == sessionViewFull
+	wantPeek := q.Get("peek") == "true" && full
 
 	all, partialErrors, err := sessionReadModelRows(store.Store)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	// In summary mode the listing itself must not observe live runtime state:
+	// The default (summary) listing must not observe live runtime state:
 	// ListFullFromBeads expands each bead through infoFromBead, which probes the
 	// provider (IsRunning/IsAttached/GetLastActivity) for active sessions — a
-	// tmux fork on the tmux provider, violating the view=summary "no live probe"
-	// contract. ListSummaryFromBeads is the metadata-only projection.
+	// tmux fork on the tmux provider, violating the cheap-default "no live probe"
+	// contract. ListSummaryFromBeads is the metadata-only projection; only
+	// view=full pays for the live expansion.
 	var listResult *worker.SessionListResult
-	if summary {
-		listResult = catalog.ListSummaryFromBeads(all, stateFilter, templateFilter)
-	} else {
+	if full {
 		listResult = catalog.ListFullFromBeads(all, stateFilter, templateFilter)
+	} else {
+		listResult = catalog.ListSummaryFromBeads(all, stateFilter, templateFilter)
 	}
 	sessions := listResult.Sessions
 
@@ -298,19 +305,19 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 
 	items := make([]sessionResponse, len(sessions))
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	// In summary mode the reason must come from the pure, no-liveness
-	// projection: the reset-pending branch probes provider IsRunning (a live
-	// tmux fork for the tmux provider), which violates the view=summary
+	// In the default (summary) listing the reason must come from the pure,
+	// no-liveness projection: the reset-pending branch probes provider IsRunning
+	// (a live tmux fork for the tmux provider), which violates the cheap-default
 	// "no live probe" contract. A nil provider makes
 	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
 	// metadata-only reason.
 	reasonProvider := s.state.SessionProvider()
-	if summary {
+	if !full {
 		reasonProvider = nil
 	}
 	for i, sess := range sessions {
 		items[i] = sessionResponseWithReason(sess, persistedResponseForBead(beadIndex[sess.ID]), cfg, reasonProvider, hasDeferredQueue)
-		if !summary {
+		if full {
 			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
 		}
 	}
@@ -675,8 +682,13 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		}
 	}
 
-	// Model + context usage (best-effort).
-	if resp.Running && info.WorkDir != "" {
+	// Model + context usage (best-effort). This transcript tier is detail-only:
+	// the session LIST never computes it. No list consumer reads
+	// model/context_pct/context_window/input_tokens/activity, and
+	// DiscoverTranscript+TailMeta is per-session filesystem I/O that dominated
+	// the list's latency. Only the per-session detail endpoint (which passes
+	// allowWorkdirTranscriptDiscovery=true) pays for the transcript read.
+	if resp.Running && info.WorkDir != "" && allowWorkdirTranscriptDiscovery {
 		workDir := info.WorkDir
 		if abs, err := filepath.Abs(workDir); err == nil {
 			workDir = abs
@@ -691,9 +703,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 		if strings.TrimSpace(provider) == "" && cfg != nil {
 			provider, _ = resolveProviderInfo(provider, cfg)
 		}
-		if !allowWorkdirTranscriptDiscovery && !canUseCheapTranscriptLookup(provider, info.SessionKey) {
-			return
-		}
 		sessionFile := factory.DiscoverTranscript(provider, workDir, info.SessionKey)
 		if sessionFile != "" {
 			if meta, err := factory.TailMeta(sessionFile); err == nil && meta != nil {
@@ -707,17 +716,6 @@ func (s *Server) enrichSessionResponse(resp *sessionResponse, info session.Info,
 			}
 		}
 	}
-}
-
-func canUseCheapTranscriptLookup(provider, sessionKey string) bool {
-	if strings.TrimSpace(sessionKey) == "" {
-		return false
-	}
-	p := strings.ToLower(strings.TrimSpace(provider))
-	if strings.Contains(p, "codex") || strings.Contains(p, "gemini") {
-		return false
-	}
-	return true
 }
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
