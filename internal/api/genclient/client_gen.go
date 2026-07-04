@@ -756,6 +756,7 @@ type AgentResponse struct {
 	ContextWindow     *int64       `json:"context_window,omitempty"`
 	Description       *string      `json:"description,omitempty"`
 	DisplayName       *string      `json:"display_name,omitempty"`
+	InputTokens       *int64       `json:"input_tokens,omitempty"`
 	LastOutput        *string      `json:"last_output,omitempty"`
 	Model             *string      `json:"model,omitempty"`
 	Name              string       `json:"name"`
@@ -3362,6 +3363,7 @@ type SessionResponse struct {
 	CreatedAt              string                  `json:"created_at"`
 	DisplayName            *string                 `json:"display_name,omitempty"`
 	Id                     string                  `json:"id"`
+	InputTokens            *int64                  `json:"input_tokens,omitempty"`
 	Kind                   *string                 `json:"kind,omitempty"`
 	LastActive             *string                 `json:"last_active,omitempty"`
 	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`

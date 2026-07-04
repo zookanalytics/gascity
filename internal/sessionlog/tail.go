@@ -15,7 +15,14 @@ import (
 
 // TailMeta holds metadata extracted from the tail of a session file.
 type TailMeta struct {
-	Model        string
+	Model string
+	// InputTokens is the absolute input-token count from the transcript's
+	// latest assistant usage block (input + cache-read + cache-create).
+	// Populated whenever a usage block is present, independent of whether
+	// ModelContextWindow recognizes the model. Callers that want to trigger
+	// on absolute counts should read this; ContextUsage's percentage/window
+	// view requires a known model family.
+	InputTokens  *int
 	ContextUsage *ContextUsage
 	Activity     string // "idle", "in-turn", or "" (unknown)
 	// MalformedTail is a tail-chunk heuristic. Full-file parser diagnostics
@@ -324,6 +331,11 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 	result := &TailMeta{Model: model, Activity: activity, MalformedTail: malformedTail}
 
 	if lastUsage != nil && lastUsage.Usage != nil {
+		totalInput := lastUsage.Usage.InputTokens +
+			lastUsage.Usage.CacheReadInputTokens +
+			lastUsage.Usage.CacheCreationInputTokens
+		result.InputTokens = &totalInput
+
 		effectiveModel := model
 		if effectiveModel == "" && lastUsage.Model != "" {
 			effectiveModel = lastUsage.Model
@@ -331,10 +343,6 @@ func extractFromLines(lines [][]byte, startsMidLine bool) *TailMeta {
 
 		contextWindow := ModelContextWindow(effectiveModel)
 		if contextWindow > 0 {
-			totalInput := lastUsage.Usage.InputTokens +
-				lastUsage.Usage.CacheReadInputTokens +
-				lastUsage.Usage.CacheCreationInputTokens
-
 			pct := totalInput * 100 / contextWindow
 			if pct > 100 {
 				pct = 100
