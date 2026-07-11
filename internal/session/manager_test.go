@@ -1817,6 +1817,103 @@ func TestClose_IgnoresWaitCancellationFailure(t *testing.T) {
 	}
 }
 
+// TestCloseDetailed_BeadClosesBeforeStopReturns pins the invariant that
+// store.Close must complete before sp.Stop returns. While the runtime Stop
+// is blocked, the bead must already be observably closed so the reconciler
+// cannot misread the live runtime as a crash and respawn it.
+func TestCloseDetailed_BeadClosesBeforeStopReturns(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	gate := make(chan struct{})
+	started := make(chan struct{})
+	sp.StopGates[info.SessionName] = gate
+	sp.StopStarted[info.SessionName] = started
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- mgr.Close(info.ID)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		close(gate)
+		<-closeDone
+		t.Fatal("Stop was not invoked within 2s")
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		close(gate)
+		<-closeDone
+		t.Fatalf("store.Get during gated Stop: %v", err)
+	}
+	if b.Status != "closed" {
+		close(gate)
+		<-closeDone
+		t.Fatalf("bead Status while Stop blocked = %q, want closed", b.Status)
+	}
+
+	close(gate)
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within 2s after Stop gate released")
+	}
+
+	if sp.IsRunning(info.SessionName) {
+		t.Errorf("runtime session %q should be stopped after close", info.SessionName)
+	}
+}
+
+// TestCloseDetailed_StopErrorLeavesBeadClosed asserts that a failing Stop
+// does not prevent the bead from reaching status=closed. The bead is the
+// durable record; the runtime is best-effort.
+func TestCloseDetailed_StopErrorLeavesBeadClosed(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := NewManagerWithOptions(store, sp)
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	sp.StopErrors[info.SessionName] = fmt.Errorf("simulated stop failure")
+
+	if err := mgr.Close(info.ID); err != nil {
+		t.Fatalf("Close should succeed even when Stop returns an error: %v", err)
+	}
+
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("bead Status = %q, want closed", b.Status)
+	}
+
+	var stopCount int
+	for _, c := range sp.Calls {
+		if c.Method == "Stop" && c.Name == info.SessionName {
+			stopCount++
+		}
+	}
+	if stopCount != 1 {
+		t.Errorf("Stop call count = %d, want 1", stopCount)
+	}
+}
+
 func TestList(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -4978,37 +5075,6 @@ func TestEnsureRunning_StartupDeathClearMetadataFailurePropagates(t *testing.T) 
 	}
 	if b.Metadata["session_key"] == "" {
 		t.Fatal("session_key should remain set after failed metadata clear")
-	}
-}
-
-// TestCloseDetailed_StopErrorLeavesBeadOpen verifies the secondary fix for the
-// self-close wedge: when the runtime terminate genuinely fails, CloseDetailed
-// must propagate the error and leave the bead open rather than reporting a
-// "closed but still running" session. The previous code discarded the Stop
-// error and closed the bead unconditionally.
-func TestCloseDetailed_StopErrorLeavesBeadOpen(t *testing.T) {
-	store := beads.NewMemStore()
-	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
-
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	// Arm a non-idempotent terminate failure (not "session gone").
-	sp.StopErrors[info.SessionName] = errors.New("kill failed")
-
-	if _, err := mgr.CloseDetailed(info.ID); err == nil {
-		t.Fatal("CloseDetailed: expected error when runtime Stop fails, got nil")
-	}
-
-	b, err := store.Get(info.ID)
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if b.Status == "closed" {
-		t.Error("bead was closed despite the runtime Stop failing")
 	}
 }
 
