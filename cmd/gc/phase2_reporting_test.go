@@ -178,7 +178,7 @@ func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedSta
 }
 
 func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
-	got, evidence, err := phase2PromptPayload(tc, prepared)
+	_, evidence, err := phase2PromptPayload(tc, prepared)
 	if err != nil {
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
@@ -194,21 +194,24 @@ func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) 
 	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
-	case got != "Base worker prompt":
+	case strings.Contains(prepared.cfg.Nudge, "Base worker prompt"):
+		// gc-7go2a: a resume-mode restart for a nudge-having agent must wake on
+		// the nudge alone. The base prompt is rehydrated via --resume, so folding
+		// it into the nudge re-injects the already-restored role on every wake.
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("restart prompt payload = %q, want base worker prompt on resume", got)).WithEvidence(evidence)
+			fmt.Sprintf("cfg.Nudge = %q, want the configured nudge alone on resume — the base prompt is rehydrated via --resume, not folded into the nudge", prepared.cfg.Nudge)).WithEvidence(evidence)
 	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
 			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial message", prepared.cfg.Nudge)).WithEvidence(evidence)
 	case prepared.cfg.Env[startupPromptDeliveredEnv] != "1":
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("%s = %q, want 1 when restart prompt is delivered on resume", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
+			fmt.Sprintf("%s = %q, want 1 so the SessionStart hook suppresses re-injecting the resumed prompt", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])).WithEvidence(evidence)
 	case !startupNudgeMatches(tc, prepared.cfg.Nudge):
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			fmt.Sprintf("cfg.Nudge = %q, want configured nudge preserved after restart prompt", prepared.cfg.Nudge)).WithEvidence(evidence)
+			fmt.Sprintf("cfg.Nudge = %q, want configured nudge preserved on resume", prepared.cfg.Nudge)).WithEvidence(evidence)
 	default:
 		return workertest.Pass(tc.profileID, workertest.RequirementInputInitialMessageResume,
-			"resumed sessions receive the base restart prompt without replaying initial_message").WithEvidence(evidence)
+			"resumed sessions wake on their configured nudge without replaying initial_message or re-folding the base prompt").WithEvidence(evidence)
 	}
 }
 
