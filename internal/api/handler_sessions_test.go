@@ -807,6 +807,259 @@ func TestHandleSessionListPagination(t *testing.T) {
 	}
 }
 
+// listSessionsForViewTest issues GET against a session-list URL and returns
+// the decoded items. Used by the view= tests to assert which response fields
+// are populated under each detail level. Accepts any http.Handler so it can
+// drive both the city-scoped Huma handler and the legacy mux.
+func listSessionsForViewTest(t *testing.T, h http.Handler, url string) []sessionResponse {
+	t.Helper()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", url, nil)
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET %s: status %d, body=%s", url, w.Code, w.Body.String())
+	}
+	var resp struct {
+		Items []sessionResponse `json:"items"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode %s: %v", url, err)
+	}
+	return resp.Items
+}
+
+// TestHandleSessionListSummaryViewSkipsEnrichment verifies that view=summary
+// returns only the cheap read-model fields and skips enrichSessionResponse
+// (no live State() probe, active-bead lookup, or transcript I/O), while the
+// default view still enriches.
+func TestHandleSessionListSummaryViewSkipsEnrichment(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Session")
+
+	// Precondition: the default (full) view enriches. Running is derived from
+	// a live State() probe, so it is true for this active session. If this
+	// stopped holding, the summary assertions below would pass vacuously.
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Fatalf("full: running=false, want true (default view must enrich)")
+	}
+
+	// view=summary must skip enrichment entirely: the live State() probe never
+	// runs, so the enriched fields keep their zero values.
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	item := sum[0]
+	if item.Running {
+		t.Errorf("summary: running=true, want false (enrichment must be skipped)")
+	}
+	if item.ActiveBead != "" {
+		t.Errorf("summary: active_bead=%q, want empty", item.ActiveBead)
+	}
+	if item.Model != "" {
+		t.Errorf("summary: model=%q, want empty", item.Model)
+	}
+	if item.ContextPct != nil {
+		t.Errorf("summary: context_pct=%d, want nil", *item.ContextPct)
+	}
+	// Cheap read-model fields the status bar needs stay populated.
+	if item.Title != "Summary Session" {
+		t.Errorf("summary: title=%q, want %q", item.Title, "Summary Session")
+	}
+	if item.State != "active" {
+		t.Errorf("summary: state=%q, want active", item.State)
+	}
+	if item.ID == "" {
+		t.Error("summary: id empty, want populated")
+	}
+}
+
+// TestHandleSessionListFullViewStillEnriches guards the default contract: no
+// view param, view=full, and any unrecognized view value all run enrichment
+// (Running is set from the live probe).
+func TestHandleSessionListFullViewStillEnriches(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Full Session")
+
+	for _, path := range []string{
+		"/sessions?state=active",            // default (no view)
+		"/sessions?state=active&view=full",  // explicit full
+		"/sessions?state=active&view=other", // unknown value falls through to full
+	} {
+		items := listSessionsForViewTest(t, h, cityURL(fs, path))
+		if len(items) != 1 {
+			t.Fatalf("%s: got %d items, want 1", path, len(items))
+		}
+		if !items[0].Running {
+			t.Errorf("%s: running=false, want true (must enrich)", path)
+		}
+	}
+}
+
+// TestHandleSessionListSummaryViewWinsOverPeek verifies that view=summary
+// takes precedence over peek=true: skipping enrichment also skips the peek
+// preview, so last_output stays empty.
+func TestHandleSessionListSummaryViewWinsOverPeek(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Peek Session")
+
+	items := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary&peek=true"))
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if items[0].Running {
+		t.Errorf("running=true, want false (summary wins over peek)")
+	}
+	if items[0].LastOutput != "" {
+		t.Errorf("last_output=%q, want empty (summary wins over peek)", items[0].LastOutput)
+	}
+}
+
+// TestLegacyHandleSessionListSummaryView verifies the legacy (non-city-scoped)
+// GET /v0/sessions handler honors view=summary identically to the city-scoped
+// Huma handler.
+func TestLegacyHandleSessionListSummaryView(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	legacy := srv.legacySessionHandler()
+
+	createTestSession(t, fs.cityBeadStore, fs.sp, "Legacy Session")
+
+	full := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active")
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if !full[0].Running {
+		t.Fatalf("full: running=false, want true (default must enrich)")
+	}
+
+	sum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if sum[0].Running {
+		t.Errorf("summary: running=true, want false (enrichment must be skipped)")
+	}
+}
+
+// summarySpyProvider wraps the fake runtime provider and records the live
+// observation calls infoFromBead makes for active sessions (IsRunning,
+// IsAttached, GetLastActivity). The view=summary listing must reach none of
+// them — it builds responses from stored metadata via ListSummaryFromBeads —
+// so any recorded call means the summary path forked back to live runtime
+// observation, the regression codex flagged on PR#43. These three are the only
+// Provider methods the summary list path can reach: the fake does not
+// implement the transport-detector or ACP-registrar interfaces, and peek and
+// per-session enrichment are gated off for summary.
+type summarySpyProvider struct {
+	*runtime.Fake
+	mu    sync.Mutex
+	calls []string
+}
+
+func (s *summarySpyProvider) record(method string) {
+	s.mu.Lock()
+	s.calls = append(s.calls, method)
+	s.mu.Unlock()
+}
+
+func (s *summarySpyProvider) reset() {
+	s.mu.Lock()
+	s.calls = nil
+	s.mu.Unlock()
+}
+
+func (s *summarySpyProvider) recorded() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+func (s *summarySpyProvider) IsRunning(name string) bool {
+	s.record("IsRunning")
+	return s.Fake.IsRunning(name)
+}
+
+func (s *summarySpyProvider) IsAttached(name string) bool {
+	s.record("IsAttached")
+	return s.Fake.IsAttached(name)
+}
+
+func (s *summarySpyProvider) GetLastActivity(name string) (time.Time, error) {
+	s.record("GetLastActivity")
+	return s.Fake.GetLastActivity(name)
+}
+
+// TestHandleSessionListSummaryViewSkipsLiveProvider guards the codex finding on
+// PR#43: view=summary must build its listing from stored metadata only, never
+// reaching a live runtime probe. The full listing expands each bead through
+// infoFromBead, which for an active session calls the provider's IsRunning,
+// IsAttached, and GetLastActivity — tmux forks on the tmux provider. The
+// summary listing must instead use the metadata-only ListSummaryFromBeads
+// projection, so a spy provider records zero calls on the summary request.
+func TestHandleSessionListSummaryViewSkipsLiveProvider(t *testing.T) {
+	fs := newSessionFakeState(t)
+	spy := &summarySpyProvider{Fake: fs.sp}
+	state := &stateWithSessionProvider{fakeState: fs, provider: spy}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	// infoFromBead only probes the provider for ACTIVE sessions, so the session
+	// must be active or the assertions below pass vacuously. createTestSession
+	// drives the raw fake directly, bypassing the spy's recorder.
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Summary Spy")
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should be running in fake provider", info.SessionName)
+	}
+
+	// Precondition: the full view DOES reach the provider, proving the spy is
+	// wired through the manager and an active session would otherwise trigger
+	// live probes. Without this a green summary assertion could be vacuous.
+	spy.reset()
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if len(spy.recorded()) == 0 {
+		t.Fatal("full view recorded no provider calls; spy not wired or session inactive (summary assertion would be vacuous)")
+	}
+
+	// view=summary must not touch the provider at all.
+	spy.reset()
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if calls := spy.recorded(); len(calls) != 0 {
+		t.Errorf("summary view reached live provider methods %v, want none (must use the metadata-only projection)", calls)
+	}
+
+	// The legacy (non-city-scoped) handler routes through the worker catalog,
+	// the other call site codex flagged. It must skip the provider too.
+	legacy := srv.legacySessionHandler()
+	spy.reset()
+	legacySum := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=summary")
+	if len(legacySum) != 1 {
+		t.Fatalf("legacy summary: got %d items, want 1", len(legacySum))
+	}
+	if calls := spy.recorded(); len(calls) != 0 {
+		t.Errorf("legacy summary view reached live provider methods %v, want none (must use the metadata-only projection)", calls)
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1963,6 +2216,54 @@ func TestHandleSessionListShowsResetPendingForLiveRuntime(t *testing.T) {
 	}
 	if body.Items[0].Reason != "reset-pending" {
 		t.Fatalf("reason = %q, want reset-pending", body.Items[0].Reason)
+	}
+}
+
+// TestHandleSessionListSummaryViewReasonSkipsLiveness guards the codex finding
+// on PR#43: view=summary must derive a session's reason from the pure,
+// no-liveness projection, never from a live runtime probe. The reset-pending
+// reason is liveness-gated — lifecycleResetPendingReasonVisible calls provider
+// IsRunning to confirm the reset marker is still live, which for the tmux
+// provider can fork/refresh tmux state. For a reset-pending session whose
+// runtime is live, the full view surfaces "reset-pending" (liveness consulted);
+// the summary view must instead surface the metadata-only reason, proving the
+// reason path did not consult provider liveness.
+func TestHandleSessionListSummaryViewReasonSkipsLiveness(t *testing.T) {
+	fs := newSessionFakeState(t)
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Reset Pending Summary")
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should be running in fake provider", info.SessionName)
+	}
+	if err := fs.cityBeadStore.SetMetadataBatch(info.ID, map[string]string{
+		"restart_requested": "true",
+		"sleep_reason":      "user-hold",
+	}); err != nil {
+		t.Fatalf("set reset metadata: %v", err)
+	}
+
+	// Precondition: the full view consults liveness and surfaces reset-pending.
+	// Without this the summary assertion below could pass vacuously (e.g. if the
+	// reset marker stopped being liveness-gated).
+	full := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active"))
+	if len(full) != 1 {
+		t.Fatalf("full: got %d items, want 1", len(full))
+	}
+	if full[0].Reason != "reset-pending" {
+		t.Fatalf("full: reason = %q, want reset-pending (liveness-gated)", full[0].Reason)
+	}
+
+	// Summary must NOT consult liveness for the reason: it falls back to the
+	// metadata-only projection (sleep_reason). A "reset-pending" reason here
+	// would mean the reason path reached a live runtime probe.
+	sum := listSessionsForViewTest(t, h, cityURL(fs, "/sessions?state=active&view=summary"))
+	if len(sum) != 1 {
+		t.Fatalf("summary: got %d items, want 1", len(sum))
+	}
+	if sum[0].Reason != "user-hold" {
+		t.Errorf("summary: reason = %q, want user-hold (non-liveness projection; reset-pending would mean a live probe)", sum[0].Reason)
 	}
 }
 
