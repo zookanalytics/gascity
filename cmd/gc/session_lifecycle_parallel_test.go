@@ -1148,6 +1148,83 @@ func TestPrepareStartCandidate_DoesNotAppendCLIResumeFlagForACP(t *testing.T) {
 	}
 }
 
+// TestPrepareStartCandidate_ACPResumeKeepsStartupPromptInNudge is the
+// regression guard for the ACP prompt-loss found on PR#61 (gc-xlj7s): the
+// gc-7go2a nudge-only resume branch must NOT run for ACP sessions. ACP is
+// excluded from CLI resume (resolveSessionCommand, gated on !tp.IsACP), and
+// acp.Provider.Start always opens a fresh session/new — so the rendered role
+// prompt rides the post-handshake nudge (prependStartupPromptToNudge), never a
+// --resume rehydration. A Claude ACP session can still mint a session_key, so
+// without the !tp.IsACP guard the resume branch would overwrite cfg.Nudge
+// (prompt+nudge) with the bare hint while keeping GC_STARTUP_PROMPT_DELIVERED=1,
+// leaving the restarted ACP agent with no role prompt at all.
+func TestPrepareStartCandidate_ACPResumeKeepsStartupPromptInNudge(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:mayor"},
+		Metadata: map[string]string{
+			"template":     "mayor",
+			"session_name": "mayor",
+			// A Claude ACP session mints a session_key, so the resume key is
+			// present...
+			"session_key": "claude-acp-session",
+			// ...and this is a restart, not a first start, so the resume branch
+			// is reachable.
+			"started_config_hash": "previous-start",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const prompt = "You are the mayor. Coordinate the city."
+	const nudgeHint = "Check your hook."
+	prepared, err := prepareStartCandidate(startCandidate{
+		session: &session,
+		tp: TemplateParams{
+			TemplateName: "mayor",
+			SessionName:  "mayor",
+			Command:      "claude acp",
+			IsACP:        true,
+			Prompt:       prompt,
+			Hints:        agent.StartupHints{Nudge: nudgeHint},
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				SessionIDFlag: "--session-id",
+			},
+		},
+		order: 0,
+	}, &config.City{}, store, &clock.Fake{Time: time.Date(2026, 5, 3, 10, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatalf("prepareStartCandidate: %v", err)
+	}
+
+	// ACP delivers the rendered role prompt via the post-handshake nudge. The
+	// resume branch must not have stripped it down to the bare hint.
+	if !strings.Contains(prepared.cfg.Nudge, prompt) {
+		t.Fatalf("cfg.Nudge = %q, want it to still carry the rendered role prompt %q — ACP delivers the prompt via the nudge, not --resume rehydration", prepared.cfg.Nudge, prompt)
+	}
+	if !strings.Contains(prepared.cfg.Nudge, nudgeHint) {
+		t.Fatalf("cfg.Nudge = %q, want it to still carry the configured nudge hint %q", prepared.cfg.Nudge, nudgeHint)
+	}
+	// PromptSuffix is always empty for ACP (the prompt rides the nudge), but the
+	// delivered marker must stay set so the SessionStart hook does not ALSO
+	// inject the prompt the nudge already carries.
+	if strings.TrimSpace(prepared.cfg.PromptSuffix) != "" {
+		t.Fatalf("cfg.PromptSuffix = %q, want empty for ACP", prepared.cfg.PromptSuffix)
+	}
+	if prepared.cfg.Env[startupPromptDeliveredEnv] != "1" {
+		t.Fatalf("%s = %q, want 1 so the SessionStart hook does not double-inject the prompt delivered via the nudge", startupPromptDeliveredEnv, prepared.cfg.Env[startupPromptDeliveredEnv])
+	}
+	// ACP is carved out of the resume override, so this incarnation genuinely
+	// re-delivers the rendered prompt and must stamp the S19 priming pair.
+	if !prepared.promptDelivered {
+		t.Fatalf("promptDelivered = false, want true: an ACP resume delivers the rendered prompt via the nudge and must stamp the priming pair")
+	}
+}
+
 func TestReconcileSessionBeads_BlockedCandidatesDoNotConsumeWakeBudget(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{
