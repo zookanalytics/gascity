@@ -563,6 +563,7 @@ func TestCmdSessionKill_RecordsAgentStopMetric(t *testing.T) {
 		func() {},
 		nil,
 		nil,
+		nil,
 		make(chan reloadRequest),
 		make(chan convergenceRequest, 1),
 		make(chan struct{}, 1),
