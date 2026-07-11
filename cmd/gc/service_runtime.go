@@ -76,3 +76,12 @@ func (rt *serviceRuntime) Poke() {
 	default:
 	}
 }
+
+// PokeDemand forces a pool-demand rebuild on the next tick, then signals it.
+// See controllerState.PokeDemand.
+func (rt *serviceRuntime) PokeDemand() {
+	if rt.cr.demandDirty != nil {
+		rt.cr.demandDirty.Store(true)
+	}
+	rt.Poke()
+}
