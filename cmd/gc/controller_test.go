@@ -245,7 +245,8 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	pokeCh := make(chan struct{}, 1)
 	controlDispatcherCh := make(chan struct{}, 1)
 	configDirty := &atomic.Bool{}
-	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+	demandDirty := &atomic.Bool{}
+	lis, err := startControllerSocket(cityPath, cancel, nil, configDirty, demandDirty, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 	if err != nil {
 		t.Fatalf("startControllerSocket: %v", err)
 	}
@@ -276,6 +277,25 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	default:
 		t.Fatal("reload did not enqueue poke")
 	}
+
+	// poke-demand marks the demand snapshot dirty (so a sleeping pool's demand
+	// rebuilds this tick) in addition to enqueuing a poke (gc-lskvo).
+	resp, err = sendControllerCommand(cityPath, "poke-demand")
+	if err != nil {
+		t.Fatalf("sendControllerCommand(poke-demand): %v", err)
+	}
+	if strings.TrimSpace(string(resp)) != "ok" {
+		t.Fatalf("poke-demand response = %q, want ok", resp)
+	}
+	if !demandDirty.Load() {
+		t.Fatal("demandDirty = false, want poke-demand to mark demand dirty")
+	}
+	select {
+	case <-pokeCh:
+	default:
+		t.Fatal("poke-demand did not enqueue poke")
+	}
+
 	if !tryStopController(cityPath, &bytes.Buffer{}) {
 		t.Fatal("tryStopController returned false, want true via fallback socket")
 	}
@@ -1301,7 +1321,7 @@ func TestHandleControllerConnControlDispatcher(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
+		handleControllerConn(server, cityPath, func() {}, nil, nil, nil, nil, convergenceReqCh, pokeCh, controlDispatcherCh)
 		close(done)
 	}()
 
