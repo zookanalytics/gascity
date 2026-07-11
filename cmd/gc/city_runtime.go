@@ -1569,7 +1569,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
-	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg, cr.stderr)
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {

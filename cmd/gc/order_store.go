@@ -573,7 +573,15 @@ func cachedOrderStoresResolver(cityPath string, cfg *config.City) orderStoresRes
 	}
 }
 
-func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []orderTrackingSweepTarget {
+// orderTrackingSweepTargetsForConfig enumerates the city and configured rig
+// scopes the order-tracking sweep visits. Rig paths that do not exist on
+// disk (or are not directories) are skipped with a stderr note instead of
+// becoming sweep targets: every bd subprocess against a dead scope root can
+// burn the full 2m command timeout — worse when bd's silent on-disk
+// fallback auto-imports a stale issues.jsonl — and the controller watchdog
+// re-opens sweep stores every 30s, so one stale entry repeatedly starves
+// the reconciler tick (gc-q40pm Problem B). stderr may be nil.
+func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City, stderr io.Writer) []orderTrackingSweepTarget {
 	targets := []orderTrackingSweepTarget{{
 		target: legacyOrderCityTarget(cityPath, cfg),
 		label:  "city",
@@ -582,6 +590,12 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 		resolveRigPaths(cityPath, cfg.Rigs)
 		for _, rig := range cfg.Rigs {
 			if strings.TrimSpace(rig.Path) == "" {
+				continue
+			}
+			if info, err := os.Stat(rig.Path); err != nil || !info.IsDir() {
+				if stderr != nil {
+					fmt.Fprintf(stderr, "order tracking sweep: skipping rig %q: scope root %s is not a directory on disk\n", rig.Name, rig.Path) //nolint:errcheck // best-effort stderr
+				}
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{
@@ -598,8 +612,8 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 	return targets
 }
 
-func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string) ([]beads.Store, error) {
-	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg)
+func orderTrackingSweepStoresForConfigTargets(cityPath string, cfg *config.City, requiredTargets map[string][]string, stderr io.Writer) ([]beads.Store, error) {
+	targets := orderTrackingSweepTargetsForConfig(cityPath, cfg, stderr)
 	if len(requiredTargets) > 0 {
 		filtered := targets[:0]
 		for _, target := range targets {
