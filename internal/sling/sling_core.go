@@ -141,6 +141,31 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Pool re-pour: an explicit sling of an existing OPEN bead to a pool
+	// puts it (back) on the routed queue, so a stale assignee must be
+	// cleared. Pool demand is ready work with assignee="" and
+	// gc.routed_to=<target> — the shared predicate behind both reconciler
+	// spawn (scale_check) and worker claim (work_query Tier 3); see
+	// engdocs/architecture/dispatch.md "scale_check ↔ work_query
+	// correspondence". Without this, a handback assignee (e.g. a named
+	// session) pins the bead invisibly: scale_check never counts it, no
+	// session spawns, and the chain stalls silently (gc-q40pm). Only open
+	// beads are normalized — in_progress marks a live claim (`bd update
+	// --claim` flips open→in_progress atomically) owned by a session;
+	// reclaiming dead claims is releaseOrphanedPoolAssignments' job, not
+	// sling's. Custom sling_query agents own their routing contract and
+	// are exempt.
+	if !opts.DryRun && !opts.IsFormula && a.SupportsInstanceExpansion() && !IsCustomSlingQuery(a) {
+		cleared, err := clearStaleOpenAssigneeForPoolRoute(opts.BeadOrFormula, deps)
+		if err != nil {
+			return result, fmt.Errorf("clearing stale assignee for pool re-pour of %s: %w", opts.BeadOrFormula, err)
+		}
+		if cleared != "" {
+			result.BeadWarnings = append(result.BeadWarnings,
+				fmt.Sprintf("cleared stale assignee %q on open bead %s for pool re-dispatch", cleared, opts.BeadOrFormula))
+		}
+	}
+
 	// Dry-run: return early with preview info.
 	if opts.DryRun {
 		result.DryRun = true
@@ -1570,4 +1595,81 @@ func reopenForReassignInStore(store beads.Store, beadID string, b beads.Bead) er
 		return nil
 	}
 	return store.Update(beadID, update)
+}
+
+// clearStaleOpenAssigneeForPoolRoute unsets the assignee on an OPEN bead
+// being routed to a pool target so the bead re-enters the canonical
+// pool-demand shape (ready + unassigned + routed). Returns the assignee it
+// cleared, or "" when nothing was cleared. It checks the city primary store
+// (deps.Store) first; if the bead is not there it sweeps the source-workflow
+// stores (deps.SourceWorkflowStores) so rig-prefixed beads — whose record
+// lives in a rig store, not deps.Store — are normalized too. Without that
+// sweep a rig-store bead keeps its stale assignee and stays invisible to
+// scale_check/work_query, the exact gc-q40pm stall this normalization exists
+// to prevent (the same store-topology gap fixed for --reassign in #3408).
+//
+// No-op when the bead is missing from every store (e.g. --force routing
+// against an absent bead), no store is available, the assignee is already
+// empty, or the bead is not open — in_progress marks a live claim that sling
+// must not strip; orphaned claims are recovered by the controller's
+// releaseOrphanedPoolAssignments instead. Errors on a real (non-ErrNotFound)
+// store read failure or a SourceWorkflowStores listing failure: silently
+// swallowing those would risk leaving a stale assignee uncleared and
+// re-introducing the stall. See the pool re-pour block in preflight (gc-q40pm).
+func clearStaleOpenAssigneeForPoolRoute(beadID string, deps SlingDeps) (string, error) {
+	if deps.Store != nil {
+		b, err := deps.Store.Get(beadID)
+		if err == nil {
+			return clearStaleOpenAssigneeInStore(deps.Store, beadID, b)
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return "", fmt.Errorf("reading %s from primary store to clear stale pool assignee: %w", beadID, err)
+		}
+		// ErrNotFound: the record is not in the city primary store. For
+		// rig-prefixed beads it lives in a rig store, so fall through to the
+		// source-workflow sweep below.
+	}
+	// Sweep the source-workflow stores and clear the bead in whichever one
+	// holds it. Mirrors clearHumanAssignee and sourceWorkflowRootByID.
+	if deps.SourceWorkflowStores == nil {
+		return "", nil
+	}
+	stores, err := deps.SourceWorkflowStores()
+	if err != nil {
+		return "", fmt.Errorf("listing source-workflow stores to clear stale pool assignee for %s: %w", beadID, err)
+	}
+	for _, info := range stores {
+		if info.Store == nil {
+			continue
+		}
+		b, err := info.Store.Get(beadID)
+		if err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				continue
+			}
+			return "", fmt.Errorf("reading %s from store %q to clear stale pool assignee: %w", beadID, strings.TrimSpace(info.StoreRef), err)
+		}
+		return clearStaleOpenAssigneeInStore(info.Store, beadID, b)
+	}
+	return "", nil
+}
+
+// clearStaleOpenAssigneeInStore unsets the assignee on b in store when b is an
+// OPEN bead with a non-empty assignee, returning the assignee it cleared (or
+// "" when nothing was cleared). The open guard lives here so it is applied
+// against whichever store actually holds the bead: an in_progress bead in a
+// rig store keeps its assignee just as one in the primary store would.
+func clearStaleOpenAssigneeInStore(store beads.Store, beadID string, b beads.Bead) (string, error) {
+	if b.Status != "open" {
+		return "", nil
+	}
+	assignee := strings.TrimSpace(b.Assignee)
+	if assignee == "" {
+		return "", nil
+	}
+	empty := ""
+	if err := store.Update(beadID, beads.UpdateOpts{Assignee: &empty}); err != nil {
+		return "", err
+	}
+	return assignee, nil
 }
