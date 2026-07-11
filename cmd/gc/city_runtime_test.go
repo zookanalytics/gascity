@@ -810,8 +810,8 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 		},
 	}})
 
-	first := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
-	second := cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	first := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	second := cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 	if buildCalls != 1 {
 		t.Fatalf("buildDesiredState call count = %d, want 1 for stable patrol reuse", buildCalls)
@@ -830,14 +830,139 @@ func TestCityRuntimeDemandSnapshotReusesStablePatrolDemand(t *testing.T) {
 			"pending_create_claim": "true",
 		},
 	}})
-	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState call count after session change = %d, want 2", buildCalls)
 	}
 
-	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, "poke", false)
+	// A poke-driven (non-patrol) tick with a stable fingerprint reuses the fresh
+	// cached snapshot instead of rebuilding — the same gate patrol ticks use.
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after stable poke = %d, want 2 (poke reuses fresh cache)", buildCalls)
+	}
+
+	// A config change still forces a rebuild — templates actually changed.
+	_ = cr.loadDemandSnapshot(changedSessionBeads, nil, true)
 	if buildCalls != 3 {
-		t.Fatalf("buildDesiredState call count after poke = %d, want 3", buildCalls)
+		t.Fatalf("buildDesiredState call count after config change = %d, want 3 (config change rebuilds)", buildCalls)
+	}
+}
+
+// TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke asserts that a
+// work-routing poke (demandDirty) forces a demand rebuild even when the session
+// fingerprint is stable, so routed work for a sleeping pool is observed this
+// tick — while a plain poke still reuses the cached snapshot.
+func TestCityRuntimeDemandSnapshotRebuildsForWorkRoutingPoke(t *testing.T) {
+	buildCalls := 0
+	routedWork := false
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		demandDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		st := map[string]TemplateParams{}
+		if routedWork {
+			// Newly-routed pool work produces a desired session (the wake).
+			st["worker-bd-1"] = TemplateParams{SessionName: "worker-bd-1"}
+		}
+		return DesiredStateResult{State: st}
+	}
+
+	// Sleeping pool: no session beads at all. Prime a no-demand snapshot.
+	sessionBeads := newSessionBeadSnapshot(nil)
+	primed := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after prime = %d, want 1", buildCalls)
+	}
+	if len(primed.result.State) != 0 {
+		t.Fatalf("primed desired sessions = %d, want 0 (no work routed yet)", len(primed.result.State))
+	}
+
+	// A plain poke with a stable fingerprint and no demand-dirty signal reuses
+	// the cache — the perf win we must not regress.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after plain poke = %d, want 1 (cache reuse preserved)", buildCalls)
+	}
+
+	// Routing new work for the sleeping pool fires a work-routing poke that marks
+	// demand dirty. The fingerprint is unchanged, so only the flag forces a rebuild.
+	routedWork = true
+	cr.demandDirty.Store(true)
+	woken := cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after work-routing poke = %d, want 2 (forced rebuild)", buildCalls)
+	}
+	if len(woken.result.State) != 1 {
+		t.Fatalf("woken desired sessions = %d, want 1 (routed work observed immediately)", len(woken.result.State))
+	}
+	if cr.demandDirty.Load() {
+		t.Fatal("demandDirty must be cleared once a rebuild consumes it (one-shot)")
+	}
+
+	// The signal is one-shot: the next stable poke reuses the rebuilt cache.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after consuming demand-dirty = %d, want 2 (reuse)", buildCalls)
+	}
+}
+
+// TestCityRuntimeDemandSnapshotConsumesDirtyFlagOnConfigChange asserts the
+// demandDirty consume cannot be bypassed by another rebuild reason: when a tick
+// already rebuilds for a config change while a work-routing poke also marked
+// demand dirty, the flag is still consumed, so it can't trigger a second,
+// redundant rebuild on the next stable poke.
+func TestCityRuntimeDemandSnapshotConsumesDirtyFlagOnConfigChange(t *testing.T) {
+	buildCalls := 0
+	cr := &CityRuntime{
+		cityName: "test-city",
+		cityPath: t.TempDir(),
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+		},
+		cs: &controllerState{
+			eventProv: events.NewFake(),
+		},
+		demandDirty: &atomic.Bool{},
+		stderr:      io.Discard,
+	}
+	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+		buildCalls++
+		return DesiredStateResult{State: map[string]TemplateParams{}}
+	}
+
+	sessionBeads := newSessionBeadSnapshot(nil)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 1 {
+		t.Fatalf("buildDesiredState call count after prime = %d, want 1", buildCalls)
+	}
+
+	// A config-change tick that also carries a work-routing demand-dirty signal:
+	// the config change forces the rebuild, but the flag must still be consumed.
+	cr.demandDirty.Store(true)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, true)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after config-change tick = %d, want 2", buildCalls)
+	}
+	if cr.demandDirty.Load() {
+		t.Fatal("demandDirty must be consumed even when a config change also forces the rebuild")
+	}
+
+	// The next stable poke reuses the cache, proving no leftover flag forced a
+	// redundant rebuild.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	if buildCalls != 2 {
+		t.Fatalf("buildDesiredState call count after stable poke = %d, want 2 (no redundant rebuild)", buildCalls)
 	}
 }
 
@@ -1330,7 +1455,7 @@ func TestCityRuntimeDemandSnapshotRetainsOnlyPoolScaleCheckPartials(t *testing.T
 				return tc.result
 			}
 
-			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+			snapshot := cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 			if got := snapshot.result.PoolDesiredCounts["worker"]; got != tc.want {
 				t.Fatalf("PoolDesiredCounts[worker] = %d, want %d", got, tc.want)
@@ -2037,8 +2162,8 @@ func TestCityRuntimeDemandSnapshotCachesCustomDemandCommands(t *testing.T) {
 			}
 
 			sessionBeads := newSessionBeadSnapshot(nil)
-			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
-			_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+			_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+			_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 
 			if buildCalls != tc.wantBuilds {
 				t.Fatalf("buildDesiredState call count = %d, want %d", buildCalls, tc.wantBuilds)
@@ -2062,7 +2187,8 @@ func TestCityRuntimeDemandSnapshotThrottlesScaleCheckPatrolReeval(t *testing.T) 
 		cs: &controllerState{
 			eventProv: events.NewFake(),
 		},
-		stderr: io.Discard,
+		demandDirty: &atomic.Bool{},
+		stderr:      io.Discard,
 	}
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 		buildCalls++
@@ -2076,25 +2202,35 @@ func TestCityRuntimeDemandSnapshotThrottlesScaleCheckPatrolReeval(t *testing.T) 
 
 	sessionBeads := newSessionBeadSnapshot(nil)
 
-	// First patrol builds; a second immediate patrol is throttled.
-	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
-	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	// First patrol builds; a second immediate patrol is throttled by the
+	// scale_check floor (scaleCheckDemandMinInterval). The floor only bites once
+	// the fork's always-rebuild top-guard is gone: a scale_check pool now reuses a
+	// sub-floor-age snapshot instead of re-running the probe on every patrol tick.
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 	if buildCalls != 1 {
 		t.Fatalf("buildDesiredState calls after two immediate patrols = %d, want 1 (throttled)", buildCalls)
 	}
 
 	// Once the floor elapses, the next patrol re-runs the probe.
 	cr.demandSnapshot.createdAt = time.Now().Add(-2 * scaleCheckDemandMinInterval)
-	_ = cr.loadDemandSnapshot(sessionBeads, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 	if buildCalls != 2 {
 		t.Fatalf("buildDesiredState calls after interval elapsed = %d, want 2", buildCalls)
 	}
 
-	// Non-patrol triggers (routed-work pokes/events) bypass the floor so pools
-	// wake immediately, even within the throttle window.
-	_ = cr.loadDemandSnapshot(sessionBeads, nil, "poke", false)
+	// A work-routing poke (demandDirty) bypasses the floor so a sleeping pool
+	// wakes immediately for routed work, even within the throttle window. The
+	// snapshot is still fresh from the rebuild above, so only the flag — not age —
+	// forces this rebuild. (A plain poke reuses the cache; see
+	// TestCityRuntimeDemandSnapshotReusesStablePatrolDemand.)
+	cr.demandDirty.Store(true)
+	_ = cr.loadDemandSnapshot(sessionBeads, nil, false)
 	if buildCalls != 3 {
-		t.Fatalf("buildDesiredState calls after poke = %d, want 3 (event-driven wake must bypass throttle)", buildCalls)
+		t.Fatalf("buildDesiredState calls after work-routing poke = %d, want 3 (demandDirty bypasses throttle)", buildCalls)
+	}
+	if cr.demandDirty.Load() {
+		t.Fatal("demandDirty must be cleared once a rebuild consumes it (one-shot)")
 	}
 
 	// A session change within the window also forces an immediate rebuild.
@@ -2103,7 +2239,7 @@ func TestCityRuntimeDemandSnapshotThrottlesScaleCheckPatrolReeval(t *testing.T) 
 		Status:   "open",
 		Metadata: map[string]string{"session_name": "polecat-1", "template": "polecat", "state": "active"},
 	}})
-	_ = cr.loadDemandSnapshot(changed, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(changed, nil, false)
 	if buildCalls != 4 {
 		t.Fatalf("buildDesiredState calls after session change = %d, want 4", buildCalls)
 	}
@@ -2129,7 +2265,7 @@ func TestCityRuntimeDemandSnapshotDoesNotRunControllerWorkQuery(t *testing.T) {
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
-	snapshot := cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, "patrol", false)
+	snapshot := cr.loadDemandSnapshot(newSessionBeadSnapshot(nil), nil, false)
 
 	if len(snapshot.result.WorkSet) != 0 {
 		t.Fatalf("WorkSet = %#v, want empty; controller demand must not run work_query", snapshot.result.WorkSet)
@@ -2163,7 +2299,7 @@ func TestCityRuntimeDemandSnapshotReplaysACPRoutesOnCacheHit(t *testing.T) {
 		stderr: io.Discard,
 	}
 
-	_ = cr.loadDemandSnapshot(nil, nil, "patrol", false)
+	_ = cr.loadDemandSnapshot(nil, nil, false)
 
 	if err := sp.Attach("headless-agent"); err == nil || !strings.Contains(err.Error(), "ACP transport") {
 		t.Fatalf("Attach(headless-agent) error = %v, want ACP transport route", err)
