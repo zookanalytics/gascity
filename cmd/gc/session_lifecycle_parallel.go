@@ -220,10 +220,12 @@ type preparedStart struct {
 	// promptDelivery decision AND-ed with the fresh-launch condition, i.e. the
 	// exact complement of the resume override below — so a resume that swaps in
 	// restartPromptNudge and re-sets GC_STARTUP_PROMPT_DELIVERED for hooks stamps
-	// no priming marker. promptHash is the sha256 of the rendered startup template
-	// prompt (tp.Prompt) only — it excludes the one-shot initial_message override
-	// appended to the delivered payload, so the stored hash still matches a later
-	// re-derivation from the template (S19 re-eligibility).
+	// no priming marker. ACP is carved out of that override (gc-xlj7s), so an ACP
+	// resume does deliver — through the nudge — and does stamp. promptHash is the
+	// sha256 of the rendered startup template prompt (tp.Prompt) only — it excludes
+	// the one-shot initial_message override appended to the delivered payload, so
+	// the stored hash still matches a later re-derivation from the template (S19
+	// re-eligibility).
 	promptDelivered bool
 	promptHash      string
 }
@@ -1002,7 +1004,10 @@ func buildPreparedStartWithWorkDirResolver(
 	// launch — the exact complement of the resume override below, which swaps in
 	// restartPromptNudge and delivers nothing. Reading the env marker instead
 	// would mis-stamp every resume (it is re-set to "1" for hook consumption).
-	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey)
+	// tp.IsACP is part of that complement: ACP is carved out of the override
+	// (gc-xlj7s), so an ACP resume never suppresses delivery — it re-delivers the
+	// rendered prompt through the nudge and must still stamp the marker.
+	promptDelivered := delivery.Delivered && (firstStart || forceFresh || !hasResumeKey || tp.IsACP)
 	// prompt_hash is the sha256 of the rendered startup TEMPLATE prompt (tp.Prompt)
 	// only, computed here BEFORE the one-shot initial_message is appended to the
 	// delivered payload below. The hash exists so a template/config change re-primes
@@ -1010,10 +1015,28 @@ func buildPreparedStartWithWorkDirResolver(
 	// replays the transient initial_message, so hashing the delivered bytes would
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
-	if !firstStart && !forceFresh && hasResumeKey {
+	// !tp.IsACP mirrors the CLI-resume guard above: only providers that actually
+	// take a --resume/--session-id flag rehydrate the prior conversation. ACP is
+	// excluded from resolveSessionCommand and acp.Provider.Start always opens a
+	// fresh session/new, delivering the rendered role prompt via the nudge — so
+	// suppressing prompt replay on an ACP "resume" would drop the role prompt
+	// entirely (gc-xlj7s). A Claude ACP session can still mint a session_key, so
+	// hasResumeKey alone is not enough to tell that --resume rehydration applies.
+	if !firstStart && !forceFresh && hasResumeKey && !tp.IsACP {
 		agentCfg.PromptSuffix = ""
 		agentCfg.PromptFlag = ""
-		agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		// On resume the provider rehydrates the prior conversation (the rendered
+		// role prompt included) via --resume, so an agent that already carries a
+		// nudge only needs the nudge to wake without landing idle. Prepending the
+		// prompt in that case duplicates the already-restored role on every wake
+		// (gc-7go2a; the ~20k-token re-injection in gc-cbtfq). #2477's prompt
+		// replay stays as the fallback for nudge-less agents, whose only
+		// first-turn payload is the prompt itself.
+		if strings.TrimSpace(tp.Hints.Nudge) != "" {
+			agentCfg.Nudge = tp.Hints.Nudge
+		} else {
+			agentCfg.Nudge = restartPromptNudge(tp.Prompt, tp.Hints.Nudge)
+		}
 		if agentCfg.Env != nil {
 			delete(agentCfg.Env, startupPromptDeliveredEnv)
 		}
