@@ -1727,8 +1727,28 @@ func (m *Manager) ListFull(stateFilter string, templateFilter string) (*ListResu
 
 // ListFullFromBeads is like ListFull but reuses a caller-supplied slice of
 // session-labeled beads. Callers that already loaded session beads can avoid
-// a second store scan by passing the same slice here.
+// a second store scan by passing the same slice here. Each matching bead is
+// expanded with live runtime observation via infoFromBead.
 func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
+	return m.listFromBeads(all, stateFilter, templateFilter, m.infoFromBead)
+}
+
+// ListSummaryFromBeads is the no-liveness counterpart to ListFullFromBeads: it
+// expands each matching bead with InfoFromPersistedBead, which reads only stored
+// metadata and never calls the session provider. It backs the view=summary
+// session list, whose contract is to fan out no live runtime probes (no tmux
+// forks, no transcript I/O), so the status bar can poll cheaply without paying
+// for per-session liveness.
+func (m *Manager) ListSummaryFromBeads(all []beads.Bead, stateFilter string, templateFilter string) *ListResult {
+	return m.listFromBeads(all, stateFilter, templateFilter, InfoFromPersistedBead)
+}
+
+// listFromBeads filters a caller-supplied bead slice by state and template,
+// then expands each survivor into an Info via the supplied projection. The
+// projection is the sole difference between the Full listing (infoFromBead,
+// live observation) and the Summary listing (InfoFromPersistedBead, metadata
+// only); the filtering is identical for both.
+func (m *Manager) listFromBeads(all []beads.Bead, stateFilter, templateFilter string, project func(beads.Bead) Info) *ListResult {
 	result := make([]Info, 0, len(all))
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
@@ -1737,7 +1757,7 @@ func (m *Manager) ListFullFromBeads(all []beads.Bead, stateFilter string, templa
 		if !sessionMatchesFilters(b, stateFilter, templateFilter) {
 			continue
 		}
-		result = append(result, m.infoFromBead(b))
+		result = append(result, project(b))
 	}
 	return &ListResult{Sessions: result, Beads: all}
 }
