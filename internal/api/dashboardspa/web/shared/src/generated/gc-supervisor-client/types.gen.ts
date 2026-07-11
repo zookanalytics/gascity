@@ -504,6 +504,7 @@ export type CityInfo = {
     phases_completed?: Array<string> | null;
     running: boolean;
     status?: string;
+    suspended: boolean;
 };
 
 export type CityLifecyclePayload = {
