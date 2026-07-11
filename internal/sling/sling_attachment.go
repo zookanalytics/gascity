@@ -453,7 +453,20 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 
 	target := a.QualifiedName()
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) == target {
-		if b.Assignee == "" || b.Assignee == target {
+		// For pool targets only an empty assignee is a settled routed
+		// state: pool demand is ready work with assignee="" and
+		// "assigning the pool template itself is not pool demand"
+		// (engdocs/architecture/dispatch.md, scale_check ↔ work_query
+		// correspondence). A routed-but-assigned bead must fall through
+		// so preflight's re-pour normalization can clear the stale
+		// assignee instead of short-circuiting as idempotent (gc-q40pm).
+		settledAssignee := b.Assignee == ""
+		if !a.SupportsInstanceExpansion() {
+			// Singleton routing stamps assignee=target for Tier 1
+			// visibility, so the self-assigned shape stays settled.
+			settledAssignee = settledAssignee || b.Assignee == target
+		}
+		if settledAssignee {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
 		return BeadCheckResult{
