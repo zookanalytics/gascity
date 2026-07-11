@@ -172,6 +172,12 @@ type State interface {
 	// is not available (e.g., in tests).
 	Poke()
 
+	// PokeDemand forces a pool-demand rebuild on the next reconciler tick and
+	// signals one immediately. Callers that change pool demand without mutating a
+	// session bead use it instead of Poke, whose cached demand snapshot would
+	// otherwise hide the change. Best-effort: no-op if poke is unavailable.
+	PokeDemand()
+
 	// ServiceRegistry returns the workspace service registry, or nil when
 	// workspace services are not enabled for this city.
 	ServiceRegistry() workspacesvc.Registry
