@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -38,14 +39,30 @@ func (s *Server) humaHandleCityPatch(_ context.Context, input *CityPatchInput) (
 		return nil, apierr.InvalidRequest.Msg("no fields to update")
 	}
 
-	var err error
+	var (
+		err       error
+		eventType string
+	)
 	if *input.Body.Suspended {
 		err = sm.SuspendCity()
+		eventType = events.CitySuspended
 	} else {
 		err = sm.ResumeCity()
+		eventType = events.CityResumed
 	}
 	if err != nil {
 		return nil, mutationError(err)
+	}
+
+	// Mirror the CLI fallback path in cmd_suspend.go: every transition
+	// must record city.suspended/city.resumed so events.jsonl reflects
+	// the change regardless of whether the operator hit the API or fell
+	// through to direct file mutation.
+	if ep := s.state.EventProvider(); ep != nil {
+		ep.Record(events.Event{
+			Type:  eventType,
+			Actor: "api",
+		})
 	}
 
 	resp := &OKResponse{}
