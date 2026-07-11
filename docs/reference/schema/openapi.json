@@ -1399,12 +1399,16 @@
           },
           "status": {
             "type": "string"
+          },
+          "suspended": {
+            "type": "boolean"
           }
         },
         "required": [
           "name",
           "path",
-          "running"
+          "running",
+          "suspended"
         ],
         "type": "object"
       },
