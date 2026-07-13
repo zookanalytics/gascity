@@ -106,6 +106,7 @@ rest_smoke_tests=(
 # compares it with Go's tagged and untagged discovery before executing it.
 cmd_gc_integration_tests=(
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof
   TestPhase2WorkerCoreRealTransportProof
 )

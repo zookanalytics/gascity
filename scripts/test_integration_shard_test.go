@@ -23,6 +23,7 @@ func TestCmdGCIntegrationShardRunsOnlyIntegrationManifest(t *testing.T) {
 	invocation := string(captured)
 	for _, testName := range []string{
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
+		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
 		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",
 		"TestPhase2WorkerCoreRealTransportProof",
 	} {
@@ -65,6 +66,7 @@ func newIntegrationShardFixture(t *testing.T, extraTaggedTests []string) integra
 	taggedTests := append([]string{
 		"TestOrdinaryUnit",
 		"TestControllerDiscoversAddedCronOrderWithoutRestart",
+		"TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind",
 		"TestPhase2HookEnabledClaudeLaunchPromptDeliveryProof",
 		"TestPhase2WorkerCoreRealTransportProof",
 	}, extraTaggedTests...)
