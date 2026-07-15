@@ -245,4 +245,4 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-replace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260623014633-126bceaf0f14
+replace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260625154543-d05de7acf095
