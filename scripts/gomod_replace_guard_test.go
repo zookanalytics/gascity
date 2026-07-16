@@ -272,6 +272,27 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./vendor/github.com/zookanalytics/beads\n",
 			true,
 		},
+		{
+			// The allowlist permits ONLY commit-backed pseudo-versions, never a
+			// mutable branch/ref token. `main` names a moving branch, so an
+			// allowlisted fork pinned to it stays BLOCKED — otherwise the guard would
+			// wave through exactly the unreleased, mutable pin it exists to stop.
+			// Regression guard for gc-434qa: the allowlist previously returned pass
+			// for the fork target *before* checking the version, bypassing all
+			// version validation.
+			"blocks_fork_beads_branch_ref",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => github.com/zookanalytics/beads main\n",
+			true,
+		},
+		{
+			// The exception is keyed on pseudo-version SHAPE, not on the literal
+			// string "main": a prerelease-label pin (a mutable git tag, not a
+			// commit-backed pseudo-version) to the allowlisted fork is likewise
+			// BLOCKED.
+			"blocks_fork_beads_prerelease_label",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads v1.0.4 => github.com/zookanalytics/beads v1.0.5-rc1\n",
+			true,
+		},
 	}
 	for _, tc := range forkAllowlistCases {
 		tc := tc
