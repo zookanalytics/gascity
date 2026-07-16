@@ -10,6 +10,17 @@
 # bypass of this required CI check — automated workers may NEVER self-authorize
 # an unreleased dependency.
 #
+# Codified exception (fork allowlist): replace targets in FORK_REPLACE_ALLOWLIST
+# below are permitted to carry an unreleased (pseudo-version) pin. These are
+# fork-owned, operator-approved repositories — not automated workers
+# self-authorizing a third-party dep. The gascity fork permanently redirects
+# github.com/steveyegge/beads to its own beads fork
+# (github.com/zookanalytics/beads), a DoltLite-backed integration branch that
+# tracks commits and therefore never carries a released semver tag. The
+# operator's approval of that pin is codified here once, so it is not
+# re-litigated on every PR. Adding an entry to the allowlist is itself an
+# operator-gated change (it modifies this committed guard). See gc-bvjbs.
+#
 # Released: exactly vX.Y.Z where X, Y, Z are integers (e.g. v1.0.5, v0.0.1).
 # Blocked: pseudo-version, prerelease label, local path, git branch/ref, or
 #          any non-semver version token.
@@ -27,6 +38,25 @@ if [[ ! -f "$gomod" ]]; then
 	echo "check-gomod-replace: $gomod not found" >&2
 	exit 1
 fi
+
+# Fork allowlist — replace *target* module paths permitted to carry an
+# unreleased (pseudo-version) pin. See the header comment for the policy
+# rationale. Each entry is matched against the replace target's module path
+# exactly (never as a substring), so a local path or a look-alike suffix cannot
+# slip through.
+FORK_REPLACE_ALLOWLIST=(
+	"github.com/zookanalytics/beads"
+)
+
+# is_fork_allowlisted PATH — exit 0 if PATH exactly matches an allowlisted fork
+# target module path, exit 1 otherwise.
+is_fork_allowlisted() {
+	local candidate="$1" allowed
+	for allowed in "${FORK_REPLACE_ALLOWLIST[@]}"; do
+		[[ "$candidate" == "$allowed" ]] && return 0
+	done
+	return 1
+}
 
 check_replace_rhs() {
 	local stripped="$1" rhs="$2"
@@ -56,6 +86,13 @@ check_replace_rhs() {
 		echo "  Local-path replaces (./  ../  /) may not appear in committed go.mod." >&2
 		echo "  Override: human operator must manually bypass this required CI check." >&2
 		return 1
+	fi
+
+	# Fork allowlist: a fork-owned, operator-approved target (see header) may
+	# carry an unreleased pin. Checked *after* the local-path block above, so a
+	# local path can never be allowlisted even if it resembles a fork module.
+	if is_fork_allowlisted "$path_part"; then
+		return 0
 	fi
 
 	# No version: path-only redirect with no version to check.

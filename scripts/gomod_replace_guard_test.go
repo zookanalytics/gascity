@@ -231,6 +231,61 @@ func TestCheckGomodReplaceGuard(t *testing.T) {
 		})
 	}
 
+	// Fork allowlist: the gascity fork permanently redirects the beads module to
+	// its own fork (github.com/zookanalytics/beads), a DoltLite-backed
+	// integration branch that tracks commits and therefore never carries a
+	// released semver tag. That operator-approved, fork-owned pin must PASS even
+	// though it is a pseudo-version, while every non-allowlisted unreleased
+	// target stays BLOCKED. Regression guard for gc-bvjbs: the fork's own beads
+	// pin tripped this guard and wedged every PR auto-land.
+	forkAllowlistCases := []struct {
+		name     string
+		gomod    string
+		wantFail bool
+	}{
+		{
+			"passes_fork_beads_pseudo_version",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260625154543-d05de7acf095\n",
+			false,
+		},
+		{
+			"passes_fork_beads_pseudo_version_grouped",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace (\n\tgithub.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260625154543-d05de7acf095\n)\n",
+			false,
+		},
+		{
+			"passes_fork_beads_pseudo_version_inline_comment",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => github.com/zookanalytics/beads v0.0.0-20260625154543-d05de7acf095 // fork pin\n",
+			false,
+		},
+		{
+			// The allowlist is narrow: a pseudo-version to any other target stays blocked.
+			"blocks_non_allowlisted_fork_pseudo_version",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => github.com/someoneelse/beads v0.0.0-20260625154543-d05de7acf095\n",
+			true,
+		},
+		{
+			// The allowlist matches the module path exactly, never as a substring, and
+			// never permits a local path — a local path whose suffix resembles the fork
+			// stays blocked.
+			"blocks_local_path_resembling_fork",
+			"module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./vendor/github.com/zookanalytics/beads\n",
+			true,
+		},
+	}
+	for _, tc := range forkAllowlistCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			out, code := runScript(t, tc.gomod)
+			if tc.wantFail && code == 0 {
+				t.Fatalf("expected non-zero exit for fork-allowlist case %q, got 0\n%s", tc.name, out)
+			}
+			if !tc.wantFail && code != 0 {
+				t.Fatalf("expected exit 0 for fork-allowlist case %q, got %d\n%s", tc.name, code, out)
+			}
+		})
+	}
+
 	t.Run("failure_message_mentions_policy", func(t *testing.T) {
 		gomod := "module github.com/example/mod\n\ngo 1.22\n\nreplace github.com/steveyegge/beads => ./local/beads\n"
 		out, code := runScript(t, gomod)
