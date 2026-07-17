@@ -956,8 +956,11 @@ dolt.auto-start: false
 	if got := env["BEADS_DOLT_SERVER_PORT"]; got != want {
 		t.Fatalf("BEADS_DOLT_SERVER_PORT = %q, want provider-state port %q", got, want)
 	}
-	if got := env["GC_DOLT_HOST"]; got != "" {
-		t.Fatalf("GC_DOLT_HOST = %q, want empty for managed provider-state target", got)
+	if got := env["GC_DOLT_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("GC_DOLT_HOST = %q, want %q for managed provider-state target", got, "127.0.0.1")
+	}
+	if got := env["BEADS_DOLT_SERVER_HOST"]; got != "127.0.0.1" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST = %q, want %q for managed provider-state target", got, "127.0.0.1")
 	}
 
 	publishedState, err := readDoltRuntimeStateFile(managedDoltStatePath(cityPath))
