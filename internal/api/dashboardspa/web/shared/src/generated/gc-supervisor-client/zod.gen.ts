@@ -198,7 +198,8 @@ export const zCityInfo = z.object({
     path: z.string(),
     phases_completed: z.array(z.string()).nullish(),
     running: z.boolean(),
-    status: z.string().optional()
+    status: z.string().optional(),
+    suspended: z.boolean()
 });
 
 export const zCityLifecyclePayload = z.object({
@@ -1301,6 +1302,7 @@ export const zRigCreatedOutputBody = z.object({
 
 export const zRigPatch = z.object({
     DefaultBranch: z.string().nullable(),
+    DefaultMergeStrategy: z.string().nullable(),
     FormulaVars: z.record(z.string(), z.string()),
     Name: z.string(),
     Path: z.string().nullable(),
@@ -1332,7 +1334,7 @@ export const zRigResponse = z.object({
     last_activity: z.iso.datetime().optional(),
     name: z.string(),
     path: z.string(),
-    prefix: z.string().optional(),
+    prefix: z.string(),
     running_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     suspended: z.boolean()
 });
@@ -7052,7 +7054,8 @@ export const zGetV0CityByCityNameSessionsQuery = z.object({
     limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     state: z.string().optional(),
     template: z.string().optional(),
-    peek: z.boolean().optional()
+    peek: z.boolean().optional(),
+    view: z.string().optional()
 });
 
 /**
