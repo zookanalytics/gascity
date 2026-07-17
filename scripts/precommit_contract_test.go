@@ -418,14 +418,19 @@ exit 0
 	return workDir, callLog
 }
 
-func runGit(t *testing.T, dir string, args ...string) {
+// runGit runs a git command in dir, failing the test on error. It returns the
+// command's trimmed output so callers that need a value (e.g. `rev-parse HEAD`)
+// can read it; callers that only need the side effect ignore the result.
+func runGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
+	return strings.TrimSpace(string(out))
 }
 
 func repoRoot(t *testing.T) string {
