@@ -33,6 +33,8 @@ const fetchCalls: FetchCall[] = [];
 
 const fetchUrls = () => fetchCalls.map((call) => call.url);
 
+const fetchPaths = () => fetchCalls.map((call) => requestPath(call.url));
+
 interface StubFetchOptions {
   agentsPayload?: unknown;
   agentsStatus?: number;
@@ -89,7 +91,7 @@ function stubFetch(options: StubFetchOptions = {}) {
           options.agentsStatus === undefined ? undefined : { status: options.agentsStatus },
         );
       }
-      if (url === '/v0/city/test-city/sessions' && method === 'GET') {
+      if (requestPath(url) === '/v0/city/test-city/sessions' && method === 'GET') {
         return jsonResponse({
           items: [
             {
@@ -150,6 +152,15 @@ function requestUrl(input: RequestInfo | URL): string {
   const url =
     input instanceof Request ? input.url : input instanceof URL ? input.toString() : String(input);
   return stripSameOrigin(url);
+}
+
+// Routing key for stub matching. Reads carry query params the route under test
+// does not choose — the supervisor client requests sessions with ?view=full to
+// opt into the enriched live-observation fields — so match on the path and let
+// supervisor/client.test.ts own the exact query contract.
+function requestPath(url: string): string {
+  const queryStart = url.indexOf('?');
+  return queryStart === -1 ? url : url.slice(0, queryStart);
 }
 
 function requestMethod(input: RequestInfo | URL, init: RequestInit | undefined): string {
@@ -346,7 +357,7 @@ describe('AgentsPage (post-ay6 regressions)', () => {
       );
     });
     // Belt-and-suspenders: assert the buggy URL was NEVER attempted.
-    expect(fetchUrls()).toContain('/v0/city/test-city/sessions');
+    expect(fetchPaths()).toContain('/v0/city/test-city/sessions');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/gc-2568/peek');
     expect(fetchUrls()).not.toContain('/api/city/test-city/sessions/mayor/peek');
