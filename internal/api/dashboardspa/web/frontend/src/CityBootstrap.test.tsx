@@ -16,7 +16,7 @@ vi.mock('./supervisor/client', () => ({
 }));
 
 function city(name: string, running = true): CityInfo {
-  return { name, path: `/srv/${name}`, running };
+  return { name, path: `/srv/${name}`, running, suspended: false };
 }
 
 const replaceSpy = vi.fn();

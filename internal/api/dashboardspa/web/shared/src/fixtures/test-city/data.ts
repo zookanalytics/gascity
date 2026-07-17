@@ -321,7 +321,13 @@ export function buildTestCitySupervisorData(nowMs: number = Date.now()): TestCit
   const events = buildEvents(beadById, iso);
 
   const cities: CityInfo[] = [
-    { name: TEST_CITY_NAME, path: `/tmp/${TEST_CITY_NAME}`, running: true, status: 'ok' },
+    {
+      name: TEST_CITY_NAME,
+      path: `/tmp/${TEST_CITY_NAME}`,
+      running: true,
+      suspended: false,
+      status: 'ok',
+    },
   ];
   const cityHealth: HealthOutputBody = {
     city: TEST_CITY_NAME,
