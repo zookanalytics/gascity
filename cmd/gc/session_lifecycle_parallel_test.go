@@ -1322,10 +1322,10 @@ func TestSortCandidatesByWakeFairness_RoundRobin(t *testing.T) {
 	cfg := &config.City{}
 	mk := func(name, template, lastWoke string) startCandidate {
 		return startCandidate{
-			session: &beads.Bead{Metadata: map[string]string{
+			info: sessiontest.InfoFromMeta(t, map[string]string{
 				"session_name": name,
 				"last_woke_at": lastWoke,
-			}},
+			}),
 			tp: TemplateParams{SessionName: name, TemplateName: template},
 		}
 	}
@@ -1427,7 +1427,7 @@ func TestExecutePlannedStarts_RoundRobinProtectsForeignTemplate(t *testing.T) {
 		sCopy := sess
 		tp := mkTP(s.name, s.template)
 		desired[s.name] = tp
-		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sCopy), tp: tp, order: i})
 	}
 
 	woken := executePlannedStarts(
@@ -1512,7 +1512,7 @@ func TestExecutePlannedStarts_SingleTemplateUsesFullBudget(t *testing.T) {
 		sCopy := sess
 		tp := mkTP(name)
 		desired[name] = tp
-		candidates = append(candidates, startCandidate{session: &sCopy, tp: tp, order: i})
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sCopy), tp: tp, order: i})
 	}
 
 	woken := executePlannedStarts(
