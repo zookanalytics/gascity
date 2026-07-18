@@ -17,6 +17,11 @@ func TestWorkspaceImportTrustRoot(t *testing.T) {
 
 	repo := t.TempDir()
 	runGit(t, repo, "init", "-q")
+	// Disable commit/tag signing so the fixture does not inherit a global
+	// commit.gpgsign that would require an unreachable ssh agent in the
+	// parallel test subprocess (ref tk-9zgnf).
+	runGit(t, repo, "config", "commit.gpgsign", "false")
+	runGit(t, repo, "config", "tag.gpgsign", "false")
 	runGit(t, repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit",
 		"--allow-empty", "-q", "-m", "init")
 
