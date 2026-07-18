@@ -1945,6 +1945,25 @@ func (m *Manager) PersistedStore() *Store {
 // persisted projection, before the runtime stale-active downgrade), and the
 // IsSessionBeadOrRepairableInfo guard mirrors the old defensive filter.
 func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string) []Info {
+	return m.EnrichInfos(m.filterInfos(infos, stateFilter, templateFilter))
+}
+
+// ListSummaryFromInfos is the no-liveness counterpart to ListFromInfos: the
+// same persisted-projection filter, but the survivors are returned as-is with
+// no runtime overlay (no EnrichInfo, so no provider IsRunning / IsAttached /
+// GetLastActivity probes). It backs the view=summary session list, whose
+// contract is to fan out no live runtime probes (no tmux forks, no transcript
+// I/O), so the status bar can poll cheaply without paying for per-session
+// liveness.
+func (m *Manager) ListSummaryFromInfos(infos []Info, stateFilter, templateFilter string) []Info {
+	return m.filterInfos(infos, stateFilter, templateFilter)
+}
+
+// filterInfos filters a persisted Info feed by state and template. The filter
+// is identical for the Full listing (which follows it with the EnrichInfos
+// runtime overlay) and the Summary listing (which returns the persisted
+// projection unchanged); the overlay is the sole difference between the two.
+func (m *Manager) filterInfos(infos []Info, stateFilter, templateFilter string) []Info {
 	result := make([]Info, 0, len(infos))
 	for _, info := range infos {
 		if !IsSessionBeadOrRepairableInfo(info) {
@@ -1955,7 +1974,7 @@ func (m *Manager) ListFromInfos(infos []Info, stateFilter, templateFilter string
 		}
 		result = append(result, info)
 	}
-	return m.EnrichInfos(result)
+	return result
 }
 
 // PersistSessionKey stores a provider resume key on an existing session when
