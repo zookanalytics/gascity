@@ -19,6 +19,24 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
+// humaHandleSessionList is the Huma-typed handler for GET
+// /v0/city/{cityName}/sessions.
+//
+// The "view" query parameter selects how much per-session detail the response
+// carries:
+//
+//   - view=summary returns only the cheap read-model + bead-metadata fields
+//     (id, alias, title, state, rig, pool, agent_kind, reason, options,
+//     metadata, submission_capabilities). These come from the cache-first read
+//     model via ListSummaryFromInfos with no fan-out and no live runtime probe.
+//     The enrichment and live-observation fields stay at their zero values:
+//     running=false, active_bead="", model="", context_pct=null,
+//     last_output="", attached=false, last_active="". summary takes precedence
+//     over peek.
+//   - view=full, empty (the default), or any unrecognized value runs
+//     enrichSessionResponse per session: running is a live State() probe,
+//     active_bead is a per-rig bead lookup, and model/context_pct come from
+//     transcript I/O. last_output is added only when peek=true.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -31,9 +49,12 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, err
 	}
+	// view=summary returns only the cheap read-model fields and skips
+	// enrichSessionResponse for every session; it takes precedence over peek.
+	summary := input.View == sessionViewSummary
 	// Cache only the first page (no cursor) of non-peek session lists; peek
 	// output is too volatile and cursor-mode pages are a low-value walk.
-	wantPeek := input.Peek
+	wantPeek := input.Peek && !summary
 	index := s.latestIndex()
 	cacheKey := ""
 	if !wantPeek && input.Cursor == "" {
@@ -53,13 +74,37 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	sessions, responseByID := filterEnrichReadModel(mgr, listings, input.State, input.Template)
+	// In summary mode the listing itself must not observe live runtime state:
+	// filterEnrichReadModel applies the runtime overlay (EnrichInfo), which
+	// probes the provider (IsRunning/IsAttached/GetLastActivity) for active
+	// sessions — a tmux fork on the tmux provider, violating the view=summary
+	// "no live probe" contract. filterReadModelSummary keeps the persisted
+	// projection with no overlay.
+	var sessions []session.Info
+	var responseByID map[string]session.PersistedResponse
+	if summary {
+		sessions, responseByID = filterReadModelSummary(mgr, listings, input.State, input.Template)
+	} else {
+		sessions, responseByID = filterEnrichReadModel(mgr, listings, input.State, input.Template)
+	}
 
 	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+	// In summary mode the reason must come from the pure, no-liveness
+	// projection: the reset-pending branch probes provider IsRunning (a live
+	// tmux fork for the tmux provider), which violates the view=summary
+	// "no live probe" contract. A nil provider makes
+	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
+	// metadata-only reason.
+	reasonProvider := s.state.SessionProvider()
+	if summary {
+		reasonProvider = nil
+	}
 	items := make([]sessionResponse, len(sessions))
 	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, reasonProvider, hasDeferredQueue)
+		if !summary {
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
+		}
 	}
 
 	// Pagination support. The session default page is the server cap, not the
