@@ -1456,8 +1456,10 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
 
 // runOrderTrackingRetentionWatchdog deletes closed order-tracking beads that
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
-// most once every orderTrackingRetentionWatchdogInterval. It deletes at most
-// orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
+// most once every orderTrackingRetentionWatchdogInterval. It deletes every
+// eligible bead per invocation (delete-to-target): event orders mint no
+// tracking beads, so the closed set is bounded by cooldown/cron cadence and a
+// fixed per-invocation cap could only fall behind, never catch up.
 func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
@@ -1475,8 +1477,8 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	}
 
 	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
-	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
-		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
+	retention, sweepErr := sweepClosedOrderTrackingRetentionAcrossStores(stores, now, policy, nil)
+	deleted := retention.deleted
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
 	}

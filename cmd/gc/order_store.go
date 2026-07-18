@@ -25,7 +25,7 @@ type (
 
 // orderFrontDoorsForStores wraps a federation of raw stores (the dispatcher's
 // city + rig scopes) as order front doors for the mixed orders+graph reads
-// (LastRunAcross / CursorAcross). Each store is used as BOTH the orders leg and
+// (LastRunAcross). Each store is used as BOTH the orders leg and
 // the graph leg: on a single-store city the order-tracking beads and the
 // wisp/molecule roots are colocated, so the two legs wrap one store and the
 // union deduplicates to a single read — byte-identical to the pre-split behavior.

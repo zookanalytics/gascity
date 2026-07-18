@@ -97,8 +97,8 @@ func classifyTraceScope(callers []string) string {
 			strings.Contains(fn, "orders.(*Store).LastRun"),
 			strings.Contains(fn, "orders.(*Store).Cursor"),
 			strings.Contains(fn, "orders.LastRunAcross"),
-			strings.Contains(fn, "orders.CursorAcross"),
 			strings.Contains(fn, "bdCursorAcrossStores"),
+			strings.Contains(fn, "orders.ReadEventCursor"),
 			strings.Contains(fn, "doOrderCheck"):
 			return "order-dispatch"
 

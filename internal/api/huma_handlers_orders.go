@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -82,6 +83,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 	}
 
 	now := time.Now()
+	runtimeDir := citylayout.RuntimeDataDir(s.state.CityPath())
 	checks := make([]orderCheckResponse, 0, len(aa))
 	for _, a := range aa {
 		storeInfos, err := orderStoreInfosForState(s.state, a)
@@ -89,7 +91,7 @@ func (s *Server) humaHandleOrderCheck(_ context.Context, input *OrderCheckInput)
 			storeInfos = nil
 		}
 		history, _ := orderHistoryBeadsAcrossStoreInfosForCheck(storeInfos, a.ScopedName(), 1, time.Time{}, input.Fresh)
-		result := checkOrderTriggerForAPI(a, now, history, storeInfos, ep, input.Fresh)
+		result := checkOrderTriggerForAPI(a, now, runtimeDir, history, ep)
 		cr := orderCheckResponse{
 			Name:       a.Name,
 			ScopedName: a.ScopedName(),
@@ -132,7 +134,7 @@ func hasConditionOrder(aa []orders.Order) bool {
 	return false
 }
 
-func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHistoryStoreBead, infos []workflowStoreInfo, ep events.Provider, fresh bool) orders.TriggerResult {
+func checkOrderTriggerForAPI(a orders.Order, now time.Time, runtimeDir string, history []orderHistoryStoreBead, ep events.Provider) orders.TriggerResult {
 	lastRunFn := func(string) (time.Time, error) {
 		if len(history) == 0 {
 			return time.Time{}, nil
@@ -141,18 +143,29 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	}
 	var cursorFn orders.CursorFunc
 	if a.Trigger == "event" {
-		if fresh {
-			cursorFn = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))
-		} else {
-			labelSets := make([][]string, 0, len(history))
-			for _, row := range history {
-				labelSets = append(labelSets, row.bead.Labels)
-			}
-			cursor := orders.MaxSeqFromLabels(labelSets)
-			cursorFn = func(string) uint64 { return cursor }
-		}
+		cursorFn = eventCursorFuncWithHistoryFallback(runtimeDir, history)
 	}
 	return orders.CheckTrigger(a, now, lastRunFn, ep, cursorFn)
+}
+
+// eventCursorFuncWithHistoryFallback reads the durable file cursor, falling back
+// to the legacy order:<scoped> + seq:<N> cursor recorded on the order's tracking
+// beads when the file has no record yet. This keeps the read-only check display
+// consistent with dispatch across the migration to the file cursor: an existing
+// city's last-processed seq lives on those beads, and reading 0 would report
+// every historical event as due until dispatch seeds the file cursor. The
+// fallback reuses the already-fetched history beads, so it adds no store reads.
+func eventCursorFuncWithHistoryFallback(runtimeDir string, history []orderHistoryStoreBead) orders.CursorFunc {
+	return func(scoped string) uint64 {
+		if seq, err := orders.ReadEventCursor(runtimeDir, scoped); err == nil && seq > 0 {
+			return seq
+		}
+		labelSets := make([][]string, 0, len(history))
+		for _, h := range history {
+			labelSets = append(labelSets, h.bead.Labels)
+		}
+		return orders.MaxSeqFromLabels(labelSets)
+	}
 }
 
 // orderCheckResponse is the response item for GET /v0/orders/check.
@@ -375,23 +388,6 @@ func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, 
 		return nil, errNoOrderStores
 	}
 	return infos, nil
-}
-
-// orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
-// order front doors for the mixed orders+graph Cursor read. Each store is used
-// as both the orders leg and the graph leg (single-store colocation dedups to one
-// read); a graph-store split would supply a distinct graph leg here.
-func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
-	out := make([]*orders.Store, 0, len(infos))
-	for _, info := range infos {
-		if info.store != nil {
-			out = append(out, orders.NewStoreWithGraph(
-				beads.OrdersStore{Store: info.store},
-				beads.GraphStore{Store: info.store},
-			))
-		}
-	}
-	return out
 }
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {

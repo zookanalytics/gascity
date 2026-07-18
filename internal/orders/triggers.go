@@ -375,8 +375,10 @@ func payloadHasLabel(payload json.RawMessage, label string) bool {
 	return false
 }
 
-// MaxSeqFromLabels extracts the highest seq:<N> value from bead labels.
-// Used by CLI callers to compute the event cursor from BdStore results.
+// MaxSeqFromLabels extracts the highest seq:<N> value from bead labels. It backs
+// the migration fallback that seeds the durable event cursor from legacy
+// order:<scoped> + seq:<N> tracking beads: cities upgraded to the file cursor
+// still carry their last-processed event seq in those labels.
 func MaxSeqFromLabels(labelSets [][]string) uint64 {
 	var maxSeq uint64
 	for _, labels := range labelSets {

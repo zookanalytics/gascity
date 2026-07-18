@@ -30,22 +30,3 @@ func LastRunAcross(stores []*Store) LastRunFunc {
 		return latest, nil
 	}
 }
-
-// CursorAcross returns a CursorFunc merging the event seq cursor for a named
-// order across a federation of order front doors. Each *Store performs its own
-// MIXED orders+graph Cursor read; the max seq across scopes wins. nil entries
-// are skipped.
-func CursorAcross(stores []*Store) CursorFunc {
-	return func(name string) uint64 {
-		var latest uint64
-		for _, s := range stores {
-			if s == nil {
-				continue
-			}
-			if seq := uint64(s.Cursor(name)); seq > latest {
-				latest = seq
-			}
-		}
-		return latest
-	}
-}

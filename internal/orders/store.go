@@ -24,10 +24,11 @@ import (
 // The Store methods (CreateRun, CreateRunClosed, SetOutcome, SetCursor,
 // CloseRun, RecentRuns) emit byte-identical bead writes to the raw ops they
 // replace and are wired into order_dispatch.go / cmd_order.go. The cooldown
-// clock (last-run) and event-cursor READS the dispatch gate uses go through the
-// Store's mixed orders+graph reads (LastRun / Cursor / HasOpenWork, and the
-// LastRunAcross / CursorAcross federation helpers), which the in-memory tracking
-// index batches per store — see cmd/gc/order_dispatch.go and store_reads.go.
+// clock (last-run) READS the dispatch gate uses go through the Store's mixed
+// orders+graph reads (LastRun / Cursor / HasOpenWork, and the LastRunAcross
+// federation helper), which the in-memory tracking index batches per store —
+// see cmd/gc/order_dispatch.go and store_reads.go. Event orders read their
+// cursor from the durable file cursor (event_cursor.go), not from beads.
 
 // Order-class label constants. These MUST stay in sync with the canonical
 // declarations in cmd/gc/order_dispatch.go and the private mirrors in
