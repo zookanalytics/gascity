@@ -53,6 +53,22 @@ func filterEnrichReadModel(mgr *session.Manager, listings []session.ListedSessio
 	return mgr.ListFromInfos(infos, stateFilter, templateFilter), responseByID
 }
 
+// filterReadModelSummary is the no-overlay twin of filterEnrichReadModel: the
+// same state/template filter and the same pre-joined persisted-response lookup,
+// but the survivors keep their persisted projection (Manager.ListSummaryFromInfos)
+// with no live runtime overlay — no provider IsRunning/IsAttached/GetLastActivity
+// probes. It backs the view=summary session list (see sessionViewSummary), whose
+// contract is to fan out no live probes at all.
+func filterReadModelSummary(mgr *session.Manager, listings []session.ListedSession, stateFilter, templateFilter string) ([]session.Info, map[string]session.PersistedResponse) {
+	infos := make([]session.Info, len(listings))
+	responseByID := make(map[string]session.PersistedResponse, len(listings))
+	for i, listing := range listings {
+		infos[i] = listing.Info
+		responseByID[listing.Info.ID] = listing.Response
+	}
+	return mgr.ListSummaryFromInfos(infos, stateFilter, templateFilter), responseByID
+}
+
 // sessionReadModelInfos is the Info-only variant of sessionReadModelListings for
 // read-model consumers that do not need the persisted-response projection (the
 // status snapshot and the city-pending aggregate filter and probe by Info alone).
