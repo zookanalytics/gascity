@@ -1063,6 +1063,86 @@ func TestHandleSessionListSummaryViewSkipsLiveProvider(t *testing.T) {
 	}
 }
 
+// TestHandleSessionListFullViewWarmCacheServesForkFreeAcrossRequests guards
+// gc-tnvok: view=full must serve the per-session live-observation fields
+// (running, active_bead, attached, last_active) from a stale-while-revalidate
+// warm cache so the request path forks no tmux. The first request primes a cold
+// cache synchronously — reaching the provider's live probes once — and every
+// subsequent request within the cache TTL serves the snapshot, reaching the
+// provider zero times while still carrying the live fields. This is the
+// warm-cache half of the PR#43/#45 cheap-default work: view=full was previously
+// live-per-request, so a long-poll status bar re-forked ~2N tmux on every poll.
+//
+// The legacy (non-city-scoped) handler is used deliberately: it has no
+// index-keyed response cache, so repeated identical requests genuinely re-run
+// the listing build each time. A growing provider-call count therefore proves
+// the listing itself forked, not that a response-cache hit masked the work.
+func TestHandleSessionListFullViewWarmCacheServesForkFreeAcrossRequests(t *testing.T) {
+	fs := newSessionFakeState(t)
+	spy := &summarySpyProvider{Fake: fs.sp}
+	state := &stateWithSessionProvider{fakeState: fs, provider: spy}
+	srv := New(state)
+	legacy := srv.legacySessionHandler()
+
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Warm Full")
+	if !fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("session %q should be running in fake provider", info.SessionName)
+	}
+	// attached and last_active are the design-gap fields: the warm set must carry
+	// them (crew.ts reads attached + last_active; status.ts reads last_active),
+	// not just running + active_bead. Seed non-zero values so the carry-through
+	// assertions below are not vacuous.
+	fs.sp.SetAttached(info.SessionName, true)
+	activeAt := time.Now().UTC().Add(-90 * time.Second).Truncate(time.Second)
+	fs.sp.SetActivity(info.SessionName, activeAt)
+
+	// First view=full primes a cold cache: it refreshes synchronously and so
+	// reaches the live provider once. It must also carry the live fields, or the
+	// fork-free assertion below would be vacuous (zero calls AND zero data).
+	spy.reset()
+	cold := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=full")
+	if len(cold) != 1 {
+		t.Fatalf("cold full: got %d items, want 1", len(cold))
+	}
+	if !cold[0].Running {
+		t.Fatalf("cold full: running=false, want true (warm refresh must carry running)")
+	}
+	if !cold[0].Attached {
+		t.Fatalf("cold full: attached=false, want true (warm refresh must carry attached)")
+	}
+	if cold[0].LastActive == "" {
+		t.Fatalf("cold full: last_active empty, want %s (warm refresh must carry last_active)", activeAt.Format(time.RFC3339))
+	}
+	if len(spy.recorded()) == 0 {
+		t.Fatal("cold full recorded no provider calls; warm refresh not reaching the live provider")
+	}
+
+	// Subsequent view=full requests within the cache TTL must serve the warm
+	// snapshot: zero provider calls, and the full live-field set (running,
+	// attached, last_active) still carried unchanged. A growing call count would
+	// mean view=full is still live-per-request; a dropped field would mean the
+	// warm set is incomplete.
+	for i := 0; i < 3; i++ {
+		spy.reset()
+		warm := listSessionsForViewTest(t, legacy, "/v0/sessions?state=active&view=full")
+		if len(warm) != 1 {
+			t.Fatalf("warm full %d: got %d items, want 1", i, len(warm))
+		}
+		if !warm[0].Running {
+			t.Errorf("warm full %d: running=false, want true (warm cache must carry running)", i)
+		}
+		if !warm[0].Attached {
+			t.Errorf("warm full %d: attached=false, want true (warm cache must carry attached)", i)
+		}
+		if warm[0].LastActive != cold[0].LastActive {
+			t.Errorf("warm full %d: last_active=%q, want %q (warm cache must carry last_active)", i, warm[0].LastActive, cold[0].LastActive)
+		}
+		if calls := spy.recorded(); len(calls) != 0 {
+			t.Errorf("warm full %d: reached live provider %v, want none (warm cache must serve the request path fork-free)", i, calls)
+		}
+	}
+}
+
 func TestHandleSessionGet(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
@@ -1250,7 +1330,7 @@ func TestHandleSessionListOmitsTranscriptTierWhileDetailKeepsIt(t *testing.T) {
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
 	resume := session.ProviderResume{ResumeFlag: "--resume", ResumeStyle: "flag", SessionIDFlag: "--session-id"}
 	workDir := t.TempDir()
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Claude Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Claude Chat", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
