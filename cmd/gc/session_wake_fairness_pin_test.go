@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
@@ -144,7 +145,7 @@ func TestWakeFairnessInfoTwinCharacterization(t *testing.T) {
 	}))
 
 	cands := []startCandidate{recentlyWoken, newSlept, oldSlept}
-	sortCandidatesByWakeFairness(cands)
+	sortCandidatesByWakeFairness(cands, &config.City{})
 	gotOrder := []string{cands[0].info.ID, cands[1].info.ID, cands[2].info.ID}
 	wantOrder := []string{"ga-old", "ga-new", "ga-recent"}
 	for i := range wantOrder {
