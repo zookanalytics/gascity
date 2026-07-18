@@ -244,13 +244,72 @@ func writeResolveError(w http.ResponseWriter, err error) {
 	}
 }
 
+// sessionListItems builds the response rows for a session listing, shared by
+// the legacy (handleSessionList) and Huma (humaHandleSessionList) handlers. It
+// returns the filtered sessions alongside their response rows (items[i]
+// mirrors sessions[i]) so the Huma keyset pager can mint its boundary from the
+// underlying session times rather than the responses' RFC3339-formatted
+// strings.
+//
+// Both the summary default and view=full build their rows from the metadata-only
+// read-model projection (filterReadModelSummary), so the request path forks no
+// tmux. view=full then overlays the per-session live-observation fields
+// (running, active_bead, attached, last_active, state) from the
+// stale-while-revalidate warm cache (sessionLiveFieldsSnapshot). The one
+// exception is view=full&peek=true: a peek is an inherently live terminal
+// capture, so it keeps the per-request live enrichment (filterEnrichReadModel +
+// enrichSessionResponse) the caller explicitly opted into.
+//
+// The reason field is liveness-gated only for reset-pending sessions
+// (lifecycleResetPendingReasonVisible short-circuits before probing for every
+// other session), so view=full passes the live provider — keeping reset-pending
+// visible while forking tmux only for the rare reset case — and the summary
+// default passes nil so its reason never touches the runtime.
+func (s *Server) sessionListItems(store beads.Store, listings []session.ListedSession, cfg *config.City, full, wantPeek bool, stateFilter, templateFilter string) ([]session.Info, []sessionResponse) {
+	mgr := s.sessionManager(store)
+	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
+
+	livePeek := full && wantPeek
+
+	var sessions []session.Info
+	var responseByID map[string]session.PersistedResponse
+	if livePeek {
+		sessions, responseByID = filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
+	} else {
+		sessions, responseByID = filterReadModelSummary(mgr, listings, stateFilter, templateFilter)
+	}
+
+	reasonProvider := s.state.SessionProvider()
+	if !full {
+		reasonProvider = nil
+	}
+
+	var warm map[string]sessionLiveFields
+	if full && !livePeek {
+		warm = s.sessionLiveFieldsSnapshot()
+	}
+
+	items := make([]sessionResponse, len(sessions))
+	for i, sess := range sessions {
+		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, reasonProvider, hasDeferredQueue)
+		switch {
+		case livePeek:
+			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), true, false, false, 0)
+		case full:
+			if lf, ok := warm[sess.ID]; ok {
+				applySessionLiveFields(&items[i], lf)
+			}
+		}
+	}
+	return sessions, items
+}
+
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -267,38 +326,13 @@ func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	// In summary mode the listing itself must not observe live runtime state:
-	// filterEnrichReadModel applies the runtime overlay (EnrichInfo), which
-	// probes the provider (IsRunning/IsAttached/GetLastActivity) for active
-	// sessions — a tmux fork on the tmux provider, violating the view=summary
-	// "no live probe" contract. filterReadModelSummary keeps the persisted
-	// projection with no overlay.
-	var sessions []session.Info
-	var responseByID map[string]session.PersistedResponse
-	if summary {
-		sessions, responseByID = filterReadModelSummary(mgr, listings, stateFilter, templateFilter)
-	} else {
-		sessions, responseByID = filterEnrichReadModel(mgr, listings, stateFilter, templateFilter)
-	}
-
-	items := make([]sessionResponse, len(sessions))
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	// In summary mode the reason must come from the pure, no-liveness
-	// projection: the reset-pending branch probes provider IsRunning (a live
-	// tmux fork for the tmux provider), which violates the view=summary
-	// "no live probe" contract. A nil provider makes
-	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
-	// metadata-only reason.
-	reasonProvider := s.state.SessionProvider()
-	if summary {
-		reasonProvider = nil
-	}
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, reasonProvider, hasDeferredQueue)
-		if !summary {
-			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
-		}
-	}
+	// The default (summary) listing must not observe live runtime state. The
+	// summary default and the (non-peek) view=full path both build from the
+	// metadata-only read-model projection (no live IsRunning/IsAttached/
+	// GetLastActivity probe); view=full overlays the live fields from the warm
+	// cache so even the enriched path forks no tmux on the request. peek=true is
+	// the one live exception. See sessionListItems / session_live_cache.go.
+	_, items := s.sessionListItems(store.Store, listings, cfg, !summary, wantPeek, stateFilter, templateFilter)
 
 	pp := parsePagination(r, maxPaginationLimit)
 	if !pp.IsPaging {
