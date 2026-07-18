@@ -33,11 +33,14 @@ import (
 //     fields stay at their zero values: running=false, active_bead="", model="",
 //     context_pct=null, last_output="", attached=false, last_active="". The
 //     summary default takes precedence over peek.
-//   - view=full runs enrichSessionResponse per session: running is a live
-//     State() probe, active_bead is a per-rig bead lookup, and attached/
-//     last_active come from live provider observation. last_output is added only
-//     when peek=true. The transcript tier (model, context_pct, context_window,
-//     input_tokens, activity) is NOT computed on the list — it is detail-only.
+//   - view=full additionally carries the live-observation fields (running,
+//     active_bead, attached, last_active, and the live active→asleep state
+//     downgrade), overlaid from the stale-while-revalidate warm cache
+//     (session_live_cache.go) so the request path forks no tmux. last_output
+//     is added only when peek=true — the one per-request live enrichment left,
+//     since a peek is an inherently live terminal capture. The transcript tier
+//     (model, context_pct, context_window, input_tokens, activity) is NOT
+//     computed on the list — it is detail-only.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -69,45 +72,19 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 			}, nil
 		}
 	}
-	mgr := s.sessionManager(store.Store)
 	cfg := s.state.Config()
 
 	listings, partialErrors, err := sessionReadModelListings(session.NewStore(store))
 	if err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	// In summary mode the listing itself must not observe live runtime state:
-	// filterEnrichReadModel applies the runtime overlay (EnrichInfo), which
-	// probes the provider (IsRunning/IsAttached/GetLastActivity) for active
-	// sessions — a tmux fork on the tmux provider, violating the view=summary
-	// "no live probe" contract. filterReadModelSummary keeps the persisted
-	// projection with no overlay.
-	var sessions []session.Info
-	var responseByID map[string]session.PersistedResponse
-	if summary {
-		sessions, responseByID = filterReadModelSummary(mgr, listings, input.State, input.Template)
-	} else {
-		sessions, responseByID = filterEnrichReadModel(mgr, listings, input.State, input.Template)
-	}
-
-	hasDeferredQueue := strings.TrimSpace(s.state.CityPath()) != ""
-	// In summary mode the reason must come from the pure, no-liveness
-	// projection: the reset-pending branch probes provider IsRunning (a live
-	// tmux fork for the tmux provider), which violates the view=summary
-	// "no live probe" contract. A nil provider makes
-	// LifecycleDisplayReasonWithLiveness skip that probe and fall back to the
-	// metadata-only reason.
-	reasonProvider := s.state.SessionProvider()
-	if summary {
-		reasonProvider = nil
-	}
-	items := make([]sessionResponse, len(sessions))
-	for i, sess := range sessions {
-		items[i] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, reasonProvider, hasDeferredQueue)
-		if !summary {
-			s.enrichSessionResponse(&items[i], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0)
-		}
-	}
+	// The default (summary) listing must not observe live runtime state. The
+	// summary default and the (non-peek) view=full path both build from the
+	// metadata-only read-model projection (no live IsRunning/IsAttached/
+	// GetLastActivity probe); view=full overlays the live fields from the warm
+	// cache so even the enriched path forks no tmux on the request. peek=true is
+	// the one live exception. See sessionListItems / session_live_cache.go.
+	sessions, items := s.sessionListItems(store.Store, listings, cfg, !summary, wantPeek, input.State, input.Template)
 
 	// Pagination support. The session default page is the server cap, not the
 	// 50-row default other lists use — preserved from the offset-cursor era.
