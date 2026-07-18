@@ -4874,6 +4874,64 @@ provider = "file"
 	}
 }
 
+func TestSlingSourceWorkflowStoreCandidatesUseAuthoritativeProviders(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "local")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gc"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensurePersistedScopeLocalFileStore(rigPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "local", Path: rigPath}}}
+	providers := make(map[string]string)
+	stores, _, err := openSourceWorkflowStoresWith(cfg, cityPath, "", func(dir string) (beads.Store, error) {
+		providers[dir] = authoritativeBeadsProviderForScope(dir, cityPath)
+		return beads.NewMemStore(), nil
+	})
+	if err != nil {
+		t.Fatalf("openSourceWorkflowStoresWith: %v", err)
+	}
+	if len(stores) != 2 {
+		t.Fatalf("stores = %d, want city and rig candidates", len(stores))
+	}
+	if got := providers[cityPath]; got != "bd" {
+		t.Fatalf("city candidate provider = %q, want bd despite ambient GC_BEADS=file", got)
+	}
+	if got := providers[rigPath]; got != "file" {
+		t.Fatalf("rig candidate provider = %q, want file", got)
+	}
+
+	t.Setenv("GC_BEADS", "")
+	remoteCity := t.TempDir()
+	if err := os.WriteFile(filepath.Join(remoteCity, "city.toml"), []byte(`[workspace]
+name = "remote"
+
+[beads]
+provider = "exec:/tmp/remote-beads"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	remoteProviders := make(map[string]string)
+	_, _, err = openSourceWorkflowStoresWith(&config.City{}, remoteCity, "", func(dir string) (beads.Store, error) {
+		remoteProviders[dir] = authoritativeBeadsProviderForScope(dir, remoteCity)
+		return beads.NewMemStore(), nil
+	})
+	if err != nil {
+		t.Fatalf("openSourceWorkflowStoresWith(remote): %v", err)
+	}
+	if got := remoteProviders[remoteCity]; got != "exec:/tmp/remote-beads" {
+		t.Fatalf("remote candidate provider = %q, want custom exec provider unchanged", got)
+	}
+}
+
 func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 	cityPath := filepath.Join(t.TempDir(), "city")
 	deps := slingDeps{
