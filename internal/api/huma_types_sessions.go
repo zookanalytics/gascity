@@ -18,6 +18,11 @@ type SessionListInput struct {
 	State    string `query:"state" required:"false" doc:"Filter by session state (e.g. active, closed)."`
 	Template string `query:"template" required:"false" doc:"Filter by session template (agent qualified name)."`
 	Peek     bool   `query:"peek" required:"false" doc:"Include last output preview."`
+	// View is intentionally not constrained to an enum: per the endpoint
+	// contract, any value other than "summary" (including empty, "full", and
+	// unrecognized values) returns the enriched response, so old and new
+	// clients are unaffected. A strict enum would 422 on unknown values.
+	View string `query:"view" required:"false" doc:"Response detail level. \"summary\" returns only the cheap read-model fields (id, alias, title, state, rig, pool, agent_kind, reason, options, metadata) built from stored metadata with no live runtime probe; it skips per-session enrichment (live running probe, active-bead lookup, model/context transcript read) and also leaves the live-observation fields running, active_bead, model, context_pct, last_output, attached, and last_active at their zero values. It takes precedence over peek. Empty or \"full\" (the default, and any unrecognized value) returns the enriched response."`
 }
 
 // CityPendingInput is the Huma input for GET /v0/city/{cityName}/pending.
