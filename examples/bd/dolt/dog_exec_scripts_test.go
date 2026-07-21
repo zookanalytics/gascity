@@ -4396,6 +4396,24 @@ func TestBackupScriptCountsFailedRemoteAutoConfiguration(t *testing.T) {
 	}
 }
 
+// backupFreshnessStaleEnv is the staleness threshold for the doctor
+// backup-freshness tests that assert a FRESH fixture is NOT reported stale.
+//
+// mol-dog-doctor.sh compares `date +%s` at script time against the artifact's
+// mtime, so the threshold must exceed the wall-clock delay between the fixture
+// being written and the script sampling the clock. The previous value of 1s
+// left no margin: under parallel suite load that delay (script startup, dolt
+// connect, SHOW DATABASES — one query alone was observed at 673ms) routinely
+// reached 2s+, and a just-written backup was reported stale as "0h old",
+// failing the very assertion that it must not be. The tests passed in
+// isolation and failed only under load, which made it read as a mystery flake.
+//
+// 1h keeps both sides unambiguous: a fresh fixture stays fresh for an hour of
+// scheduling delay, while the deliberately-aged fixtures (2h) stay stale. The
+// "missing" assertions are unaffected — those come from a separate branch that
+// fires when no artifact exists at all, independent of this threshold.
+const backupFreshnessStaleEnv = "GC_DOCTOR_BACKUP_STALE_S=3600"
+
 func TestDoctorScriptChecksBackupArtifactFreshnessPerDatabase(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -4447,7 +4465,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, backupFreshnessStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
@@ -4659,7 +4677,7 @@ esac
 exit 0
 `)
 
-	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, backupFreshnessStaleEnv)
 	if !strings.Contains(out, "server: ok") {
 		t.Fatalf("unexpected doctor output:\n%s", out)
 	}
