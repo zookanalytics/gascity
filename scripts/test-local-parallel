@@ -36,6 +36,15 @@ unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"
 
+# Every job below writes its own multi-GiB Go $WORK tree here, and
+# test-local-job-count sized the fan-out against this filesystem's free space.
+# Resolve it once and hand the result to each job, so the shards cannot end up
+# building on a volume the detector never measured. The default must match the
+# detector's and the Makefile's TEST_ENV (/var/tmp, not a tmpfs-backed /tmp —
+# gc-v2z1p): only test-fast-parallel runs under that wrapper, so the other
+# parallel targets reach this script with TMPDIR unset (gc-k1b5h).
+scratch_dir="${TMPDIR:-/var/tmp}"
+
 if ! [[ "$local_jobs" =~ ^[0-9]+$ && "$local_jobs" -gt 0 ]]; then
   echo "LOCAL_TEST_JOBS must be a positive integer" >&2
   exit 1
@@ -145,7 +154,7 @@ if [[ -n "${LOCAL_TEST_LOG_DIR:-}" ]]; then
   log_dir="$LOCAL_TEST_LOG_DIR"
   cleanup_log_dir=0
 else
-  log_dir="$(mktemp -d "${TMPDIR:-/tmp}/gc-local-tests.XXXXXX")"
+  log_dir="$(mktemp -d "${scratch_dir}/gc-local-tests.XXXXXX")"
 fi
 export LOCAL_TEST_LOG_DIR="$log_dir"
 export TEST_LOCAL_GOPATH="$gopath_val"
@@ -153,6 +162,7 @@ export TEST_LOCAL_GOCACHE="$gocache_val"
 export TEST_LOCAL_GOMODCACHE="$gomodcache_val"
 export TEST_LOCAL_GOTMPDIR="$gotmpdir_val"
 export TEST_LOCAL_GOROOT="${GOROOT:-$goroot_val}"
+export TEST_LOCAL_TMPDIR="$scratch_dir"
 
 # Lower each shard's CPU and I/O priority (best-effort) so the parallel fan-out
 # yields to interactive work and does not livelock constrained hosts during the
@@ -187,7 +197,7 @@ printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TEST_LOCAL_TMPDIR}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \

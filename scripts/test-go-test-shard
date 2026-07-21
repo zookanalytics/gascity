@@ -52,6 +52,11 @@ while IFS='=' read -r name _; do
   esac
 done < <(env)
 
+# TMPDIR defaults to persistent disk, matching the Makefile's TEST_ENV and the
+# free-scratch budget in scripts/test-local-job-count. A shard invoked directly
+# (TESTING.md documents that entry point) would otherwise link its multi-GiB
+# test binary on a tmpfs-backed /tmp that the fan-out detector never measured
+# (gc-v2z1p, gc-k1b5h).
 run_in_test_env() {
   local base_env=(
     PATH="${PATH}" \
@@ -60,7 +65,7 @@ run_in_test_env() {
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \

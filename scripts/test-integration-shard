@@ -33,6 +33,11 @@ configure_cgo_platform_paths
 export CGO_CPPFLAGS="${cgo_cppflags}"
 export CGO_LDFLAGS="${cgo_ldflags}"
 
+# TMPDIR defaults to persistent disk, matching the Makefile's TEST_ENV and the
+# free-scratch budget in scripts/test-local-job-count. A bucket invoked directly
+# (TESTING.md documents that entry point) would otherwise link its multi-GiB
+# test binary on a tmpfs-backed /tmp that the fan-out detector never measured
+# (gc-v2z1p, gc-k1b5h).
 run_go_test() {
   env -i \
     PATH="${PATH}" \
@@ -41,7 +46,7 @@ run_go_test() {
     LOGNAME="${LOGNAME:-}" \
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
-    TMPDIR="${TMPDIR:-/tmp}" \
+    TMPDIR="${TMPDIR:-/var/tmp}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \

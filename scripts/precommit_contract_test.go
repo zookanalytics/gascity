@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -321,6 +322,127 @@ func TestNativeDoltliteBeadsTargetRunsTaggedSuite(t *testing.T) {
 		}
 	}
 	assertNativeDoltliteBeadsSelectionMatchesTaggedOwners(t, repoRoot)
+}
+
+// canonicalScratchDefault is the build-scratch filesystem every local test
+// entry point falls back to when TMPDIR is unset. /tmp is conventionally a
+// size-capped tmpfs; /var/tmp is persistent disk with room for the multi-GiB
+// Go $WORK trees a sharded run creates (gc-v2z1p).
+const canonicalScratchDefault = "/var/tmp"
+
+// scratchDefaultPattern captures X out of a ${TMPDIR:-X} fallback, including
+// the $${TMPDIR:-X} spelling make uses to escape its own expansion.
+var scratchDefaultPattern = regexp.MustCompile(`\$\{TMPDIR:-([^}]*)\}`)
+
+// scratchScopedFiles are the entry points whose TMPDIR carries `go test` build
+// scratch: the detector that sizes the fan-out against free space, the runner
+// that fans jobs out, and the two shard wrappers TESTING.md documents as direct
+// entry points. Deliberately excludes scripts whose temp files are small and
+// unrelated to build scratch (go-test-observable's JSONL log,
+// precommit-format-staged-go's single formatted file, test-slice-enroll-test's
+// workdir) — those are not part of the disk budget and need not move volumes.
+var scratchScopedFiles = []string{
+	"Makefile",
+	filepath.Join("scripts", "test-local-job-count"),
+	filepath.Join("scripts", "test-local-parallel"),
+	filepath.Join("scripts", "test-go-test-shard"),
+	filepath.Join("scripts", "test-integration-shard"),
+}
+
+// TestLocalTestScratchDefaultsAgree pins the detector and the runners to one
+// scratch filesystem. scripts/test-local-job-count budgets 4 GiB of free space
+// per concurrent shard above an 8 GiB reserve, so sizing the fan-out against
+// one volume while the shards write their $WORK trees to another defeats the
+// ENOSPC guard completely: the parallel targets other than test-fast-parallel
+// invoke the runner without the Makefile's TEST_ENV wrapper, and the shard
+// wrappers are documented for direct invocation, so each has to repeat the
+// default rather than inherit it (gc-k1b5h).
+func TestLocalTestScratchDefaultsAgree(t *testing.T) {
+	repoRoot := repoRoot(t)
+
+	for _, rel := range scratchScopedFiles {
+		content, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		matches := scratchDefaultPattern.FindAllStringSubmatch(string(content), -1)
+		if len(matches) == 0 {
+			t.Errorf("%s has no ${TMPDIR:-...} fallback; it must pin the scratch default to %s",
+				rel, canonicalScratchDefault)
+			continue
+		}
+		for _, match := range matches {
+			if match[1] != canonicalScratchDefault {
+				t.Errorf("%s falls back to TMPDIR=%s, want %s: the fan-out is sized against %s, "+
+					"so shards writing elsewhere can still exhaust it",
+					rel, match[1], canonicalScratchDefault, canonicalScratchDefault)
+			}
+		}
+	}
+
+	// The runner resolves the scratch dir once and hands that exact value to
+	// every child, so the per-job env cannot drift away from the volume the
+	// detector measured.
+	runner, err := os.ReadFile(filepath.Join(repoRoot, "scripts", "test-local-parallel"))
+	if err != nil {
+		t.Fatalf("read test-local-parallel: %v", err)
+	}
+	if !strings.Contains(string(runner), `TMPDIR="${TEST_LOCAL_TMPDIR}"`) {
+		t.Error("test-local-parallel must pass the resolved TEST_LOCAL_TMPDIR to each job, " +
+			"not re-derive a default in the child shell")
+	}
+}
+
+// TestParallelTargetsSizeFanoutAgainstMeasuredScratch covers every make target
+// that fans jobs out, not just test-fast-parallel. The other three dispatch the
+// runner without the TEST_ENV wrapper, so they are the paths where a detector
+// and runner that disagree about the scratch volume would go unnoticed.
+func TestParallelTargetsSizeFanoutAgainstMeasuredScratch(t *testing.T) {
+	repoRoot := repoRoot(t)
+
+	// 20 GiB free, minus the 8 GiB reserve, at 4 GiB per job = 3 jobs — well
+	// under the 16 CPUs and 512 GiB of memory, so only the disk budget can
+	// produce this number and every target must show it.
+	const (
+		cpus      = "16"
+		memoryKiB = "536870912"
+		diskKiB   = "20971520"
+		wantJobs  = "3"
+	)
+
+	targets := []struct {
+		target string
+		mode   string
+	}{
+		{target: "test-fast-parallel", mode: "fast"},
+		{target: "test-cmd-gc-process-parallel", mode: "cmd-gc-process"},
+		{target: "test-integration-shards-parallel", mode: "integration"},
+		{target: "test-local-full-parallel", mode: "full"},
+	}
+
+	for _, tt := range targets {
+		t.Run(tt.target, func(t *testing.T) {
+			cmd := exec.Command("make", "-n", tt.target)
+			cmd.Dir = repoRoot
+			cmd.Env = append(os.Environ(),
+				"GC_TEST_LOCAL_CPUS="+cpus,
+				"GC_TEST_LOCAL_MEMORY_KIB="+memoryKiB,
+				"GC_TEST_LOCAL_DISK_KIB="+diskKiB,
+			)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("make -n %s failed: %v\n%s", tt.target, err, out)
+			}
+			command := string(out)
+			if !strings.Contains(command, "./scripts/test-local-parallel "+tt.mode) {
+				t.Fatalf("%s should dispatch the %s runner mode:\n%s", tt.target, tt.mode, command)
+			}
+			if !strings.Contains(command, "LOCAL_TEST_JOBS="+wantJobs+" ") {
+				t.Fatalf("%s should clamp the fan-out to %s jobs on a scratch-constrained host:\n%s",
+					tt.target, wantJobs, command)
+			}
+		})
+	}
 }
 
 func TestLocalParallelAllowlistIncludesObservableEnv(t *testing.T) {
