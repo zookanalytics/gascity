@@ -16,6 +16,34 @@ import (
 // inject it so the host's real free space cannot perturb their expectations.
 const unconstrainedDiskKiB = "1073741824"
 
+// localTestJobsOverride is the explicit fan-out override the Makefile honors
+// ahead of the detector (`LOCAL_TEST_JOBS ?=`); localTestDetectorEnvPrefix is
+// the namespace of stubs scripts/test-local-job-count reads to fake a host's
+// CPUs, memory and free scratch.
+const (
+	localTestJobsOverride      = "LOCAL_TEST_JOBS="
+	localTestDetectorEnvPrefix = "GC_TEST_LOCAL_"
+)
+
+// sanitizedLocalTestEnv returns the inherited environment with every variable
+// that decides the local fan-out removed. Every test asserting a computed job
+// count must build its child environment from this rather than os.Environ():
+// a LOCAL_TEST_JOBS exported by the caller — a developer's shell, an outer
+// sharded runner — beats the Makefile's `?=` default, so an inherited value
+// would answer the assertion instead of the detector under test.
+func sanitizedLocalTestEnv() []string {
+	inherited := os.Environ()
+	env := make([]string, 0, len(inherited))
+	for _, entry := range inherited {
+		if strings.HasPrefix(entry, localTestJobsOverride) ||
+			strings.HasPrefix(entry, localTestDetectorEnvPrefix) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
 func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binDir := t.TempDir()
@@ -66,19 +94,7 @@ printf '\n'
 
 func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *testing.T) {
 	repoRoot := repoRoot(t)
-	baseEnv := make([]string, 0, len(os.Environ()))
-	for _, entry := range os.Environ() {
-		if strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_CPUS=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMORY_KIB=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_DISK_KIB=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMINFO=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_PROC_CGROUP=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") {
-			continue
-		}
-		baseEnv = append(baseEnv, entry)
-	}
+	baseEnv := sanitizedLocalTestEnv()
 	tests := []struct {
 		name      string
 		cpus      string
@@ -420,11 +436,18 @@ func TestParallelTargetsSizeFanoutAgainstMeasuredScratch(t *testing.T) {
 		{target: "test-local-full-parallel", mode: "full"},
 	}
 
+	// Plant the override the Makefile honors ahead of the detector. The
+	// assertions below only mean anything if the child environment strips it
+	// back out, and planting it here makes that failure deterministic: without
+	// it the regression is invisible on a host that happens not to export
+	// LOCAL_TEST_JOBS and fails only for whoever does.
+	t.Setenv("LOCAL_TEST_JOBS", "7")
+
 	for _, tt := range targets {
 		t.Run(tt.target, func(t *testing.T) {
 			cmd := exec.Command("make", "-n", tt.target)
 			cmd.Dir = repoRoot
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(sanitizedLocalTestEnv(),
 				"GC_TEST_LOCAL_CPUS="+cpus,
 				"GC_TEST_LOCAL_MEMORY_KIB="+memoryKiB,
 				"GC_TEST_LOCAL_DISK_KIB="+diskKiB,
