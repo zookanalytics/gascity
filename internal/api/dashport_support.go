@@ -263,7 +263,12 @@ func (s *seededState) GraphBeadStore() beads.GraphStore {
 
 func (s *seededState) Orders() []orders.Order    { return nil }
 func (s *seededState) OrdersAll() []orders.Order { return nil }
-func (s *seededState) Poke()                     {}
+
+// Poke and PokeDemand are inert: a seeded city has no controller loop to signal
+// and no cached pool-demand snapshot to invalidate. Both are best-effort by
+// contract, so the harness serves reads unchanged with no reconciler behind it.
+func (s *seededState) Poke()       {}
+func (s *seededState) PokeDemand() {}
 
 func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
