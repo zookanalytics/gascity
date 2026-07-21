@@ -83,6 +83,83 @@ func TestPrePushRunsSuiteOnGoChanges(t *testing.T) {
 	}
 }
 
+// TestPrePushRunsSuiteOnLargeGoDiff is the regression test for the gate's
+// second fail-open path, found while landing gc-uz8az.
+//
+// The hook derived go_changed with `git diff --name-only ... | grep -q .` under
+// `set -o pipefail`. `grep -q` exits on its first match and closes the pipe, so
+// `git diff` is killed by SIGPIPE (141) whenever it is still writing. Under
+// pipefail the pipeline then reports 141 — non-zero — so the `if` never fired
+// and go_changed stayed 0: the gate skipped the suite on a diff that DID touch
+// .go files. Whether git finished writing first is a race, which made the gate
+// skip nondeterministically (observed 0,1,1,0,1 across five runs on one commit
+// pair, and a real 913-file push that skipped).
+//
+// A diff whose file list exceeds the 64 KiB pipe buffer makes the SIGPIPE
+// certain rather than racy, so this fails deterministically against the piped
+// implementation. The repeat loop then guards against a partially-restored
+// pipeline that only flakes.
+func TestPrePushRunsSuiteOnLargeGoDiff(t *testing.T) {
+	repoRoot := repoRoot(t)
+	hookPath := filepath.Join(repoRoot, ".githooks", "pre-push")
+
+	workDir, callLog, baseSHA, bigSHA := setupPrePushLargeGoDiffRepo(t)
+
+	stdin := fmt.Sprintf("refs/heads/main %s refs/heads/main %s\n", bigSHA, baseSHA)
+
+	// The bug is a race; a single green run could be luck. Repeat so a
+	// reintroduced pipeline fails reliably rather than intermittently.
+	for i := range 3 {
+		if err := os.Remove(callLog); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("reset make call log: %v", err)
+		}
+		out, log, _ := runPrePush(t, hookPath, workDir, callLog, stdin)
+		if !strings.Contains(log, "test-fast-parallel") {
+			t.Fatalf("run %d: a large .go diff must run the suite, but make test-fast-parallel was never invoked (gate failed open)\n--- make call log ---\n%s\n--- hook output ---\n%s", i+1, log, out)
+		}
+	}
+}
+
+// setupPrePushLargeGoDiffRepo builds a repo whose two commits differ by enough
+// .go files that `git diff --name-only` output exceeds the 64 KiB pipe buffer.
+// Paths are deliberately long and deeply nested so the byte threshold is met
+// with few files, keeping the fixture cheap. Returns the worktree, the make
+// call-log path, and the base and large-diff commit SHAs.
+func setupPrePushLargeGoDiffRepo(t *testing.T) (workDir, callLog, baseSHA, bigSHA string) {
+	t.Helper()
+
+	workDir, callLog, _, _, _ = setupPrePushFakeRepo(t)
+
+	// ~230 bytes of path per entry × 400 entries ≈ 92 KiB of `git diff
+	// --name-only` output, comfortably past the 64 KiB pipe buffer.
+	const (
+		fileCount = 400
+		deepDir   = "internal/generated/deeply/nested/package/tree/for/the/pre_push_large_diff_fixture/segment_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/segment_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+
+	paths := make([]string, 0, fileCount)
+	for i := range fileCount {
+		paths = append(paths, filepath.Join(workDir, deepDir,
+			fmt.Sprintf("generated_source_file_with_a_long_name_%04d.go", i)))
+	}
+
+	for _, p := range paths {
+		writePlainFile(t, p, "package tree\n")
+	}
+	runGit(t, workDir, "add", "-A")
+	runGit(t, workDir, "commit", "-q", "-m", "add large generated tree")
+	baseSHA = runGit(t, workDir, "rev-parse", "HEAD")
+
+	for i, p := range paths {
+		writePlainFile(t, p, fmt.Sprintf("package tree\n\nconst Marker%04d = %d\n", i, i))
+	}
+	runGit(t, workDir, "add", "-A")
+	runGit(t, workDir, "commit", "-q", "-m", "modify large generated tree")
+	bigSHA = runGit(t, workDir, "rev-parse", "HEAD")
+
+	return workDir, callLog, baseSHA, bigSHA
+}
+
 // setupPrePushFakeRepo builds a minimal git repo with three commits — a base
 // commit, a .go-touching commit, and a doc-only commit — so tests can construct
 // stdin ref lines whose remote..local diff does or does not touch a .go file. It
@@ -114,6 +191,11 @@ exit 0
 	// below with "Couldn't get agent socket?". Disable signing locally so the
 	// fixture is hermetic regardless of the developer's global git config.
 	runGit(t, workDir, "config", "commit.gpgsign", "false")
+	// Keep the fixture hermetic: git may fork background auto-maintenance after
+	// a commit, which keeps writing into .git and races t.TempDir's RemoveAll
+	// ("directory not empty"). Nothing here needs repacking.
+	runGit(t, workDir, "config", "gc.auto", "0")
+	runGit(t, workDir, "config", "maintenance.auto", "false")
 
 	writePlainFile(t, filepath.Join(workDir, "main.go"), "package main\n\nfunc main() {}\n")
 	writePlainFile(t, filepath.Join(workDir, "README.md"), "# base\n")
