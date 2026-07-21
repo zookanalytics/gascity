@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func exampleDir() string {
@@ -48,6 +49,13 @@ func runCmd(t *testing.T, dir, name string, args ...string) string {
 		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// neutralizeUserGitConfig isolates child git processes from the host git config
+// (see testutil.IsolatedGitConfig).
+func neutralizeUserGitConfig(t *testing.T) {
+	t.Helper()
+	testutil.IsolatedGitConfig(t)
 }
 
 func currentBranch(t *testing.T, dir string) string {
@@ -622,6 +630,7 @@ func TestRefineryFormulaRefusesZeroDiffMerge(t *testing.T) {
 // authority (a net-zero branch carrying commits is still "empty"), and a
 // tool error fails closed (exit 2) rather than reading as "safe to merge".
 func TestRefineryBranchHasRealChangeExec(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	fn := extractBetween(t, refineryMergePushDescription(t),
 		"branch_has_real_change() {", "\nhalt_false_completion() {")
 
@@ -1451,6 +1460,7 @@ grep -q -- "runtime drain-ack" "$GC_LOG" || exit 1
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1547,6 +1557,7 @@ func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
 }
 
 func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1581,6 +1592,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedTargetDir(t *testing.T) {
 }
 
 func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1630,6 +1642,7 @@ func TestWorktreeSetupBootstrapsPrepopulatedNestedRuntimeTree(t *testing.T) {
 }
 
 func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1677,6 +1690,7 @@ func TestWorktreeSetupPreservesTrackedFilesInPrepopulatedTargetDir(t *testing.T)
 }
 
 func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1700,6 +1714,7 @@ func TestWorktreeSetupSupportsLegacySignature(t *testing.T) {
 }
 
 func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
@@ -1726,6 +1741,7 @@ func TestWorktreeSetupReusesExistingAgentBranch(t *testing.T) {
 }
 
 func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	cityA := filepath.Join(tmp, "city-a")
@@ -1761,6 +1777,7 @@ func TestWorktreeSetupNamespacesAgentBranchesByWorktreePath(t *testing.T) {
 }
 
 func TestWorktreeSetupSyncSkipsMissingOrigin(t *testing.T) {
+	neutralizeUserGitConfig(t)
 	tmp := t.TempDir()
 	repo := filepath.Join(tmp, "repo")
 	city := filepath.Join(tmp, "city")
