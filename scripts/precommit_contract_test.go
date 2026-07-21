@@ -5,9 +5,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// unconstrainedDiskKiB is a scratch-space reading (1 TiB) far above anything
+// the fan-out policy can clamp on. Cases that are not about the disk budget
+// inject it so the host's real free space cannot perturb their expectations.
+const unconstrainedDiskKiB = "1073741824"
 
 func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
 	repoRoot := repoRoot(t)
@@ -64,6 +70,7 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 		if strings.HasPrefix(entry, "LOCAL_TEST_JOBS=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_CPUS=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMORY_KIB=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_DISK_KIB=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_MEMINFO=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_PROC_CGROUP=") ||
 			strings.HasPrefix(entry, "GC_TEST_LOCAL_CGROUP_ROOT=") {
@@ -75,8 +82,10 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 		name      string
 		cpus      string
 		memoryKiB string
+		diskKiB   string
 		makeArgs  []string
 		wantJobs  string
+		wantWarn  string
 		cgroup    string
 		limit     string
 		current   string
@@ -91,6 +100,16 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 		{name: "hybrid cgroup falls through to v1 memory controller", cpus: "16", wantJobs: "3", cgroup: "hybrid", limit: "12884901888", current: "0"},
 		{name: "exhausted cgroup forces one job", cpus: "16", wantJobs: "1", cgroup: "v2", limit: "4294967296", current: "4294967296"},
 		{name: "explicit override wins", cpus: "192", memoryKiB: "536870912", makeArgs: []string{"LOCAL_TEST_JOBS=7"}, wantJobs: "7"},
+
+		// Free build scratch is the third budget: every concurrent shard writes
+		// its own multi-GiB Go $WORK tree, so a fan-out sized purely on CPU and
+		// memory can fill the volume that also carries the Dolt data plane
+		// (gc-k1b5h).
+		{name: "disk constrains fanout", cpus: "16", memoryKiB: "536870912", diskKiB: "20971520", wantJobs: "3"},
+		{name: "disk at the reserve floor still runs one job", cpus: "16", memoryKiB: "536870912", diskKiB: "8388608", wantJobs: "1", wantWarn: "free for build scratch"},
+		{name: "exhausted disk still runs one job", cpus: "16", memoryKiB: "536870912", diskKiB: "1048576", wantJobs: "1", wantWarn: "free for build scratch"},
+		{name: "unknown disk leaves fanout to cpu and memory", cpus: "16", memoryKiB: "536870912", diskKiB: "0", wantJobs: "16"},
+		{name: "tightest of the three budgets wins", cpus: "16", memoryKiB: "16777216", diskKiB: "41943040", wantJobs: "4"},
 	}
 
 	for _, tt := range tests {
@@ -103,6 +122,14 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			if tt.memoryKiB != "" {
 				cmd.Env = append(cmd.Env, "GC_TEST_LOCAL_MEMORY_KIB="+tt.memoryKiB)
 			}
+			// Cases that do not exercise the disk budget still pin it, or the
+			// host's own free space decides their fan-out and the expectation
+			// becomes machine-dependent.
+			diskKiB := tt.diskKiB
+			if diskKiB == "" {
+				diskKiB = unconstrainedDiskKiB
+			}
+			cmd.Env = append(cmd.Env, "GC_TEST_LOCAL_DISK_KIB="+diskKiB)
 			if tt.cgroup != "" {
 				cmd.Env = append(cmd.Env, localTestCgroupEnv(t, tt.cgroup, tt.limit, tt.current)...)
 			}
@@ -120,6 +147,69 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			wantJobAssignment := " LOCAL_TEST_JOBS=" + tt.wantJobs + " CMD_GC_PROCESS_TOTAL="
 			if !strings.Contains(command, wantJobAssignment) {
 				t.Fatalf("test-fast-parallel job count should be %s:\n%s", tt.wantJobs, command)
+			}
+			// Below the reserve the fan-out is already at its one-job floor, so
+			// clamping can no longer protect the volume. Staying silent there
+			// hides a host that is about to ENOSPC mid-link.
+			if tt.wantWarn != "" && !strings.Contains(command, tt.wantWarn) {
+				t.Fatalf("exhausted scratch space should warn with %q:\n%s", tt.wantWarn, command)
+			}
+			if tt.wantWarn == "" && strings.Contains(command, "free for build scratch") {
+				t.Fatalf("job count should not warn about scratch space when it is not exhausted:\n%s", command)
+			}
+		})
+	}
+}
+
+// TestLocalJobCountProbesScratchFilesystem covers the two halves of the disk
+// budget that GC_TEST_LOCAL_DISK_KIB stubs out in the table above: the real
+// `df` probe against a real directory, and the fail-open path when no scratch
+// filesystem can be measured. Fail-open matters because an unreadable
+// free-space reading must leave today's CPU-and-memory fan-out untouched rather
+// than silently throttle every suite on an unsupported host — the same stance
+// the doctor's tmp-scratch-space check takes.
+func TestLocalJobCountProbesScratchFilesystem(t *testing.T) {
+	repoRoot := repoRoot(t)
+	missing := filepath.Join(t.TempDir(), "definitely-absent")
+
+	tests := []struct {
+		name     string
+		tmpDir   string
+		goTmpDir string
+		wantMin  int
+		wantMax  int
+	}{
+		// A readable scratch dir must yield a usable count: any parse failure
+		// would surface here as a non-numeric line or a zero.
+		{name: "real filesystem yields a usable job count", tmpDir: t.TempDir(), wantMin: 1, wantMax: 16},
+		// Neither candidate is measurable, so the disk budget must not clamp.
+		{name: "unmeasurable scratch leaves fanout unclamped", tmpDir: missing, goTmpDir: missing, wantMin: 16, wantMax: 16},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(filepath.Join(repoRoot, "scripts", "test-local-job-count"))
+			cmd.Dir = repoRoot
+			cmd.Env = []string{
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + os.Getenv("HOME"),
+				"TMPDIR=" + tt.tmpDir,
+				"GC_TEST_LOCAL_CPUS=16",
+				"GC_TEST_LOCAL_MEMORY_KIB=536870912",
+			}
+			if tt.goTmpDir != "" {
+				cmd.Env = append(cmd.Env, "GOTMPDIR="+tt.goTmpDir)
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("test-local-job-count failed: %v\n%s", err, out)
+			}
+			jobs, err := strconv.Atoi(strings.TrimSpace(string(out)))
+			if err != nil {
+				t.Fatalf("test-local-job-count printed %q, want an integer", out)
+			}
+			if jobs < tt.wantMin || jobs > tt.wantMax {
+				t.Fatalf("job count = %d, want between %d and %d", jobs, tt.wantMin, tt.wantMax)
 			}
 		})
 	}

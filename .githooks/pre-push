@@ -3,9 +3,10 @@ set -euo pipefail
 
 # Heavy `go test` fan-out runs here, at push time, instead of on every commit
 # (#3628). pre-commit previously invoked `make test-fast-parallel` on every
-# commit. Its outer shard fan-out can compile ~2.8 GiB test binaries per job,
-# so the canonical runner now derives concurrency from both CPU and available
-# memory while preserving an explicit LOCAL_TEST_JOBS override. Running the
+# commit. Its outer shard fan-out can compile ~2.8 GiB test binaries per job —
+# each one costing both memory and scratch disk — so the canonical runner
+# derives concurrency from CPU, available memory, and free build-scratch space
+# (gc-k1b5h) while preserving an explicit LOCAL_TEST_JOBS override. Running the
 # suite at push time also fires it only when Go sources actually change.
 #
 # git feeds "<local ref> <local sha> <remote ref> <remote sha>" per pushed ref

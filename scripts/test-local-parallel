@@ -7,7 +7,7 @@ usage() {
 usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
 
 Environment:
-  LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
+  LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-, memory-, and free-scratch-aware)
   CMD_GC_PROCESS_TOTAL  cmd/gc shard count (default: 6)
 USAGE
 }

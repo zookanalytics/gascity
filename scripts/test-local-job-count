@@ -9,6 +9,20 @@ readonly job_memory_kib=$((4 * 1024 * 1024))
 readonly max_auto_jobs=16
 readonly unknown_memory_jobs=3
 
+# Free scratch space is the third budget, alongside CPU and memory. Every
+# concurrent shard writes its own Go $WORK tree — package archives, that same
+# ~2.8 GiB test binary, and linker temporaries — under the scratch filesystem,
+# so peak disk demand scales with the fan-out exactly like peak memory does.
+# Budget the same 4 GiB per shard, since the same test binary dominates both.
+#
+# Reserve 8 GiB on top: on a Gas City host the scratch volume also carries the
+# Dolt data plane, and Go only removes $WORK on a clean exit, so killed shards
+# leak their trees until something reaps them. Filling that volume stopped every
+# build and every Dolt write fleet-wide (gc-k1b5h), which is far more expensive
+# than a slower suite.
+readonly job_scratch_kib=$((4 * 1024 * 1024))
+readonly reserved_scratch_kib=$((8 * 1024 * 1024))
+
 fail() {
   echo "test-local-job-count: $*" >&2
   exit 1
@@ -133,8 +147,50 @@ detect_memory_kib() {
   printf '%s\n' "$best"
 }
 
+detect_scratch_dir() {
+  local dir="${GOTMPDIR:-}"
+
+  # The toolchain places $WORK under GOTMPDIR when one is configured, so prefer
+  # it over TMPDIR; `go env` also surfaces a GOTMPDIR set by `go env -w`, which
+  # never reaches this script's environment.
+  if [[ -z "$dir" ]]; then
+    dir="$(go env GOTMPDIR 2>/dev/null || true)"
+  fi
+  if [[ -n "$dir" && -d "$dir" ]]; then
+    printf '%s\n' "$dir"
+    return
+  fi
+
+  # The Makefile's TEST_ENV defaults TMPDIR to /var/tmp for every test target
+  # (gc-v2z1p), but LOCAL_TEST_JOBS is expanded before that wrapper applies.
+  # Repeating the default here keeps the probe on the filesystem the shards
+  # will actually write to.
+  printf '%s\n' "${TMPDIR:-/var/tmp}"
+}
+
+detect_scratch_kib() {
+  if [[ -n "${GC_TEST_LOCAL_DISK_KIB+x}" ]]; then
+    [[ "$GC_TEST_LOCAL_DISK_KIB" =~ ^[0-9]+$ ]] ||
+      fail "GC_TEST_LOCAL_DISK_KIB must be a non-negative integer"
+    if [[ "$GC_TEST_LOCAL_DISK_KIB" -gt 0 ]]; then
+      printf '%s\n' "$GC_TEST_LOCAL_DISK_KIB"
+      return
+    fi
+    return 1
+  fi
+
+  # POSIX `df -Pk` keeps each filesystem on one line and reports 1024-byte
+  # blocks, so field 4 is the space available to this user.
+  local avail
+  avail="$(df -Pk "$1" 2>/dev/null | awk 'NR == 2 { print $4; exit }')" || return 1
+  [[ "$avail" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$avail"
+}
+
 cpus="$(detect_cpus)"
 memory_kib="$(detect_memory_kib || true)"
+scratch_dir="$(detect_scratch_dir)"
+scratch_kib="$(detect_scratch_kib "$scratch_dir" || true)"
 jobs="$cpus"
 
 if [[ -n "$memory_kib" ]]; then
@@ -147,6 +203,29 @@ if [[ -n "$memory_kib" ]]; then
   fi
 elif [[ "$jobs" -gt "$unknown_memory_jobs" ]]; then
   jobs="$unknown_memory_jobs"
+fi
+
+# An unreadable free-space reading leaves the CPU-and-memory fan-out untouched:
+# an unsupported platform or a transient probe failure must not throttle every
+# suite, the same fail-open stance the doctor's tmp-scratch-space check takes.
+if [[ -n "$scratch_kib" ]]; then
+  if [[ "$scratch_kib" -gt "$reserved_scratch_kib" ]]; then
+    scratch_jobs=$(((scratch_kib - reserved_scratch_kib) / job_scratch_kib))
+  else
+    scratch_jobs=0
+  fi
+  if [[ "$scratch_jobs" -lt 1 ]]; then
+    scratch_jobs=1
+    # At the floor the fan-out can no longer protect the volume, and a single
+    # shard can still exhaust it. Only the operator can reclaim space, so say
+    # so rather than failing later mid-link with a bare ENOSPC.
+    echo "test-local-job-count: only $((scratch_kib / 1024)) MiB free for build scratch on ${scratch_dir}" \
+      "(one shard needs $((job_scratch_kib / 1024)) MiB above the $((reserved_scratch_kib / 1024)) MiB reserve);" \
+      "running 1 job anyway — reclaim space or the suite may fail with 'no space left on device'" >&2
+  fi
+  if [[ "$scratch_jobs" -lt "$jobs" ]]; then
+    jobs="$scratch_jobs"
+  fi
 fi
 
 if [[ "$jobs" -gt "$max_auto_jobs" ]]; then
