@@ -7,12 +7,15 @@ func TestWindow(t *testing.T) {
 		model string
 		want  int
 	}{
-		// Modern Claude families resolve to 1M WITHOUT the "[1m]" suffix — the
-		// provider echoes the model ID back without the launch flag (gc-os8fn).
+		// Modern Claude variants resolve to 1M WITHOUT the "[1m]" suffix — 1M is
+		// their plain default, and the provider echoes the model ID back without
+		// the launch flag, so a session log only ever carries the bare form.
 		{"claude-opus-4-8", Million},
 		{"claude-opus-4-7", Million},
 		{"claude-opus-4-6", Million},
 		{"claude-sonnet-4-6", Million},
+		{"claude-sonnet-5", Million},
+		{"claude-sonnet-5-20260101", Million}, // dated variant still matches
 		{"claude-opus-4-8-20260101", Million}, // dated variant still matches
 		{"CLAUDE-OPUS-4-8", Million},          // case-insensitive
 		{"claude-fable-5", Million},
@@ -24,7 +27,7 @@ func TestWindow(t *testing.T) {
 		{"claude-haiku-4-5-20251001[1m]", Million},
 		// Older Claude families stay at the conservative default.
 		{"claude-opus-4-5-20251101", Default},
-		{"claude-sonnet-4-5-20251101", Default},
+		{"claude-sonnet-4-5-20250929", Default},
 		{"claude-haiku-4-5-20251001", Default},
 		// Non-Claude families.
 		{"gemini-2.5-pro", Million},

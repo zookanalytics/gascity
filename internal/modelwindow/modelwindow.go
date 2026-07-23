@@ -1,9 +1,8 @@
 // Package modelwindow resolves an LLM model ID to its context-window size in
 // tokens. It is the single source of truth shared by the session-log context
 // reader (internal/sessionlog) and the CLI context-pressure injector
-// (cmd/gc/context_inject.go), so both report identical windows for the same
-// model ID and cannot drift apart (the failure mode behind gc-os8fn, where the
-// API path under-reported a 1M window as 200K and saturated context_pct).
+// (cmd/gc/context_inject.go) so the two cannot resolve the same model ID to
+// different windows.
 package modelwindow
 
 import "strings"
@@ -16,40 +15,36 @@ const (
 	Default = 200_000
 )
 
-// familyWindows maps a model-family keyword to its context-window size in
-// tokens. Claude families default to the conservative window here; the 1M
-// Claude variants are matched ahead of this table by millionMarkers in Window.
-var familyWindows = map[string]int{
-	"opus":   Default,
-	"sonnet": Default,
-	"haiku":  Default,
-	"gemini": Million,
-	"gpt-5":  258_000,
-	"codex":  258_000,
-	"gpt-4":  128_000,
-	"gpt-4o": 128_000,
-}
-
-// millionMarkers are substrings that force a 1M window regardless of the base
-// family default. They cover the explicit "[1m]" launch suffix, the 1M-window
-// Claude families (Fable, Mythos), and the version-specific Claude variants
-// whose window is 1M even without the suffix (Opus 4.6/4.7/4.8, Sonnet 4.6).
-// The provider echoes a model ID back without its launch flag, so a bare
-// "claude-opus-4-8" must resolve to 1M (gc-os8fn). Substring matching keeps
-// dated-suffix variants (e.g. "claude-opus-4-8-20260101") recognized.
+// millionMarkers force a 1M window when any is a substring of the model ID.
 var millionMarkers = []string{
-	"[1m]", "fable", "mythos", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6",
+	"[1m]", "fable", "mythos",
+	"opus-4-6", "opus-4-7", "opus-4-8",
+	"sonnet-4-6", "sonnet-5",
 }
 
-// familyOrder lists family keywords longest-match-first so a longer keyword is
-// tried before a shorter one it contains (e.g. "gpt-4o" before "gpt-4").
-var familyOrder = []string{"gpt-4o", "gpt-5", "gpt-4", "opus", "sonnet", "haiku", "gemini", "codex"}
+// familyWindows pairs a model-family keyword with its context-window size, in
+// longest-match-first order so a longer keyword wins over a shorter one it
+// contains (e.g. "gpt-4o" before "gpt-4"). Claude families resolve to Default
+// here; their 1M variants are caught earlier by millionMarkers.
+var familyWindows = []struct {
+	keyword string
+	window  int
+}{
+	{"gpt-4o", 128_000},
+	{"gpt-5", 258_000},
+	{"gpt-4", 128_000},
+	{"opus", Default},
+	{"sonnet", Default},
+	{"haiku", Default},
+	{"gemini", Million},
+	{"codex", 258_000},
+}
 
-// Window returns the context-window size, in tokens, for a model ID. Modern
-// Claude families (Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos) and any model
+// Window returns the context-window size, in tokens, for a model ID. Claude
+// variants (Opus 4.6/4.7/4.8, Sonnet 4.6, Sonnet 5, Fable, Mythos) and any model
 // carrying the explicit "[1m]" launch suffix resolve to the 1M window; older or
-// unknown Claude variants use the 200K Default. Returns 0 when the model family
-// is entirely unrecognized, so callers can apply their own unknown-model policy
+// unrecognized Claude variants use the 200K Default. Returns 0 when the model
+// family is unrecognized, so callers can apply their own unknown-model policy
 // (the session-log/API path treats 0 as "window unknown"; the injector floors
 // it to Default).
 func Window(model string) int {
@@ -59,9 +54,9 @@ func Window(model string) int {
 			return Million
 		}
 	}
-	for _, family := range familyOrder {
-		if strings.Contains(lower, family) {
-			return familyWindows[family]
+	for _, f := range familyWindows {
+		if strings.Contains(lower, f.keyword) {
+			return f.window
 		}
 	}
 	return 0
