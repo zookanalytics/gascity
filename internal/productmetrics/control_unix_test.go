@@ -1750,7 +1750,16 @@ func TestDisableAndPurgeRejectsUnprovenPeerSuccessor(t *testing.T) {
 			}
 			deps.disableUploaderWait = 2 * testutil.GoroutineRaceTimeout
 			service := mustOpenTestService(t, deps)
+			attempts := make(chan struct{}, 1)
+			service.deps.beforeDisableUploaderLock = func() { attempts <- struct{}{} }
 			call := startDisableAndPurge(t, service)
+			// Arm only once the opt-out write is durable and the purge has
+			// reached the uploader barrier. The state file becomes readable at
+			// its rename, several directory syncs before beginDisableAtRoot
+			// returns, so waiting on the file contents alone can arm inside the
+			// opt-out write and land the injected failure there — classifying it
+			// disable-write-failed instead of the storage-failure this asserts.
+			receiveUploaderAttempt(t, attempts)
 			owner := waitForMetricsState(t, home, func(state persistedState) bool {
 				return state.Preference == preferenceDisabled && state.CleanupKind == cleanupDisable
 			})
