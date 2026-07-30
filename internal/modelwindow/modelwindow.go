@@ -33,12 +33,18 @@ var familyWindows = map[string]int{
 // millionMarkers are substrings that force a 1M window regardless of the base
 // family default. They cover the explicit "[1m]" launch suffix, the 1M-window
 // Claude families (Fable, Mythos), and the version-specific Claude variants
-// whose window is 1M even without the suffix (Opus 4.6/4.7/4.8, Sonnet 4.6).
+// whose window is 1M even without the suffix (Opus 4.6/4.7/4.8/5, Sonnet 4.6/5).
 // The provider echoes a model ID back without its launch flag, so a bare
 // "claude-opus-4-8" must resolve to 1M (gc-os8fn). Substring matching keeps
-// dated-suffix variants (e.g. "claude-opus-4-8-20260101") recognized.
+// dated-suffix variants (e.g. "claude-opus-4-8-20260101") recognized. Windows
+// verified against /v1/models max_input_tokens; sonnet-4-5 is deliberately
+// excluded (its 1M was a beta since reverted to 200K, and a family substring
+// cannot distinguish a 1M snapshot from a 200K one — marking it would risk
+// under-reporting the 200K variant).
 var millionMarkers = []string{
-	"[1m]", "fable", "mythos", "opus-4-6", "opus-4-7", "opus-4-8", "sonnet-4-6",
+	"[1m]", "fable", "mythos",
+	"opus-4-6", "opus-4-7", "opus-4-8", "opus-5",
+	"sonnet-4-6", "sonnet-5",
 }
 
 // familyOrder lists family keywords longest-match-first so a longer keyword is
@@ -46,7 +52,7 @@ var millionMarkers = []string{
 var familyOrder = []string{"gpt-4o", "gpt-5", "gpt-4", "opus", "sonnet", "haiku", "gemini", "codex"}
 
 // Window returns the context-window size, in tokens, for a model ID. Modern
-// Claude families (Opus 4.6/4.7/4.8, Sonnet 4.6, Fable, Mythos) and any model
+// Claude families (Opus 4.6/4.7/4.8/5, Sonnet 4.6/5, Fable, Mythos) and any model
 // carrying the explicit "[1m]" launch suffix resolve to the 1M window; older or
 // unknown Claude variants use the 200K Default. Returns 0 when the model family
 // is entirely unrecognized, so callers can apply their own unknown-model policy

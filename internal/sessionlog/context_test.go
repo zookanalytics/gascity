@@ -8,6 +8,7 @@ func TestModelContextWindow(t *testing.T) {
 		want  int
 	}{
 		{"claude-opus-4-5-20251101", 200_000},
+		{"claude-opus-4-1-20250805", 200_000}, // opus-5 marker must not swallow this
 		{"claude-sonnet-4-5-20251101", 200_000},
 		{"claude-haiku-4-5-20251001", 200_000},
 		// Modern Claude families have a 1M window WITHOUT the "[1m]" suffix:
@@ -16,7 +17,9 @@ func TestModelContextWindow(t *testing.T) {
 		{"claude-opus-4-8", 1_000_000},
 		{"claude-opus-4-7", 1_000_000},
 		{"claude-opus-4-6", 1_000_000},
+		{"claude-opus-5", 1_000_000},
 		{"claude-sonnet-4-6", 1_000_000},
+		{"claude-sonnet-5", 1_000_000},
 		{"claude-opus-4-8-20260101", 1_000_000}, // dated variant still matches
 		{"claude-fable-5", 1_000_000},
 		{"claude-mythos-1", 1_000_000},
