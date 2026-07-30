@@ -227,7 +227,9 @@ func resolveConvoyCreateScope(cfg *config.City, cityPath, rigName string, citySc
 		// Pass no bead args: the convoy name is not a bead and child issues
 		// are handled below, so resolveBdScopeTarget is restricted to its
 		// flag/cwd/env resolution — the same store selection `gc bd` uses.
-		target, err := resolveBdScopeTarget(cfg, cityPath, rigName, nil, false)
+		// Discard its stderr channel: with no args it emits no arg-routing
+		// warning, and this function surfaces its own warnings via the return.
+		target, err := resolveBdScopeTarget(cfg, cityPath, rigName, nil, false, io.Discard)
 		if err != nil {
 			return "", "", err
 		}
