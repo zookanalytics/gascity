@@ -12,8 +12,11 @@ func TestWindow(t *testing.T) {
 		{"claude-opus-4-8", Million},
 		{"claude-opus-4-7", Million},
 		{"claude-opus-4-6", Million},
+		{"claude-opus-5", Million},
 		{"claude-sonnet-4-6", Million},
+		{"claude-sonnet-5", Million},
 		{"claude-opus-4-8-20260101", Million}, // dated variant still matches
+		{"claude-opus-5-20260724", Million},   // dated variant still matches
 		{"CLAUDE-OPUS-4-8", Million},          // case-insensitive
 		{"claude-fable-5", Million},
 		{"claude-mythos-1", Million},
@@ -22,8 +25,10 @@ func TestWindow(t *testing.T) {
 		{"claude-opus-4-8[1m]", Million},
 		{"sonnet[1m]", Million},
 		{"claude-haiku-4-5-20251001[1m]", Million},
-		// Older Claude families stay at the conservative default.
+		// Older Claude families stay at the conservative default. The opus-5 and
+		// sonnet-5 markers must not swallow opus-4-5/opus-4-1/sonnet-4-5 by substring.
 		{"claude-opus-4-5-20251101", Default},
+		{"claude-opus-4-1-20250805", Default},
 		{"claude-sonnet-4-5-20251101", Default},
 		{"claude-haiku-4-5-20251001", Default},
 		// Non-Claude families.
