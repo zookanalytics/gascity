@@ -4685,6 +4685,31 @@ func materializeProviderOverlaysBeforeFingerprint(
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
+	normalizeStagedCodexHooks(bp, overlayProviders, qualifiedName, workDir, stderr)
+}
+
+// normalizeStagedCodexHooks rebinds a Codex hooks file that overlay staging
+// just wrote into workDir. Staging copies a pack's per-provider/codex overlay
+// verbatim — unbound to this city and with prompt hooks unwrapped — while
+// hooks.Install, the writer that applies the managed normalization, runs only
+// when install_agent_hooks is non-empty. An agent whose resolved provider is
+// codex stages that slot without declaring it, so nothing normalized the file.
+//
+// The codex-hooks-drift doctor check audits the same provider-derived surface
+// (agentUsesCodexHookSurface matches the resolved provider, not install hooks),
+// which left it permanently red: each reconciler tick re-staged the raw overlay
+// over whatever `gc doctor --fix` had just upgraded, so the check re-flagged
+// files it had already fixed and never went green (gc-beez).
+func normalizeStagedCodexHooks(bp *agentBuildParams, overlayProviders []string, qualifiedName, workDir string, stderr io.Writer) {
+	for _, name := range overlayProviders {
+		if !codexHookProviderName(name, bp.providers) {
+			continue
+		}
+		if err := hooks.NormalizeManagedCodexHooks(bp.fs, bp.cityPath, workDir); err != nil {
+			fmt.Fprintf(stderr, "agent %q: codex hooks: %v\n", qualifiedName, err) //nolint:errcheck
+		}
+		return
+	}
 }
 
 func resolveTemplatePrepared(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, fpExtra map[string]string) (TemplateParams, error) {
