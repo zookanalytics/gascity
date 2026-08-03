@@ -345,10 +345,15 @@ func TestGoTestShardWithoutTimingPreservesDirectProductContract(t *testing.T) {
 	if got := readFixtureFile(t, fixture.productArgsFile); got != wantArgs {
 		t.Fatalf("direct product argv:\n%s\nwant:\n%s", got, wantArgs)
 	}
+	// GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM are forwarded from the caller so the
+	// Makefile TEST_ENV git-config isolation survives this env -i (gc-fzl4). The
+	// fixture sets neither, so both arrive empty — the fail-safe value: git then
+	// reads no global config at all rather than the host ~/.gitconfig.
 	wantEnv := map[string]string{
 		"PATH": fixture.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME": fixture.homeDir, "USER": "", "LOGNAME": "", "SHELL": "/bin/sh",
 		"LANG": "C.UTF-8", "TMPDIR": fixture.tmpDir, "XDG_RUNTIME_DIR": "",
+		"GIT_CONFIG_GLOBAL": "", "GIT_CONFIG_SYSTEM": "",
 		"GOPATH": filepath.Join(fixture.tmpDir, "gopath"), "GOCACHE": filepath.Join(fixture.tmpDir, "gocache"),
 		"GOMODCACHE": filepath.Join(fixture.tmpDir, "gomodcache"), "GOTMPDIR": filepath.Join(fixture.tmpDir, "gotmp"),
 		"GOROOT": filepath.Join(fixture.tmpDir, "goroot"), "GOENV": "", "GOFLAGS": "", "GO111MODULE": "",
