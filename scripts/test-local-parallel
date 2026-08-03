@@ -298,6 +298,19 @@ run_fan_out() {
   if [[ -n "$gate_fd" ]]; then
     eval "exec ${gate_fd}>&-"
   fi
+  # The per-job env -i below forwards GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM so
+  # the Makefile TEST_ENV git-config isolation survives this boundary
+  # (gc-fzl4). HOME *is* forwarded, so without them git falls back to the host
+  # ~/.gitconfig; on a host with commit.gpgsign=true + gpg.format=ssh that
+  # breaks every test that execs `git commit` with the git error "Couldn't get
+  # agent socket?" -- SSH_AUTH_SOCK is deliberately not allowlisted -- and it
+  # reads as a broken diff rather than a broken harness. Forward-or-empty is
+  # the fail-safe form: git treats an empty GIT_CONFIG_GLOBAL like /dev/null
+  # (no global config at all), never as "fall back to the home directory".
+  # test-go-test-shard and test-integration-shard repeat the same forwarding,
+  # because they re-exec jobs through their own env -i one layer further down.
+  # Keep this note here, not inside the single-quoted bash -c body below: an
+  # apostrophe in there would close the quote and break the script.
   printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
   set -euo pipefail
   spec="$1"
@@ -315,6 +328,8 @@ run_fan_out() {
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
+    GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL-}" \
+    GIT_CONFIG_SYSTEM="${GIT_CONFIG_SYSTEM-}" \
     OBSERVABLE_TEST_LOG="${OBSERVABLE_TEST_LOG-}" \
     OBSERVABLE_FAILURE_LINES="${OBSERVABLE_FAILURE_LINES-}" \
     GC_TEST_NO_SLICE="${GC_TEST_NO_SLICE-}" \
