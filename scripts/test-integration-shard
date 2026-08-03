@@ -34,6 +34,11 @@ export CGO_CPPFLAGS="${cgo_cppflags}"
 export CGO_LDFLAGS="${cgo_ldflags}"
 
 run_go() {
+  # GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM carry the Makefile TEST_ENV git-config
+  # isolation; forwarding them keeps the host ~/.gitconfig (commit.gpgsign +
+  # gpg.format=ssh, with no agent socket under env -i) from breaking every test
+  # that execs `git commit`. Empty is safe — git reads no global config at all,
+  # which is what a direct CI invocation of this script should get (gc-fzl4).
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -42,6 +47,8 @@ run_go() {
     SHELL="${SHELL:-/bin/sh}" \
     LANG="${LANG:-C.UTF-8}" \
     TMPDIR="${TMPDIR:-/var/tmp}" \
+    GIT_CONFIG_GLOBAL="${GIT_CONFIG_GLOBAL-}" \
+    GIT_CONFIG_SYSTEM="${GIT_CONFIG_SYSTEM-}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
     GOPATH="${gopath_val}" \
     GOCACHE="${gocache_val}" \
