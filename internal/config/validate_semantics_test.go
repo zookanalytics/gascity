@@ -1,8 +1,12 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 func TestValidateSemanticsNoWarnings(t *testing.T) {
@@ -293,5 +297,191 @@ func TestValidateAgentsPromptFlagWithFlagModeOK(t *testing.T) {
 	}
 	if err := ValidateAgents(agents); err != nil {
 		t.Errorf("should be valid: %v", err)
+	}
+}
+
+// --- Semantic-warning source attribution (gc-qmr9) ---
+//
+// The source label on an agent-scoped warning must name the file that
+// actually declares the agent, not the root city.toml that merely imports
+// the pack it came from.
+
+func TestValidateSemanticsAttributesV2ConventionAgentToItsAgentToml(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{{
+			Name:        "refinery",
+			Dir:         "gc-toolkit",
+			BindingName: "gc-toolkit",
+			Provider:    "bogus",
+			SourceDir:   "/packs/gastown",
+			layout:      layoutV2Convention,
+		}},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	want := "/packs/gastown/agents/refinery/agent.toml"
+	if !strings.HasPrefix(warnings[0], want+":") {
+		t.Errorf("warning should be attributed to %s, got: %s", want, warnings[0])
+	}
+	if strings.Contains(warnings[0], "/city/city.toml") {
+		t.Errorf("warning must not name the root city.toml, got: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsAttributesV1InlineAgentToPackToml(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{{
+			Name:      "refinery",
+			Provider:  "bogus",
+			SourceDir: "/packs/gastown",
+			layout:    layoutV1Inline,
+		}},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	want := "/packs/gastown/pack.toml"
+	if !strings.HasPrefix(warnings[0], want+":") {
+		t.Errorf("warning should be attributed to %s, got: %s", want, warnings[0])
+	}
+}
+
+func TestValidateSemanticsAttributesFragmentAgentToItsSourceDir(t *testing.T) {
+	// Fragment agents carry SourceDir but no pack layout stamp. Naming the
+	// directory is honest; naming a specific file there would be a guess.
+	cfg := &City{
+		Agents: []Agent{{
+			Name:      "worker",
+			Provider:  "bogus",
+			SourceDir: "/city/fragments",
+		}},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.HasPrefix(warnings[0], "/city/fragments:") {
+		t.Errorf("warning should be attributed to the fragment dir, got: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsAttributesInlineAgentToRootSource(t *testing.T) {
+	// An agent declared inline in city.toml has no SourceDir; the root
+	// source stays correct and must not change.
+	cfg := &City{
+		Agents: []Agent{{Name: "worker", Provider: "bogus"}},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.HasPrefix(warnings[0], "/city/city.toml:") {
+		t.Errorf("inline agent should keep the root source, got: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsKeepsRootSourceForNonAgentWarnings(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{Provider: "bogus"},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 1 {
+		t.Fatalf("expected 1 warning, got %d: %v", len(warnings), warnings)
+	}
+	if !strings.HasPrefix(warnings[0], "/city/city.toml:") {
+		t.Errorf("[workspace] warning should keep the root source, got: %s", warnings[0])
+	}
+}
+
+func TestValidateSemanticsAttributesAllAgentScopedWarnings(t *testing.T) {
+	// Every agent-scoped warning — not just the provider one — must follow
+	// the agent's own declaring file.
+	unlimited := -1
+	cfg := &City{
+		Agents: []Agent{{
+			Name:              "refinery",
+			Provider:          "bogus",
+			Session:           "carrier-pigeon",
+			Namepool:          "/packs/gastown/agents/refinery/namepool.txt",
+			MaxActiveSessions: &unlimited,
+			IdleTimeout:       "2h",
+			SleepAfterIdle:    "300s",
+			SourceDir:         "/packs/gastown",
+			layout:            layoutV2Convention,
+		}},
+	}
+	warnings := ValidateSemantics(cfg, "/city/city.toml")
+	if len(warnings) != 4 {
+		t.Fatalf("expected 4 agent-scoped warnings, got %d: %v", len(warnings), warnings)
+	}
+	want := "/packs/gastown/agents/refinery/agent.toml:"
+	for _, w := range warnings {
+		if !strings.HasPrefix(w, want) {
+			t.Errorf("warning should be attributed to %s, got: %s", want, w)
+		}
+	}
+}
+
+// TestValidateSemanticsAttributesComposedPackAgentToItsAgentToml exercises the
+// real composition path rather than a hand-built Agent: a city that imports a
+// pack whose agents/<name>/agent.toml carries the offending keys must produce a
+// warning naming that agent.toml, never the city.toml that only imports it.
+// This is the shape the gastown pack ships (gc-qmr9).
+func TestValidateSemanticsAttributesComposedPackAgentToItsAgentToml(t *testing.T) {
+	root := t.TempDir()
+	cityDir := filepath.Join(root, "city")
+	packDir := filepath.Join(root, "helper")
+
+	writeTestFile(t, packDir, "pack.toml", `
+[pack]
+name = "helper"
+schema = 2
+`)
+	writeTestFile(t, packDir, "agents/refinery/agent.toml", `
+scope = "city"
+session = "carrier-pigeon"
+idle_timeout = "2h"
+sleep_after_idle = "300s"
+`)
+	writeTestFile(t, packDir, "agents/refinery/prompt.template.md", "You are the refinery.\n")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[imports.helper]
+source = "../helper"
+`)
+
+	cityPath := filepath.Join(cityDir, "city.toml")
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	warnings := ValidateSemantics(cfg, cityPath)
+	if len(warnings) == 0 {
+		t.Fatal("expected semantic warnings for the malformed pack agent")
+	}
+	want := filepath.Join(packDir, "agents", "refinery", "agent.toml")
+	for _, w := range warnings {
+		if !strings.HasPrefix(w, want+":") {
+			t.Errorf("warning should name the declaring agent.toml, got: %s", w)
+		}
+		if strings.Contains(w, cityPath) {
+			t.Errorf("warning must not name the importing city.toml, got: %s", w)
+		}
+	}
+	// The named file must actually exist and hold the offending keys.
+	data, readErr := os.ReadFile(want)
+	if readErr != nil {
+		t.Fatalf("attributed source %q is not readable: %v", want, readErr)
+	}
+	for _, key := range []string{"idle_timeout", "sleep_after_idle", "session"} {
+		if !strings.Contains(string(data), key) {
+			t.Errorf("attributed source %q does not contain %q", want, key)
+		}
 	}
 }
