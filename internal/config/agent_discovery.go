@@ -21,7 +21,7 @@ var agentPromptConventionFilenames = []string{
 // canonical, prompt.md.tmpl remains temporarily supported, and prompt.md is
 // the plain-markdown fallback.
 func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool) ([]Agent, error) {
-	agentsDir := filepath.Join(packDir, "agents")
+	agentsDir := filepath.Join(packDir, agentsDirName)
 	entries, err := fs.ReadDir(agentsDir)
 	if err != nil {
 		return nil, nil
@@ -43,7 +43,7 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 		agentDir := filepath.Join(agentsDir, agentName)
 		agent := Agent{Name: agentName}
 
-		agentTomlPath := filepath.Join(agentDir, "agent.toml")
+		agentTomlPath := filepath.Join(agentDir, agentFile)
 		if atData, atErr := fs.ReadFile(agentTomlPath); atErr == nil {
 			if _, decErr := toml.Decode(string(atData), &agent); decErr != nil {
 				return nil, fmt.Errorf("agents/%s/agent.toml: %w", agentName, decErr)
@@ -81,7 +81,7 @@ func applyAgentConventionDefaults(fs fsys.FS, packDir string, agent *Agent) {
 		return
 	}
 
-	agentDir := filepath.Join(packDir, "agents", agent.Name)
+	agentDir := filepath.Join(packDir, agentsDirName, agent.Name)
 	info, err := fs.Stat(agentDir)
 	if err != nil || !info.IsDir() {
 		return
