@@ -23,6 +23,14 @@ import (
 // packFile is the expected filename inside a pack directory.
 const packFile = "pack.toml"
 
+// agentsDirName is the directory under a pack root that holds one
+// subdirectory per agent in the v2 convention layout.
+const agentsDirName = "agents"
+
+// agentFile is the per-agent config filename under agents/<name>/ in a
+// pack laid out by the v2 convention.
+const agentFile = "agent.toml"
+
 // currentPackSchema is the supported pack schema version.
 const currentPackSchema = 2
 
