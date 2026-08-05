@@ -739,7 +739,7 @@ func (c *ConfigSemanticsCheck) Name() string { return "config-semantics" }
 // Run executes ValidateSemantics and reports any warnings.
 func (c *ConfigSemanticsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
-	warnings := config.ValidateSemantics(c.cfg, c.source)
+	warnings := surfacedSemanticWarnings(config.ValidateSemantics(c.cfg, c.source))
 	if len(warnings) == 0 {
 		r.Status = StatusOK
 		r.Message = "config semantics valid"
@@ -749,6 +749,27 @@ func (c *ConfigSemanticsCheck) Run(_ *CheckContext) *CheckResult {
 	r.Message = fmt.Sprintf("%d config semantic warning(s)", len(warnings))
 	r.Details = warnings
 	return r
+}
+
+// surfacedSemanticWarnings drops semantic warnings the codebase already
+// classifies as known-benign, so doctor reports the same set that strict
+// mode treats as fatal.
+//
+// Without this, doctor and strict-warnings mode hold two opinions about one
+// string: cmd/gc/strict_warnings.go filters the idle_timeout/sleep_after_idle
+// precedence warning as supported-and-ignorable, while doctor surfaced it. The
+// gastown pack ships both keys on its refinery agent, so a stock city raised
+// one warning per rig that no operator could clear without diverging from the
+// shipped pack. Genuine semantic warnings still surface.
+func surfacedSemanticWarnings(warnings []string) []string {
+	surfaced := make([]string, 0, len(warnings))
+	for _, w := range warnings {
+		if config.IsIdleSleepMaskedByIdleTimeoutWarning(w) {
+			continue
+		}
+		surfaced = append(surfaced, w)
+	}
+	return surfaced
 }
 
 // CanFix returns false — semantic issues require manual config correction.
