@@ -685,6 +685,35 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 	return data, changed, nil
 }
 
+// NormalizeManagedCodexHooks rewrites an already-staged Codex hooks file in
+// workDir into current managed form for cityDir: managed commands bound to
+// cityDir with an explicit --city flag, prompt hooks wrapped in `gc hook run`,
+// and duplicate managed SessionStart entries collapsed.
+//
+// Overlay staging copies a pack's per-provider/codex/.codex/hooks.json into an
+// agent's working directory verbatim, bypassing the normalization Install
+// applies. Callers that stage provider overlays run this afterwards so the
+// staged file matches the managed form the codex-hooks-drift doctor check
+// audits.
+//
+// It never creates a hooks file: when nothing is staged at workDir the call is
+// a no-op, because whether an agent has a Codex hook surface at all is the
+// overlay's decision. User-owned hook documents are left untouched.
+func NormalizeManagedCodexHooks(fs fsys.FS, cityDir, workDir string) error {
+	if strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	dst := filepath.Join(workDir, ".codex", "hooks.json")
+	if _, err := fs.Stat(dst); err != nil {
+		return nil
+	}
+	desired, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+	if err != nil {
+		return fmt.Errorf("reading managed Codex hooks asset: %w", err)
+	}
+	return writeCodexHooksManaged(fs, cityDir, dst, desired)
+}
+
 // CodexHooksMissingManagedPreCompact reports whether data is a Gas City
 // managed Codex hooks document that can be upgraded with a PreCompact hook.
 func CodexHooksMissingManagedPreCompact(data []byte) bool {
