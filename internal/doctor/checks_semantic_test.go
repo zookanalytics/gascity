@@ -359,6 +359,55 @@ func TestConfigSemanticsCheck_MultipleWarnings(t *testing.T) {
 	}
 }
 
+// TestConfigSemanticsCheck_IdleSleepMaskedIsBenign pins gc-qmr9: the
+// idle_timeout/sleep_after_idle precedence warning is already classified as
+// known-benign by strict-warnings mode, and the gastown pack ships both keys
+// on its refinery agent, so every stock city produced one of these per rig.
+// Doctor must agree with strict-warnings and report OK.
+func TestConfigSemanticsCheck_IdleSleepMaskedIsBenign(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{
+			{Name: "refinery", IdleTimeout: "2h", SleepAfterIdle: "300s"},
+		},
+	}
+	c := NewConfigSemanticsCheck(cfg, "city.toml")
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; msg = %s; details = %v", r.Status, r.Message, r.Details)
+	}
+	if len(r.Details) != 0 {
+		t.Errorf("expected no details, got: %v", r.Details)
+	}
+}
+
+// TestConfigSemanticsCheck_GenuineWarningSurvivesFilter pins the other half of
+// gc-qmr9: filtering the benign warning must not suppress real ones, and the
+// reported count must reflect only what survived.
+func TestConfigSemanticsCheck_GenuineWarningSurvivesFilter(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Agents: []config.Agent{
+			{Name: "refinery", IdleTimeout: "2h", SleepAfterIdle: "300s"},
+			{Name: "worker", Provider: "nonexistent"},
+		},
+	}
+	c := NewConfigSemanticsCheck(cfg, "city.toml")
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 {
+		t.Fatalf("expected exactly the surviving warning, got %d: %v", len(r.Details), r.Details)
+	}
+	if !strings.Contains(r.Details[0], "nonexistent") {
+		t.Errorf("surviving warning should be the bad provider ref, got: %s", r.Details[0])
+	}
+	if !strings.Contains(r.Message, "1 config semantic warning") {
+		t.Errorf("message should count only surviving warnings, got: %s", r.Message)
+	}
+}
+
 // --- humanSize ---
 
 func TestHumanSize(t *testing.T) {
