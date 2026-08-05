@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -11,6 +12,29 @@ const idleSleepMaskedByIdleTimeoutWarningFragment = "idle_timeout and sleep_afte
 // supported idle-timeout precedence case where sleep_after_idle is masked.
 func IsIdleSleepMaskedByIdleTimeoutWarning(warning string) bool {
 	return strings.Contains(warning, idleSleepMaskedByIdleTimeoutWarningFragment)
+}
+
+// agentWarningSource returns the config file that declares a, so an
+// agent-scoped semantic warning points an operator at a file that actually
+// contains the offending keys. root is the caller's fallback (the city.toml
+// the config was loaded from), used only for agents with no recorded origin.
+//
+// A pack agent's keys live in the pack, not in the city.toml that imports it.
+// Reporting the root source for those sends the operator to a file where the
+// keys do not appear and cannot be changed. Fragment agents record only their
+// directory, so that is what they get — naming a file inside it would be a
+// guess.
+func agentWarningSource(a Agent, root string) string {
+	if a.SourceDir == "" {
+		return root
+	}
+	switch a.layout {
+	case layoutV2Convention:
+		return filepath.Join(a.SourceDir, agentsDirName, a.Name, agentFile)
+	case layoutV1Inline:
+		return filepath.Join(a.SourceDir, packFile)
+	}
+	return a.SourceDir
 }
 
 // ValidateSemantics checks cross-entity semantic constraints in the config
@@ -35,7 +59,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		if !knownProviders[a.Provider] {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: agent %q: provider %q is not defined in [providers]",
-				source, a.QualifiedName(), a.Provider))
+				agentWarningSource(a, source), a.QualifiedName(), a.Provider))
 		}
 	}
 
@@ -62,7 +86,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		if !IsValidSessionTransport(a.Session) {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: agent %q: session %q is not a valid session transport (use \"acp\", \"tmux\", or omit)",
-				source, a.QualifiedName(), a.Session))
+				agentWarningSource(a, source), a.QualifiedName(), a.Session))
 		}
 	}
 
@@ -72,7 +96,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		if a.Namepool != "" && a.MaxActiveSessions != nil && *a.MaxActiveSessions < 0 {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: agent %q: namepool requires bounded max_active_sessions (> 0); unlimited agents use prefix discovery which cannot find themed names",
-				source, a.QualifiedName()))
+				agentWarningSource(a, source), a.QualifiedName()))
 		}
 	}
 
@@ -81,7 +105,7 @@ func ValidateSemantics(cfg *City, source string) []string {
 		if a.IdleTimeout != "" && a.SleepAfterIdle != "" {
 			warnings = append(warnings, fmt.Sprintf(
 				"%s: agent %q: %s and sleep_after_idle only applies when the session survives the idle_timeout check",
-				source, a.QualifiedName(), idleSleepMaskedByIdleTimeoutWarningFragment))
+				agentWarningSource(a, source), a.QualifiedName(), idleSleepMaskedByIdleTimeoutWarningFragment))
 		}
 	}
 
