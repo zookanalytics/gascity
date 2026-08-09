@@ -797,6 +797,14 @@ case "$query" in
       print_cell ""
       exit 0
     fi
+    # Fails only once HEAD is at the flatten commit, so the preflight probe
+    # still records a hash and the marker carries a measured value on one side
+    # and an errored probe on the other — the third of the three states the
+    # quarantine marker distinguishes (gc-800l).
+    if [ "$mode" = "db_hash_failure_after_flatten" ] && [ "$(current_head)" = "compactcommit" ]; then
+      printf 'db hash exploded after flatten\n' >&2
+      exit 48
+    fi
     if { [ "$mode" = "writer_race_after_postverify_before_db_hash" ] || [ "$mode" = "writer_race_db_hash_empty_pre_probe" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       set_head writercommit
       set_hash hash-after-writer
@@ -3087,6 +3095,40 @@ func TestCompactScriptQuarantinesEmptyPostflightValueHashBeforeFullGC(t *testing
 		// The probe ran and returned nothing — distinct from never having run,
 		// which is what the reason string here is about.
 		"postflight_db_value_hash=<empty>",
+		"decision=preserve_marker_manual_review_required",
+	)
+}
+
+// The third marker state: the postflight probe was attempted and errored. A
+// reader clearing a marker has to tell that apart from a probe that returned
+// nothing and from one that never ran — an errored probe says the server was
+// answering badly at that moment, which is evidence about the run itself, not
+// about the flatten (gc-800l).
+func TestCompactScriptRecordsProbeFailedPostflightValueHash(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "db_hash_failure_after_flatten", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite failing postflight value hash probe:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten value hash probe failed") {
+		t.Fatalf("output missing postflight hash probe failure:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("failed postflight hash probe must block full GC:\n%s", string(logData))
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	assertCompactMarkerHasEvidence(t, marker,
+		"reason=post-flatten value hash probe failed",
+		"flatten_preflight_head=headcommit",
+		"flatten_head=compactcommit",
+		// One side measured, the other errored — the distinction the three
+		// marker states exist to preserve.
+		"preflight_db_value_hash=hash-before",
+		"postflight_db_value_hash=<probe-failed>",
 		"decision=preserve_marker_manual_review_required",
 	)
 }

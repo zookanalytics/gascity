@@ -231,9 +231,9 @@ postflight database value hashes, `integrity_table_drift` for table-level
 row/hash mismatches, `database_value_hash_drift` for aggregate hash drift, and
 `decision=preserve_marker_manual_review_required`.
 
-The two database value-hash fields distinguish three states, because most
-quarantines fire before the database-hash probe ever runs and a blank field
-cannot support a decision:
+The two database value-hash fields therefore record four distinct values,
+because most quarantines fire before the database-hash probe ever runs and a
+blank field cannot support a decision:
 
 | Value | Meaning |
 |-------|---------|
