@@ -80,6 +80,77 @@ configure_linux_system_cgo_fallback() {
     done
 }
 
+# gc_isolated_gitconfig_path prints the canonical path of the seeded global git
+# config every test entrypoint shares. Keeping it under TMPDIR means a CI
+# container, a `make` run and a direct shard invocation each get one stable file
+# without any of them reaching into the host's real ~/.gitconfig.
+gc_isolated_gitconfig_path() {
+    printf '%s/gascity-testcfg/gitconfig' "${TMPDIR:-/var/tmp}"
+}
+
+# gc_seed_isolated_gitconfig writes the canonical isolated global git config and
+# prints its path. This is the single source of that file's contents: the
+# Makefile's ISOLATED_GITCONFIG and gc_resolve_isolated_gitconfig below both go
+# through here so the `make` path and the direct-invocation path cannot drift.
+#
+# The seeded settings exist for two different failure modes:
+#   - gpgsign = false neutralizes a host ~/.gitconfig with commit.gpgsign=true +
+#     gpg.format=ssh. TEST_ENV allowlists HOME but deliberately not
+#     SSH_AUTH_SOCK, so without this every test that execs `git commit` dies
+#     with "Couldn't get agent socket?" (gc-fzl4).
+#   - user.name/user.email/init.defaultBranch give tests a committer identity and
+#     a stable initial branch without each one opting in.
+#
+# The write is atomic (temp file + rename) because concurrent shard jobs share
+# this path: a truncated-then-rewritten file would be readable mid-write.
+gc_seed_isolated_gitconfig() {
+    local path dir tmp
+    path="$(gc_isolated_gitconfig_path)"
+    dir="$(dirname "$path")"
+    mkdir -p "$dir" || return 1
+    tmp="$(mktemp "$dir/gitconfig.XXXXXX")" || return 1
+    # mktemp creates 0600; the file carries no secrets and is shared by every
+    # concurrent test job, so publish it readable rather than umask-dependent.
+    if ! printf '[user]\n\tname = Gas City Test\n\temail = gascity-test@example.invalid\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n' > "$tmp" ||
+        ! chmod 0644 "$tmp" ||
+        ! mv -f "$tmp" "$path"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    printf '%s' "$path"
+}
+
+# gc_resolve_isolated_gitconfig exports GIT_CONFIG_GLOBAL pointing at a real,
+# writable git config, so every `env -i` allowlist below it forwards a usable
+# value instead of an empty one.
+#
+# An empty GIT_CONFIG_GLOBAL looks fail-safe and is not: git treats it as
+# /dev/null when READING (no global config at all) but resolves the WRITE
+# destination to the empty path, so `git config --global <key> <value>` fails
+# with "error: could not write config file :". CI invokes the shard scripts
+# directly, with no Makefile TEST_ENV above them, and `${GIT_CONFIG_GLOBAL-}`
+# forwarded exactly that empty value — which broke `gc init` (gc-beads-bd's
+# ensure_beads_role writes beads.role into the global config) across six
+# Integration shards (gc-f7wx8).
+#
+# A caller that already chose a config keeps it: under `make`, TEST_ENV has
+# already pointed the variable at $(ISOLATED_GITCONFIG), and re-seeding there
+# would clobber keys such as beads.role that earlier steps wrote into it.
+gc_resolve_isolated_gitconfig() {
+    if [[ -n "${GIT_CONFIG_GLOBAL:-}" ]]; then
+        export GIT_CONFIG_GLOBAL
+        return 0
+    fi
+    local path
+    path="$(gc_isolated_gitconfig_path)"
+    # Seed only when the file is missing. Re-seeding an existing one would drop
+    # keys a concurrent job has already written into it.
+    if [[ ! -f "$path" ]]; then
+        path="$(gc_seed_isolated_gitconfig)" || return 1
+    fi
+    export GIT_CONFIG_GLOBAL="$path"
+}
+
 configure_cgo_platform_paths() {
     cgo_cppflags="${cgo_cppflags:-${CGO_CPPFLAGS:-}}"
     cgo_ldflags="${cgo_ldflags:-${CGO_LDFLAGS:-}}"
