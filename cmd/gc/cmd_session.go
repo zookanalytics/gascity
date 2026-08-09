@@ -2605,6 +2605,11 @@ type sessionNudgeJSON struct {
 	Delivery      string `json:"delivery"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	// NudgeID is the durable id of the queued nudge, set only when the nudge
+	// was queued rather than delivered live. It is the handle a caller needs
+	// to resolve the nudge's fate later (`gc nudge show`): without it,
+	// "delivered" and "dropped" are the same silence.
+	NudgeID string `json:"nudge_id,omitempty"`
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".
