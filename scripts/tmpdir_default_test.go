@@ -72,6 +72,7 @@ func runMakefileTestEnvTMPDirPrintTarget(t *testing.T, extraEnv []string) string
 		t.Fatalf("read Makefile: %v", err)
 	}
 	tmp := t.TempDir()
+	stageRelocatedMakefileSiblings(t, repoRoot, tmp)
 	testMakefile := filepath.Join(tmp, "Makefile")
 	content := string(makefile) + `
 .PHONY: print-test-env-tmpdir

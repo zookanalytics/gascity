@@ -14,6 +14,10 @@ source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-integration-shard" "$@"
+# Resolve before the `env -i` allowlist below reads it: a direct CI invocation
+# supplies no GIT_CONFIG_GLOBAL, and forwarding the empty value breaks every
+# `git config --global` write underneath (gc-f7wx8).
+gc_resolve_isolated_gitconfig
 
 timeout="${GO_TEST_TIMEOUT:-30m}"
 pkg="./test/integration"
@@ -37,8 +41,9 @@ run_go() {
   # GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM carry the Makefile TEST_ENV git-config
   # isolation; forwarding them keeps the host ~/.gitconfig (commit.gpgsign +
   # gpg.format=ssh, with no agent socket under env -i) from breaking every test
-  # that execs `git commit`. Empty is safe — git reads no global config at all,
-  # which is what a direct CI invocation of this script should get (gc-fzl4).
+  # that execs `git commit` (gc-fzl4). GIT_CONFIG_GLOBAL is guaranteed non-empty
+  # by gc_resolve_isolated_gitconfig above: an empty value reads like /dev/null
+  # but fails every `git config --global` WRITE (gc-f7wx8).
   env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
