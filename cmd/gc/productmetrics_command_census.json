@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 203,
+  "next_id": 204,
   "permanent_ids": [
     {
       "name": "help",
@@ -2612,6 +2612,21 @@
       "owner": "excluded",
       "mode": "hidden-private",
       "exclusion": "hidden-private"
+    },
+    {
+      "path": "gc nudge show",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "nudge-show",
+      "owner": "immediate",
+      "id": 203
     },
     {
       "path": "gc nudge status",

@@ -1,6 +1,6 @@
 // TestGcNudgeFormPositional guards issue #1491: the bare `gc nudge <target>
 // "msg"` form was retired when the `gc nudge` namespace was reduced to
-// `drain`/`status`/`poll`. The deprecated form falls through to help-text on
+// subcommands. The deprecated form falls through to help-text on
 // stderr and exits non-zero; every shipped call site wraps with
 // `2>/dev/null || true`, so it silently no-ops. The canonical send-form is
 // `gc session nudge <target> "msg"`. This test fails if a pack template,
@@ -45,11 +45,12 @@ var nudgeAllowlistFiles = map[string]bool{
 }
 
 // validNudgeSubcommands are the still-supported `gc nudge` subcommands.
-// `gc nudge drain`, `gc nudge status`, and `gc nudge poll` remain valid;
-// the bare positional form does not.
+// `gc nudge drain`, `gc nudge status`, `gc nudge show`, and `gc nudge poll`
+// remain valid; the bare positional form does not.
 var validNudgeSubcommands = map[string]bool{
 	"drain":  true,
 	"status": true,
+	"show":   true,
 	"poll":   true,
 }
 
@@ -91,7 +92,7 @@ func TestGcNudgeFormPositional(t *testing.T) {
 	if len(violations) > 0 {
 		t.Errorf("deprecated `gc nudge <target> \"msg\"` (or `{{ cmd }} nudge ...`) form found"+
 			" — silently no-ops because the bare `gc nudge` namespace was reduced to"+
-			" `drain`/`status`/`poll` (issue #1491).\n"+
+			" subcommands (issue #1491).\n"+
 			"Fix: replace with `gc session nudge <target> \"msg\"` (or"+
 			" `{{ cmd }} session nudge <target> \"msg\"`).\n\n%s",
 			strings.Join(violations, "\n"))
