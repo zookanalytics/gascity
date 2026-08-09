@@ -22,9 +22,15 @@ fi
 mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
+# shellcheck source=lib/common.sh
+source "$repo_root/scripts/lib/common.sh"
 # shellcheck source=lib/test-slice.sh
 source "$repo_root/scripts/lib/test-slice.sh"
 gc_test_slice_reexec "$repo_root/scripts/test-local-parallel" "$@"
+# Resolve before the per-job `env -i` allowlist below reads it: a direct
+# invocation supplies no GIT_CONFIG_GLOBAL, and forwarding the empty value
+# breaks every `git config --global` write underneath (gc-f7wx8).
+gc_resolve_isolated_gitconfig
 # shellcheck source=lib/inner-parallelism.sh
 source "$repo_root/scripts/lib/inner-parallelism.sh"
 
@@ -250,11 +256,13 @@ set +e
   # ~/.gitconfig; on a host with commit.gpgsign=true + gpg.format=ssh that
   # breaks every test that execs `git commit` with the git error "Couldn't get
   # agent socket?" -- SSH_AUTH_SOCK is deliberately not allowlisted -- and it
-  # reads as a broken diff rather than a broken harness. Forward-or-empty is
-  # the fail-safe form: git treats an empty GIT_CONFIG_GLOBAL like /dev/null
-  # (no global config at all), never as "fall back to the home directory".
-  # test-go-test-shard and test-integration-shard repeat the same forwarding,
-  # because they re-exec jobs through their own env -i one layer further down.
+  # reads as a broken diff rather than a broken harness. The value forwarded is
+  # guaranteed non-empty by gc_resolve_isolated_gitconfig above: git treats an
+  # empty GIT_CONFIG_GLOBAL like /dev/null when READING but resolves the WRITE
+  # destination to the empty path, so `git config --global` fails under it
+  # (gc-f7wx8). test-go-test-shard and test-integration-shard repeat both the
+  # resolve and the forwarding, because they re-exec jobs through their own
+  # env -i one layer further down.
   # Keep this note here, not inside the single-quoted bash -c body below: an
   # apostrophe in there would close the quote and break the script.
   printf '%s\0' "${jobspecs[@]}" | xargs -0 -n1 -P "$local_jobs" bash -c '
