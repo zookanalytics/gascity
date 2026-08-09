@@ -2879,7 +2879,10 @@ func TestTryDeliverQueuedNudgesByPollerDeliversDespiteStaleFenceBeadMarkFailure(
 	idleSince := time.Now().Add(-10 * time.Second)
 	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
 
-	stale := newQueuedNudgeWithOptions("worker", "stale fenced reminder", "session", now, queuedNudgeOptions{
+	// Wait-sourced: its stamped epoch is the registered_epoch of the
+	// conversation that created the wait, so an epoch drift stays fenced
+	// (queuedNudgeMatchesTargetFence) instead of being retargeted.
+	stale := newQueuedNudgeWithOptions("worker", "stale fenced reminder", nudgeSourceWait, now, queuedNudgeOptions{
 		SessionID:         info.ID,
 		ContinuationEpoch: "1",
 	})
