@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "city_path",
+    "nudge_id",
+    "outcome",
+    "state"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "command": {
+      "const": "nudge show"
+    },
+    "city_path": {
+      "type": "string"
+    },
+    "nudge_id": {
+      "type": "string"
+    },
+    "outcome": {
+      "description": "Whether the nudge reached the target. Callers that reason from a nudged agent's silence must read this before drawing any conclusion: a dropped nudge never arrived, so the silence says nothing about the agent.",
+      "type": "string",
+      "enum": [
+        "pending",
+        "in_flight",
+        "delivered",
+        "dropped",
+        "unknown"
+      ]
+    },
+    "state": {
+      "description": "The underlying record behind the outcome: a live queue bucket (pending/in_flight/dead) or the shadow bead's lifecycle state (queued/injected/accepted_for_injection/failed/expired/superseded).",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Why a nudge was dropped, when the record carries one.",
+      "type": "string"
+    },
+    "agent": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "message": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}
