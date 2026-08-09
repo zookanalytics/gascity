@@ -1189,7 +1189,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 			message = "Wait satisfied."
 		}
 		message = fmt.Sprintf("Wait satisfied (%s): %s", wait.ID, message)
-		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
+		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, nudgeSourceWait, now, queuedNudgeOptions{
 			ID:                nudgeID,
 			SessionID:         sessionID,
 			ContinuationEpoch: wait.RegisteredEpoch,

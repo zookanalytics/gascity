@@ -2585,7 +2585,34 @@ gc nudge
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc nudge show](#gc-nudge-show) | Show whether a queued nudge was delivered or dropped |
 | [gc nudge status](#gc-nudge-status) | Show queued and dead-letter nudges for a session |
+
+## gc nudge show
+
+Show whether a queued nudge was delivered or dropped.
+
+Takes the nudge id "gc session nudge" reports when it queues a nudge (the
+nudge_id field of its --json output). Reports exactly one outcome:
+
+  pending     accepted, waiting for a delivery boundary
+  in_flight   claimed by a delivery pass, not yet acknowledged
+  delivered   handed to the target's runtime
+  dropped     terminalized without delivery; the reason says why
+
+Use it before reading anything into a nudged agent's silence: a dropped
+nudge never reached the agent, so silence says nothing about its health.
+
+The command reports the outcome rather than judging it — a "dropped"
+outcome still exits 0. Exit 1 means the nudge id is unknown to this city.
+
+```
+gc nudge show <nudge-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output as JSON |
 
 ## gc nudge status
 
