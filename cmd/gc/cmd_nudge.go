@@ -107,6 +107,13 @@ const (
 	nudgeDeliveryQueue     nudgeDeliveryMode = "queue"
 )
 
+// nudgeSourceWait marks a queued nudge produced by a satisfied durable wait.
+// The source is load-bearing at delivery: a wait nudge is gated on its wait
+// bead (blockedQueuedNudgeReason) and keeps the strict epoch fence
+// (queuedNudgeMatchesTargetFence), because its stamped epoch is the
+// registered_epoch of the conversation that created the wait.
+const nudgeSourceWait = "wait"
+
 type queuedNudge = nudgequeue.Item
 
 type nudgeQueueState = nudgequeue.State
@@ -252,6 +259,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 	}
 	cmd.AddCommand(
 		newNudgeStatusCmd(stdout, stderr),
+		newNudgeShowCmd(stdout, stderr),
 		newNudgeDrainCmd(stdout, stderr),
 		newNudgePollCmd(stdout, stderr),
 	)
@@ -938,7 +946,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	if err := nudgePokeController(target.cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, "", stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, item.ID, jsonOutput, "", stdout, stderr)
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) error {
@@ -1131,7 +1139,8 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1140,14 +1149,16 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, item.ID, jsonOutput, undelivered, stdout, stderr)
 }
 
 // writeQueuedSessionNudgeResult reports a queued nudge truthfully: WHERE it was
 // queued (the flock'd state.json that is the queue's authority — the shadow bead
-// is a projection of it, so an operator looking for the item needs this path)
-// and, when the live leg was skipped rather than tried, WHY.
-func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
+// is a projection of it, so an operator looking for the item needs this path),
+// WHICH nudge it is (nudgeID is echoed back so the caller can resolve
+// delivered-vs-dropped later with `gc nudge show`), and, when the live leg was
+// skipped rather than tried, WHY.
+func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, nudgeID string, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -1158,11 +1169,12 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
+			NudgeID:       nudgeID,
 		})
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
-		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), nudgequeue.StatePath(target.cityPath), queuedNudgeDowngradeNote(target, undelivered))
+		"Queued nudge for %s in %s (nudge %s)%s\n",
+		target.agentKey(), nudgequeue.StatePath(target.cityPath), nudgeID, queuedNudgeDowngradeNote(target, undelivered))
 	return 0
 }
 
@@ -1675,7 +1687,7 @@ func splitQueuedNudgesForDelivery(sessFront *session.Store, items []queuedNudge)
 }
 
 func blockedQueuedNudgeReason(sessFront *session.Store, item queuedNudge) (string, bool, error) {
-	if !sessFront.Backed() || item.Source != "wait" || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
+	if !sessFront.Backed() || item.Source != nudgeSourceWait || item.Reference == nil || item.Reference.Kind != "bead" || item.Reference.ID == "" {
 		return "", false, nil
 	}
 	wait, err := sessFront.GetWait(item.Reference.ID)
@@ -1837,14 +1849,47 @@ func queuedNudgeIDs(items []queuedNudge) []string {
 	return ids
 }
 
+// queuedNudgeMatchesTargetFence reports whether a claimed nudge may be
+// delivered to target.
+//
+// The session-id half is an identity guard: a nudge stamped for a different
+// session is not this session's message, and never becomes one.
+//
+// The epoch half is narrower than it looks. A session configured
+// mode=always/wake_mode=fresh bumps continuation_epoch on every wake
+// (shouldBumpContinuationEpoch) while keeping the same session bead, so any
+// nudge that outlives one recycle meets a moved epoch at delivery — and an
+// epoch mismatch is dead-lettered on the first attempt (failedQueuedNudge),
+// never retried. Fencing on the epoch there does not protect the message, it
+// destroys it: the sender addressed the AGENT, not one of its conversations.
+// So a drift that is provably the same session is retargeted onto the live
+// conversation instead of rejected.
+//
+// Two cases keep the strict fence. A wait-sourced nudge carries the wait's own
+// registered_epoch (cmd_wait.go), which is a real conversation-scoped
+// guarantee — a stale-epoch wait is independently canceled as
+// continuation-stale, so delivering its reminder into a later conversation
+// would contradict the wait state machine. And an item that names no session
+// cannot prove identity at all, leaving the epoch as the only evidence there is.
 func queuedNudgeMatchesTargetFence(target nudgeTarget, item queuedNudge) bool {
 	if item.SessionID != "" && item.SessionID != target.sessionID {
 		return false
 	}
 	if item.ContinuationEpoch != "" && item.ContinuationEpoch != target.continuationEpoch {
-		return false
+		return queuedNudgeEpochRetargetable(item)
 	}
 	return true
+}
+
+// queuedNudgeEpochRetargetable reports whether an epoch drift on an item that
+// already cleared the session-id guard may be retargeted onto the live
+// conversation. Clearing that guard means the item either names this exact
+// session or names none, so a non-empty session id here is proof of identity.
+func queuedNudgeEpochRetargetable(item queuedNudge) bool {
+	if item.Source == nudgeSourceWait {
+		return false
+	}
+	return item.SessionID != ""
 }
 
 func queuedNudgeClaimableForTarget(target nudgeTarget, item queuedNudge) bool {
