@@ -387,12 +387,21 @@ GOROOT_VAL    := $(shell go env GOROOT)
 ## + gpg.format=ssh makes every test that execs `git commit` fail with "Couldn't
 ## get agent socket?". Pointing GIT_CONFIG_GLOBAL here neutralizes the host config
 ## for every test binary at once, so individual tests need no per-test opt-in.
-## Must be a real writable file, never /dev/null: ensure_beads_role runs
-## `git config --global beads.role maintainer` and cannot lock /dev/null. Tests
-## that WRITE global config still call testutil.IsolatedGitConfig for a per-test
-## file, so writes don't leak through this shared one. Keep contents in sync with
-## internal/testutil/gitconfig.go (isolatedGitConfigContents).
-ISOLATED_GITCONFIG := $(shell d="$${TMPDIR:-/var/tmp}/gascity-testcfg"; mkdir -p "$$d" && printf '[user]\n\tname = Gas City Test\n\temail = gascity-test@example.invalid\n[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n' > "$$d/gitconfig" && printf '%s' "$$d/gitconfig")
+## Must be a real writable file, never /dev/null and never the empty string:
+## ensure_beads_role runs `git config --global beads.role maintainer` and cannot
+## lock either one. The contents live in scripts/lib/common.sh so this path and
+## the directly-invoked shard scripts (which seed the same file when CI gives
+## them no GIT_CONFIG_GLOBAL) cannot drift apart.
+SCRIPTS_LIB_COMMON := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/lib/common.sh
+ISOLATED_GITCONFIG := $(shell bash -c '. "$(SCRIPTS_LIB_COMMON)" && gc_seed_isolated_gitconfig')
+## Fail loudly rather than open. A $(shell) that cannot seed the file yields an
+## empty ISOLATED_GITCONFIG, TEST_ENV then exports GIT_CONFIG_GLOBAL="", and git
+## silently accepts that for reads while failing every `git config --global`
+## WRITE with "could not write config file :" — the gc-f7wx8 failure, one layer
+## up and much harder to see.
+ifeq ($(strip $(ISOLATED_GITCONFIG)),)
+$(error could not seed the isolated test gitconfig via $(SCRIPTS_LIB_COMMON))
+endif
 
 TEST_ENV = env -i \
 	PATH="$$PATH" \

@@ -297,6 +297,7 @@ func runMakefileCGOPrintTarget(t *testing.T, repoRoot, tmp, binDir string, args 
 	if err != nil {
 		t.Fatalf("read Makefile: %v", err)
 	}
+	stageRelocatedMakefileSiblings(t, repoRoot, tmp)
 	testMakefile := filepath.Join(tmp, "Makefile")
 	makefileContent := string(makefile) + `
 .PHONY: print-cgo-flags
@@ -327,6 +328,32 @@ print-cgo-flags:
 		t.Fatalf("make print-cgo-flags failed: %v\n%s", err, out)
 	}
 	return string(out)
+}
+
+// stageRelocatedMakefileSiblings copies the files a relocated copy of the
+// Makefile resolves relative to its own directory. Tests that append a print
+// target to the Makefile body and run it from a temp dir must call this, or the
+// Makefile parses with those lookups pointing at an empty directory.
+//
+// scripts/lib/common.sh is one such sibling: it seeds ISOLATED_GITCONFIG, and
+// without it the Makefile now stops with an explicit $(error) rather than
+// exporting an empty GIT_CONFIG_GLOBAL (gc-f7wx8).
+func stageRelocatedMakefileSiblings(t *testing.T, repoRoot, tmp string) {
+	t.Helper()
+
+	for _, rel := range []string{filepath.Join("scripts", "lib", "common.sh")} {
+		body, err := os.ReadFile(filepath.Join(repoRoot, rel))
+		if err != nil {
+			t.Fatalf("read Makefile sibling %s: %v", rel, err)
+		}
+		dst := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatalf("create parent for %s: %v", dst, err)
+		}
+		if err := os.WriteFile(dst, body, 0o644); err != nil {
+			t.Fatalf("stage Makefile sibling %s: %v", dst, err)
+		}
+	}
 }
 
 func makeCommand(args ...string) *exec.Cmd {
