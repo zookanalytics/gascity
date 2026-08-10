@@ -32,6 +32,13 @@ and cannot see PR#109's fix. The re-check recorded on gc-ytmda ("Verified
 18:52Z, after the merge") ran that stale binary: it was three minutes after
 the merge, but the merge had not been built or installed.
 
+Reproduced independently at self-review, same host and cwd, both binaries
+run back to back: the installed `gc` reports `⚠ census-owner-liveness —
+found 8 dangling owner_bead reference(s)`; a build of this branch reports
+`✓ census-owner-liveness — no dangling owner_bead references found`.
+gc-ytmda's own instruction is not to close on a merge alone; the
+counter-claim gets the same treatment — measured, not asserted.
+
 ## What PR#109 actually fixed
 
 PR#109 was scoped to the checker, and that was the correct place to fix it.
@@ -103,6 +110,11 @@ every agent running `gc doctor` will keep seeing the 8 findings, and the
 next observer will file this bead a fourth time. That is an operator
 decision — reinstalling changes behavior for every agent on the host — so
 it is flagged, not performed here.
+
+Tracked as **`gc-ee0vu`** (routed to the mayor), so the action survives
+outside this branch. A flag in a spec doc on an unmerged branch is not an
+actionable record — and "the next observer files it again" is precisely
+what this bead exists to stop.
 
 ## Correction for the `tk-fwspr` pattern
 
