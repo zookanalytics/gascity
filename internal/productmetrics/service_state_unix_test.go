@@ -186,6 +186,7 @@ func TestStatusIsByteForByteReadOnlyAcrossAbsentCorruptAndUnsafeStates(t *testin
 }
 
 func TestOpenProductionAndPreparationAreLazyAndNonCreating(t *testing.T) {
+	neutralizeAmbientOptOutEnvironment(t)
 	trustedTempRoot := "/tmp"
 	if runtime.GOOS == "darwin" {
 		trustedTempRoot = "/private/tmp"
@@ -718,6 +719,7 @@ func TestTerminalAdjacentPauseCleanupMovesToFreshCompletableNamespace(t *testing
 }
 
 func TestCurrentEndpointEmptyProductionServiceCanPersistAbsentAndCorruptOptOutWithoutEntropy(t *testing.T) {
+	neutralizeAmbientOptOutEnvironment(t)
 	tests := map[string][]byte{
 		"absent":  nil,
 		"corrupt": []byte("invalid = [\n"),
@@ -1088,6 +1090,19 @@ func defaultTestServiceDependencies(home gchome.ProductUsageHome, epoch uint64) 
 		},
 		verifyTTY: func(io.Writer) bool { return true },
 	}
+}
+
+// neutralizeAmbientOptOutEnvironment clears the opt-out environment variables
+// for the duration of the test. OpenProduction wires the real os.Getenv, so an
+// ambient DO_NOT_TRACK or GC_DISABLE_USAGE_METRICS exported by the developer's
+// or agent's shell reaches project() and resolves every such test to
+// environment-disabled. Tests that exercise the environment-disable path itself
+// inject their own getenv through serviceDependencies instead of relying on the
+// process environment.
+func neutralizeAmbientOptOutEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv(envDoNotTrack, "")
+	t.Setenv(envDisableUsageMetrics, "")
 }
 
 func mustOpenTestService(t *testing.T, deps serviceDependencies) *Service {
