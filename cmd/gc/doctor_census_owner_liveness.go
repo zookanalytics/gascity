@@ -118,21 +118,35 @@ func (c *censusOwnerLivenessCheck) liveBeadPrefixes() map[string]struct{} {
 
 // censusOwnerBeadIsLocal reports whether id names a bead in a namespace this
 // city owns, and so can be meaningfully checked for liveness here. An id
-// carrying no prefix segment is treated as local: it cannot be attributed to
-// a foreign store, and reporting it beats silently dropping it.
+// carrying no prefix segment — no dash at all, or an empty leading segment —
+// is treated as local: it cannot be attributed to a foreign store, and
+// reporting it beats silently dropping it.
+//
+// A prefix matches only as a whole dash-delimited head — id must begin with
+// prefix+"-" — so "gcx-1" is not in the "gc" namespace. Matching runs over the
+// whole live set rather than over id's first dash-delimited segment, because
+// configured bead prefixes may themselves contain dashes (rig
+// "agent-diagnostics" mints "agent-diagnostics-hnn"); splitting at the first
+// dash would read that id as the "agent" namespace and, finding no such live
+// prefix, skip a genuinely dangling local row. This is the boolean form of the
+// longest-match rule the routing resolver applies (sling.BeadPrefixForCity):
+// where that resolver must name one prefix, this only asks whether any live
+// prefix claims the id, and "some prefix matches" is exactly "the longest
+// matching prefix is non-empty".
 func censusOwnerBeadIsLocal(id string, live map[string]struct{}) bool {
 	if len(live) == 0 {
 		return true
 	}
-	prefix, _, ok := strings.Cut(strings.TrimSpace(id), "-")
-	if !ok {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if head, _, ok := strings.Cut(id, "-"); !ok || head == "" {
 		return true
 	}
-	if prefix = normalizeCensusBeadPrefix(prefix); prefix == "" {
-		return true
+	for prefix := range live {
+		if strings.HasPrefix(id, prefix+"-") {
+			return true
+		}
 	}
-	_, local := live[prefix]
-	return local
+	return false
 }
 
 // normalizeCensusBeadPrefix canonicalizes a bead ID prefix for comparison,
