@@ -864,3 +864,166 @@ tz = "Amrica/New_York"
 		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }
+
+// A pack imported by rigs stays on the city layer list too, so ScanAll scans
+// its orders/ twice: once on the city pass (Rig keeps "") and once per
+// importing rig. A registration that EXPLICITLY declares scope = "rig" must
+// not survive the city pass. The unbound copy names a rig pool that qualifies
+// to nothing at city scope, so its wisp is poured into the city store where no
+// agent can claim it — and because the order keeps its cooldown, it re-strands
+// every interval.
+func TestScanAllDropsUnboundRigScopedCityRegistration(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir, _ := orderDiscoveryPackLayer(t, "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "liveness-sweep", `[order]
+scope = "rig"
+formula = "mol-liveness-sweep"
+pool = "gc-toolkit.polecat"
+trigger = "cooldown"
+interval = "6h"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"alpha": {cityLayer},
+				"beta":  {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"alpha": {packDir},
+			"beta":  {packDir},
+		},
+	}
+
+	var droppedNames []string
+	var droppedBoundRigs [][]string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			droppedNames = append(droppedNames, orderName)
+			droppedBoundRigs = append(droppedBoundRigs, boundRigs)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+
+	rigs := map[string]int{}
+	for _, a := range aa {
+		if a.Name != "liveness-sweep" {
+			continue
+		}
+		rigs[a.Rig]++
+	}
+	if rigs[""] != 0 {
+		t.Fatalf("unbound (Rig == \"\") registration survived the city pass: %#v", aa)
+	}
+	if rigs["alpha"] != 1 || rigs["beta"] != 1 {
+		t.Fatalf("rig-bound registrations = %v, want one per importing rig", rigs)
+	}
+
+	if len(droppedNames) != 1 || droppedNames[0] != "liveness-sweep" {
+		t.Fatalf("dropped registrations reported = %v, want [liveness-sweep]", droppedNames)
+	}
+	if got := strings.Join(droppedBoundRigs[0], ","); got != "alpha,beta" {
+		t.Errorf("bound rigs reported = %q, want %q", got, "alpha,beta")
+	}
+}
+
+// THE guard against the catastrophic variant of this filter. Scope defaults to
+// rig-scoped when EMPTY, but an empty field is not a declaration: most orders —
+// including the builtin core set — never mention scope at all, and a filter
+// keyed on !IsCityScoped() would delete every one of them. Only the literal
+// "rig" is a declaration.
+func TestScanAllKeepsCityOrdersThatDoNotDeclareRigScope(t *testing.T) {
+	cityPath, _ := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "no-scope-key", `[order]
+exec = "scripts/heartbeat.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "declares-city", `[order]
+scope = "city"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	var dropped []string
+	aa, err := ScanAll(cityPath, &config.City{}, ScanOptions{
+		OnUnboundRigScoped: func(orderName string, _ []string) {
+			dropped = append(dropped, orderName)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(dropped) != 0 {
+		t.Fatalf("dropped %v, want nothing dropped: only an explicit scope = \"rig\" is a declaration", dropped)
+	}
+
+	kept := map[string]bool{}
+	for _, a := range aa {
+		kept[a.Name] = true
+	}
+	if !kept["no-scope-key"] || !kept["declares-city"] {
+		t.Fatalf("kept orders = %v, want both no-scope-key and declares-city", kept)
+	}
+}
+
+// A city-LOCAL order declaring scope = "rig" is in no rig's exclusive layers,
+// so the guard removes it entirely and it runs nowhere. That is correct — it
+// could only ever have stranded — but it is a config error, so the drop is
+// reported with an empty rig list rather than passing silently.
+func TestScanAllReportsCityLocalRigScopedOrderAsBoundNowhere(t *testing.T) {
+	cityPath, _ := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "orphan-sweep", `[order]
+scope = "rig"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	var droppedNames []string
+	var droppedBoundRigs [][]string
+	aa, err := ScanAll(cityPath, &config.City{}, ScanOptions{
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			droppedNames = append(droppedNames, orderName)
+			droppedBoundRigs = append(droppedBoundRigs, boundRigs)
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 0 {
+		t.Fatalf("orders = %#v, want the unbound rig-scoped order dropped", aa)
+	}
+	if len(droppedNames) != 1 || droppedNames[0] != "orphan-sweep" {
+		t.Fatalf("dropped registrations reported = %v, want [orphan-sweep]", droppedNames)
+	}
+	if len(droppedBoundRigs[0]) != 0 {
+		t.Errorf("bound rigs reported = %v, want empty: the order now runs nowhere", droppedBoundRigs[0])
+	}
+}
+
+// A nil handler must not turn the drop into a panic or an error — discovery
+// still drops the unbound registration, the caller just gets no report.
+func TestScanAllDropsUnboundRigScopedWithoutHandler(t *testing.T) {
+	cityPath, _ := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "orphan-sweep", `[order]
+scope = "rig"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	aa, err := ScanAll(cityPath, &config.City{}, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 0 {
+		t.Fatalf("orders = %#v, want the unbound rig-scoped order dropped", aa)
+	}
+}

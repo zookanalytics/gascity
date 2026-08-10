@@ -187,6 +187,15 @@ func (a *Order) IsCityScoped() bool {
 	return a.Scope == "city"
 }
 
+// DeclaresRigScope reports whether the order file EXPLICITLY declares
+// scope = "rig". Registration guards that drop or refuse an order key on this,
+// never on !IsCityScoped(): an empty Scope behaves as rig-scoped but is not a
+// declaration, and most orders — including the builtin core set — never mention
+// scope at all, so the negation would sweep up nearly every order there is.
+func (a *Order) DeclaresRigScope() bool {
+	return a.Scope == "rig"
+}
+
 // TimeoutOrDefault returns the order's configured timeout, or the
 // default: 300s for exec orders, 30s for formula orders.
 func (a *Order) TimeoutOrDefault() time.Duration {

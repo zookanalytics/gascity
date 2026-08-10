@@ -362,6 +362,9 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
 			return nil
 		},
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+		},
 		ValidateOrder: validateOrderExecEnvOverrides,
 	})
 	if err != nil {
