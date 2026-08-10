@@ -209,7 +209,7 @@ version = 1
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-owner_bead = "ga-city-missing"
+owner_bead = "hq-city-missing"
 `)
 	writeCensusLedger(t, rigDir, `
 version = 1
@@ -217,9 +217,10 @@ version = 1
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-owner_bead = "ga-rig-missing"
+owner_bead = "re-rig-missing"
 `)
 	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "hq"},
 		Rigs: []config.Rig{
 			{Name: "repo", Path: rigDir},
 			{Name: "ghost", Path: ""},
@@ -235,12 +236,282 @@ owner_bead = "ga-rig-missing"
 	}
 	details := strings.Join(result.Details, "\n")
 	for _, want := range []string{
-		"city: dangling owner_bead=ga-city-missing",
-		"rig repo: dangling owner_bead=ga-rig-missing",
+		"city: dangling owner_bead=hq-city-missing",
+		"rig repo: dangling owner_bead=re-rig-missing",
 	} {
 		if !strings.Contains(details, want) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
+	}
+}
+
+func TestCensusOwnerLivenessCheckIgnoresForeignPrefixOwnerBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "ga-80po0c.2"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "ga-80po0c.2.1"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "lx"},
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: t.TempDir()},
+		},
+	}
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		t.Fatal("newStore should not be called when no owner_bead names a live namespace")
+		return nil, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want StatusOK; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	if len(result.Details) != 0 {
+		t.Fatalf("details = %v, want empty (foreign-prefix rows are out of scope, not findings)", result.Details)
+	}
+}
+
+func TestCensusOwnerLivenessCheckStillFlagsLivePrefixOwnerBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "ga-80po0c.2"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "gc-missing"
+
+[[small_debt]]
+scope = "all"
+resource = "cwd"
+owner_bead = "lx-missing"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "lx"},
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: t.TempDir()},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{
+		"city: dangling owner_bead=gc-missing",
+		"city: dangling owner_bead=lx-missing",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing live-prefix finding %q:\n%s", want, details)
+		}
+	}
+	if strings.Contains(details, "ga-80po0c.2") {
+		t.Fatalf("foreign-prefix owner_bead must not appear in details:\n%s", details)
+	}
+	if got := strings.Count(details, "dangling owner_bead="); got != 2 {
+		t.Fatalf("dangling finding count = %d, want 2:\n%s", got, details)
+	}
+}
+
+func TestCensusOwnerLivenessCheckTreatsSuspendedAndPathlessRigPrefixesAsLive(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "gh-missing"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "pa-missing"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "lx"},
+		Rigs: []config.Rig{
+			{Name: "ghost", Prefix: "gh", Path: ""},
+			{Name: "paused", Prefix: "pa", Path: t.TempDir(), SuspendedOnStart: true},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{
+		"city: dangling owner_bead=gh-missing",
+		"city: dangling owner_bead=pa-missing",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q — an unscanned rig's prefix is still a live namespace:\n%s", want, details)
+		}
+	}
+}
+
+func TestCensusOwnerLivenessCheckChecksEveryOwnerBeadWhenNoLivePrefixIsKnown(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "ga-missing-1"
+`)
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(nil, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "dangling owner_bead=ga-missing-1") {
+		t.Fatalf("unknown-namespace city must check every owner_bead rather than suppress findings:\n%s", details)
+	}
+}
+
+func TestCensusOwnerLivenessCheckMatchesPrefixExactlyAndCaseInsensitively(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "gcx-missing"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "GC-missing"
+
+[[small_debt]]
+scope = "all"
+resource = "cwd"
+owner_bead = "nodash"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestOrphan"
+resources = ["subprocess"]
+owner_bead = "-orphan"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "lx"},
+		Rigs: []config.Rig{
+			{Name: "gascity", Prefix: "gc", Path: t.TempDir()},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if strings.Contains(details, "gcx-missing") {
+		t.Fatalf("prefix match must be exact-segment: gcx- is not the gc namespace:\n%s", details)
+	}
+	for _, want := range []string{
+		"city: dangling owner_bead=GC-missing",
+		"city: dangling owner_bead=nodash",
+		"city: dangling owner_bead=-orphan",
+	} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q — an id with no attributable prefix segment must be reported, not skipped:\n%s", want, details)
+		}
+	}
+}
+
+func TestCensusOwnerLivenessCheckMatchesHyphenatedLivePrefix(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "agent-diagnostics-hnn"
+
+[[debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "agent-elsewhere-hnn"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "lx"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Prefix: "agent-diagnostics", Path: t.TempDir()},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, nil, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want StatusWarning; message=%q details=%v", result.Status, result.Message, result.Details)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "city: dangling owner_bead=agent-diagnostics-hnn") {
+		t.Fatalf("a hyphenated live rig prefix must still be checked, not classified foreign:\n%s", details)
+	}
+	if strings.Contains(details, "agent-elsewhere-hnn") {
+		t.Fatalf("prefix match must be exact-segment: agent-elsewhere- is not the agent-diagnostics namespace:\n%s", details)
+	}
+}
+
+func TestCensusOwnerLivenessCheckPrefersLongestLivePrefixMatch(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "agent-diagnostics-hnn"
+`)
+	cfg := &config.City{
+		Workspace: config.Workspace{Prefix: "agent"},
+		Rigs: []config.Rig{
+			{Name: "agent-diagnostics", Prefix: "agent-diagnostics", Path: t.TempDir()},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "agent-diagnostics-hnn", Title: "alive"}}, nil)
+	result := newCensusOwnerLivenessCheck(cfg, cityDir, func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want StatusOK; message=%q details=%v", result.Status, result.Message, result.Details)
 	}
 }
 
