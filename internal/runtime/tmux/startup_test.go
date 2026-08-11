@@ -3445,15 +3445,29 @@ func TestRunSetupCommandActivityIdleKillsSilentHang(t *testing.T) {
 
 // TestRunSetupCommandActivityCeilingKillsRunaway proves the runaway backstop:
 // continuous output must not extend a command past the absolute ceiling.
+//
+// The idle budget is set far beyond the ceiling deliberately. Both budgets are
+// armed from the same instant, so a ceiling shorter than the idle window is the
+// only one that can fire no matter how the host schedules the streamer — where
+// an idle window near the ceiling turns the assertion into a race that a
+// starved writer loses, reporting the idle timeout for a command the ceiling
+// was meant to kill.
 func TestRunSetupCommandActivityCeilingKillsRunaway(t *testing.T) {
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 700 * time.Millisecond}
 
+	// A regression that dropped the ceiling while keeping the idle budget would
+	// leave this streamer running forever, hanging the package rather than
+	// failing it. Bound the parent so that regression surfaces as the assertion
+	// below; the ceiling fires an order of magnitude earlier on the happy path.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	start := time.Now()
 	err := ops.runSetupCommand(
-		context.Background(),
+		ctx,
 		"while true; do echo spinning; sleep 0.1; done",
 		map[string]string{},
-		300*time.Millisecond,
+		5*time.Second,
 	)
 	elapsed := time.Since(start)
 	if err == nil {
