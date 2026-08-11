@@ -1752,6 +1752,9 @@ func (cs *controllerState) OrdersAll() []orders.Order {
 			log.Printf("gc api: skipping invalid order %s for %s: %v", orderName, cs.cityPath, err)
 			return nil
 		},
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			log.Printf("gc api: %s for %s", orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs), cs.cityPath)
+		},
 		ValidateOrder: validateOrderExecEnvOverrides,
 	})
 	if err != nil {
