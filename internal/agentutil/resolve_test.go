@@ -1,6 +1,8 @@
 package agentutil
 
 import (
+	"errors"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -320,6 +322,75 @@ func TestAgentReachesWorkflowStoreCityScopedReachesAnyStore(t *testing.T) {
 	}
 	if !AgentReachesWorkflowStore("rig:voxist-web", rigAgent, "/c", cfg) {
 		t.Fatal("rig-scoped agent must reach its own rig store")
+	}
+}
+
+// A per-rig template (scope="rig", no dir) binds to no single rig, so its
+// store is not decidable here — ResolveRouteTarget holds the candidate logic
+// that picks which rig-qualification a route means. Reachability defers to it
+// rather than classifying the template by the empty-dir branch, which reads an
+// absent dir as "city agent" and refused every rig-store route before the
+// routing write site could qualify it.
+func TestAgentReachesWorkflowStoreDefersUnboundRigTemplate(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/c/alpha", Prefix: "AL"},
+			{Name: "beta", Path: "/c/beta", Prefix: "BE"},
+		},
+	}
+	template := &config.Agent{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig"}
+
+	for _, storeRef := range []string{"rig:alpha", "rig:beta", "city:test-city"} {
+		if !AgentReachesWorkflowStore(storeRef, template, "/c", cfg) {
+			t.Errorf("per-rig template must defer to the route resolver for store %q, not be refused here", storeRef)
+		}
+	}
+
+	// The deferral is narrow: it turns on the template shape alone. An agent
+	// with a dir is still classified by its rig, and a dir-less agent that is
+	// NOT a rig template is still city-store-only.
+	bound := &config.Agent{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig", Dir: "alpha"}
+	if AgentReachesWorkflowStore("rig:beta", bound, "/c", cfg) {
+		t.Error("a rig-bound agent must not reach another rig's store")
+	}
+	hq := &config.Agent{Name: "mayor"}
+	if AgentReachesWorkflowStore("rig:alpha", hq, "/c", cfg) {
+		t.Error("a dir-less non-template agent must stay city-store-only")
+	}
+}
+
+// The resolver the check above defers to is what actually decides the
+// template's route, so pin both halves: a rig store qualifies the bare
+// address, and a store no rig-qualification reaches refuses it by name.
+func TestResolveRouteTargetQualifiesUnboundRigTemplate(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/c/alpha", Prefix: "AL"},
+			{Name: "beta", Path: "/c/beta", Prefix: "BE"},
+		},
+		Agents: []config.Agent{{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig"}},
+	}
+
+	got, err := ResolveRouteTarget(cfg, "rig:alpha", "gc-toolkit.polecat")
+	if err != nil {
+		t.Fatalf("ResolveRouteTarget(rig:alpha): %v", err)
+	}
+	if got != "alpha/gc-toolkit.polecat" {
+		t.Errorf("ResolveRouteTarget(rig:alpha) = %q, want alpha/gc-toolkit.polecat", got)
+	}
+
+	if _, err := ResolveRouteTarget(cfg, "city:test-city", "gc-toolkit.polecat"); err == nil {
+		t.Fatal("a template address no city-store qualification reaches must be refused")
+	} else {
+		var unresolvable *UnresolvableRouteTargetError
+		if !errors.As(err, &unresolvable) {
+			t.Fatalf("error type = %T, want *UnresolvableRouteTargetError", err)
+		}
+		for _, want := range []string{"alpha/gc-toolkit.polecat", "beta/gc-toolkit.polecat"} {
+			if !slices.Contains(unresolvable.Candidates, want) {
+				t.Errorf("candidates %v missing %q", unresolvable.Candidates, want)
+			}
+		}
 	}
 }
 

@@ -2676,6 +2676,90 @@ dir = "orders"
 	}
 }
 
+// TestCmdSlingUnboundRigTemplateQualifiesRouteEndToEnd drives the whole
+// `gc sling` path — resolution, the cross-store preflight, and the routing
+// write — for the one agent shape that actually produces a bare rig-pool
+// routed identity: a per-rig template, scope="rig" with no dir. Its
+// RoutedToIdentity is the unqualified "worker", which names no live identity;
+// the live one is "alpha/worker".
+//
+// The write-site guard qualifies that address, but only if the route reaches
+// the write site at all. The preflight cross-store check runs first and cannot
+// classify a template's store from its config, so this test pins the two
+// halves together end to end rather than at the router in isolation.
+func TestCmdSlingUnboundRigTemplateQualifiesRouteEndToEnd(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	t.Setenv("GC_BEADS", "file")
+
+	cityDir := t.TempDir()
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	alphaDir := filepath.Join(cityDir, "alpha")
+	if err := os.MkdirAll(alphaDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", alphaDir, err)
+	}
+	if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+		t.Fatalf("ensureScopedFileStoreLayout: %v", err)
+	}
+	for _, dir := range []string{cityDir, alphaDir} {
+		if err := ensurePersistedScopeLocalFileStore(dir); err != nil {
+			t.Fatalf("ensurePersistedScopeLocalFileStore(%s): %v", dir, err)
+		}
+	}
+	writeTestFileStoreBeads(t, alphaDir, []beads.Bead{{
+		ID:       "AL-abcde",
+		Title:    "rig-store work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{},
+	}})
+	cityToml := `[workspace]
+name = "demo"
+
+[[rigs]]
+name = "alpha"
+path = "alpha"
+prefix = "AL"
+
+[[agent]]
+name = "worker"
+scope = "rig"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSling(
+		[]string{"worker", "AL-abcde"},
+		false, false, true,
+		"", nil, "",
+		true, false, false, "",
+		true, false, false,
+		"", "",
+		&stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("cmdSling returned %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	alphaStore, err := openStoreAtForCity(alphaDir, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(alpha): %v", err)
+	}
+	routed, err := alphaStore.Get("AL-abcde")
+	if err != nil {
+		t.Fatalf("alphaStore.Get(AL-abcde): %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "alpha/worker" {
+		t.Fatalf("gc.routed_to = %q, want alpha/worker (the bare template name is unclaimable)", got)
+	}
+}
+
 // TestCmdSlingHyphenatedRigPrefixExistingBeadDoesNotOrphan verifies
 // that an existing bead in a rig whose configured prefix contains a
 // hyphen ("agent-diagnostics-hnn" in rig "agent-diagnostics") routes

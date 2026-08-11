@@ -138,7 +138,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
 		},
 		Runner:   s.slingRunner(),
-		Router:   apiBeadRouter{server: s, store: store},
+		Router:   apiBeadRouter{server: s, store: store, storeRef: storeRef},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -477,6 +477,9 @@ func (n *apiNotifier) PokeControlDispatch(_ string) {
 type apiBeadRouter struct {
 	server *Server
 	store  beads.Store
+	// storeRef scopes which rig-qualification of a routing address is live,
+	// in the workflow store format AgentReachesWorkflowStore uses.
+	storeRef string
 }
 
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
@@ -501,9 +504,19 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
+	// Same guard as the CLI write site (cmd/gc/cmd_sling.go): an address that
+	// resolves to no live agent identity is structurally invisible, because the
+	// pool offer predicate is open + unassigned + gc.routed_to matching a live
+	// identity. ResolveRouteTarget qualifies it against this store's rig when
+	// exactly one qualification is live, refuses it otherwise, and subsumes the
+	// slot-suffixed pool collapse that guarded this line before.
 	routedTo := req.Target
 	if cfg != nil {
-		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
+		resolved, err := agentutil.ResolveRouteTarget(cfg, r.storeRef, req.Target)
+		if err != nil {
+			return fmt.Errorf("routing %s: %w", req.BeadID, err)
+		}
+		routedTo = resolved
 	}
 	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		if req.Force && errors.Is(err, beads.ErrNotFound) {

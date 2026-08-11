@@ -271,6 +271,21 @@ func AgentReachesWorkflowStore(storeRef string, agentCfg *config.Agent, cityPath
 	if AgentIsCrossStoreEligible(agentCfg) {
 		return true
 	}
+	// A per-rig template binds to no single rig, so its store is not decidable
+	// from its config: it materializes one identity per rig, and which one a
+	// route means is decided by the store being written to. Defer to
+	// ResolveRouteTarget, the only thing that holds that candidate logic — it
+	// qualifies the address for a rig store and refuses it, naming candidates,
+	// for a store no rig-qualification reaches.
+	//
+	// Deciding it here instead classified the template by the branch below,
+	// where an empty ConfiguredRigName means "city agent". A template is not a
+	// city agent — it has no dir because it has every rig, not because it has
+	// none — so every rig-store route to one was refused before the routing
+	// write site could qualify it.
+	if isUnboundRigTemplate(agentCfg.Scope, agentCfg.Dir) {
+		return true
+	}
 	agentRig := workdirutil.ConfiguredRigName(cityPath, *agentCfg, cfg.Rigs)
 	if agentRig == "" {
 		return strings.HasPrefix(storeRef, "city:")

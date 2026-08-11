@@ -639,6 +639,41 @@ func TestSlingSlotSuffixedPoolTargetNormalizesRoutedTo(t *testing.T) {
 	}
 }
 
+// TestSlingUnboundRigTemplateQualifiesRoutedTo pins the API write site to the
+// same live-identity rule as the CLI's. A per-rig template (scope="rig", no
+// dir) routes as the bare "gc-toolkit.polecat", which matches no live identity
+// — the live one is "myrig/gc-toolkit.polecat" — so a bead stamped with the
+// bare form is invisible to the pool offer predicate and sits open forever.
+func TestSlingUnboundRigTemplateQualifiesRoutedTo(t *testing.T) {
+	h, state := newSlingTestServer(t)
+	state.cfg.Agents = []config.Agent{
+		{
+			Name: "polecat", BindingName: "gc-toolkit", Scope: "rig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		},
+	}
+	store := state.stores["myrig"]
+	b, err := store.Create(beads.Bead{Title: "test task", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"target":"gc-toolkit.polecat","bead":"` + b.ID + `"}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/sling"), strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if got := updated.Metadata["gc.routed_to"]; got != "myrig/gc-toolkit.polecat" {
+		t.Fatalf("gc.routed_to = %q, want myrig/gc-toolkit.polecat (the bare template name is unclaimable)", got)
+	}
+}
+
 func TestSlingGraphV2RejectsLegacySourceWorkflowConflict(t *testing.T) {
 	// The Huma migration moved sling to /v0/city/{cityName}/sling and
 	// replaced the old plain-JSON `{code, message, source_bead_id, ...}`

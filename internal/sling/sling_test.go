@@ -2162,6 +2162,23 @@ func TestValidateBuiltInRouteStoreReachableAllowsCityScopedTarget(t *testing.T) 
 	}
 }
 
+// A per-rig template (scope="rig", no dir) is the one target shape whose
+// routed identity is a bare rig-pool name, and it is exactly the shape this
+// preflight cannot classify: the template has no dir because it has every rig.
+// Refusing it here shadowed the routing write site's qualifier, so the guard
+// that turns "gc-toolkit.polecat" into "myrig/gc-toolkit.polecat" was
+// unreachable through DoSling and only exercised by calling the router
+// directly.
+func TestValidateBuiltInRouteStoreReachableAllowsUnboundRigTemplate(t *testing.T) {
+	deps, _, _ := crossStoreSlingDeps(t)
+	deps.StoreRef = "rig:myrig"
+	template := config.Agent{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig", MaxActiveSessions: intPtr(3)}
+
+	if err := validateBuiltInRouteStoreReachable(deps, "RW-1", template); err != nil {
+		t.Fatalf("per-rig template routing a rig-store bead must reach the write site, got: %v", err)
+	}
+}
+
 func requireCrossStoreRouteError(t *testing.T, err error) {
 	t.Helper()
 	var crossStoreErr *CrossStoreRouteError
