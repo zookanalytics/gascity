@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	beadsexec "github.com/gastownhall/gascity/internal/beads/exec"
@@ -2269,6 +2270,123 @@ func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	requireOnlySeedBeads(t, deps.Store, 1)
 	if len(router.routed) != 0 {
 		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+// unboundTemplateSlingFixture routes a city-store bead to a per-rig template
+// (scope="rig", no dir) that only rig:myrig can qualify. The store-reachability
+// predicate defers this shape to ResolveRouteTarget rather than classifying it
+// itself, so this is the one target shape whose refusal is decided by the
+// route-target rule alone.
+func unboundTemplateSlingFixture(t *testing.T, assignee, status string) (SlingOpts, SlingDeps, *fakeBeadRouter, beads.Bead) {
+	t.Helper()
+	deps, router, _ := crossStoreSlingDeps(t) // deps.StoreRef = "city:test-city"
+	template := config.Agent{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig", MaxActiveSessions: intPtr(3)}
+	deps.Cfg.Agents = []config.Agent{template}
+	bead, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Assignee: assignee})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Create always stores a bead open, so an in_progress fixture needs a
+	// follow-up update.
+	if status != "" {
+		if err := deps.Store.Update(bead.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("Update(%s, status=%s): %v", bead.ID, status, err)
+		}
+		bead.Status = status
+	}
+	opts := SlingOpts{Target: template, BeadOrFormula: bead.ID, Force: true}
+	return opts, deps, router, bead
+}
+
+func requireUnresolvableRouteTargetError(t *testing.T, err error) {
+	t.Helper()
+	var routeErr *agentutil.UnresolvableRouteTargetError
+	if !errors.As(err, &routeErr) {
+		t.Fatalf("error = %T %[1]v, want UnresolvableRouteTargetError", err)
+	}
+	if len(routeErr.Candidates) == 0 {
+		t.Fatal("refusal must name the live rig-qualifications the caller could have meant")
+	}
+}
+
+// Deferring the template to ResolveRouteTarget must not turn a refusal into a
+// LATE refusal. ResolveRouteTarget runs at the routing write site, which is
+// reached only after --on/default formula has instantiated a wisp and stamped
+// molecule_id — so a route the write site refuses would leave molecule
+// artifacts behind on a command that failed. The preflight runs that same
+// decision before any of it.
+func TestDoSlingRefusesUnboundTemplateOnFormulaBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := unboundTemplateSlingFixture(t, "", "")
+	opts.OnFormula = "code-review"
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireUnresolvableRouteTargetError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+func TestDoSlingRefusesUnboundTemplateDefaultFormulaBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := unboundTemplateSlingFixture(t, "", "")
+	opts.Target.DefaultSlingFormula = stringPtr("code-review")
+	deps.Cfg.Agents = []config.Agent{opts.Target}
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireUnresolvableRouteTargetError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+// --reassign runs immediately after the preflight guard, so a late refusal
+// leaves the bead reopened and unassigned — claimable by nobody, because the
+// route that was supposed to replace the assignee never landed.
+func TestDoSlingRefusesUnboundTemplateReassignBeforeReopening(t *testing.T) {
+	opts, deps, router, bead := unboundTemplateSlingFixture(t, "human@example.com", "in_progress")
+	opts.NoFormula = true
+	opts.Reassign = true
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireUnresolvableRouteTargetError(t, err)
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "human@example.com")
+	got, getErr := deps.Store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("Status = %q, want in_progress (unreopened) after refusal", got.Status)
+	}
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
+// The reachable direction must keep working: from the rig store that qualifies
+// it, the same template routes end-to-end and the write site records the
+// qualified identity.
+func TestDoSlingRoutesUnboundTemplateFromQualifyingStore(t *testing.T) {
+	opts, deps, router, bead := unboundTemplateSlingFixture(t, "", "")
+	deps.StoreRef = "rig:myrig"
+	opts.NoFormula = true
+
+	if _, err := DoSling(opts, deps, deps.Store); err != nil {
+		t.Fatalf("DoSling from the qualifying rig store: %v", err)
+	}
+
+	if len(router.routed) != 1 {
+		t.Fatalf("router calls = %d, want 1", len(router.routed))
+	}
+	if router.routed[0].BeadID != bead.ID {
+		t.Fatalf("routed BeadID = %q, want %q", router.routed[0].BeadID, bead.ID)
 	}
 }
 

@@ -707,19 +707,37 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	return result, nil
 }
 
+// validateBuiltInRouteStoreReachable refuses, before any mutation, a built-in
+// route the routing write site would refuse: one whose target cannot serve the
+// store the bead lives in, and one whose target resolves to no live identity
+// reachable from that store.
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {
 	if deps.Cfg == nil || IsCustomSlingQuery(a) {
 		return nil
 	}
-	if agentutil.AgentReachesWorkflowStore(deps.StoreRef, &a, deps.CityPath, deps.Cfg) {
-		return nil
+	if !agentutil.AgentReachesWorkflowStore(deps.StoreRef, &a, deps.CityPath, deps.Cfg) {
+		return &CrossStoreRouteError{
+			BeadID:            beadID,
+			StoreRef:          deps.StoreRef,
+			Target:            a.QualifiedName(),
+			ReachableStoreRef: agentutil.AgentReachableStoreLabel(&a, deps.CityPath, deps.CityName, deps.Cfg),
+		}
 	}
-	return &CrossStoreRouteError{
-		BeadID:            beadID,
-		StoreRef:          deps.StoreRef,
-		Target:            a.QualifiedName(),
-		ReachableStoreRef: agentutil.AgentReachableStoreLabel(&a, deps.CityPath, deps.CityName, deps.Cfg),
+	// Store reachability cannot classify a per-rig template — the template has
+	// no dir because it has every rig, not because it has none — so it defers
+	// that shape to ResolveRouteTarget, which otherwise runs only at the
+	// routing write site. Deferral alone is too late to be the whole guard: the
+	// write site is reached after --on/default formula has instantiated a wisp
+	// and stamped molecule_id, and after --reassign has cleared the assignee
+	// and reopened the bead, so a route refused there fails a command that has
+	// already mutated state. Running the write site's own decision here moves
+	// the refusal ahead of every mutation, and raises the identical error.
+	// Every target shape reachability CAN classify already resolves to a live
+	// identity, so this pass adds no new refusals.
+	if _, err := agentutil.ResolveRouteTarget(deps.Cfg, deps.StoreRef, agentutil.RoutedToIdentity(&a)); err != nil {
+		return fmt.Errorf("routing %s: %w", beadID, err)
 	}
+	return nil
 }
 
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
