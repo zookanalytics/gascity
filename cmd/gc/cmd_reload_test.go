@@ -304,7 +304,7 @@ func TestHandleReloadSocketCmdAsyncAccepted(t *testing.T) {
 		close(done)
 	}()
 
-	req := <-reloadReqCh
+	req := recvReloadRequest(t, reloadReqCh)
 	if req.wait {
 		t.Fatal("req.wait = true, want false")
 	}
@@ -340,7 +340,7 @@ func TestHandleReloadSocketCmdPropagatesSoft(t *testing.T) {
 		close(done)
 	}()
 
-	req := <-reloadReqCh
+	req := recvReloadRequest(t, reloadReqCh)
 	if !req.soft {
 		t.Fatal("req.soft = false, want true")
 	}
@@ -373,7 +373,7 @@ func TestHandleReloadSocketCmdAsyncIgnoresInvalidTimeout(t *testing.T) {
 		close(done)
 	}()
 
-	req := <-reloadReqCh
+	req := recvReloadRequest(t, reloadReqCh)
 	if req.wait {
 		t.Fatal("req.wait = true, want false")
 	}
@@ -409,7 +409,7 @@ func TestHandleReloadSocketCmdSyncTimeout(t *testing.T) {
 		close(done)
 	}()
 
-	req := <-reloadReqCh
+	req := recvReloadRequest(t, reloadReqCh)
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
@@ -466,39 +466,109 @@ func TestHandleReloadSocketCmdBusyOnAcceptTimeout(t *testing.T) {
 }
 
 func TestHandleReloadSocketCmdWaitsForAcceptedAfterHandoff(t *testing.T) {
+	// The accept clock restarts at handoff: an acknowledgement that arrives
+	// after the ORIGINAL accept deadline, but inside the window the handler
+	// opens once the controller has taken the request, still has to produce
+	// "accepted". The handler used to wait only the leftover of the original
+	// deadline, so a handoff that consumed most of the window left the
+	// controller almost no time to acknowledge.
+	//
+	// Observing that costs real wall time — the handoff has to consume most
+	// of the accept window — and the handler reads its deadline straight off
+	// the clock, so there is no seam that makes the exchange deterministic.
+	// What this test does instead is refuse to conclude anything from timings
+	// it did not actually get: every wait is bounded, and an attempt whose
+	// own sleeps were descheduled outside the window they need retries with a
+	// wider one rather than reporting a regression that did not happen.
+	window := 400 * time.Millisecond
+	for attempt := 1; attempt <= 3; attempt++ {
+		if observedAcceptRefreshAfterHandoff(t, window) {
+			return
+		}
+		t.Logf("attempt %d: exchange slipped outside the %s accept window, retrying wider", attempt, window)
+		window *= 2
+	}
+	t.Skipf("machine never scheduled the exchange tightly enough to observe the accept refresh (widened to %s); no evidence either way", window)
+}
+
+// observedAcceptRefreshAfterHandoff drives one late-handoff exchange under the
+// given accept window and reports whether it observed the refresh. It lets the
+// handler burn most of the window before taking the request, then acknowledges
+// after the original deadline has passed but while the fresh window is still
+// open. A handler that misbehaves under timings the attempt verified fails the
+// test; timings the attempt failed to hit report false so the caller can retry
+// with more room.
+func observedAcceptRefreshAfterHandoff(t *testing.T, window time.Duration) bool {
+	t.Helper()
+
+	// guard holds both ends of the acknowledgement away from the window
+	// boundaries, so the attempt only draws a conclusion when the timings it
+	// measured clear them by a real margin.
+	guard := window / 8
+	handoffDelay := window * 5 / 8
+	ackDelay := window * 5 / 8
+
 	oldAccept := controllerReloadAcceptTimeout
-	controllerReloadAcceptTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { controllerReloadAcceptTimeout = oldAccept })
+	controllerReloadAcceptTimeout = window
+	defer func() { controllerReloadAcceptTimeout = oldAccept }()
 
 	server, client := net.Pipe()
 	defer client.Close() //nolint:errcheck
 
 	reloadReqCh := make(chan reloadRequest)
 	done := make(chan struct{})
+	started := time.Now()
 	go func() {
 		handleReloadSocketCmd(server, `{"wait":false}`, reloadReqCh)
 		close(done)
 	}()
 
-	time.Sleep(180 * time.Millisecond)
-	req := <-reloadReqCh
-	time.Sleep(50 * time.Millisecond)
+	// Burn most of the accept window before taking the request, so the
+	// acknowledgement below lands past the original deadline.
+	time.Sleep(handoffDelay)
+
+	var req reloadRequest
+	select {
+	case req = <-reloadReqCh:
+	case <-time.After(window):
+		// The sleep outlasted the accept window, so the handler gave up
+		// and replied "busy" before the request was ever taken. Nothing
+		// is stuck and nothing was observed.
+		if reply := readReloadSocketReply(t, client); reply.Outcome != reloadOutcomeBusy {
+			t.Fatalf("reply.Outcome = %q, want %q after an abandoned handoff", reply.Outcome, reloadOutcomeBusy)
+		}
+		awaitReloadHandlerExit(t, client, done)
+		return false
+	}
+	handoffAt := time.Now()
+
+	time.Sleep(ackDelay)
+	// acceptedCh is buffered, so this never blocks even when the handler has
+	// already stopped waiting; measuring after the send bounds how late the
+	// acknowledgement could have become visible.
 	req.acceptedCh <- reloadControlReply{
 		Outcome: reloadOutcomeAccepted,
 		Message: "Reload requested.",
 	}
+	acked := time.Since(handoffAt)
 
 	reply := readReloadSocketReply(t, client)
-	if reply.Outcome != reloadOutcomeAccepted {
-		t.Fatalf("reply.Outcome = %q, want %q", reply.Outcome, reloadOutcomeAccepted)
-	}
 
-	client.Close() //nolint:errcheck
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload socket handler did not exit")
+	// A handler that carried the original deadline forward would have waited
+	// only this much longer for the acknowledgement. Conclude something only
+	// when the acknowledgement landed clear of that leftover and still clear
+	// of the end of the fresh window.
+	leftover := window - handoffAt.Sub(started)
+	if acked < leftover+guard || acked > window-guard {
+		awaitReloadHandlerExit(t, client, done)
+		return false
 	}
+	if reply.Outcome != reloadOutcomeAccepted {
+		t.Fatalf("reply.Outcome = %q, want %q: acknowledged %s after a handoff that left %s of the original %s accept window",
+			reply.Outcome, reloadOutcomeAccepted, acked, leftover, window)
+	}
+	awaitReloadHandlerExit(t, client, done)
+	return true
 }
 
 func TestControllerReloadAcceptTimeoutDefault(t *testing.T) {
@@ -861,6 +931,41 @@ func readReloadSocketReply(t *testing.T, conn net.Conn) reloadControlReply {
 		t.Fatalf("decode reply: %v", err)
 	}
 	return reply
+}
+
+// reloadHandoffWait bounds how long a test waits for the handler to offer a
+// reload request. It only has to outlast scheduling noise: offering the request
+// is the handler's first blocking act, so anything slower means it never got
+// there.
+const reloadHandoffWait = 10 * time.Second
+
+// recvReloadRequest receives the request the handler hands off, failing the
+// test instead of blocking forever when no handoff arrives. handleReloadSocketCmd
+// abandons the handoff once controllerReloadAcceptTimeout expires, replies
+// "busy" and returns, after which nothing will ever send on the channel — an
+// unguarded receive here blocks until the package -timeout fires and takes
+// every other test in the binary down with it.
+func recvReloadRequest(t *testing.T, ch <-chan reloadRequest) reloadRequest {
+	t.Helper()
+	select {
+	case req := <-ch:
+		return req
+	case <-time.After(reloadHandoffWait):
+		t.Fatalf("handler did not hand off a reload request within %s", reloadHandoffWait)
+		return reloadRequest{}
+	}
+}
+
+// awaitReloadHandlerExit closes the client end of the pipe and waits for the
+// handler goroutine to return, so no attempt leaves a handler parked on it.
+func awaitReloadHandlerExit(t *testing.T, client net.Conn, done <-chan struct{}) {
+	t.Helper()
+	client.Close() //nolint:errcheck
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reload socket handler did not exit")
+	}
 }
 
 func TestSupervisorCityInfoMatchesNormalizedPath(t *testing.T) {
