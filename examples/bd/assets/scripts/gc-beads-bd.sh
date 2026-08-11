@@ -1938,6 +1938,17 @@ ensure_beads_role() {
     if git config --global beads.role >/dev/null 2>&1; then
         return 0
     fi
+    # A set-but-EMPTY GIT_CONFIG_GLOBAL resolves git's global config file to
+    # the empty path. The read above survives it (git treats the empty path as
+    # /dev/null) and so always falls through to the write below, which dies
+    # with "error: could not write config file : <errno>". The empty filename
+    # between the colon and the errno is the only clue to the cause, and the
+    # errno text is not stable across systems — decoding that cost a full
+    # investigation once already (gc-f7wx8). Name the variable instead.
+    # Unset is the normal state and must not trip this.
+    if [ -n "${GIT_CONFIG_GLOBAL+set}" ] && [ -z "${GIT_CONFIG_GLOBAL:-}" ]; then
+        die "GIT_CONFIG_GLOBAL is set but empty, so git has no global config file to write beads.role into. Unset it, or point it at a real writable file."
+    fi
     echo "gc-beads-bd: setting git config --global beads.role maintainer" >&2
     git config --global beads.role maintainer || die "failed to set git config beads.role"
 }
