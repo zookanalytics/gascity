@@ -99,9 +99,12 @@ func ResolveRouteTarget(cfg *config.City, storeRef, target string) (string, erro
 	if len(candidates) == 0 {
 		return target, nil
 	}
+	// Candidates are always rig-bound, so a candidate is reachable exactly when
+	// it belongs to the rig store being written to. An empty storeRef matches
+	// nothing and so refuses rather than guessing.
 	var reachable []string
 	for _, c := range candidates {
-		if storeRef != "" && storeRef == "rig:"+c.rig {
+		if storeRef == "rig:"+c.rig {
 			reachable = append(reachable, c.identity)
 		}
 	}
