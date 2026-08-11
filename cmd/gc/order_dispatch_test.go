@@ -10419,3 +10419,40 @@ func TestCountClosedOrderTrackingRetentionEligible(t *testing.T) {
 		}
 	})
 }
+
+// Belt and braces for the discovery-side guard. An order that declares
+// scope = "rig" but reaches dispatch with no rig binding must be refused, not
+// resolved to the city store: its pool is a rig pool name that qualifies to
+// nothing at city scope, so the wisp would land in the city store where no
+// agent can claim it.
+func TestResolveOrderStoreTarget_DeclaredRigScopeWithoutRigRefused(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	_, err := resolveOrderStoreTarget("/city", cfg, orders.Order{
+		Name:  "liveness-sweep",
+		Scope: "rig",
+		Pool:  "gc-toolkit.polecat",
+	})
+	if err == nil {
+		t.Fatal("resolveOrderStoreTarget: expected error for declared rig scope with no rig binding, got nil")
+	}
+	if !strings.Contains(err.Error(), "liveness-sweep") {
+		t.Errorf("error = %q, want mention of the order name", err)
+	}
+	if !strings.Contains(err.Error(), `scope = "rig"`) {
+		t.Errorf("error = %q, want mention of the declared scope", err)
+	}
+}
+
+// The other half of the same rule: an order that never declares scope is
+// rig-scoped only by default, not by declaration, so a city-level registration
+// of it still resolves to the city store exactly as before.
+func TestResolveOrderStoreTarget_UndeclaredScopeStillResolvesToCityStore(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	target, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "heartbeat"})
+	if err != nil {
+		t.Fatalf("resolveOrderStoreTarget: unexpected error: %v", err)
+	}
+	if target.ScopeKind != "city" {
+		t.Errorf("ScopeKind = %q, want %q", target.ScopeKind, "city")
+	}
+}

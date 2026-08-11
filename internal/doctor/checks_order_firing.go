@@ -285,6 +285,9 @@ func orderFiringCurrentScanOptions(cityPath string) orderdiscovery.ScanOptions {
 			log.Printf("gc doctor: skipping invalid order %s for %s: %v", orderName, cityPath, err)
 			return nil
 		},
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			log.Printf("gc doctor: %s for %s", orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs), cityPath)
+		},
 		ValidateOrder: orders.ValidateExecEnvOverrides,
 	}
 }
