@@ -235,4 +235,4 @@ unbound `SessionStart` command puts the workdir back in the state
 codex-hooks-drift flags — and, because staging re-runs every tick,
 `gc doctor --fix` is undone again. Both `gastown` (in `gastownhall/gascity-packs`)
 and `gc-toolkit` ship such a file today; each needs the same conversion in its
-own repo.
+own repo, tracked as gc-efti4.

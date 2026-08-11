@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -3198,9 +3200,9 @@ func TestPrepareTemplateResolution_StagesCodexHooksBoundToCity(t *testing.T) {
 		t.Error("the templated source staged as a stray file alongside the rendered target")
 	}
 
-	// Every reconciler tick re-stages the raw overlay over the normalized file,
-	// so stage+normalize must reach a fixed point rather than accumulating
-	// merged entries. Re-run the pass and require byte stability.
+	// Every reconciler tick re-stages the overlay over the file already there,
+	// so staging must reach a fixed point rather than accumulating merged
+	// entries. Re-run the pass and require byte stability.
 	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
 	second, err := os.ReadFile(staged)
 	if err != nil {
@@ -3211,6 +3213,73 @@ func TestPrepareTemplateResolution_StagesCodexHooksBoundToCity(t *testing.T) {
 	}
 	if codexHooksNeedUpgrade(staged, cityDir) {
 		t.Fatalf("staged Codex hooks need an upgrade again after a second pass:\n%s", second)
+	}
+}
+
+// TestPrepareTemplateResolution_CodexHooksStableWithInstallHooks covers the
+// agent shape where both writers of managed Codex hooks run on the same file
+// each tick: overlay staging renders the templated asset, then hooks.Install
+// rewrites it because install_agent_hooks names codex.
+//
+// The two must agree byte-for-byte. If the rendered document differed from the
+// canonical form Install writes — key order, indentation, a matcher the asset
+// spells differently — each would undo the other on every reconciler tick, and
+// the file would churn indefinitely without either writer being wrong on its
+// own.
+func TestPrepareTemplateResolution_CodexHooksStableWithInstallHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	hooksDst := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(hooksDst), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	// The real shipped asset, so this pins the two writers against each other
+	// rather than against a fixture that could drift from either.
+	asset, err := fs.ReadFile(core.PackFS, "overlay/per-provider/codex/.codex/hooks.template.json")
+	if err != nil {
+		t.Fatalf("reading core codex hooks asset: %v", err)
+	}
+	if err := os.WriteFile(hooksDst, asset, 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay hooks): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat-codex",
+			Provider:          "codex",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+
+	staged := filepath.Join(rigDir, ".codex", "hooks.json")
+	first, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("codex hooks not written into workdir: %v", err)
+	}
+	if codexHooksNeedUpgrade(staged, cityDir) {
+		t.Fatalf("Codex hooks need a managed upgrade after stage + install:\n%s", first)
+	}
+
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("staging and hooks.Install disagree — the file churns every tick:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
 

@@ -639,7 +639,7 @@ func TestInstallCodexStagesTemplatedAssetAtItsTargetName(t *testing.T) {
 // without one must fail loudly rather than install its placeholders verbatim.
 func TestInstalledOverlayRelRejectsUnboundTemplatedAsset(t *testing.T) {
 	got, err := installedOverlayRel("codex", ".codex/hooks.template.json")
-	if err != nil || got != filepath.Join(".codex", "hooks.json") {
+	if err != nil || got != ".codex/hooks.json" {
 		t.Fatalf("installedOverlayRel(codex hooks) = %q, %v; want the staged hooks.json name", got, err)
 	}
 	if got, err := installedOverlayRel("codex", ".codex/config.toml"); err != nil || got != ".codex/config.toml" {
