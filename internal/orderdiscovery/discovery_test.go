@@ -1027,3 +1027,136 @@ interval = "5m"
 		t.Fatalf("orders = %#v, want the unbound rig-scoped order dropped", aa)
 	}
 }
+
+// A rigless [[orders.overrides]] entry naming a rig-scoped order is the
+// documented workaround for this very bug: it disables the unbound city copy
+// so the copy stops stranding a wisp every cooldown. It is in city.toml on
+// every deployment that hit the bug before this guard existed. ApplyOverrides
+// errors on an override that matches nothing and returns at the FIRST miss, so
+// a drop that ran before the overrides would turn that workaround into a hard
+// scan failure for the callers that leave OnOverrideError nil (gc order, the
+// doctor order-firing check) and would strand every LATER override unapplied
+// for the ones that log and continue — silently re-enabling orders the
+// operator had disabled.
+func TestScanAllRiglessOverrideStillMatchesDroppedRigScopedOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir, _ := orderDiscoveryPackLayer(t, "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "liveness-sweep", `[order]
+scope = "rig"
+formula = "mol-liveness-sweep"
+pool = "gc-toolkit.polecat"
+trigger = "cooldown"
+interval = "6h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "triage-recurrence", `[order]
+scope = "rig"
+formula = "mol-triage-recurrence"
+pool = "gc-toolkit.polecat"
+trigger = "cooldown"
+interval = "6h"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"alpha": {cityLayer},
+				"beta":  {cityLayer},
+			},
+		},
+		PackDirs: []string{packDir},
+		RigPackDirs: map[string][]string{
+			"alpha": {packDir},
+			"beta":  {packDir},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				// The workaround, exactly as deployments wrote it.
+				{Name: "liveness-sweep", Enabled: &disabled},
+				// A later, valid entry that must still be applied.
+				{Name: "triage-recurrence", Rig: "alpha", Enabled: &disabled},
+			},
+		},
+	}
+
+	// OnOverrideError stays nil on purpose: that is the gc order / doctor
+	// shape, where an unmatched override fails the whole scan.
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+
+	for _, a := range aa {
+		if a.Rig == "" {
+			t.Fatalf("unbound (Rig == \"\") registration survived: %#v", a)
+		}
+	}
+
+	enabled := map[string]bool{}
+	for _, a := range aa {
+		enabled[a.Name+"@"+a.Rig] = a.IsEnabled()
+	}
+	if got, ok := enabled["triage-recurrence@alpha"]; !ok || got {
+		t.Errorf("triage-recurrence@alpha enabled = %v (present=%v), want the later override applied", got, ok)
+	}
+	if got, ok := enabled["triage-recurrence@beta"]; !ok || !got {
+		t.Errorf("triage-recurrence@beta enabled = %v (present=%v), want untouched by a rig-scoped override", got, ok)
+	}
+	// The rigless override reached only the dropped copy, so the rig-bound
+	// registrations it never named keep running.
+	if got, ok := enabled["liveness-sweep@alpha"]; !ok || !got {
+		t.Errorf("liveness-sweep@alpha enabled = %v (present=%v), want the rig-bound registration untouched", got, ok)
+	}
+	if got, ok := enabled["liveness-sweep@beta"]; !ok || !got {
+		t.Errorf("liveness-sweep@beta enabled = %v (present=%v), want the rig-bound registration untouched", got, ok)
+	}
+}
+
+// An override cannot resurrect a dropped registration. The guard refuses the
+// unbound copy because nothing at city scope can claim its wisp, and that is
+// not a preference an [[orders.overrides]] entry gets to reverse — matching one
+// only consumes the entry, it never puts the registration back.
+func TestScanAllRiglessOverrideCannotResurrectDroppedRigScopedOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir, _ := orderDiscoveryPackLayer(t, "shared-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "liveness-sweep", `[order]
+scope = "rig"
+formula = "mol-liveness-sweep"
+pool = "gc-toolkit.polecat"
+trigger = "cooldown"
+interval = "6h"
+`)
+
+	enabled := true
+	interval := "5m"
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "liveness-sweep", Enabled: &enabled, Interval: &interval},
+			},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	for _, a := range aa {
+		if a.Rig == "" {
+			t.Fatalf("unbound (Rig == \"\") registration survived an enabling override: %#v", a)
+		}
+	}
+	if len(aa) != 1 || aa[0].Rig != "alpha" {
+		t.Fatalf("orders = %#v, want only the rig-bound registration", aa)
+	}
+	if aa[0].Interval != "6h" {
+		t.Errorf("Interval = %q, want %q: a rigless override reaches only the city-level copy", aa[0].Interval, "6h")
+	}
+}

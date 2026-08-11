@@ -4,6 +4,7 @@ package orderdiscovery
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -131,10 +132,26 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		reportUnboundRigScoped(unboundRigScoped, rigOrders, opts.OnUnboundRigScoped)
 	}
 
-	allOrders := make([]orders.Order, 0, len(cityOrders)+len(promotedCityOrders)+len(rigOrders))
+	allOrders := make([]orders.Order, 0, len(cityOrders)+len(promotedCityOrders)+len(rigOrders)+len(unboundRigScoped))
 	allOrders = append(allOrders, cityOrders...)
 	allOrders = append(allOrders, promotedCityOrders...)
 	allOrders = append(allOrders, rigOrders...)
+	// The registrations the rig-scope guard dropped ride along through override
+	// application and are cut again immediately after it, so a configured
+	// override can still match them.
+	//
+	// A rigless [[orders.overrides]] entry naming a rig-scoped order is the
+	// documented workaround for the very bug this guard fixes — it disables the
+	// unbound copy so that copy stops stranding a wisp every cooldown — so it is
+	// already in city.toml wherever the bug was hit. ApplyOverrides treats an
+	// override that matches nothing as an error and returns at the FIRST miss,
+	// so cutting these before it runs would turn that workaround into a hard
+	// scan failure for callers that leave OnOverrideError nil (gc order, the
+	// doctor order-firing check), and would leave every LATER override
+	// unapplied for the ones that log and continue — silently re-enabling
+	// orders the operator had disabled. Matching here consumes such an entry as
+	// the no-op it has now become.
+	allOrders = append(allOrders, unboundRigScoped...)
 	// Stamp the city-default cron timezone onto orders that don't author
 	// their own tz, so trigger evaluation sees one explicit location without
 	// widening the CheckTrigger signature. A bad [workspace] timezone fails
@@ -160,11 +177,23 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			}
 		}
 	}
+	// Cut the dropped registrations back out, now that any override naming one
+	// of them has been consumed. They are removed before validation because a
+	// registration nothing can run must not produce validation diagnostics.
+	allOrders = slices.DeleteFunc(allOrders, isUnboundRigScoped)
 	allOrders, err = validateOrders(allOrders, opts.ValidateOrder, opts.OnValidateError)
 	if err != nil {
 		return nil, err
 	}
 	return allOrders, nil
+}
+
+// isUnboundRigScoped reports the registration shape the guard refuses: an
+// order that explicitly declares scope = "rig" yet carries no rig binding.
+// A promoted scope = "city" order also has no rig, which is why the scope
+// declaration — not the empty Rig alone — is what identifies the drop.
+func isUnboundRigScoped(order orders.Order) bool {
+	return order.Rig == "" && order.DeclaresRigScope()
 }
 
 // dropUnboundRigScoped removes city-pass registrations for orders that
@@ -184,7 +213,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 func dropUnboundRigScoped(cityOrders []orders.Order) (kept, dropped []orders.Order) {
 	kept = cityOrders[:0]
 	for _, order := range cityOrders {
-		if order.DeclaresRigScope() {
+		if isUnboundRigScoped(order) {
 			dropped = append(dropped, order)
 			continue
 		}
