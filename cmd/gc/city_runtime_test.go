@@ -725,6 +725,72 @@ func TestTickDebouncer_IndependentInstances(t *testing.T) {
 	}
 }
 
+// TestTickDebouncer_CancelPendingRacesInFlightFire is the concurrency
+// regression for gc-l2c6v: cancelPending must suppress a fire from a timer
+// whose callback is already in flight, not only one whose timer has not yet
+// fired. The pre-fix callback released d.mu after clearing d.timer but
+// before its channel send, so a cancelPending that acquired d.mu in that
+// gap observed d.timer already nil, drained an empty channel, and returned
+// — and the callback's send then delivered a fire after a completed
+// cancelPending.
+//
+// Each round arms a short timer and, from a separate goroutine, calls
+// cancelPending timed to collide with the firing callback. cancelPending
+// happens-after the arm, so after both return no fire may remain — any
+// survivor is a canceled tick. On the fixed code this holds for every
+// interleaving (the send is gated on the generation under the lock), so the
+// test never flakes; on the buggy code a round that lands in the send
+// window leaks a fire and fails.
+func TestTickDebouncer_CancelPendingRacesInFlightFire(t *testing.T) {
+	const rounds = 500
+	const delay = time.Millisecond
+	for i := 0; i < rounds; i++ {
+		d := newTickDebouncer()
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(delay) // wake around when the armed timer fires
+			d.cancelPending()
+		}()
+		d.arm(delay)
+		wg.Wait()
+		// Give any in-flight callback time to complete its send, then assert
+		// nothing survived the cancel.
+		if got := drainFiredCount(d, 2*time.Millisecond); got != 0 {
+			t.Fatalf("round %d: %d fire(s) survived cancelPending", i, got)
+		}
+	}
+}
+
+// TestTickDebouncer_FireDropsStaleGeneration deterministically pins the
+// generation mechanism that fixes gc-l2c6v, with no dependence on timing or
+// load. arm captures d.gen for the timer it schedules and the callback runs
+// fire(gen); cancelPending advances d.gen. Driving fire directly reproduces
+// the exact interleaving load exposed — an in-flight callback from the
+// pre-cancel generation delivering after cancelPending returned — and
+// asserts it is dropped, while fires at the live generation are delivered.
+func TestTickDebouncer_FireDropsStaleGeneration(t *testing.T) {
+	d := newTickDebouncer()
+	// A fire at the current generation (0) is delivered.
+	d.fire(0)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 1 {
+		t.Fatalf("current-generation fire count = %d, want 1", got)
+	}
+	// cancelPending advances the generation. A late callback from the prior
+	// generation (fire(0)) is the canceled tick and must be dropped.
+	d.cancelPending()
+	d.fire(0)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 0 {
+		t.Fatalf("stale-generation fire count = %d, want 0 (canceled tick leaked)", got)
+	}
+	// A fire at the new live generation (1) is delivered again.
+	d.fire(1)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 1 {
+		t.Fatalf("post-cancel live-generation fire count = %d, want 1", got)
+	}
+}
+
 // drainFiredCount counts how many fires are available on the debouncer's
 // channel within window. It returns once window elapses with no further
 // fires for at least a short tail, so the count is stable.
