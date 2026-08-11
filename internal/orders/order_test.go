@@ -663,3 +663,23 @@ func TestValidateCronBadTZ(t *testing.T) {
 		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }
+
+// DeclaresRigScope must key on the literal "rig" and nothing else. Registration
+// guards that drop or refuse an order call it, so treating an unscoped order as
+// a declaration would sweep up most of the order set, including the builtin
+// core orders that never mention scope.
+func TestDeclaresRigScopeOnlyOnExplicitDeclaration(t *testing.T) {
+	for _, tc := range []struct {
+		scope string
+		want  bool
+	}{
+		{scope: "rig", want: true},
+		{scope: "", want: false},
+		{scope: "city", want: false},
+	} {
+		a := Order{Name: "sweep", Scope: tc.scope}
+		if got := a.DeclaresRigScope(); got != tc.want {
+			t.Errorf("Order{Scope: %q}.DeclaresRigScope() = %v, want %v", tc.scope, got, tc.want)
+		}
+	}
+}

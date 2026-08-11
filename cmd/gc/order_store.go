@@ -125,6 +125,16 @@ func openOrderStoreForOrder(cityPath string, cfg *config.City, a orders.Order, s
 
 func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) (execStoreTarget, error) {
 	if strings.TrimSpace(a.Rig) == "" {
+		// Belt and braces behind orderdiscovery's rig-scope guard: an order
+		// that declares scope = "rig" but arrives with no rig binding must not
+		// resolve to the city store. Its pool is a rig pool name that
+		// qualifies to nothing at city scope, so the wisp would be poured into
+		// the city store where no agent can claim it — and the order's own
+		// cooldown would repeat that every interval. Refusing keeps a future
+		// discovery path from silently reintroducing the unbound registration.
+		if a.DeclaresRigScope() {
+			return execStoreTarget{}, fmt.Errorf("order %q declares scope = \"rig\" but carries no rig binding; refusing to dispatch it into the city store, where its pool %q resolves to no agent", a.Name, a.Pool)
+		}
 		prefix := ""
 		if cfg != nil {
 			prefix = config.EffectiveHQPrefix(cfg)

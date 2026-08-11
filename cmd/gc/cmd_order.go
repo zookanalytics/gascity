@@ -324,6 +324,9 @@ func orderScanOptions(stderr io.Writer, cmdName string) orderdiscovery.ScanOptio
 			fmt.Fprintf(stderr, "%s: order %s: %v\n", cmdName, orderName, err) //nolint:errcheck // best-effort stderr
 			return nil
 		},
+		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
+			fmt.Fprintf(stderr, "%s: %s\n", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)) //nolint:errcheck // best-effort stderr
+		},
 		ValidateOrder: validateOrderExecEnvOverrides,
 	}
 }
