@@ -20,8 +20,8 @@ const cmdGCImportPath = "github.com/gastownhall/gascity/cmd/gc"
 
 // TestFastLaneExcludesCmdGCFromTheSharedSweepBudget pins the exclusion itself:
 // the package list `make test` sweeps must not contain cmd/gc, so cmd/gc's
-// runtime is never measured against a deadline it shares with 164 other
-// packages.
+// runtime is never measured against a deadline it shares with every other
+// package in the module.
 func TestFastLaneExcludesCmdGCFromTheSharedSweepBudget(t *testing.T) {
 	for _, listVar := range []string{"UNIT_PKGS_NONCMDGC", "MAC_UNIT_PKGS", "UNIT_COVER_PKGS_NONCMDGC"} {
 		t.Run(listVar, func(t *testing.T) {
