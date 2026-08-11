@@ -430,6 +430,31 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
+# UNIT_PKGS_NONCMDGC is the fast-unit sweep with cmd/gc removed. `go test`
+# applies -timeout per test binary, so a single `./...` sweep measures every
+# package against one shared deadline — and cmd/gc alone needs ~838s of the
+# 900s it used to get, about 7% headroom. Any concurrent load pushes it over,
+# and go test reports that as `FAIL github.com/gastownhall/gascity/cmd/gc
+# 901.011s` with a goroutine dump and zero `--- FAIL` lines: a false red that
+# names nothing that actually broke, landing on whichever diff happened to be
+# running (gc-kye20). Routing cmd/gc into its own sharded run below gives it a
+# deadline it can meet. This is the same split test-cover, test-cover-mac and
+# the Mac regression matrix already make; the default fast lane was the last
+# one still sharing the budget.
+UNIT_PKGS_NONCMDGC = $(shell go list ./... | grep -v '/cmd/gc$$')
+
+# Fast-unit cmd/gc sharding, mirroring CMD_GC_COVER_TOTAL/test-cover. Six ways
+# keeps each shard near ~140s of its own budget. The shard count also has a
+# hard floor that is *not* about time: test-go-test-shard selects tests with a
+# single `-run '^(A|B|...)$$'` argument, and cmd/gc's 8231 fast-unit tests make
+# that regex ~419KB — well past the 128KB Linux per-argument limit
+# (MAX_ARG_STRLEN), which fails as a bare `Argument list too long` before a
+# single test runs. Six shards land near 70KB each. Do not lower this without
+# rechecking that ceiling; TestFastLaneShardRegexStaysUnderArgvLimit guards it.
+CMD_GC_UNIT_TOTAL ?= 6
+CMD_GC_UNIT_SHARD ?= 1
+CMD_GC_UNIT_TIMEOUT ?= 10m
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
@@ -437,13 +462,25 @@ test-ci-policy:
 ## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
+## cmd/gc runs after the sweep, sharded, for the budget reason on
+## UNIT_PKGS_NONCMDGC above.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
+	@for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
+		$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=$(CMD_GC_UNIT_TIMEOUT) \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
+	done
+
+## test-cmd-gc-unit-shard: run one fast-unit cmd/gc shard (CMD_GC_UNIT_SHARD of CMD_GC_UNIT_TOTAL),
+## so a shard that fails under `make test` can be re-run on its own.
+test-cmd-gc-unit-shard:
+	$(TEST_ENV) GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=$(CMD_GC_UNIT_TIMEOUT) ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_UNIT_SHARD) $(CMD_GC_UNIT_TOTAL)
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
-# sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+# sharded via the mac-cmd-gc-process CI matrix job instead. Same list as the
+# default fast lane above, which now excludes cmd/gc for the same reason.
+MAC_UNIT_PKGS = $(UNIT_PKGS_NONCMDGC)
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
