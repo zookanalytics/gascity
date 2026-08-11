@@ -1,3 +1,5 @@
+//go:build integration || dolt_integration
+
 package dolt_test
 
 import (

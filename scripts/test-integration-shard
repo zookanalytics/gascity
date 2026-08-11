@@ -122,6 +122,7 @@ rest_smoke_tests=(
 cmd_gc_integration_tests=(
   TestCapstoneIntegrationRealMinter
   TestControllerDiscoversAddedCronOrderWithoutRestart
+  TestEnsureBeadsRoleGitConfigGlobal
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
   TestPhase2WorkerCoreRealTransportProof
   TestRigAddIncludeResolvesScopedRegistryPackName
