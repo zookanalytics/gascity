@@ -1347,7 +1347,15 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // atomic across processes.
 func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe, formulaName string, opts molecule.Options, sourceBeadID, scopeKind, scopeRef string, graphWorkflow bool, a config.Agent, deps SlingDeps, forceGraphV2Replace ...bool) (*molecule.Result, error) {
 	graphStore := deps.graphStore()
-	if err := graphroute.ApplyGraphRouting(recipe, &a, agentutil.RoutedToIdentity(&a), opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
+	// Graph routing persists this string as the default route: onto the
+	// workflow root's gc.routed_to and onto every step that inherits it. It
+	// must therefore be the resolved live identity, not the raw one — a
+	// per-rig template's own name is not claimable by any pool.
+	routedTo, err := resolvedRouteIdentity(deps, &a)
+	if err != nil {
+		return nil, fmt.Errorf("routing formula %s: %w", formulaName, err)
+	}
+	if err := graphroute.ApplyGraphRouting(recipe, &a, routedTo, opts.Vars, sourceBeadID, scopeKind, scopeRef, deps.StoreRef, graphStore, deps.CityName, deps.Cfg, deps.graphrouteDeps()); err != nil {
 		SlingTracef("instantiate decorate-error formula=%s err=%v", formulaName, err)
 		return nil, err
 	}

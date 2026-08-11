@@ -2390,6 +2390,71 @@ func TestDoSlingRoutesUnboundTemplateFromQualifyingStore(t *testing.T) {
 	}
 }
 
+// The graph.v2 materializer is a second gc.routed_to write site: it stamps the
+// default route onto the workflow root and onto every step that inherits it.
+// Resolving the per-rig template in the preflight is not enough on its own,
+// because the preflight only decides whether to refuse — it discards the
+// identity it resolved. Unless that resolved identity also reaches graph
+// routing, a graph.v2 sling from the qualifying rig store succeeds while
+// creating an open, unassigned root routed to the bare template name, which no
+// pool claims: the same invisible-route failure the direct router bug had.
+func TestDoSlingGraphV2RoutesUnboundTemplateToRigQualifiedIdentity(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2ConvoyFormula(t, formulaDir)
+	cfg := graphV2SlingTestConfig(t, formulaDir)
+	cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/myrig", Prefix: "RW"}}
+	template := config.Agent{Name: "polecat", BindingName: "gc-toolkit", Scope: "rig", MaxActiveSessions: intPtr(3)}
+	// A rig-store graph needs the control dispatcher bound to that rig; the
+	// city-scoped one the shared fixture supplies cannot serve a rig scope.
+	rigDispatcher := slingControlDispatcherAgent()
+	rigDispatcher.Dir = "myrig"
+	cfg.Agents = append(cfg.Agents, rigDispatcher, template)
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Router = &fakeBeadRouter{}
+	deps.StoreRef = "rig:myrig"
+	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	opts := SlingOpts{Target: template, BeadOrFormula: source.ID, OnFormula: "graph-work", Force: true}
+
+	if _, err := DoSling(opts, deps, deps.Store); err != nil {
+		t.Fatalf("DoSling of a graph.v2 formula from the qualifying rig store: %v", err)
+	}
+
+	roots := liveGraphV2Roots(t, deps.Store)
+	if len(roots) != 1 {
+		t.Fatalf("graph.v2 roots = %d, want 1", len(roots))
+	}
+	const (
+		want = "myrig/gc-toolkit.polecat"
+		bare = "gc-toolkit.polecat"
+	)
+	if got := roots[0].Metadata[beadmeta.RoutedToMetadataKey]; got != want {
+		t.Fatalf("root %s = %q, want %q", beadmeta.RoutedToMetadataKey, got, want)
+	}
+	// The root is only the first stamp: every step inheriting the default route
+	// is written from the same string, so the bare name must appear on no bead
+	// at all. Sweeping the store covers those steps without pinning the test to
+	// the graph's internal shape.
+	items, err := deps.Store.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	stepsRouted := 0
+	for _, item := range items {
+		switch item.Metadata[beadmeta.RoutedToMetadataKey] {
+		case bare:
+			t.Fatalf("bead %s (%q) routed to the unclaimable bare template %q", item.ID, item.Title, bare)
+		case want:
+			stepsRouted++
+		}
+	}
+	if stepsRouted < 2 {
+		t.Fatalf("beads routed to %q = %d, want the root and at least one inheriting step", want, stepsRouted)
+	}
+}
+
 func TestDoSlingBatchRefusesCrossStoreBeforeFormulaMutation(t *testing.T) {
 	deps, router, target := crossStoreSlingDeps(t)
 	store := deps.Store

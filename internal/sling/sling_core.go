@@ -734,10 +734,23 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	// the refusal ahead of every mutation, and raises the identical error.
 	// Every target shape reachability CAN classify already resolves to a live
 	// identity, so this pass adds no new refusals.
-	if _, err := agentutil.ResolveRouteTarget(deps.Cfg, deps.StoreRef, agentutil.RoutedToIdentity(&a)); err != nil {
+	if _, err := resolvedRouteIdentity(deps, &a); err != nil {
 		return fmt.Errorf("routing %s: %w", beadID, err)
 	}
 	return nil
+}
+
+// resolvedRouteIdentity returns the routing identity to persist for a: the
+// live identity ResolveRouteTarget canonicalizes a's route target to.
+//
+// It pairs RoutedToIdentity with ResolveRouteTarget as one decision so every
+// gc.routed_to write the sling performs records the same value. Deciding is
+// not enough on its own — the preflight above only needs the error, but the
+// graph.v2 materializer stamps the identity onto the workflow root and onto
+// every step that inherits the default route, so a resolution the materializer
+// discarded would persist a bare per-rig template name that no pool claims.
+func resolvedRouteIdentity(deps SlingDeps, a *config.Agent) (string, error) {
+	return agentutil.ResolveRouteTarget(deps.Cfg, deps.StoreRef, agentutil.RoutedToIdentity(a))
 }
 
 // doStartGraphWorkflow performs post-instantiation graph workflow setup.
