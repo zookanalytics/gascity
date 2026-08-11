@@ -121,6 +121,7 @@ var excludedFromCore = map[string]string{
 	"Nudge":                  "post-ready typed text",
 	"SessionLive":            "the LIVE axis — re-applied without restart (LiveFingerprint, not Core)",
 	"PackOverlayDirs":        "additive pack file staging, not hashed",
+	"OverlayTemplateData":    "overlay template expansion surface; mirrors the agent env, so hashing it would defeat the env allow-list — the identity it derives from already hashes",
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
 }

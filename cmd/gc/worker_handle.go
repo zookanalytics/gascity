@@ -147,7 +147,13 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 // ready, and the controller churns into a fall-back-to-claude loop (gc-6bw8o).
 // Best-effort: a missing cfg/resolved (CLI direct-start fallback) leaves the
 // config untouched rather than failing the start.
-func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, template string, resolved *config.ResolvedProvider) {
+func applyWorkerOverlayHints(
+	hints *runtime.Config,
+	cfg *config.City,
+	cityPath, template string,
+	resolved *config.ResolvedProvider,
+	identity, workDir string,
+) {
 	if hints == nil || cfg == nil || resolved == nil {
 		return
 	}
@@ -157,6 +163,11 @@ func applyWorkerOverlayHints(hints *runtime.Config, cfg *config.City, cityPath, 
 	hints.ProviderName = resolvedProviderLaunchFamily(resolved)
 	hints.ProviderOverlayName = strings.TrimSpace(resolved.Name)
 	agentCfg := findAgentByTemplate(cfg, template)
+	// Templated overlay files (overlay.TemplateTargetName) render against this
+	// map, so the create/resume paths bind an installed pack file to the same
+	// city/rig/workdir the reconciler create path would. A synthetic session
+	// with no agent config still gets the city-level surface.
+	hints.OverlayTemplateData = materialize.PackTemplateData(cfg, cityPath, agentCfg, identity, workDir)
 	if agentCfg == nil {
 		// No agent config to resolve install-hooks/rig overlay scope against
 		// (e.g. a synthetic session). Still stage city pack overlays.
@@ -293,7 +304,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	// reconciler create path does; resolvedWorkerSessionConfigWithConfig builds
 	// runtime.Config directly and never routes through resolveTemplate
 	// (gc-6bw8o).
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved)
+	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityPath, template, resolved, alias, workDir)
 	return factory.SessionForResolvedRuntime(sessionCfg)
 }
 
@@ -637,7 +648,7 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// Stage provider-overlay hooks on resume the same way the reconciler create
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
-	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
+	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved, qualifiedName, workDir)
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

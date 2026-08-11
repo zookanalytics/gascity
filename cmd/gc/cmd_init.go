@@ -1559,8 +1559,13 @@ func materializeCityRootPackOverlays(fs fsys.FS, cityPath string, stderr io.Writ
 	if err != nil || cfg == nil {
 		return
 	}
+	// No agent context exists at init, so a templated universal file can only
+	// bind the one value init knows: the city root. That is the token this
+	// seam exists for; anything else in a city-root overlay template fails
+	// loudly (missingkey=error) rather than installing half-bound.
+	templateData := map[string]string{"CityRoot": cityPath}
 	for _, od := range cfg.PackOverlayDirs {
-		if err := overlay.CopyDirForProviders(od, cityPath, nil, stderr); err != nil {
+		if err := overlay.CopyDirForProviders(od, cityPath, nil, stderr, overlay.WithTemplateData(templateData)); err != nil {
 			fmt.Fprintf(stderr, "gc init: materializing pack overlay %s: %v\n", od, err) //nolint:errcheck // best-effort stderr
 		}
 	}

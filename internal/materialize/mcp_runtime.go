@@ -29,11 +29,17 @@ func EffectiveMCPForSession(
 			cfgForMCP = &clone
 		}
 	}
-	return EffectiveMCPForAgent(cfgForMCP, agent, MCPTemplateData(cfgForMCP, cityPath, agent, identity, workDir))
+	return EffectiveMCPForAgent(cfgForMCP, agent, PackTemplateData(cfgForMCP, cityPath, agent, identity, workDir))
 }
 
-// MCPTemplateData builds the template expansion surface used by MCP catalogs.
-func MCPTemplateData(
+// PackTemplateData builds the template expansion surface every templated pack
+// file expands against, for one concrete session context. Both templated file
+// classes share it: MCP catalog entries named "<name>.template.toml" and
+// overlay files named "<name>.template.<ext>" staged into an agent's work
+// directory. One surface means a pack author learns one vocabulary —
+// CityRoot, RigRoot, WorkDir, AgentName, the queries, and the agent env —
+// rather than one per loader.
+func PackTemplateData(
 	cfg *config.City,
 	cityPath string,
 	agent *config.Agent,

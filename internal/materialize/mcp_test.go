@@ -215,7 +215,7 @@ func TestRuntimeMCPServersPreservesTransport(t *testing.T) {
 	}
 }
 
-func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
+func TestPackTemplateDataUsesBackingTemplateName(t *testing.T) {
 	t.Parallel()
 
 	agent := &config.Agent{
@@ -223,7 +223,7 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 		Dir:  "rig-a",
 		Env:  map[string]string{"TOKEN": "abc"},
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work")
+	got := PackTemplateData(&config.City{}, "/tmp/city", agent, "rig-a/worker-7", "/tmp/work")
 	if got["AgentName"] != "rig-a/worker-7" {
 		t.Fatalf("AgentName = %q, want %q", got["AgentName"], "rig-a/worker-7")
 	}
@@ -246,20 +246,20 @@ func TestMCPTemplateDataUsesBackingTemplateName(t *testing.T) {
 	}
 }
 
-func TestMCPTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
+func TestPackTemplateDataUsesPoolNameForPoolInstances(t *testing.T) {
 	t.Parallel()
 
 	agent := &config.Agent{
 		Name:     "worker-3",
 		PoolName: "worker",
 	}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
+	got := PackTemplateData(&config.City{}, "/tmp/city", agent, "worker-3", "/tmp/work")
 	if got["TemplateName"] != "worker" {
 		t.Fatalf("TemplateName = %q, want %q", got["TemplateName"], "worker")
 	}
 }
 
-func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
+func TestPackTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.City{
@@ -267,17 +267,17 @@ func TestMCPTemplateDataUsesBD105WorkQuery(t *testing.T) {
 	}
 	agent := &config.Agent{Name: "worker"}
 
-	got := MCPTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
+	got := PackTemplateData(cfg, "/tmp/city", agent, "worker", "/tmp/work")
 	if !strings.Contains(got["WorkQuery"], "bd ready --include-ephemeral") {
 		t.Fatalf("WorkQuery = %q, want bd-1.0.5 ephemeral-ready probe", got["WorkQuery"])
 	}
 }
 
-func TestMCPTemplateDataPreservesBranchAlias(t *testing.T) {
+func TestPackTemplateDataPreservesBranchAlias(t *testing.T) {
 	t.Parallel()
 
 	agent := &config.Agent{Name: "worker"}
-	got := MCPTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "")
+	got := PackTemplateData(&config.City{}, "/tmp/city", agent, "worker-1", "")
 	if got["Branch"] == "" {
 		t.Fatal("Branch = empty, want default branch alias")
 	}

@@ -35,12 +35,12 @@ func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
 	if cfg.WorkDir != "" {
 		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, cfg.OverlayTemplateData, warnings); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, cfg.OverlayTemplateData, warnings); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
@@ -103,9 +103,17 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 
 // StageProviderOverlayDir copies a provider-aware overlay directory into a
 // work directory and writes nonfatal preservation warnings to warnings.
-func StageProviderOverlayDir(srcDir, dstDir string, providers []string, warnings io.Writer) error {
+//
+// templateData is the expansion surface for templated overlay files
+// (overlay.TemplateTargetName): a pack file named "<name>.template.<ext>" is
+// rendered through it and staged as "<name>.<ext>". It is an explicit
+// parameter rather than an option so every staging path has to decide what
+// an installed pack file binds to — a caller that has no city context cannot
+// reach this seam by accident. Rendering is missingkey=error, so an
+// unresolvable token fails staging instead of installing a half-bound file.
+func StageProviderOverlayDir(srcDir, dstDir string, providers []string, templateData map[string]string, warnings io.Writer) error {
 	var stderr bytes.Buffer
-	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr); err != nil {
+	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr, overlay.WithTemplateData(templateData)); err != nil {
 		return err
 	}
 	nonfatal, fatal := splitOverlayWarnings(stderr.String())
