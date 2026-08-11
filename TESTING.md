@@ -542,6 +542,42 @@ fast unit-only baseline; the integration contribution comes from the
 shard-specific `coverage.integration-*.txt` profiles and their matching
 Codecov flags.
 
+Both targets also run `cmd/gc` *outside* the shared package sweep. `go test`
+applies `-timeout` per test binary, so a single `./...` invocation measures
+every package against one deadline, and `cmd/gc` alone needs roughly 838s of
+it. At about 7% headroom any concurrent load pushed it over, and the result
+was reported as `FAIL github.com/gastownhall/gascity/cmd/gc 901.011s` with a
+goroutine dump and zero `--- FAIL` lines — a false red that named nothing that
+had actually broken and landed on whichever diff happened to be running
+(gc-kye20). `make test` therefore sweeps `$(UNIT_PKGS_NONCMDGC)` and then runs
+`cmd/gc` through `scripts/test-go-test-shard`, the same splitter `test-cover`
+and the CI matrices use, so each shard is measured against a budget it can
+meet. Knobs:
+
+```bash
+# Re-run just the shard that failed, instead of the whole lane.
+make test-cmd-gc-unit-shard CMD_GC_UNIT_SHARD=3
+
+# Widen the split (or the per-shard budget) on a slow machine.
+make test CMD_GC_UNIT_TOTAL=12 CMD_GC_UNIT_TIMEOUT=30m
+```
+
+The 20m default per shard is the same budget `scripts/test-local-parallel`
+gives this workload, sized for a loaded developer box rather than a CI runner:
+a shard measured on a busy 8-core host at load 54 took 395s of in-binary time,
+so 20m keeps roughly 3x margin there and about 8x on an idle machine. Build
+time is not charged against it — `-timeout` bounds the test binary's own run,
+not the compile that precedes it.
+
+`CMD_GC_UNIT_TOTAL` has a floor that is not about time. The splitter selects
+tests with one `-run '^(A|B|...)$'` argument, and `cmd/gc`'s 8231 fast-unit
+tests make the unsplit regex about 419KB — past Linux's 128KB per-argument
+limit (`MAX_ARG_STRLEN`, distinct from the much larger total `ARG_MAX`), which
+fails as a bare `Argument list too long` before any test runs. Six shards land
+near 70KB each; `TestFastLaneShardRegexStaysUnderArgvLimit` fails once growth
+eats that margin, so the count is raised deliberately rather than after a
+cryptic exec failure.
+
 ### Cross-category runners, timing, and resource isolation
 
 For broad local runs, prefer the repo's sharded wrappers over raw `go test`
