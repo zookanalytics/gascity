@@ -67,6 +67,37 @@ provider preserve-existing — consults the resolved target name, so
 would silently lose the identity-keyed merge its non-templated twin gets and
 append duplicate hook entries instead of replacing them.
 
+### The name is shared, so rendering is opt-in
+
+Reusing the MCP naming rule buys a pack author one convention, but it also
+means the marker does not identify an *owner*. The largest population of
+`.template.<ext>` files in the tree is not overlay content at all: every
+agent's `agents/<name>/prompt.template.md` carries the same marker and belongs
+to the prompt renderer, which expands it later, per session, against a
+different data map and a funcmap this package does not have.
+
+So the marker cannot be the trigger on its own. The trigger is the caller
+supplying `overlay.WithTemplateData`, which is only reachable from a staging
+path that holds install context:
+
+- `CopyDirForProvider` / `CopyDirForProviders` render when — and only when —
+  that option is passed.
+- `CopyDir`, `CopyDirWithSkip`, and `CopyFileOrDir` take no options and render
+  nothing. A templated file copies through byte-for-byte, marker intact.
+
+That second bullet is load-bearing rather than a default. `gc init --from-dir`
+materializes a city by copying a source directory through `CopyDirWithSkip`,
+and every shipped example city contains agent prompts. A marker-only trigger
+parses those prompts as overlay templates, fails on `basename`, and breaks
+`gc init` for the examples the repo ships — which is exactly what it did
+before the opt-in was added.
+
+Opting in with a nil map still opts in. Staging callers pass the option
+unconditionally, so a `runtime.Config` whose map was never populated must fail
+loudly under `missingkey=error` rather than quietly staging an unbound file —
+the failure mode this seam exists to remove. The rule reads: *no install
+context, no rendering; install context, no excuses.*
+
 ### The data map
 
 `materialize.PackTemplateData` builds the expansion surface, and both
@@ -138,6 +169,12 @@ city-binding, wrapping prompt hooks in `gc hook run`, and deduping managed
   destination, so silently renaming a file the operator spelled out would be
   the wrong behavior there; a templated file listed in `copy_files` is copied
   verbatim, as before.
+
+- **City materialization is deliberately untouched.** `gc init --from-dir`
+  and `gc init` template expansion copy a source tree into a new city through
+  the option-free `CopyDirWithSkip`. Those trees hold pack sources — agent
+  prompts, template fragments — that other renderers own and that must reach
+  the new city under their own names. See "The name is shared" above.
 
 - **The exec provider's script-side staging is out of scope.** `startConfig`
   hands `pack_overlay_dirs` to a user-supplied script, which does its own

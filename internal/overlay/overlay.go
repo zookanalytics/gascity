@@ -44,6 +44,11 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 // Directory structure is preserved. File permissions are preserved.
 // If srcDir does not exist, returns nil (no-op).
 // Individual file copy failures are logged to stderr but don't abort.
+//
+// Every file is copied verbatim, including one named "<name>.template.<ext>":
+// rendering is opt-in and this entry point takes no options. Callers with
+// install context reach the templated path through CopyDirForProviders with
+// WithTemplateData.
 func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
 	return copyDir(srcDir, dstDir, stderr, nil, copyConfig{})
 }
@@ -119,7 +124,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		// keys on the staged destination, so a templated file is preserved
 		// under the same rule as its non-templated twin.
 		src := filepath.Join(srcBase, entryRel)
-		stagedRel := stagedRelPath(entryRel)
+		stagedRel := cfg.stagedRelPath(entryRel)
 		if preserveExisting != nil && preserveExisting(stagedRel) {
 			dst := filepath.Join(dstBase, stagedRel)
 			if _, err := os.Stat(dst); err == nil {
@@ -145,6 +150,11 @@ type SkipFunc func(relPath string, isDir bool) bool
 // where skip returns true. If skip is nil, copies everything.
 // Unlike CopyDir, this function does not silently ignore errors on individual
 // files — it returns on the first error encountered.
+//
+// Like CopyDir, it renders nothing: "<name>.template.<ext>" is copied under
+// its own name. This is the entry point `gc init` uses to materialize a city
+// from a source directory, where the templated files it walks are agent
+// prompts owned by the prompt renderer.
 func CopyDirWithSkip(srcDir, dstDir string, skip SkipFunc, _ io.Writer) error {
 	return copyDirWithSkip(srcDir, dstDir, skip, copyConfig{})
 }
@@ -226,8 +236,8 @@ func HasProviderDir(srcDir, providerName string) bool {
 //  2. If per-provider/<providerName>/ exists, copies its contents into dst
 //     (flattened — the per-provider/<provider>/ prefix is stripped).
 //
-// Templated files (<name>.template.<ext>) are rendered with the data map from
-// WithTemplateData; see CopyDirForProviders.
+// Templated files (<name>.template.<ext>) are rendered only when the caller
+// passes WithTemplateData; see CopyDirForProviders.
 //
 // This implements the V2 overlay layering described in doc-agent-v2.md.
 func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer, opts ...CopyOption) error {
@@ -278,6 +288,11 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer, o
 // skipped. The order in providers determines which per-provider copy
 // wins when two providers ship the same rel path (last-writer-wins via
 // overwrite or JSON merge).
+//
+// Pass WithTemplateData to render "<name>.template.<ext>" files through
+// text/template and stage them at "<name>.<ext>". Without it this copy
+// renders nothing, so a caller that has no install-time values to bind cannot
+// stage a half-bound file by omission.
 func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer, opts ...CopyOption) error {
 	cfg := newCopyConfig(opts)
 	info, err := os.Stat(srcDir)
@@ -332,15 +347,16 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 
 // stageEntry stages one overlay file from srcBase/relPath.
 //
-// A templated source (see TemplateTargetName) is rendered through
-// text/template with cfg's data map and staged at its target name; every
-// destination-keyed rule — JSON merge, hook wrapping — then follows that
-// target name, so ".codex/hooks.template.json" merges exactly as
-// ".codex/hooks.json" would. Any other file keeps the historical byte-copy /
-// merge path untouched.
+// When this copy renders templates (see WithTemplateData), a templated source
+// (see TemplateTargetName) is rendered through text/template with cfg's data
+// map and staged at its target name; every destination-keyed rule — JSON
+// merge, hook wrapping — then follows that target name, so
+// ".codex/hooks.template.json" merges exactly as ".codex/hooks.json" would.
+// Any other file — and every file in a copy that did not opt in — keeps the
+// historical byte-copy / merge path untouched.
 func stageEntry(srcBase, dstBase, relPath string, cfg copyConfig) error {
 	src := filepath.Join(srcBase, relPath)
-	stagedRel := stagedRelPath(relPath)
+	stagedRel := cfg.stagedRelPath(relPath)
 	dst := filepath.Join(dstBase, stagedRel)
 	if stagedRel == relPath {
 		return copyOrMergeFile(src, dst, IsMergeablePath(relPath), WrapsBareHooks(relPath))

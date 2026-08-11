@@ -176,16 +176,19 @@ func TestCopyDirForProviders_UnrenderableTokenFails(t *testing.T) {
 	}
 }
 
-// TestCopyDirForProviders_NoTemplateDataStillFailsClosed pins that a caller
-// that forgets to supply the data map cannot silently ship an unbound file.
-func TestCopyDirForProviders_NoTemplateDataStillFailsClosed(t *testing.T) {
+// TestCopyDirForProviders_NilTemplateDataStillFailsClosed pins that opting in
+// with a nil map is still opting in: a caller that reaches the seam but has no
+// values to bind cannot silently ship an unbound file. Staging callers pass
+// WithTemplateData unconditionally, so a Config whose map was never populated
+// surfaces here as a loud failure rather than a half-bound staged file.
+func TestCopyDirForProviders_NilTemplateDataStillFailsClosed(t *testing.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
 	writeOverlayFile(t, filepath.Join(src, PerProviderDir, "codex", ".codex", "hooks.template.json"),
 		`{"city":"{{.CityRoot}}"}`)
 
 	var stderr strings.Builder
-	if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+	if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr, WithTemplateData(nil)); err != nil {
 		t.Fatalf("CopyDirForProviders returned %v; the per-provider walk reports on stderr", err)
 	}
 	if !strings.Contains(stderr.String(), "CityRoot") {
@@ -193,6 +196,100 @@ func TestCopyDirForProviders_NoTemplateDataStillFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, ".codex", "hooks.json")); !os.IsNotExist(err) {
 		t.Error("an unbound hooks.json was staged with no template data supplied")
+	}
+}
+
+// promptTemplateBody is a pack's agent prompt template: it carries the
+// .template.md name and a function only the prompt renderer registers.
+// Parsing it as an overlay template fails at parse time, before any data map
+// is consulted.
+const promptTemplateBody = "# Coder\n\nYou are **{{ basename .AgentName }}**, a peer coder.\n"
+
+// TestCopyDirWithSkip_LeavesTemplatesAloneWithoutOptIn pins the boundary
+// between the two file classes that share the .template.<ext> name.
+//
+// A pack's agents/<name>/prompt.template.md belongs to the prompt renderer,
+// which expands it later against a different data map and a funcmap overlay
+// staging does not carry. Rendering is therefore opt-in per copy: a caller
+// that was handed no install data has no business claiming the file, and must
+// copy it through under its own name.
+//
+// This is the exact path `gc init --from-dir` takes to materialize a city from
+// an example directory. Claiming those prompts here fails on `basename` and
+// breaks init for every shipped example city.
+func TestCopyDirWithSkip_LeavesTemplatesAloneWithoutOptIn(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	rel := filepath.Join("packs", "swarm", "agents", "coder", "prompt.template.md")
+	writeOverlayFile(t, filepath.Join(src, rel), promptTemplateBody)
+
+	if err := CopyDirWithSkip(src, dst, func(string, bool) bool { return false }, io.Discard); err != nil {
+		t.Fatalf("CopyDirWithSkip: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dst, rel))
+	if err != nil {
+		t.Fatalf("prompt template was not copied under its own name: %v", err)
+	}
+	if string(got) != promptTemplateBody {
+		t.Errorf("prompt template = %q, want a byte-for-byte copy", got)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "packs", "swarm", "agents", "coder", "prompt.md")); !os.IsNotExist(err) {
+		t.Error("a copy with no template data renamed a prompt template to its rendered target")
+	}
+}
+
+// TestCopyDir_LeavesTemplatesAloneWithoutOptIn pins the same boundary on the
+// best-effort walk, which reports per-file failures to stderr rather than
+// returning them — so a claimed prompt template would vanish from the
+// destination instead of failing the copy.
+func TestCopyDir_LeavesTemplatesAloneWithoutOptIn(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeOverlayFile(t, filepath.Join(src, "agents", "mayor", "prompt.template.md"), promptTemplateBody)
+
+	var stderr strings.Builder
+	if err := CopyDir(src, dst, &stderr); err != nil {
+		t.Fatalf("CopyDir: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("CopyDir reported %q; a prompt template is not an overlay template", stderr.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "agents", "mayor", "prompt.template.md"))
+	if err != nil {
+		t.Fatalf("prompt template was not copied under its own name: %v", err)
+	}
+	if string(got) != promptTemplateBody {
+		t.Errorf("prompt template = %q, want a byte-for-byte copy", got)
+	}
+}
+
+// TestCopyDirForProviders_NoOptInCopiesTemplateVerbatim pins that the opt-in
+// governs the provider walks too. Without WithTemplateData the historical
+// byte-copy behavior stands: the marker stays in the name and the bytes are
+// untouched.
+func TestCopyDirForProviders_NoOptInCopiesTemplateVerbatim(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	const body = `{"city":"{{.CityRoot}}"}`
+	writeOverlayFile(t, filepath.Join(src, PerProviderDir, "codex", ".codex", "hooks.template.json"), body)
+
+	var stderr strings.Builder
+	if err := CopyDirForProviders(src, dst, []string{"codex"}, &stderr); err != nil {
+		t.Fatalf("CopyDirForProviders: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("CopyDirForProviders reported %q; want a silent byte copy", stderr.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dst, ".codex", "hooks.template.json"))
+	if err != nil {
+		t.Fatalf("template was not copied under its own name: %v", err)
+	}
+	if string(got) != body {
+		t.Errorf("copied template = %q, want the unrendered source bytes", got)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Error("a copy with no template data staged a rendered hooks.json")
 	}
 }
 
@@ -239,7 +336,7 @@ func TestCopyDirForProviders_TemplateWithoutTokensStillRenames(t *testing.T) {
 	dst := t.TempDir()
 	writeOverlayFile(t, filepath.Join(src, "notes.template.md"), "static\n")
 
-	if err := CopyDirForProviders(src, dst, nil, io.Discard); err != nil {
+	if err := CopyDirForProviders(src, dst, nil, io.Discard, WithTemplateData(nil)); err != nil {
 		t.Fatalf("CopyDirForProviders: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dst, "notes.md")); err != nil {

@@ -20,6 +20,14 @@ import (
 // pack wants to ship — the city root above all — are known only at install
 // time, and a staged file that carries them unbound is wrong the moment it
 // lands rather than merely incomplete.
+//
+// The marker alone does not make a file this package's to render. It is a
+// shared naming convention, not a private one: a pack's
+// agents/<name>/prompt.template.md carries the same marker and belongs to the
+// prompt renderer, which expands it later against its own data map and
+// funcmap. Rendering here is therefore opt-in per copy operation — see
+// WithTemplateData — so a copy that carries no install context leaves every
+// templated file untouched, name included.
 const TemplateMarker = ".template"
 
 // TemplateTargetName returns the staged filename for a templated overlay file
@@ -45,7 +53,8 @@ type CopyOption func(*copyConfig)
 
 // copyConfig carries per-operation staging settings down the directory walk.
 type copyConfig struct {
-	templateData map[string]string
+	renderTemplates bool
+	templateData    map[string]string
 }
 
 // WithTemplateData supplies the data map used to render templated overlay
@@ -53,12 +62,21 @@ type copyConfig struct {
 // catalog templates use — CityRoot, RigRoot, WorkDir, AgentName, and the
 // agent env — so one pack-authoring vocabulary covers both file classes.
 //
-// Rendering uses missingkey=error: a token with no entry in data fails the
-// copy loudly instead of staging a half-bound file. A caller that stages a
-// templated pack without supplying data therefore cannot silently ship an
-// unbound file; it gets an error naming the template.
+// Passing this option is what opts a copy into rendering at all. A copy
+// without it treats a templated file as any other file: byte-for-byte, marker
+// left in the name. That boundary is load-bearing rather than a convenience —
+// the same .template.<ext> convention names pack files owned by other
+// renderers (agent prompts above all), and directory copies that carry no
+// install context walk right through them.
+//
+// Opting in with a nil map is still opting in. Rendering uses
+// missingkey=error, so a caller that reaches this seam with nothing to bind
+// fails loudly, naming the template, instead of staging a half-bound file.
 func WithTemplateData(data map[string]string) CopyOption {
-	return func(c *copyConfig) { c.templateData = data }
+	return func(c *copyConfig) {
+		c.renderTemplates = true
+		c.templateData = data
+	}
 }
 
 // newCopyConfig folds opts into a copyConfig.
@@ -70,12 +88,17 @@ func newCopyConfig(opts []CopyOption) copyConfig {
 	return cfg
 }
 
-// stagedRelPath returns the destination-relative path relPath stages to,
-// resolving the template marker. Staging rules that key on the destination —
-// JSON merge, hook wrapping, provider preserve-existing — must consult this
-// path rather than the source path, so a templated settings file behaves
-// exactly like its non-templated twin.
-func stagedRelPath(relPath string) string {
+// stagedRelPath returns the destination-relative path relPath stages to under
+// cfg, resolving the template marker when this copy renders templates.
+// Staging rules that key on the destination — JSON merge, hook wrapping,
+// provider preserve-existing — must consult this path rather than the source
+// path, so a templated settings file behaves exactly like its non-templated
+// twin. A copy that does not render templates stages every file at its own
+// name, so the path is returned unchanged.
+func (c copyConfig) stagedRelPath(relPath string) string {
+	if !c.renderTemplates {
+		return relPath
+	}
 	target, ok := TemplateTargetName(filepath.Base(relPath))
 	if !ok {
 		return relPath

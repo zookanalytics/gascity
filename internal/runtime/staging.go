@@ -110,7 +110,10 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 // parameter rather than an option so every staging path has to decide what
 // an installed pack file binds to — a caller that has no city context cannot
 // reach this seam by accident. Rendering is missingkey=error, so an
-// unresolvable token fails staging instead of installing a half-bound file.
+// unresolvable token fails staging instead of installing a half-bound file;
+// that holds for a nil map too, since reaching this function is itself the
+// opt-in. Directory copies outside this seam (overlay.CopyDir and friends)
+// render nothing and leave templated files under their own names.
 func StageProviderOverlayDir(srcDir, dstDir string, providers []string, templateData map[string]string, warnings io.Writer) error {
 	var stderr bytes.Buffer
 	if err := overlay.CopyDirForProviders(srcDir, dstDir, providers, &stderr, overlay.WithTemplateData(templateData)); err != nil {
