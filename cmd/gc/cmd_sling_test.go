@@ -770,6 +770,140 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	}
 }
 
+// A bare rig-pool name is not a live identity — the live one is
+// "<rig>/<binding>.<name>". Stamping the bare form leaves the bead
+// structurally invisible to the pool, so the write site qualifies it against
+// the rig store being written to.
+func TestCliBeadRouterQualifiesBareRigPoolRoute(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "alpha")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name: "polecat", BindingName: "gc-toolkit", Dir: "alpha", Scope: "rig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "RIG-2", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed RIG-2: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "rig:alpha",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "RIG-2",
+		Target: "gc-toolkit.polecat",
+	}); err != nil {
+		t.Fatalf("bare rig-pool route should be qualified, got: %v", err)
+	}
+	bead, err := store.Get("RIG-2")
+	if err != nil {
+		t.Fatalf("store.Get(RIG-2): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "alpha/gc-toolkit.polecat" {
+		t.Errorf("gc.routed_to = %q, want alpha/gc-toolkit.polecat", bead.Metadata["gc.routed_to"])
+	}
+}
+
+// A bare rig-pool name that two rigs could each qualify, written to the city
+// store where neither is reachable, is refused rather than stamped: an
+// unclaimable route leaves the bead open forever with nothing reporting it.
+func TestCliBeadRouterRefusesUnresolvableRoute(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: filepath.Join(cityPath, "alpha")},
+			{Name: "beta", Path: filepath.Join(cityPath, "beta")},
+		},
+		Agents: []config.Agent{{
+			Name: "polecat", BindingName: "gc-toolkit", Dir: "alpha", Scope: "rig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		}, {
+			Name: "polecat", BindingName: "gc-toolkit", Dir: "beta", Scope: "rig",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "RIG-3", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed RIG-3: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "city:test-city",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "RIG-3",
+		Target: "gc-toolkit.polecat",
+	})
+	if err == nil {
+		t.Fatal("expected an unresolvable route to be refused")
+	}
+	for _, want := range []string{"alpha/gc-toolkit.polecat", "beta/gc-toolkit.polecat"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name candidate %q", err.Error(), want)
+		}
+	}
+
+	// Verify the bead's metadata was NOT mutated.
+	bead, getErr := store.Get("RIG-3")
+	if getErr != nil {
+		t.Fatalf("store.Get(RIG-3): %v", getErr)
+	}
+	if bead.Metadata["gc.routed_to"] != "" {
+		t.Errorf("guard did not block SetMetadata: gc.routed_to = %q", bead.Metadata["gc.routed_to"])
+	}
+}
+
+// The "human" sentinel names no agent on purpose and must reach the bead
+// unchanged.
+func TestCliBeadRouterAllowsSentinelRoute(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "HQ-3", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed HQ-3: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "city:test-city",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "HQ-3",
+		Target: "human",
+	}); err != nil {
+		t.Fatalf("sentinel route should succeed, got: %v", err)
+	}
+	bead, err := store.Get("HQ-3")
+	if err != nil {
+		t.Fatalf("store.Get(HQ-3): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "human" {
+		t.Errorf("gc.routed_to = %q, want human", bead.Metadata["gc.routed_to"])
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

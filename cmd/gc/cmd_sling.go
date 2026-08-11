@@ -761,9 +761,20 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
+	// Guard the routing write against an address that resolves to no live
+	// agent identity. Such a value is structurally invisible — the pool offer
+	// predicate is open + unassigned + gc.routed_to matching a live identity —
+	// so the bead sits open forever and nothing reports it. ResolveRouteTarget
+	// qualifies the address when this store's rig makes exactly one
+	// qualification of it live, refuses it otherwise, and subsumes the
+	// slot-suffixed pool collapse that guarded this same line before.
 	routedTo := req.Target
 	if r.deps.Cfg != nil {
-		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
+		resolved, err := agentutil.ResolveRouteTarget(r.deps.Cfg, r.deps.StoreRef, req.Target)
+		if err != nil {
+			return fmt.Errorf("routing %s: %w", req.BeadID, err)
+		}
+		routedTo = resolved
 	}
 	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
