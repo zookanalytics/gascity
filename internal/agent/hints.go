@@ -48,6 +48,11 @@ type StartupHints struct {
 	// OverlayDir is the resolved overlay directory path on the host.
 	// Passed through to the exec session provider for remote copy.
 	OverlayDir string
+	// OverlayTemplateData is the expansion surface for templated overlay
+	// files staged out of PackOverlayDirs / OverlayDir, carrying the
+	// install-specific values (CityRoot above all) a pack cannot know when
+	// it is authored.
+	OverlayTemplateData map[string]string
 	// CopyFiles lists files/directories to stage in the session's working
 	// directory before the agent command starts.
 	CopyFiles []runtime.CopyEntry
@@ -80,6 +85,7 @@ func (h StartupHints) ToRuntimeConfig() runtime.Config {
 		InstallAgentHooks:      h.InstallAgentHooks,
 		PackOverlayDirs:        h.PackOverlayDirs,
 		OverlayDir:             h.OverlayDir,
+		OverlayTemplateData:    h.OverlayTemplateData,
 		CopyFiles:              h.CopyFiles,
 	}
 }

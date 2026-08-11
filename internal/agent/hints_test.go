@@ -53,6 +53,10 @@ func setNonZero(t *testing.T, name string, v reflect.Value) {
 		v.Set(reflect.New(v.Type().Elem()))
 	case reflect.Slice:
 		v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+	case reflect.Map:
+		m := reflect.MakeMap(v.Type())
+		m.SetMapIndex(reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem())
+		v.Set(m)
 	default:
 		t.Fatalf("setNonZero: unhandled kind %s for StartupHints.%s — extend this helper", v.Kind(), name)
 	}
@@ -80,6 +84,7 @@ func TestStartupHintsToRuntimeConfigCopiesValues(t *testing.T) {
 		InstallAgentHooks:      []string{"gemini"},
 		PackOverlayDirs:        []string{"/pack/overlay"},
 		OverlayDir:             "/agent/overlay",
+		OverlayTemplateData:    map[string]string{"CityRoot": "/city"},
 		CopyFiles:              make([]runtime.CopyEntry, 1),
 	}
 
@@ -135,6 +140,9 @@ func TestStartupHintsToRuntimeConfigCopiesValues(t *testing.T) {
 	}
 	if cfg.OverlayDir != "/agent/overlay" {
 		t.Errorf("OverlayDir = %q", cfg.OverlayDir)
+	}
+	if cfg.OverlayTemplateData["CityRoot"] != "/city" {
+		t.Errorf("OverlayTemplateData = %v, want CityRoot=/city", cfg.OverlayTemplateData)
 	}
 	if len(cfg.CopyFiles) != 1 {
 		t.Errorf("CopyFiles len = %d, want 1", len(cfg.CopyFiles))

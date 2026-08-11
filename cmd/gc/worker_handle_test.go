@@ -2490,8 +2490,11 @@ func TestResolvedWorkerSessionConfigStagesProviderOverlayForRigBasePiProvider(t 
 
 	// Apply the overlay hints exactly as
 	// newWorkerSessionHandleForResolvedRuntimeWithConfig does before the factory call.
-	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved)
+	applyWorkerOverlayHints(&sessionCfg.Runtime.Hints, cfg, cityDir, "myrig/polecat", resolved, "myrig/polecat", cityDir)
 
+	if got := sessionCfg.Runtime.Hints.OverlayTemplateData["CityRoot"]; got != cityDir {
+		t.Errorf("create Hints.OverlayTemplateData[CityRoot] = %q, want %q — templated overlay files stage unbound without it", got, cityDir)
+	}
 	if got := strings.TrimSpace(sessionCfg.Runtime.Hints.ProviderOverlayName); got != "pi-vllm" {
 		t.Fatalf("create Hints.ProviderOverlayName = %q, want %q", got, "pi-vllm")
 	}

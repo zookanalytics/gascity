@@ -668,6 +668,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		InstallAgentHooks:      installHooks,
 		PackOverlayDirs:        effectiveOverlayDirs(p.packOverlayDirs, p.rigOverlayDirs, rigName),
 		OverlayDir:             overlayDir,
+		OverlayTemplateData:    materialize.PackTemplateData(mcpCity, p.cityPath, cfgAgent, qualifiedName, workDir),
 		CopyFiles:              copyFiles,
 	}
 

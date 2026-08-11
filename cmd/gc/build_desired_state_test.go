@@ -3026,6 +3026,60 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 	}
 }
 
+// TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot pins that
+// the reconciler's pre-fingerprint materialization reaches the templated-file
+// seam with a real data map — the threading acceptance case for this path.
+//
+// The templated file is deliberately one nothing else rewrites. A templated
+// .codex/hooks.json would also render here, but normalizeStagedCodexHooks runs
+// immediately after staging on this path and rewrites that specific file into
+// managed form, so asserting on it would test the normalizer rather than the
+// seam. The hooks-shaped case is pinned exactly in internal/overlay and
+// internal/runtime instead.
+func TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	tmpl := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "gc-city.template.txt")
+	if err := os.MkdirAll(filepath.Dir(tmpl), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	if err := os.WriteFile(tmpl, []byte("city={{.CityRoot}} agent={{.AgentName}}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(template): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat-codex",
+			Provider: "codex",
+			Scope:    "rig",
+			Dir:      "myrig",
+		}},
+		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+
+	data, err := os.ReadFile(filepath.Join(rigDir, ".codex", "gc-city.txt"))
+	if err != nil {
+		t.Fatalf("templated overlay file not staged at its target name: %v", err)
+	}
+	want := "city=" + cityDir + " agent=myrig/polecat-codex\n"
+	if string(data) != want {
+		t.Errorf("staged file = %q, want %q", data, want)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".codex", "gc-city.template.txt")); !os.IsNotExist(err) {
+		t.Error("the .template.txt source staged as a stray file alongside the rendered target")
+	}
+}
+
 // TestPrepareTemplateResolution_NormalizesStagedCodexHooks guards gc-beez. A
 // pack overlay ships per-provider/codex/.codex/hooks.json in raw form — managed
 // commands that are not bound to this city (`--city <path>`) and prompt hooks

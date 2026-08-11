@@ -44,8 +44,13 @@ func CopyFileOrDir(src, dst string, stderr io.Writer) error {
 // Directory structure is preserved. File permissions are preserved.
 // If srcDir does not exist, returns nil (no-op).
 // Individual file copy failures are logged to stderr but don't abort.
+//
+// Every file is copied verbatim, including one named "<name>.template.<ext>":
+// rendering is opt-in and this entry point takes no options. Callers with
+// install context reach the templated path through CopyDirForProviders with
+// WithTemplateData.
 func CopyDir(srcDir, dstDir string, stderr io.Writer) error {
-	return copyDir(srcDir, dstDir, stderr, nil)
+	return copyDir(srcDir, dstDir, stderr, nil, copyConfig{})
 }
 
 type preserveExistingFunc func(relPath string) bool
@@ -66,7 +71,7 @@ func skipRuntimeMirror(relPath string) bool {
 	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
 }
 
-func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveExistingFunc, cfg copyConfig) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil // Missing source dir is a no-op (like Gas Town).
@@ -77,11 +82,11 @@ func copyDir(srcDir, dstDir string, stderr io.Writer, preserveExisting preserveE
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
-	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting)
+	return copyDirRecursive(srcDir, dstDir, "", stderr, preserveExisting, cfg)
 }
 
 // copyDirRecursive walks srcBase/rel and copies files into dstBase/rel.
-func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc) error {
+func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveExisting preserveExistingFunc, cfg copyConfig) error {
 	srcPath := srcBase
 	if rel != "" {
 		srcPath = filepath.Join(srcBase, rel)
@@ -109,16 +114,19 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				fmt.Fprintf(stderr, "overlay: mkdir %q: %v\n", dstSubDir, err) //nolint:errcheck
 				continue
 			}
-			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting); err != nil {
+			if err := copyDirRecursive(srcBase, dstBase, entryRel, stderr, preserveExisting, cfg); err != nil {
 				fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 			}
 			continue
 		}
 
-		// Copy file (merge if applicable).
+		// Copy file (render if templated, merge if applicable). Preservation
+		// keys on the staged destination, so a templated file is preserved
+		// under the same rule as its non-templated twin.
 		src := filepath.Join(srcBase, entryRel)
-		dst := filepath.Join(dstBase, entryRel)
-		if preserveExisting != nil && preserveExisting(entryRel) {
+		stagedRel := cfg.stagedRelPath(entryRel)
+		if preserveExisting != nil && preserveExisting(stagedRel) {
+			dst := filepath.Join(dstBase, stagedRel)
 			if _, err := os.Stat(dst); err == nil {
 				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
 				continue
@@ -127,7 +135,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 				continue
 			}
 		}
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := stageEntry(srcBase, dstBase, entryRel, cfg); err != nil {
 			fmt.Fprintf(stderr, "overlay: %v\n", err) //nolint:errcheck
 		}
 	}
@@ -142,7 +150,16 @@ type SkipFunc func(relPath string, isDir bool) bool
 // where skip returns true. If skip is nil, copies everything.
 // Unlike CopyDir, this function does not silently ignore errors on individual
 // files — it returns on the first error encountered.
+//
+// Like CopyDir, it renders nothing: "<name>.template.<ext>" is copied under
+// its own name. This is the entry point `gc init` uses to materialize a city
+// from a source directory, where the templated files it walks are agent
+// prompts owned by the prompt renderer.
 func CopyDirWithSkip(srcDir, dstDir string, skip SkipFunc, _ io.Writer) error {
+	return copyDirWithSkip(srcDir, dstDir, skip, copyConfig{})
+}
+
+func copyDirWithSkip(srcDir, dstDir string, skip SkipFunc, cfg copyConfig) error {
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil // Missing source dir is a no-op (consistent with CopyDir).
@@ -153,12 +170,12 @@ func CopyDirWithSkip(srcDir, dstDir string, skip SkipFunc, _ io.Writer) error {
 	if !info.IsDir() {
 		return fmt.Errorf("overlay: %q is not a directory", srcDir)
 	}
-	return copyDirWithSkipRecursive(srcDir, dstDir, "", skip)
+	return copyDirWithSkipRecursive(srcDir, dstDir, "", skip, cfg)
 }
 
 // copyDirWithSkipRecursive walks srcBase/rel and copies files into dstBase/rel,
 // consulting skip for each entry.
-func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error {
+func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc, cfg copyConfig) error {
 	srcPath := srcBase
 	if rel != "" {
 		srcPath = filepath.Join(srcBase, rel)
@@ -184,15 +201,13 @@ func copyDirWithSkipRecursive(srcBase, dstBase, rel string, skip SkipFunc) error
 			if err := os.MkdirAll(dstSubDir, 0o755); err != nil {
 				return fmt.Errorf("overlay: mkdir %q: %w", dstSubDir, err)
 			}
-			if err := copyDirWithSkipRecursive(srcBase, dstBase, entryRel, skip); err != nil {
+			if err := copyDirWithSkipRecursive(srcBase, dstBase, entryRel, skip, cfg); err != nil {
 				return err
 			}
 			continue
 		}
 
-		src := filepath.Join(srcBase, entryRel)
-		dst := filepath.Join(dstBase, entryRel)
-		if err := copyOrMergeFile(src, dst, IsMergeablePath(entryRel), WrapsBareHooks(entryRel)); err != nil {
+		if err := stageEntry(srcBase, dstBase, entryRel, cfg); err != nil {
 			return err
 		}
 	}
@@ -221,8 +236,12 @@ func HasProviderDir(srcDir, providerName string) bool {
 //  2. If per-provider/<providerName>/ exists, copies its contents into dst
 //     (flattened — the per-provider/<provider>/ prefix is stripped).
 //
+// Templated files (<name>.template.<ext>) are rendered only when the caller
+// passes WithTemplateData; see CopyDirForProviders.
+//
 // This implements the V2 overlay layering described in doc-agent-v2.md.
-func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) error {
+func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer, opts ...CopyOption) error {
+	cfg := newCopyConfig(opts)
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -243,14 +262,14 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
 	}
-	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+	if err := copyDirWithSkip(srcDir, dstDir, skip, cfg); err != nil {
 		return err
 	}
 
 	// Step 2: copy provider-specific files (flattened into dst).
 	if providerName != "" {
 		providerDir := filepath.Join(srcDir, PerProviderDir, providerName)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName)); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(providerName), cfg); err != nil {
 			return err
 		}
 	}
@@ -269,7 +288,13 @@ func CopyDirForProvider(srcDir, dstDir, providerName string, stderr io.Writer) e
 // skipped. The order in providers determines which per-provider copy
 // wins when two providers ship the same rel path (last-writer-wins via
 // overwrite or JSON merge).
-func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer) error {
+//
+// Pass WithTemplateData to render "<name>.template.<ext>" files through
+// text/template and stage them at "<name>.<ext>". Without it this copy
+// renders nothing, so a caller that has no install-time values to bind cannot
+// stage a half-bound file by omission.
+func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Writer, opts ...CopyOption) error {
+	cfg := newCopyConfig(opts)
 	info, err := os.Stat(srcDir)
 	if os.IsNotExist(err) {
 		return nil
@@ -289,7 +314,7 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		return relPath == PerProviderDir || filepath.Dir(relPath) == PerProviderDir ||
 			len(relPath) > len(PerProviderDir)+1 && relPath[:len(PerProviderDir)+1] == PerProviderDir+string(filepath.Separator)
 	}
-	if err := CopyDirWithSkip(srcDir, dstDir, skip, stderr); err != nil {
+	if err := copyDirWithSkip(srcDir, dstDir, skip, cfg); err != nil {
 		return err
 	}
 
@@ -301,7 +326,7 @@ func CopyDirForProviders(srcDir, dstDir string, providers []string, stderr io.Wr
 		}
 		seen[p] = true
 		providerDir := filepath.Join(srcDir, PerProviderDir, p)
-		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p)); err != nil {
+		if err := copyDir(providerDir, dstDir, stderr, providerPreserveExisting(p), cfg); err != nil {
 			return err
 		}
 	}
@@ -320,6 +345,29 @@ func providerPreserveExisting(providerName string) preserveExistingFunc {
 	}
 }
 
+// stageEntry stages one overlay file from srcBase/relPath.
+//
+// When this copy renders templates (see WithTemplateData), a templated source
+// (see TemplateTargetName) is rendered through text/template with cfg's data
+// map and staged at its target name; every destination-keyed rule — JSON
+// merge, hook wrapping — then follows that target name, so
+// ".codex/hooks.template.json" merges exactly as ".codex/hooks.json" would.
+// Any other file — and every file in a copy that did not opt in — keeps the
+// historical byte-copy / merge path untouched.
+func stageEntry(srcBase, dstBase, relPath string, cfg copyConfig) error {
+	src := filepath.Join(srcBase, relPath)
+	stagedRel := cfg.stagedRelPath(relPath)
+	dst := filepath.Join(dstBase, stagedRel)
+	if stagedRel == relPath {
+		return copyOrMergeFile(src, dst, IsMergeablePath(relPath), WrapsBareHooks(relPath))
+	}
+	data, mode, err := renderTemplateFile(src, cfg.templateData)
+	if err != nil {
+		return err
+	}
+	return stageFileData(data, mode, dst, IsMergeablePath(stagedRel), WrapsBareHooks(stagedRel))
+}
+
 // copyOrMergeFile copies src to dst, optionally merging JSON if merge is true
 // and dst already exists. When wrapBareHooks is true (Claude settings), bare
 // hook entries in the result are normalized into wrapped form, both when
@@ -329,21 +377,39 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	if !merge {
 		return copyFile(src, dst)
 	}
-	// Only merge if destination already exists.
-	dstInfo, dstErr := os.Stat(dst)
-	if dstErr != nil {
-		// Destination doesn't exist or can't be stat'd — canonicalize (and
-		// normalize hook shape for wrap-style files) the source before
-		// creating it.
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
+	srcData, err := os.ReadFile(src)
+	if err != nil {
+		return copyFile(src, dst)
+	}
+	info, err := os.Stat(src)
+	if err != nil {
+		return copyFile(src, dst)
+	}
+	return stageFileData(srcData, info.Mode().Perm(), dst, true, wrapBareHooks)
+}
+
+// stageFileData writes srcData to dst. When merge is true and dst already
+// holds a readable document, the two are JSON-merged (identity-keyed for hook
+// entries) instead of overwritten; otherwise dst is created from srcData's
+// canonicalized JSON. mode is the permission set used when dst is created
+// fresh — an existing dst keeps its own permissions. Falls back to writing
+// srcData verbatim on any merge error.
+//
+// This is the content-level core both staging paths share: copyOrMergeFile
+// reads an overlay file into it, and templated files feed it rendered bytes
+// that must never be replaced by a re-read of the unrendered source.
+func stageFileData(srcData []byte, mode os.FileMode, dst string, merge, wrapBareHooks bool) error {
+	if !merge {
+		return writeStagedFile(dst, srcData, mode)
+	}
+	// Only merge if destination already exists and is readable.
+	dstInfo, err := os.Stat(dst)
+	if err != nil {
+		return writeCanonicalSettingsData(srcData, mode, dst, wrapBareHooks)
 	}
 	dstData, err := os.ReadFile(dst)
 	if err != nil {
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
-	}
-	srcData, err := os.ReadFile(src)
-	if err != nil {
-		return createCanonicalSettingsFile(src, dst, wrapBareHooks)
+		return writeCanonicalSettingsData(srcData, mode, dst, wrapBareHooks)
 	}
 	var opts []MergeOption
 	if wrapBareHooks {
@@ -352,60 +418,39 @@ func copyOrMergeFile(src, dst string, merge, wrapBareHooks bool) error {
 	merged, err := MergeSettingsJSON(dstData, srcData, opts...)
 	if err != nil {
 		// Merge failed — fall back to overwrite.
-		return copyFile(src, dst)
-	}
-	// Ensure parent directory exists.
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("creating parent for %q: %w", dst, err)
+		return writeStagedFile(dst, srcData, mode)
 	}
 	// Preserve the destination file's permissions.
-	return os.WriteFile(dst, merged, dstInfo.Mode().Perm())
+	return writeStagedFile(dst, merged, dstInfo.Mode().Perm())
 }
 
-// createCanonicalSettingsFile writes dst from src's canonicalized JSON. For
-// wrap-style files (wrapBareHooks) it also normalizes bare hook entries into
-// wrapped form by merging the source over an empty object. Falls back to a
-// plain canonical copy if the source can't be read or isn't a JSON object.
-func createCanonicalSettingsFile(src, dst string, wrapBareHooks bool) error {
-	if !wrapBareHooks {
-		return copyCanonicalJSONFile(src, dst)
+// writeCanonicalSettingsData creates dst from srcData's canonicalized JSON.
+// For wrap-style files (wrapBareHooks) it also normalizes bare hook entries
+// into wrapped form by merging the source over an empty object. Falls back to
+// srcData verbatim when it isn't a JSON object.
+func writeCanonicalSettingsData(srcData []byte, mode os.FileMode, dst string, wrapBareHooks bool) error {
+	if wrapBareHooks {
+		if out, err := MergeSettingsJSON([]byte("{}"), srcData, WithWrapBareHooks()); err == nil {
+			return writeStagedFile(dst, out, mode)
+		}
 	}
-	data, err := os.ReadFile(src)
+	canonical, err := CanonicalJSON(srcData)
 	if err != nil {
-		return copyCanonicalJSONFile(src, dst)
+		return writeStagedFile(dst, srcData, mode)
 	}
-	out, err := MergeSettingsJSON([]byte("{}"), data, WithWrapBareHooks())
-	if err != nil {
-		// Source isn't a mergeable JSON object — fall back to canonical copy.
-		return copyCanonicalJSONFile(src, dst)
-	}
-	info, err := os.Stat(src)
-	if err != nil {
-		return copyCanonicalJSONFile(src, dst)
-	}
+	return writeStagedFile(dst, canonical, mode)
+}
+
+// writeStagedFile writes data to dst, creating parent directories. mode
+// applies only when dst is created; an existing file keeps its permissions.
+func writeStagedFile(dst string, data []byte, mode os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
-	return os.WriteFile(dst, out, info.Mode().Perm())
-}
-
-func copyCanonicalJSONFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return copyFile(src, dst)
+	if err := os.WriteFile(dst, data, mode); err != nil {
+		return fmt.Errorf("writing %q: %w", dst, err)
 	}
-	canonical, err := CanonicalJSON(data)
-	if err != nil {
-		return copyFile(src, dst)
-	}
-	info, err := os.Stat(src)
-	if err != nil {
-		return copyFile(src, dst)
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return fmt.Errorf("creating parent for %q: %w", dst, err)
-	}
-	return os.WriteFile(dst, canonical, info.Mode().Perm())
+	return nil
 }
 
 // copyFile copies a single file preserving permissions.

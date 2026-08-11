@@ -226,7 +226,7 @@ func TestStageProviderOverlayDirIgnoresWarningWriterFailure(t *testing.T) {
 		t.Fatalf("write project instructions: %v", err)
 	}
 
-	err := StageProviderOverlayDir(packOverlay, workDir, []string{"kiro"}, failingWriter{})
+	err := StageProviderOverlayDir(packOverlay, workDir, []string{"kiro"}, nil, failingWriter{})
 	if err != nil {
 		t.Fatalf("StageProviderOverlayDir: %v", err)
 	}
@@ -243,4 +243,78 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) {
 	return 0, errors.New("writer unavailable")
+}
+
+// TestStageSessionWorkDirRendersTemplateOverlayFromConfig is the runtime-layer
+// acceptance case: a pack ships a templated per-provider overlay file, and the
+// session's own Config carries the data map, so the file lands city-bound at
+// the moment it is staged — with nothing left to normalize afterwards.
+func TestStageSessionWorkDirRendersTemplateOverlayFromConfig(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	hooks := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o755); err != nil {
+		t.Fatalf("mkdir codex overlay: %v", err)
+	}
+	body := `{"hooks":{"SessionStart":[{"matcher":"","hooks":[` +
+		`{"type":"command","command":"gc --city {{.CityRoot}} prime --hook"}]}]}}`
+	if err := os.WriteFile(hooks, []byte(body), 0o644); err != nil {
+		t.Fatalf("write codex hooks template: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	err := StageSessionWorkDirWithWarnings(Config{
+		WorkDir:             workDir,
+		ProviderName:        "codex",
+		PackOverlayDirs:     []string{packOverlay},
+		OverlayTemplateData: map[string]string{"CityRoot": "/home/op/city"},
+	}, &warnings)
+	if err != nil {
+		t.Fatalf("StageSessionWorkDirWithWarnings: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json"))
+	if err != nil {
+		t.Fatalf("read staged hooks.json: %v", err)
+	}
+	if !strings.Contains(string(data), "--city /home/op/city") {
+		t.Errorf("staged hooks.json = %s, want the command bound to the city root", data)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.template.json")); !os.IsNotExist(err) {
+		t.Error("the .template.json source staged as a stray file alongside the rendered target")
+	}
+}
+
+// TestStageProviderOverlayDirFailsOnUnrenderableTemplate pins the escalation:
+// the per-provider overlay walk reports a render failure on stderr rather than
+// returning it, and StageProviderOverlayDir classifies any non-preservation
+// line as fatal. Without that promotion a half-bound file would be a warning
+// nobody reads.
+func TestStageProviderOverlayDirFailsOnUnrenderableTemplate(t *testing.T) {
+	t.Parallel()
+
+	workDir := t.TempDir()
+	packOverlay := t.TempDir()
+	hooks := filepath.Join(packOverlay, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(hooks), 0o755); err != nil {
+		t.Fatalf("mkdir codex overlay: %v", err)
+	}
+	if err := os.WriteFile(hooks, []byte(`{"city":"{{.NoSuchKey}}"}`), 0o644); err != nil {
+		t.Fatalf("write codex hooks template: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	err := StageProviderOverlayDir(packOverlay, workDir, []string{"codex"},
+		map[string]string{"CityRoot": "/home/op/city"}, &warnings)
+	if err == nil {
+		t.Fatal("StageProviderOverlayDir succeeded on an unrenderable template; want a fatal error")
+	}
+	if !strings.Contains(err.Error(), "hooks.template.json") {
+		t.Errorf("error = %v, want it to name the offending template", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(statErr) {
+		t.Error("a half-bound hooks.json was staged despite the render failure")
+	}
 }

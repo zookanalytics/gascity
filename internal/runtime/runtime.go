@@ -645,6 +645,20 @@ type Config struct {
 	// Empty means no overlay. Highest priority — overwrites pack overlays.
 	OverlayDir string
 
+	// OverlayTemplateData is the expansion surface for templated overlay
+	// files (overlay.TemplateTargetName) found in PackOverlayDirs and
+	// OverlayDir. It carries the install-specific values a pack cannot know
+	// when it is authored — CityRoot above all — plus RigRoot, WorkDir,
+	// AgentName, and the agent env, matching the map MCP catalog templates
+	// expand against.
+	//
+	// Deliberately NOT part of any fingerprint: the map mirrors the agent
+	// env, so hashing it would route ~50 GC_* service-discovery vars into
+	// config-drift detection and defeat the env allow-list. The identity the
+	// map derives from (city, rig, workdir, agent) is already covered by the
+	// fields that do hash.
+	OverlayTemplateData map[string]string
+
 	// CopyFiles lists files/directories to stage before the command runs.
 	// Provider.Start handles the copy atomically: for local providers,
 	// files are copied to workDir; for remote providers, files are
