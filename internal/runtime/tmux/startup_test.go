@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2768,18 +2769,80 @@ func TestRecordStartCrashDisabledWhenNoRuntimeDir(t *testing.T) {
 // slow-but-healthy setup commands killed mid-flight by the fixed wall-clock
 // deadline (e.g. a large `git worktree add` checkout streaming progress past
 // setup_timeout). With the activity budget enabled, output resets the idle
-// clock, so a command that streams for 3x the idle window and exits 0 must
+// clock, so a command that streams for twice the idle window and exits 0 must
 // succeed.
+//
+// The progress is paced by this test writing into a FIFO the command copies to
+// stdout, rather than by a `sleep` loop inside the command itself. A shell loop
+// forks and execs /bin/sleep once per step, and on an oversubscribed host that
+// process creation alone outlasts the idle window: the command is then killed
+// for a silence it never chose and the assertion inverts, failing a push over a
+// diff that cannot reach this package. Pacing from the test costs one timer
+// wakeup per step instead, so the gap the idle clock observes is bounded by
+// scheduling latency rather than by fork+exec.
 func TestRunSetupCommandActivityStreamingSurvivesIdleWindow(t *testing.T) {
-	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
-
-	err := ops.runSetupCommand(
-		context.Background(),
-		"for i in 1 2 3 4 5 6 7 8 9 10; do echo progress $i; sleep 0.1; done; exit 0",
-		map[string]string{},
-		300*time.Millisecond, // idle budget — total runtime (~1s) far exceeds it
+	const (
+		idle = 800 * time.Millisecond
+		step = 80 * time.Millisecond
+		// Stream past the idle budget that would have killed the command
+		// under the old fixed deadline — that survival is the regression.
+		stream = 2 * idle
 	)
+
+	fifo := filepath.Join(t.TempDir(), "progress")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatalf("Mkfifo(%s): %v", fifo, err)
+	}
+	// O_RDWR so this open never blocks on the FIFO rendezvous: a command that
+	// dies before it opens the read end must fail the test, not hang it.
+	w, err := os.OpenFile(fifo, os.O_RDWR, 0)
 	if err != nil {
+		t.Fatalf("opening progress FIFO: %v", err)
+	}
+	closed := false
+	defer func() {
+		if !closed {
+			_ = w.Close()
+		}
+	}()
+
+	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 30 * time.Second}
+	done := make(chan error, 1)
+	go func() {
+		done <- ops.runSetupCommand(
+			context.Background(),
+			`exec cat "$GC_PROGRESS_FIFO"`,
+			map[string]string{"GC_PROGRESS_FIFO": fifo},
+			idle,
+		)
+	}()
+
+	// A ticker rather than a sleep per step: it holds the cadence instead of
+	// accumulating each write's latency into the next gap, and it lets the
+	// command's own exit cut the loop short, so a kill mid-stream is reported
+	// where it happens instead of after the full streaming window.
+	ticker := time.NewTicker(step)
+	defer ticker.Stop()
+	streaming := time.After(stream)
+	for streamed := false; !streamed; {
+		if _, err := fmt.Fprintln(w, "progress"); err != nil {
+			t.Fatalf("writing progress: %v", err)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("streaming setup command exited while progress was flowing: %v", err)
+		case <-streaming:
+			streamed = true
+		case <-ticker.C:
+		}
+	}
+	// Dropping the last writer ends the copy, so the command exits 0.
+	closed = true
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing progress FIFO: %v", err)
+	}
+
+	if err := <-done; err != nil {
 		t.Fatalf("streaming setup command killed despite visible progress: %v", err)
 	}
 }
@@ -2813,15 +2876,29 @@ func TestRunSetupCommandActivityIdleKillsSilentHang(t *testing.T) {
 
 // TestRunSetupCommandActivityCeilingKillsRunaway proves the runaway backstop:
 // continuous output must not extend a command past the absolute ceiling.
+//
+// The idle budget is set far beyond the ceiling deliberately. Both budgets are
+// armed from the same instant, so a ceiling shorter than the idle window is the
+// only one that can fire no matter how the host schedules the streamer — where
+// an idle window near the ceiling turns the assertion into a race that a
+// starved writer loses, reporting the idle timeout for a command the ceiling
+// was meant to kill.
 func TestRunSetupCommandActivityCeilingKillsRunaway(t *testing.T) {
 	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 700 * time.Millisecond}
 
+	// A regression that dropped the ceiling while keeping the idle budget would
+	// leave this streamer running forever, hanging the package rather than
+	// failing it. Bound the parent so that regression surfaces as the assertion
+	// below; the ceiling fires an order of magnitude earlier on the happy path.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	start := time.Now()
 	err := ops.runSetupCommand(
-		context.Background(),
+		ctx,
 		"while true; do echo spinning; sleep 0.1; done",
 		map[string]string{},
-		300*time.Millisecond,
+		5*time.Second,
 	)
 	elapsed := time.Since(start)
 	if err == nil {
