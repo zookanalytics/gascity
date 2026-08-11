@@ -27,6 +27,12 @@ permissions: {}
 
 jobs:
   notify:
+    # Only the canonical repo can dispatch to gascity/gasworks-control-plane:
+    # GASCITY_HOSTED_TOKEN is a contents:write credential there, which a fork
+    # neither has nor should have. Unguarded, GH_TOKEN resolves to the empty
+    # string on every fork and gh exits 4, so the job fails by construction
+    # rather than skipping.
+    if: ${{ github.repository == 'gastownhall/gascity' }}
     runs-on: ubuntu-latest
     steps:
       - name: Trigger runtime image rebuild
