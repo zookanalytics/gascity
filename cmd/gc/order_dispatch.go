@@ -443,12 +443,15 @@ type orderTrackingSummary struct {
 // field stamped so they use independent scoped labels. routes is the caller's
 // resolved storage binding; nil is the identity routing of a single-store city.
 func buildOrderDispatcher(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher { //nolint:unparam // routes is nil in current callers but is the storage binding a production caller must pass
-	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan")
+	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan", nil)
 	return od
 }
 
-func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
-	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
+// buildOrderDispatcherWithSnapshot scans the order set and builds the
+// dispatcher over it. The scan logs the registrations it drops for their rig
+// scope through unbound (scanOrderSetSnapshotFSWith).
+func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderDispatcher, orderSetSnapshot) {
+	snapshot, err := scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, unbound)
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
@@ -457,8 +460,23 @@ func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cf
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	return scanOrderSetSnapshotFSWith(fs, cityPath, cfg, stderr, cmdName, nil)
+}
+
+// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS logging the
+// registrations the scan drops for their rig scope through unbound, which
+// leaves out a warning the previous scan through it already reported. A nil
+// unbound logs every one the scan reports.
+func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
+	}
+	var onUnbound orderdiscovery.UnboundRigScopedHandler = func(orderName string, boundRigs []string) {
+		logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+	}
+	scanned := func() {}
+	if unbound != nil {
+		onUnbound, scanned = unbound.scan(stderr, cmdName)
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		FS: fs,
@@ -474,15 +492,64 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
 			return nil
 		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		OnUnboundRigScoped: onUnbound,
+		ValidateOrder:      validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err
 	}
+	scanned()
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),
 	}, nil
+}
+
+// unboundRigScopedLog logs the registrations order-set scans drop for their
+// rig scope. A scan logs only the warnings the previous scan did not report: a
+// warning every scan repeats unchanged is logged once, a changed one is
+// logged, and so is one that goes away and later comes back. The drop is
+// expected for a rig-scoped order in a pack every rig imports, and the
+// supervisor scans the order set at start, on every config reload, and every
+// orderRescanInterval on the orders lane, so logging every warning of every
+// scan buries the log.
+type unboundRigScopedLog struct {
+	mu sync.Mutex
+	// last is the warnings of the latest completed scan, by order name. A scan
+	// in progress adds each warning it logs, so a scan running beside it does
+	// not log that warning again.
+	last map[string]string
+}
+
+// scan begins one scan logged through l, prefixed with cmdName. It returns the
+// handler the scan reports its dropped registrations to, and scanned, which the
+// caller runs once the scan has completed to make the scan's warnings the set
+// the next scan is compared with. A scan that fails does not run scanned, so a
+// warning it did not reach is not taken for gone.
+func (l *unboundRigScopedLog) scan(stderr io.Writer, cmdName string) (report orderdiscovery.UnboundRigScopedHandler, scanned func()) {
+	reported := make(map[string]string)
+	report = func(orderName string, boundRigs []string) {
+		msg := orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)
+		l.mu.Lock()
+		reported[orderName] = msg
+		news := l.last[orderName] != msg
+		if news {
+			if l.last == nil {
+				l.last = make(map[string]string)
+			}
+			l.last[orderName] = msg
+		}
+		l.mu.Unlock()
+		if news {
+			logDispatchError(stderr, "%s: %s", cmdName, msg)
+		}
+	}
+	scanned = func() {
+		l.mu.Lock()
+		l.last = reported
+		l.mu.Unlock()
+	}
+	return report, scanned
 }
 
 func orderSetSignature(aa []orders.Order) string {

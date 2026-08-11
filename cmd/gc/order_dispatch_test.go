@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -152,6 +153,153 @@ interval = "1m"
 	}
 	if orderSnapshotHasName(removed.Orders, "tick") {
 		t.Fatalf("removed snapshot still contains tick: %#v", removed.Orders)
+	}
+}
+
+// TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport: a rig-scoped
+// order in a pack every rig imports reports its dropped city registration on
+// every scan, and the supervisor scans the order set at start, on every config
+// reload and every orderRescanInterval. A scan logs only the warnings the
+// previous completed scan did not report: an unchanged warning is logged once,
+// a changed one is logged, and so is one that goes away for a scan and comes
+// back.
+func TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport(t *testing.T) {
+	var stderr bytes.Buffer
+	var l unboundRigScopedLog
+	type drop struct {
+		order string
+		rigs  []string
+	}
+	// scan runs one scan that reports drops, and completes it unless failed.
+	scan := func(failed bool, drops ...drop) {
+		report, scanned := l.scan(&stderr, "gc patrol: order scan")
+		for _, d := range drops {
+			report(d.order, d.rigs)
+		}
+		if !failed {
+			scanned()
+		}
+	}
+	sweepOnTwo := drop{"sweep", []string{"alpha", "beta"}}
+	sweepOnOne := drop{"sweep", []string{"alpha"}}
+	other := drop{"other", []string{"alpha"}}
+	scan(false, sweepOnTwo, other) // both new
+	scan(false, sweepOnTwo, other) // both unchanged
+	scan(false, sweepOnOne, other) // sweep's warning changed
+	scan(false, other)             // sweep's warning went away
+	scan(false, sweepOnOne, other) // and came back unchanged
+	scan(true)                     // a scan that failed before reaching either
+	scan(false, sweepOnOne, other) // left nothing to log again
+
+	// Two scans in flight at once, as when a config reload's scan overlaps the
+	// lane's rescan: a new warning is logged by the first to report it.
+	reportFirst, scannedFirst := l.scan(&stderr, "gc patrol: order scan")
+	reportSecond, scannedSecond := l.scan(&stderr, "gc patrol: order scan")
+	reportFirst("late", []string{"beta"})
+	reportSecond("late", []string{"beta"})
+	scannedFirst()
+	scannedSecond()
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	want := []struct{ order, rigs string }{
+		{"sweep", "alpha, beta"},
+		{"other", "alpha"},
+		{"sweep", "alpha"},
+		{"sweep", "alpha"},
+		{"late", "beta"},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("logged %d warnings, want %d (a warning the previous scan reported unchanged is not logged):\n%s", len(lines), len(want), stderr.String())
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(lines[i], `gc patrol: order scan: order "`+w.order+`" declares scope = "rig"`) ||
+			!strings.HasSuffix(lines[i], "(still registered on rig(s) "+w.rigs+")") {
+			t.Errorf("warning %d = %q, want order %q still registered on %s", i, lines[i], w.order, w.rigs)
+		}
+	}
+}
+
+// TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce: the orders lane's
+// periodic rescan and the same-revision config reload both scan through
+// CityRuntime.scanOrderSet, so a dropped rig-scope registration is logged
+// once, not on every rescan.
+func TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	cityLayer := filepath.Join(cityPath, "formulas")
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	for _, dir := range []string{cityLayer, filepath.Join(packDir, "formulas"), filepath.Join(packDir, "orders")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(packDir, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr}
+
+	for i := 0; i < 3; i++ {
+		snapshot, err := cr.scanOrderSet(cityPath, cfg, "gc patrol: order scan")
+		if err != nil {
+			t.Fatalf("scan %d: %v", i, err)
+		}
+		if !orderSnapshotHasName(snapshot.Orders, "sweep") {
+			t.Fatalf("scan %d dropped the rig-bound registration too: %#v", i, snapshot.Orders)
+		}
+	}
+	if n := strings.Count(stderr.String(), `order "sweep" declares scope = "rig"`); n != 1 {
+		t.Fatalf("dropped-registration warnings across three scans = %d, want 1:\n%s", n, stderr.String())
+	}
+}
+
+// TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce: the scan
+// at start, the scan a config reload rebuilds the dispatcher from, and the
+// orders lane's rescan all log through the runtime's one unboundRigScoped, so
+// a dropped rig-scope registration none of them changes is logged once.
+func TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	// A city-local order declaring rig scope: no rig imports it, so every scan
+	// drops its city registration and reports the drop.
+	if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cr, _, _ := newPublicationTestRuntime(t, cityPath, runtime.NewFake(), io.Discard, &stderr)
+	const warning = `order "sweep" declares scope = "rig"`
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings from the start scan = %d, want 1:\n%s", n, stderr.String())
+	}
+
+	// A reload that changes the config revision rebuilds the dispatcher from a
+	// fresh scan.
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual); reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
+	// The orders lane's rescan.
+	if _, err := cr.scanOrderSet(cityPath, cr.cfg, "gc patrol: order scan"); err != nil {
+		t.Fatalf("lane rescan: %v", err)
+	}
+
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings across the start scan, a reload and a rescan = %d, want 1:\n%s", n, stderr.String())
 	}
 }
 
@@ -11028,6 +11176,43 @@ func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
 		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
 			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
 		}
+	}
+}
+
+// Belt and braces for the discovery-side guard. An order that declares
+// scope = "rig" but reaches dispatch with no rig binding must be refused, not
+// resolved to the city store: its pool is a rig pool name that qualifies to
+// nothing at city scope, so the wisp would land in the city store where no
+// agent can claim it.
+func TestResolveOrderStoreTarget_DeclaredRigScopeWithoutRigRefused(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	_, err := resolveOrderStoreTarget("/city", cfg, orders.Order{
+		Name:  "liveness-sweep",
+		Scope: "rig",
+		Pool:  "gc-toolkit.polecat",
+	})
+	if err == nil {
+		t.Fatal("resolveOrderStoreTarget: expected error for declared rig scope with no rig binding, got nil")
+	}
+	if !strings.Contains(err.Error(), "liveness-sweep") {
+		t.Errorf("error = %q, want mention of the order name", err)
+	}
+	if !strings.Contains(err.Error(), `scope = "rig"`) {
+		t.Errorf("error = %q, want mention of the declared scope", err)
+	}
+}
+
+// The other half of the same rule: an order that never declares scope is
+// rig-scoped only by default, not by declaration, so a city-level registration
+// of it still resolves to the city store exactly as before.
+func TestResolveOrderStoreTarget_UndeclaredScopeStillResolvesToCityStore(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	target, err := resolveOrderStoreTarget("/city", cfg, orders.Order{Name: "heartbeat"})
+	if err != nil {
+		t.Fatalf("resolveOrderStoreTarget: unexpected error: %v", err)
+	}
+	if target.ScopeKind != "city" {
+		t.Errorf("ScopeKind = %q, want %q", target.ScopeKind, "city")
 	}
 }
 
