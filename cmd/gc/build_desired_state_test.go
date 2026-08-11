@@ -3030,12 +3030,10 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 // the reconciler's pre-fingerprint materialization reaches the templated-file
 // seam with a real data map — the threading acceptance case for this path.
 //
-// The templated file is deliberately one nothing else rewrites. A templated
-// .codex/hooks.json would also render here, but normalizeStagedCodexHooks runs
-// immediately after staging on this path and rewrites that specific file into
-// managed form, so asserting on it would test the normalizer rather than the
-// seam. The hooks-shaped case is pinned exactly in internal/overlay and
-// internal/runtime instead.
+// The templated file is deliberately a plain one, so the assertion is on the
+// rendering seam alone. The hooks-shaped case — where rendering has to produce
+// a document the codex-hooks-drift check accepts — is pinned separately in
+// TestPrepareTemplateResolution_StagesCodexHooksBoundToCity.
 func TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
@@ -3080,34 +3078,35 @@ func TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot(t *testing
 	}
 }
 
-// TestPrepareTemplateResolution_NormalizesStagedCodexHooks guards gc-beez. A
-// pack overlay ships per-provider/codex/.codex/hooks.json in raw form — managed
-// commands that are not bound to this city (`--city <path>`) and prompt hooks
-// that are not wrapped in `gc hook run`. The overlay stager copies (and JSON
-// merges) that file verbatim, but hooks.Install — the only writer that applies
-// the managed normalization — runs solely when install_agent_hooks is
-// non-empty. An agent whose resolved provider is codex therefore gets the codex
-// hook surface staged and audited by the codex-hooks-drift doctor check
-// (agentUsesCodexHookSurface matches on the provider, not on install hooks)
-// while nothing ever normalizes it.
+// TestPrepareTemplateResolution_StagesCodexHooksBoundToCity guards gc-beez on
+// the live code path. A pack overlay ships its Codex hooks as the templated
+// per-provider/codex/.codex/hooks.template.json, and the reconciler's
+// pre-fingerprint materialization is what must reach the templated-file seam
+// with a real data map so the staged commands come out bound to this city.
 //
-// The result was a doctor check that could never go green: every reconciler
-// tick re-staged the raw overlay, so `gc doctor --fix` was undone within
-// seconds and the check re-flagged the file it had just upgraded. Staging must
-// leave managed Codex hooks in current managed form.
-func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
+// That threading is load-bearing here and nowhere else: hooks.Install — the
+// other writer of managed form — runs solely when install_agent_hooks is
+// non-empty, while an agent whose resolved provider is codex gets the codex
+// hook surface staged and audited by the codex-hooks-drift doctor check
+// (agentUsesCodexHookSurface matches on the provider, not on install hooks).
+//
+// The gc-beez failure was a doctor check that could never go green: every
+// reconciler tick re-staged an unbound overlay, so `gc doctor --fix` was undone
+// within seconds and the check re-flagged the file it had just upgraded. It was
+// closed first by a post-hoc normalizer and now by the asset itself, so staging
+// leaves managed Codex hooks in current managed form with no second writer.
+func TestPrepareTemplateResolution_StagesCodexHooksBoundToCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)
 	}
 	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
-	hooksSrc := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.json")
+	hooksSrc := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.template.json")
 	if err := os.MkdirAll(filepath.Dir(hooksSrc), 0o755); err != nil {
 		t.Fatalf("MkdirAll(overlay): %v", err)
 	}
-	// Raw pack-overlay form: unbound `gc prime`, unwrapped prompt hooks.
-	rawOverlay := `{
+	templatedOverlay := `{
   "hooks": {
     "SessionStart": [
       {
@@ -3115,7 +3114,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '{{.CityRoot}}' prime --hook --hook-format codex"
           }
         ]
       }
@@ -3126,7 +3125,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "gc handoff --auto \"context cycle\""
+            "command": "gc --city '{{.CityRoot}}' handoff --auto --hook-format codex \"context cycle\""
           }
         ]
       }
@@ -3137,15 +3136,27 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "gc nudge drain --inject --hook-format codex"
+            "command": "gc --city '{{.CityRoot}}' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex"
           }
         ]
       }
     ]
   }
 }`
-	if err := os.WriteFile(hooksSrc, []byte(rawOverlay), 0o644); err != nil {
+	if err := os.WriteFile(hooksSrc, []byte(templatedOverlay), 0o644); err != nil {
 		t.Fatalf("WriteFile(overlay hooks): %v", err)
+	}
+
+	// A user-authored entry already in the workdir must survive the merge:
+	// staging adds the managed surface, it does not own the whole document.
+	if err := os.MkdirAll(filepath.Join(rigDir, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.codex): %v", err)
+	}
+	const userHook = "printf custom-codex-hook"
+	if err := os.WriteFile(filepath.Join(rigDir, ".codex", "hooks.json"),
+		[]byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"`+userHook+`","type":"command"}]}]}}`),
+		0o644); err != nil {
+		t.Fatalf("WriteFile(user hooks): %v", err)
 	}
 
 	cfg := &config.City{
@@ -3180,6 +3191,12 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(staged): %v", err)
 	}
+	if !strings.Contains(string(first), userHook) {
+		t.Fatalf("staging dropped the user-authored hook entry:\n%s", first)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".codex", "hooks.template.json")); !os.IsNotExist(err) {
+		t.Error("the templated source staged as a stray file alongside the rendered target")
+	}
 
 	// Every reconciler tick re-stages the raw overlay over the normalized file,
 	// so stage+normalize must reach a fixed point rather than accumulating
@@ -3197,10 +3214,11 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	}
 }
 
-// TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks ensures the
-// normalization added for gc-beez stays scoped to Gas City's managed hook
-// surface: a workdir whose .codex/hooks.json contains only user-authored hooks
-// is left byte-for-byte alone.
+// TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks pins that an agent
+// whose overlays ship no Codex hooks gets no Codex hooks written for it: a
+// workdir whose .codex/hooks.json contains only user-authored hooks is left
+// byte-for-byte alone. Whether an agent has a managed Codex hook surface at all
+// is the overlay's decision, and materialization adds no writer of its own.
 func TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")

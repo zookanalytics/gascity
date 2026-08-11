@@ -18,10 +18,18 @@ Provider hook configs live in two places:
 - `internal/hooks/config/claude.json` — Claude-specific settings (this directory).
 - `internal/bootstrap/packs/core/overlay/per-provider/<provider>/…` — every other
   provider, scoped under that provider's expected dotfile path
-  (e.g. `codex/.codex/hooks.json`, `cursor/.cursor/hooks.json`).
+  (e.g. `codex/.codex/hooks.template.json`, `cursor/.cursor/hooks.json`).
 
 Installation walks the pack overlay during `gc start` / `gc rig boot`,
 materializing the per-provider files into each agent's working directory.
+
+A file named `<name>.template.<ext>` carries values known only at install
+time — the city root above all — and lands at `<name>.<ext>`. Overlay staging
+renders it through `text/template`; `hooks.Install` renders nothing and instead
+binds the same values through that file's managed writer, so an asset may only
+carry the marker when it has one (see `installedOverlayRel`). The Codex hooks
+asset is the marker's one user today: its managed commands bind the city with
+`gc --city '<root>' …`.
 
 ## Event mapping
 

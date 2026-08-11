@@ -1,14 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -224,6 +229,93 @@ func TestCodexHooksDriftCheckFixRebindsManagedWrongCityBinding(t *testing.T) {
 	if strings.Contains(got, "/old/city") {
 		t.Fatalf("stale city binding survived:\n%s", got)
 	}
+}
+
+// TestStagedCoreCodexHooksAssetIsCurrent pins the contract that replaced
+// hooks.NormalizeManagedCodexHooks (gc-fbc9d): the core pack ships its Codex
+// hooks overlay as a templated asset, so overlay staging alone leaves a
+// workdir whose .codex/hooks.json this check reports as current — no post-hoc
+// rewrite of the file staging just wrote.
+//
+// Staging alone is the load-bearing part. An agent whose resolved provider is
+// codex stages that slot without declaring install_agent_hooks, so hooks.Install
+// — the other writer of managed form — never runs for it, while this check still
+// audits the file (agentUsesCodexHookSurface matches the provider). That gap is
+// gc-beez: each tick re-staged a raw overlay over whatever `gc doctor --fix` had
+// upgraded, so the check could never go green.
+func TestStagedCoreCodexHooksAssetIsCurrent(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+	overlayDir := materializeCoreOverlayForTest(t)
+
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		map[string]string{"CityRoot": cityDir}, io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir: %v", err)
+	}
+
+	staged := filepath.Join(workDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("core codex hooks asset not staged at its target name: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.template.json")); !os.IsNotExist(err) {
+		t.Errorf("the templated source staged as a stray file alongside the rendered target")
+	}
+
+	check := newCodexHooksDriftCheck(cityDir, []string{workDir})
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("staged core Codex hooks need an upgrade — the codex-hooks-drift\n"+
+			"check flags this file on every tick and `gc doctor --fix` is undone by\n"+
+			"the next stage (gc-beez).\nstatus=%v message=%s\nstaged content:\n%s",
+			result.Status, result.Message, data)
+	}
+	if want := shellquote.Quote(cityDir); !strings.Contains(string(data), "--city "+want) {
+		t.Fatalf("staged hooks missing explicit city binding %q:\n%s", want, data)
+	}
+
+	// Every reconciler tick re-stages the overlay over the staged file, so the
+	// merge must reach a fixed point rather than accumulating entries.
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		map[string]string{"CityRoot": cityDir}, io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir (second pass): %v", err)
+	}
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(data, second) {
+		t.Fatalf("staged Codex hooks are not stable across staging passes:\nfirst:\n%s\nsecond:\n%s", data, second)
+	}
+}
+
+// materializeCoreOverlayForTest writes the core pack's embedded overlay tree to
+// a temp directory, the on-disk shape city bootstrap produces and the shape
+// overlay staging consumes.
+func materializeCoreOverlayForTest(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	err := fs.WalkDir(core.PackFS, "overlay", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(name, "overlay/")))
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		data, err := fs.ReadFile(core.PackFS, name)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("materializing core overlay: %v", err)
+	}
+	return root
 }
 
 func TestCodexHookWorkDirsIncludesActiveRigPaths(t *testing.T) {
