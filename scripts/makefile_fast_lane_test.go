@@ -87,8 +87,15 @@ func TestFastLaneSweepPlusCmdGCShardsCoverEveryPackage(t *testing.T) {
 func TestFastLaneShardsCmdGCWithItsOwnBudget(t *testing.T) {
 	recipe := dryRunMakeTarget(t, "test")
 
-	if strings.Contains(recipe, " ./... ") || strings.HasSuffix(strings.TrimSpace(recipe), " ./...") {
-		t.Fatalf("`make test` still sweeps ./..., which puts cmd/gc back on the shared budget:\n%s", recipe)
+	for _, line := range strings.Split(recipe, "\n") {
+		if !strings.Contains(line, "go test") && !strings.Contains(line, "go-test-observable") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if field == "./..." {
+				t.Fatalf("`make test` still passes ./... to a test command, which puts cmd/gc back on the shared budget:\n%s", line)
+			}
+		}
 	}
 	if !strings.Contains(recipe, "scripts/test-go-test-shard ./cmd/gc") {
 		t.Fatalf("`make test` does not shard cmd/gc via scripts/test-go-test-shard; the package would go untested:\n%s", recipe)

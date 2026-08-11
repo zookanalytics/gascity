@@ -559,8 +559,15 @@ meet. Knobs:
 make test-cmd-gc-unit-shard CMD_GC_UNIT_SHARD=3
 
 # Widen the split (or the per-shard budget) on a slow machine.
-make test CMD_GC_UNIT_TOTAL=12 CMD_GC_UNIT_TIMEOUT=20m
+make test CMD_GC_UNIT_TOTAL=12 CMD_GC_UNIT_TIMEOUT=30m
 ```
+
+The 20m default per shard is the same budget `scripts/test-local-parallel`
+gives this workload, sized for a loaded developer box rather than a CI runner:
+a shard measured on a busy 8-core host at load 54 took 395s of in-binary time,
+so 20m keeps roughly 3x margin there and about 8x on an idle machine. Build
+time is not charged against it — `-timeout` bounds the test binary's own run,
+not the compile that precedes it.
 
 `CMD_GC_UNIT_TOTAL` has a floor that is not about time. The splitter selects
 tests with one `-run '^(A|B|...)$'` argument, and `cmd/gc`'s 8231 fast-unit

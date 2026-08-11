@@ -444,16 +444,27 @@ test-ci-policy:
 UNIT_PKGS_NONCMDGC = $(shell go list ./... | grep -v '/cmd/gc$$')
 
 # Fast-unit cmd/gc sharding, mirroring CMD_GC_COVER_TOTAL/test-cover. Six ways
-# keeps each shard near ~140s of its own budget. The shard count also has a
+# puts each shard near ~140s on an unloaded box. The shard count also has a
 # hard floor that is *not* about time: test-go-test-shard selects tests with a
 # single `-run '^(A|B|...)$$'` argument, and cmd/gc's 8231 fast-unit tests make
 # that regex ~419KB — well past the 128KB Linux per-argument limit
 # (MAX_ARG_STRLEN), which fails as a bare `Argument list too long` before a
 # single test runs. Six shards land near 70KB each. Do not lower this without
 # rechecking that ceiling; TestFastLaneShardRegexStaysUnderArgvLimit guards it.
+#
+# 20m per shard is what scripts/test-local-parallel already gives this exact
+# workload (GC_FAST_UNIT=1, ./cmd/gc, 6 shards) and what
+# test-cmd-gc-process-shard gives the heavier one. It is sized for a loaded
+# developer box, which is the only place `make test` runs and is the whole
+# failure mode here: a shard measured on this fleet at load 54 (8 cores) took
+# 395s of in-binary time, so 20m holds ~3x margin even there, against ~8x
+# unloaded. test-cover's 10m is the deliberate outlier — it runs on CI runners
+# under a job cap, not next to 50 other processes. A timeout is a ceiling, not
+# a cost: raising it slows nothing that passes, it only delays the report of a
+# genuine hang.
 CMD_GC_UNIT_TOTAL ?= 6
 CMD_GC_UNIT_SHARD ?= 1
-CMD_GC_UNIT_TIMEOUT ?= 10m
+CMD_GC_UNIT_TIMEOUT ?= 20m
 
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
