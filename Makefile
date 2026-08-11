@@ -103,7 +103,7 @@ endif
 endif
 endif
 
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-full lint-new lint-changed lint-affected fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-cmd-gc-unit-shard test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-bd-cli-contract test-bd-conditional-release-contract test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 
 ## build: compile gc binary with version metadata
@@ -455,6 +455,42 @@ test-ci-policy:
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 ./scripts/cipolicy
 	$(TEST_ENV) GOFLAGS= GOENV=off GOWORK=off go test -count=1 -run '^(TestPreflightStaticScopesOrdinaryPRsWithoutWeakeningProtectedRuns|TestFullStaticLintExplicitlyOwnsConfiguredGolangCIGovet|TestChangedStaticTargetsScopeLintAndFormattingToTheDiff|TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge)$$' ./scripts
 
+# UNIT_PKGS_NONCMDGC is the fast-unit sweep with cmd/gc removed. `go test`
+# applies -timeout per test binary, so a single `./...` sweep measures every
+# package against one shared deadline — and cmd/gc alone needs ~838s of the
+# 900s it used to get, about 7% headroom. Any concurrent load pushes it over,
+# and go test reports that as `FAIL github.com/gastownhall/gascity/cmd/gc
+# 901.011s` with a goroutine dump and zero `--- FAIL` lines: a false red that
+# names nothing that actually broke, landing on whichever diff happened to be
+# running (gc-kye20). Routing cmd/gc into its own sharded run below gives it a
+# deadline it can meet. This is the same split test-cover, test-cover-mac and
+# the Mac regression matrix already make; the default fast lane was the last
+# one still sharing the budget.
+UNIT_PKGS_NONCMDGC = $(shell go list ./... | grep -v '/cmd/gc$$')
+
+# Fast-unit cmd/gc sharding, mirroring CMD_GC_COVER_TOTAL/test-cover. Six ways
+# puts each shard near ~140s on an unloaded box. The shard count also has a
+# hard floor that is *not* about time: test-go-test-shard selects tests with a
+# single `-run '^(A|B|...)$$'` argument, and cmd/gc's 8231 fast-unit tests make
+# that regex ~419KB — well past the 128KB Linux per-argument limit
+# (MAX_ARG_STRLEN), which fails as a bare `Argument list too long` before a
+# single test runs. Six shards land near 70KB each. Do not lower this without
+# rechecking that ceiling; TestFastLaneShardRegexStaysUnderArgvLimit guards it.
+#
+# 20m per shard is what scripts/test-local-parallel already gives this exact
+# workload (GC_FAST_UNIT=1, ./cmd/gc, 6 shards) and what
+# test-cmd-gc-process-shard gives the heavier one. It is sized for a loaded
+# developer box, which is the only place `make test` runs and is the whole
+# failure mode here: a shard measured on this fleet at load 54 (8 cores) took
+# 395s of in-binary time, so 20m holds ~3x margin even there, against ~8x
+# unloaded. test-cover's 10m is the deliberate outlier — it runs on CI runners
+# under a job cap, not next to 50 other processes. A timeout is a ceiling, not
+# a cost: raising it slows nothing that passes, it only delays the report of a
+# genuine hang.
+CMD_GC_UNIT_TOTAL ?= 6
+CMD_GC_UNIT_SHARD ?= 1
+CMD_GC_UNIT_TIMEOUT ?= 20m
+
 ## test: run fast unit tests (skip integration-tagged and GC_FAST_UNIT-gated process tests)
 ## The skipped cmd/gc process-backed scenarios remain covered by
 ## `make test-cmd-gc-process` locally and the CI `cmd/gc process suite` job.
@@ -462,13 +498,25 @@ test-ci-policy:
 ## other into false 5s probe/condition timeouts. Use -count=1 so pre-commit
 ## reports actual test results instead of hanging after PASS while Go computes
 ## cache input hashes over local working files.
+## cmd/gc runs after the sweep, sharded, for the budget reason on
+## UNIT_PKGS_NONCMDGC above.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m $(UNIT_PKGS_NONCMDGC)
+	@for s in $$(seq 1 $(CMD_GC_UNIT_TOTAL)); do \
+		$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=$(CMD_GC_UNIT_TIMEOUT) \
+		./scripts/test-go-test-shard ./cmd/gc "$$s" $(CMD_GC_UNIT_TOTAL) || exit 1; \
+	done
+
+## test-cmd-gc-unit-shard: run one fast-unit cmd/gc shard (CMD_GC_UNIT_SHARD of CMD_GC_UNIT_TOTAL)
+# Lets a shard that failed under `make test` be re-run on its own.
+test-cmd-gc-unit-shard:
+	$(TEST_ENV) GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GC_FAST_UNIT=1 GO_TEST_COUNT=1 GO_TEST_TIMEOUT=$(CMD_GC_UNIT_TIMEOUT) ./scripts/test-go-test-shard ./cmd/gc $(CMD_GC_UNIT_SHARD) $(CMD_GC_UNIT_TOTAL)
 
 # MAC_UNIT_PKGS excludes cmd/gc from the Mac unit sweep; cmd/gc runs
-# sharded via the mac-cmd-gc-process CI matrix job instead.
-MAC_UNIT_PKGS = $(shell go list ./... | grep -v '/cmd/gc$$')
+# sharded via the mac-cmd-gc-process CI matrix job instead. Same list as the
+# default fast lane above, which now excludes cmd/gc for the same reason.
+MAC_UNIT_PKGS = $(UNIT_PKGS_NONCMDGC)
 
 ## test-mac: Mac unit sweep with cmd/gc excluded; cmd/gc covered by the Mac sharded job.
 test-mac: test-fsys-darwin-compile
