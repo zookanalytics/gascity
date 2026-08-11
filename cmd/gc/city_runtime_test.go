@@ -725,44 +725,6 @@ func TestTickDebouncer_IndependentInstances(t *testing.T) {
 	}
 }
 
-// TestTickDebouncer_CancelPendingRacesInFlightFire is the concurrency
-// regression for gc-l2c6v: cancelPending must suppress a fire from a timer
-// whose callback is already in flight, not only one whose timer has not yet
-// fired. The pre-fix callback released d.mu after clearing d.timer but
-// before its channel send, so a cancelPending that acquired d.mu in that
-// gap observed d.timer already nil, drained an empty channel, and returned
-// — and the callback's send then delivered a fire after a completed
-// cancelPending.
-//
-// Each round arms a short timer and, from a separate goroutine, calls
-// cancelPending timed to collide with the firing callback. cancelPending
-// happens-after the arm, so after both return no fire may remain — any
-// survivor is a canceled tick. On the fixed code this holds for every
-// interleaving (the send is gated on the generation under the lock), so the
-// test never flakes; on the buggy code a round that lands in the send
-// window leaks a fire and fails.
-func TestTickDebouncer_CancelPendingRacesInFlightFire(t *testing.T) {
-	const rounds = 500
-	const delay = time.Millisecond
-	for i := 0; i < rounds; i++ {
-		d := newTickDebouncer()
-		var wg sync.WaitGroup
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			time.Sleep(delay) // wake around when the armed timer fires
-			d.cancelPending()
-		}()
-		d.arm(delay)
-		wg.Wait()
-		// Give any in-flight callback time to complete its send, then assert
-		// nothing survived the cancel.
-		if got := drainFiredCount(d, 2*time.Millisecond); got != 0 {
-			t.Fatalf("round %d: %d fire(s) survived cancelPending", i, got)
-		}
-	}
-}
-
 // TestTickDebouncer_FireDropsStaleGeneration deterministically pins the
 // generation mechanism that fixes gc-l2c6v, with no dependence on timing or
 // load. arm captures d.gen for the timer it schedules and the callback runs
