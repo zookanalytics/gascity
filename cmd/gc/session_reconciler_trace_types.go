@@ -210,6 +210,10 @@ const (
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
+	// TraceReasonAttached is the idle-timeout defer taken when a human
+	// terminal is attached to the session (DecideIdleTimeout's attachment
+	// rung). It pairs with TraceOutcomeDeferredAttached.
+	TraceReasonAttached TraceReasonCode = "attached"
 )
 
 type TraceOutcomeCode string
