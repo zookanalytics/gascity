@@ -124,6 +124,7 @@ func TestFindBareBDCommands(t *testing.T) {
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{
 		"assets/scripts/_bd_trace.sh",
+		"assets/scripts/_list-helpers.sh",
 		"assets/scripts/dolt-target.sh",
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
@@ -214,5 +215,108 @@ func TestCoreMaintenanceOrdersCarryLegacySkipAliases(t *testing.T) {
 		if len(parsed.Order.SkipAliases) != 1 || parsed.Order.SkipAliases[0] != tt.want {
 			t.Fatalf("%s skip_aliases = %#v, want [%q]", tt.path, parsed.Order.SkipAliases, tt.want)
 		}
+	}
+}
+
+var (
+	// A `set ... pipefail` declaration anywhere in the script.
+	pipefailDeclPattern = regexp.MustCompile(`(?m)^[ \t]*set\b[^\n]*\bpipefail\b`)
+	// A writer piped into `grep` with a `-q` (quiet) flag, in any flag
+	// cluster: -q, -qF, -Fxq, -qiE, -Eq, -qsF, ... `grep -q` exits the
+	// instant it matches without draining stdin, so the writer races into a
+	// SIGPIPE. The here-string form (`grep -q ... <<<"$x"`) has no pipe and
+	// is not matched.
+	pipedGrepQPattern = regexp.MustCompile(`\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*q[A-Za-z]*\b`)
+)
+
+// findPipefailGrepQPipelines returns the byte offsets of `writer | grep -q`
+// pipelines in a script that runs under `set -o pipefail`. It returns nil for
+// scripts that do not enable pipefail (where the SIGPIPE is harmless) and
+// skips full-line comments so the guard can be documented in prose. See
+// TestCoreShippedScriptsAvoidPipefailGrepQPipelines for the invariant.
+func findPipefailGrepQPipelines(data []byte) []int {
+	if !pipefailDeclPattern.Match(data) {
+		return nil
+	}
+	var offsets []int
+	pos := 0
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		if trimmed := bytes.TrimLeft(line, " \t"); len(trimmed) == 0 || trimmed[0] != '#' {
+			if loc := pipedGrepQPattern.FindIndex(line); loc != nil {
+				offsets = append(offsets, pos+loc[0])
+			}
+		}
+		pos += len(line)
+	}
+	return offsets
+}
+
+// TestCoreShippedScriptsAvoidPipefailGrepQPipelines fails if any shell script
+// shipped in the core pack feeds a writer into `grep -q` while running under
+// `set -o pipefail`. Under pipefail, grep's early exit SIGPIPEs the writer and
+// that 141 becomes the pipeline's status, so a present match is reported as
+// absent — a false negative that has bitten the maintenance scripts three
+// times (d416a0085 in reaper.sh, again in orphan-sweep.sh, and again across
+// spawn-storm-detect/wisp-compact/escalate). Use a here-string
+// (`grep -q ... <<<"$x"`, which pipefail does not apply to) or, for exact-line
+// membership, list_contains_line from _list-helpers.sh.
+func TestCoreShippedScriptsAvoidPipefailGrepQPipelines(t *testing.T) {
+	err := fs.WalkDir(PackFS, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".sh") {
+			return nil
+		}
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			return err
+		}
+		for _, offset := range findPipefailGrepQPipelines(data) {
+			lineNumber := bytes.Count(data[:offset], []byte{'\n'}) + 1
+			lineStart := bytes.LastIndexByte(data[:offset], '\n') + 1
+			lineEnd := bytes.IndexByte(data[offset:], '\n')
+			if lineEnd < 0 {
+				lineEnd = len(data)
+			} else {
+				lineEnd += offset
+			}
+			t.Errorf("%s:%d: under `set -o pipefail`, piping into `grep -q` SIGPIPEs the writer on grep's early exit and reports a present match as absent — use a here-string (`grep -q ... <<<\"$x\"`) or list_contains_line from _list-helpers.sh: %s",
+				path, lineNumber, strings.TrimSpace(string(data[lineStart:lineEnd])))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking embedded core pack: %v", err)
+	}
+}
+
+func TestFindPipefailGrepQPipelines(t *testing.T) {
+	const pipefail = "set -euo pipefail\n"
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "piped grep -q", body: pipefail + `echo "$x" | grep -q foo`, want: 1},
+		{name: "piped grep -qF", body: pipefail + `printf '%s' "$x" | grep -qF "$n"`, want: 1},
+		{name: "piped grep -Fxq", body: pipefail + `printf '%s\n' "$x" | grep -Fxq -- "$n"`, want: 1},
+		{name: "piped grep -qiE", body: pipefail + `echo "$x" | grep -qiE 'a|b'`, want: 1},
+		{name: "piped grep -Eq", body: pipefail + `printf '%s' "$x" | grep -Eq '\[.\]$'`, want: 1},
+		{name: "here-string grep -q is safe", body: pipefail + `grep -q foo <<<"$x"`},
+		{name: "here-string grep -Fxq is safe", body: pipefail + `grep -Fxq -- "$n" <<<"$x"`},
+		{name: "list_contains_line is safe", body: pipefail + `list_contains_line "$x" "$n"`},
+		{name: "not gated without pipefail", body: `echo "$x" | grep -q foo`},
+		{name: "full-line comment is ignored", body: pipefail + `  # bad: echo "$x" | grep -q foo`},
+		{name: "grep -v without q is not flagged", body: pipefail + `echo "$x" | grep -v foo`},
+		{name: "grep pattern q is not a flag", body: pipefail + `echo "$x" | grep 'q'`},
+		{name: "grep -e q pattern is not a flag", body: pipefail + `echo "$x" | grep -e q`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := len(findPipefailGrepQPipelines([]byte(tt.body))); got != tt.want {
+				t.Fatalf("findPipefailGrepQPipelines() = %d, want %d for %q", got, tt.want, tt.body)
+			}
+		})
 	}
 }
