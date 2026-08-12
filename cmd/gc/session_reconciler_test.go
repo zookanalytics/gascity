@@ -9876,6 +9876,168 @@ func TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout(t *testing.T) {
 	}
 }
 
+// TestWithinPoolSpawnClaimGraceInfo pins the spawn-claim grace predicate that
+// both drain-suppression guards share (gc-yi1ig): only a pool-managed session
+// with a parseable last_woke_at inside the startup_timeout+grace window is
+// protected, the window scales with the configured startup_timeout, and a
+// non-pool session is never protected.
+func TestWithinPoolSpawnClaimGraceInfo(t *testing.T) {
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	cfg := &config.City{} // StartupTimeoutDuration() defaults to 60s
+	window := cfg.Session.StartupTimeoutDuration() + poolSpawnClaimGrace
+	poolInfo := func(lastWoke string) sessionpkg.Info {
+		return sessionpkg.Info{PoolManaged: true, PoolSlot: "1", LastWokeAt: lastWoke}
+	}
+	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
+
+	cases := []struct {
+		name string
+		info sessionpkg.Info
+		cfg  *config.City
+		now  time.Time
+		want bool
+	}{
+		{"fresh pool session within grace", poolInfo(rfc(now)), cfg, now, true},
+		{"pool session just inside window", poolInfo(rfc(now.Add(-window + time.Second))), cfg, now, true},
+		{"pool session past window", poolInfo(rfc(now.Add(-window - time.Second))), cfg, now, false},
+		{"non-pool session never in grace", sessionpkg.Info{LastWokeAt: rfc(now)}, cfg, now, false},
+		{"empty last_woke_at", poolInfo(""), cfg, now, false},
+		{"unparseable last_woke_at", poolInfo("not-a-time"), cfg, now, false},
+		{"nil cfg falls back to 60s window", poolInfo(rfc(now.Add(-90 * time.Second))), nil, now, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := withinPoolSpawnClaimGraceInfo(tc.info, tc.cfg, tc.now); got != tc.want {
+				t.Fatalf("withinPoolSpawnClaimGraceInfo = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// The window scales with the configured startup_timeout: a longer budget
+	// keeps a same-aged pool session in grace that the default budget would drop.
+	longCfg := &config.City{Session: config.SessionConfig{StartupTimeout: "10m"}}
+	aged := poolInfo(rfc(now.Add(-5 * time.Minute)))
+	if withinPoolSpawnClaimGraceInfo(aged, cfg, now) {
+		t.Fatal("5m-old pool session must be past the default (60s+grace) window")
+	}
+	if !withinPoolSpawnClaimGraceInfo(aged, longCfg, now) {
+		t.Fatal("5m-old pool session must stay in grace under a 10m startup_timeout")
+	}
+}
+
+// TestReconcileSessionBeads_FreshPoolWorkerSurvivesOrphanDrainWithinGrace guards
+// the pool-orphan spawn-claim grace against the pool-worker crash-loop (gc-yi1ig).
+// A pool worker spawned to serve demand that fluctuated away during its startup
+// leaves the desired set and reaches the orphan/suspended drain phase while it is
+// still alive and pre-claim (it claims its own work during load-context, after
+// startup completes). Without the grace it is force-stopped as "orphaned" before
+// it can claim, orphaning its molecule and re-dispatching onto a fresh worker that
+// hits the same death. The freshly-woken pool worker must survive within its
+// spawn-claim window; once that window elapses with still no claim, the orphan
+// drain proceeds so a genuinely idle over-spawn is not pinned awake.
+func TestReconcileSessionBeads_FreshPoolWorkerSurvivesOrphanDrainWithinGrace(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Running pool worker, NOT in the desired set (scale demand fluctuated away)
+	// and holding no assigned work — the pre-claim pool-spawn shape that reaches
+	// the orphan drain phase.
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session) // sets state=active + last_woke_at=now
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed":   "true",
+		"pool_slot":      "1",
+		"session_origin": "ephemeral",
+	})
+
+	// Tick 1: freshly woken (last_woke_at == now). The orphan drain must be
+	// suppressed so the worker can run load-context and claim.
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("fresh pool worker must not begin a drain within the spawn-claim grace, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("fresh pool worker must stay running within the spawn-claim grace")
+	}
+	if strings.Contains(env.stdout.String(), "Draining session") {
+		t.Fatalf("fresh pool worker must not be drained; stdout=%q", env.stdout.String())
+	}
+
+	// Advance well past the spawn-claim window with still no claim. The worker
+	// genuinely left the desired set and never claimed, so the orphan drain
+	// proceeds.
+	env.stdout.Reset()
+	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "orphaned" {
+		t.Fatalf("pool worker past the spawn-claim grace must begin an orphan drain, got %+v", ds)
+	}
+}
+
+// TestReconcileSessionBeads_FreshPoolWorkerSurvivesNoWakeDrainWithinGrace guards
+// the no-wake-reason spawn-claim grace against the pool-worker crash-loop
+// (gc-yi1ig). A pool worker still in the desired set but with no scale demand
+// attributed to it (over-spawn: poolDesired < live count) reaches the wake/drain
+// phase with ShouldWake=false and would otherwise be "no-wake-reason" drained
+// before it can claim its routed work during load-context. It must survive within
+// its spawn-claim window; once that window elapses with still no claim, the drain
+// proceeds.
+func TestReconcileSessionBeads_FreshPoolWorkerSurvivesNoWakeDrainWithinGrace(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	// Desired (so it reaches the wake/drain phase) and running, but with no scale
+	// demand (poolDesired empty) and no assigned work — the over-spawn shape.
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session) // sets state=active + last_woke_at=now
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed":   "true",
+		"pool_slot":      "1",
+		"session_origin": "ephemeral",
+	})
+
+	// Tick 1: freshly woken (last_woke_at == now). The no-wake-reason drain must
+	// be suppressed so the worker can run load-context and claim.
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("fresh pool worker must not begin a drain within the spawn-claim grace, got reason=%q", ds.reason)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("fresh pool worker must stay running within the spawn-claim grace")
+	}
+	if strings.Contains(env.stdout.String(), "no-wake-reason") {
+		t.Fatalf("fresh pool worker must not be no-wake-reason drained; stdout=%q", env.stdout.String())
+	}
+
+	// Advance well past the spawn-claim window with still no claim. The worker
+	// genuinely has no reason to be awake now, so the no-wake-reason drain
+	// proceeds.
+	env.stdout.Reset()
+	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
+	got, err = env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
+	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "no-wake-reason" {
+		t.Fatalf("pool worker past the spawn-claim grace must begin a no-wake-reason drain, got %+v", ds)
+	}
+}
+
 // TestReconcileSessionBeads_HeartbeatHeldDeadSessionRespawns guards the
 // heartbeat crash-recovery gap surfaced in PR #3994 review iteration 2. A
 // heartbeat hold (held_until only, no sleep_intent) defers idle/max-age timers
