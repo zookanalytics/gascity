@@ -978,8 +978,14 @@ func (cr *CityRuntime) startupReadinessWatchdog(ctx context.Context, ready <-cha
 // Methods are safe to call from multiple goroutines (time.AfterFunc
 // callbacks run on their own goroutine).
 type tickDebouncer struct {
-	mu     sync.Mutex
-	timer  *time.Timer
+	mu    sync.Mutex
+	timer *time.Timer
+	// gen counts cancelPending calls. arm captures the current value for
+	// the timer it schedules, and fire drops its send when gen has advanced
+	// since — so a cancelPending that races an already-fired callback still
+	// suppresses the fire, and a stale callback cannot clobber a freshly
+	// re-armed timer. See fire and cancelPending.
+	gen    uint64
 	fireCh chan struct{}
 }
 
@@ -1007,23 +1013,44 @@ func (d *tickDebouncer) arm(delay time.Duration) {
 	if d.timer != nil {
 		return // already pending — burst collapse
 	}
-	d.timer = time.AfterFunc(delay, func() {
-		d.mu.Lock()
-		d.timer = nil
-		d.mu.Unlock()
-		select {
-		case d.fireCh <- struct{}{}:
-		default:
-		}
-	})
+	gen := d.gen
+	d.timer = time.AfterFunc(delay, func() { d.fire(gen) })
 }
 
-// cancelPending stops an armed timer and discards a queued fire, if
-// any. Used when a higher-priority tick (e.g. the periodic patrol)
-// supersedes whatever caused the pending fire.
+// fire delivers a debounced fire on behalf of the timer that arm scheduled
+// at generation gen. The whole body runs under d.mu — including the
+// non-blocking channel send — so cancelPending cannot interleave between
+// the staleness check and the send. If cancelPending (or a superseding
+// re-arm) advanced d.gen since the timer was armed, this fire belongs to a
+// canceled generation and is dropped; otherwise it clears d.timer and
+// enqueues the fire. Holding the lock across the send is safe because the
+// send is non-blocking (cap=1 channel with a default arm), so it never
+// blocks while holding d.mu.
+func (d *tickDebouncer) fire(gen uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.gen != gen {
+		return // superseded by cancelPending or a re-arm
+	}
+	d.timer = nil
+	select {
+	case d.fireCh <- struct{}{}:
+	default:
+	}
+}
+
+// cancelPending stops an armed timer, invalidates any in-flight timer
+// callback via the generation counter, and discards a queued fire, if any.
+// Used when a higher-priority tick (e.g. the periodic patrol) supersedes
+// whatever caused the pending fire. After it returns, no fire from a timer
+// armed before the call can appear on fired().
 func (d *tickDebouncer) cancelPending() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// Advance the generation unconditionally: a timer callback may already
+	// be in flight with d.timer cleared but its fire not yet delivered, and
+	// the bumped generation is what makes that late fire a no-op.
+	d.gen++
 	if d.timer != nil {
 		d.timer.Stop()
 		d.timer = nil
