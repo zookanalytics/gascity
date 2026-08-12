@@ -10505,6 +10505,9 @@ func TestOrderDispatchExecFailureEventBoundsTheOutputItCarries(t *testing.T) {
 		if e.Type == events.OrderFailed && len(e.Message) > maxOrderFailureOutputBytes*2 {
 			t.Fatalf("order.failed message = %d bytes, want bounded near %d", len(e.Message), maxOrderFailureOutputBytes)
 		}
+	}
+}
+
 // Belt and braces for the discovery-side guard. An order that declares
 // scope = "rig" but reaches dispatch with no rig binding must be refused, not
 // resolved to the city store: its pool is a rig pool name that qualifies to

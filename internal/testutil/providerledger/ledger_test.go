@@ -1581,6 +1581,34 @@ func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	}
 }
 
+// TestCatalogWaiverExpiriesAreStaggered pins the anti-cliff invariant: no two
+// catalog waivers may expire on the same day. One shared package-level expiry
+// used to feed every runtime.Provider waiver, so all nine lapsed together the
+// instant the clock crossed 2026-08-12T00:00Z and Validate reported a nine-line
+// wall that blocked every push in the repo. Distinct dates keep a lapse to a
+// single entry the owner renews or discharges on its own.
+func TestCatalogWaiverExpiriesAreStaggered(t *testing.T) {
+	sharing := make(map[string][]string)
+	for _, entry := range Catalog() {
+		for _, claim := range entry.Claims {
+			if claim.Disposition != DispositionWaived || claim.Waiver == nil {
+				continue
+			}
+			day := claim.Waiver.Expires.UTC().Format("2006-01-02")
+			sharing[day] = append(sharing[day], entry.ID+" "+renderSymbolRef(claim.Constructor))
+		}
+	}
+	if len(sharing) == 0 {
+		t.Fatal("Catalog() has no waived claims, so the stagger invariant is unverifiable")
+	}
+	for day, claims := range sharing {
+		if len(claims) > 1 {
+			t.Errorf("%d waivers share expiry %s (%s): give each waiver its own date so the set cannot lapse in a single instant",
+				len(claims), day, strings.Join(claims, ", "))
+		}
+	}
+}
+
 func proofFixtureEntry(file, test string) Entry {
 	constructor := repoSymbol("internal/runtime", "NewFake")
 	return Entry{
