@@ -31,7 +31,7 @@ check() {
 
 check_contains() {
     local desc="$1" needle="$2" haystack="$3"
-    if echo "$haystack" | grep -qF "$needle"; then
+    if grep -qF "$needle" <<<"$haystack"; then
         echo "  PASS: $desc"
         ((pass++)) || true
     else
@@ -445,7 +445,7 @@ echo "$config" | "$SCRIPT" start "${SESSION}-activity"
 sleep 0.5
 activity=$("$SCRIPT" get-last-activity "${SESSION}-activity")
 # Should be a valid RFC3339 timestamp (YYYY-MM-DDTHH:MM:SSZ).
-if echo "$activity" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+if grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$activity"; then
     echo "  PASS: get-last-activity returns RFC3339 ($activity)"
     ((pass++)) || true
 else
@@ -483,7 +483,7 @@ check_contains "scrollback contains early lines" "scrollline-1" "$before"
 
 # After clearing, early scrollback lines should be gone.
 after=$("$SCRIPT" peek "${SESSION}-clear" 0)
-if echo "$after" | grep -qF "scrollline-1"; then
+if grep -qF "scrollline-1" <<<"$after"; then
     echo "  FAIL: clear-scrollback did not clear scrollback"
     ((fail++)) || true
 else
