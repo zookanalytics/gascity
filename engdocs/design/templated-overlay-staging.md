@@ -182,6 +182,13 @@ city-binding, wrapping prompt hooks in `gc hook run`, and deduping managed
   targets a script-staged exec provider would stage them unrendered. Closing
   that means either rendering host-side before handoff or publishing the
   convention as part of the exec script contract.
+
+  Since gc-fbc9d this is reachable rather than hypothetical: a core asset now
+  carries the marker. Where the reconciler selects the same overlay slot the
+  script copies, its pre-fingerprint materialization renders `.codex/hooks.json`
+  through this seam anyway, and the symptom is a stray unrendered
+  `.codex/hooks.template.json` beside it. A script that copies a slot the
+  reconciler does not select gets only the unrendered name.
 - **The data map is built eagerly, and it is not free.**
   `PackTemplateData` resolves `Branch`/`DefaultBranch` by shelling out to git
   (1-3 subprocesses per call). The reconciler already paid this once per agent
