@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/materialize"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
@@ -317,11 +319,25 @@ func TestStagedCoreCodexHooksBindApostropheCityRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("core codex hooks asset not staged at its target name: %v", err)
 	}
-	if want := "--city " + shellquote.Quote(cityDir); !strings.Contains(string(data), want) {
-		t.Fatalf("staged hooks missing shell-safe city binding %q:\n%s", want, data)
+	// The staged hooks document must be valid JSON: shellquote.Quote renders an
+	// embedded apostrophe as the sequence '\'', whose backslash is not a valid
+	// JSON string escape, so binding the raw shell-quoted form leaves a document
+	// no JSON parser can load. Assert on the decoded commands, not the raw file
+	// bytes — the on-disk JSON-escaped bytes and the shell-safe decoded value
+	// differ once the render is valid JSON.
+	cmds := codexStagedHookCommands(t, data)
+	if len(cmds) == 0 {
+		t.Fatalf("no managed command strings in staged hooks:\n%s", data)
 	}
-	if bad := "--city '" + cityDir + "'"; strings.Contains(string(data), bad) {
-		t.Fatalf("staged hooks contain a malformed unescaped city binding %q:\n%s", bad, data)
+	want := "--city " + shellquote.Quote(cityDir)
+	bad := "--city '" + cityDir + "'"
+	for _, cmd := range cmds {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("staged hook command missing shell-safe city binding %q:\n%s", want, cmd)
+		}
+		if strings.Contains(cmd, bad) {
+			t.Fatalf("staged hook command carries a malformed unescaped city binding %q:\n%s", bad, cmd)
+		}
 	}
 	check := newCodexHooksDriftCheck(cityDir, []string{workDir})
 	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
@@ -330,15 +346,52 @@ func TestStagedCoreCodexHooksBindApostropheCityRoot(t *testing.T) {
 	}
 }
 
+// codexStagedHookCommands unmarshals a staged Codex hooks document — failing
+// the test if it is not valid JSON — and returns every managed command string
+// it carries (the decoded values, not the raw file bytes). The JSON-validity
+// check is the point: a staged hooks.json that does not parse is unusable by
+// Codex.
+func codexStagedHookCommands(t *testing.T, data []byte) []string {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("staged Codex hooks is not valid JSON: %v\n%s", err, data)
+	}
+	var cmds []string
+	var walk func(any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			for key, val := range node {
+				if key == "command" {
+					if s, ok := val.(string); ok {
+						cmds = append(cmds, s)
+					}
+				}
+				walk(val)
+			}
+		case []any:
+			for _, item := range node {
+				walk(item)
+			}
+		}
+	}
+	walk(doc)
+	return cmds
+}
+
 // codexStageTemplateData mirrors the subset of the overlay template vocabulary
 // materialize.PackTemplateData binds that the core Codex hooks asset expands
 // against, for tests that stage the asset directly rather than through the
-// production builder. CityRootShellQuoted carries the shell-safe city binding
-// (see internal/materialize.PackTemplateData).
+// production builder. The asset's managed commands expand the city root
+// through CityRootShellQuotedJSON — shell-safe and JSON-string-safe — so the
+// staged .codex/hooks.json is valid JSON even for a city root with an
+// apostrophe (see internal/materialize.CityRootShellQuotedJSON).
 func codexStageTemplateData(cityDir string) map[string]string {
 	return map[string]string{
-		"CityRoot":            cityDir,
-		"CityRootShellQuoted": shellquote.Quote(cityDir),
+		"CityRoot":                cityDir,
+		"CityRootShellQuoted":     shellquote.Quote(cityDir),
+		"CityRootShellQuotedJSON": materialize.CityRootShellQuotedJSON(cityDir),
 	}
 }
 

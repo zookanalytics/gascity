@@ -1,8 +1,11 @@
 package materialize
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/config"
@@ -55,13 +58,14 @@ func PackTemplateData(
 	if agent == nil {
 		branch := defaultMCPBranch(workDir)
 		return map[string]string{
-			"CityRoot":            cityPath,
-			"CityRootShellQuoted": shellquote.Quote(cityPath),
-			"AgentName":           identity,
-			"TemplateName":        identity,
-			"WorkDir":             workDir,
-			"Branch":              branch,
-			"DefaultBranch":       branch,
+			"CityRoot":                cityPath,
+			"CityRootShellQuoted":     shellquote.Quote(cityPath),
+			"CityRootShellQuotedJSON": CityRootShellQuotedJSON(cityPath),
+			"AgentName":               identity,
+			"TemplateName":            identity,
+			"WorkDir":                 workDir,
+			"Branch":                  branch,
+			"DefaultBranch":           branch,
 		}
 	}
 	var rigs []config.Rig
@@ -76,13 +80,14 @@ func PackTemplateData(
 	if templateName == "" {
 		templateName = identity
 	}
-	data := make(map[string]string, len(agent.Env)+14)
+	data := make(map[string]string, len(agent.Env)+15)
 	for key, value := range agent.Env {
 		data[key] = value
 	}
 	branch := defaultMCPBranch(workDir)
 	data["CityRoot"] = cityPath
 	data["CityRootShellQuoted"] = shellquote.Quote(cityPath)
+	data["CityRootShellQuotedJSON"] = CityRootShellQuotedJSON(cityPath)
 	data["AgentName"] = identity
 	data["TemplateName"] = templateName
 	data["RigName"] = rigName
@@ -97,6 +102,36 @@ func PackTemplateData(
 	data["RoutedPoolQuery"] = agent.EffectiveRoutedPoolQueryForBeads(beadsCfg)
 	data["SlingQuery"] = agent.EffectiveSlingQuery()
 	return data
+}
+
+// CityRootShellQuotedJSON is the shell-safe city root (shellquote.Quote)
+// additionally escaped for placement inside a JSON string value. An overlay
+// template that carries a shell command inside a JSON document — the Codex
+// .codex/hooks.json commands are the one shipped case — must expand the city
+// root through this key rather than CityRootShellQuoted: shellquote.Quote
+// renders an embedded apostrophe as the sequence '\”, whose backslash is not
+// a valid JSON string escape, so binding the raw shell-quoted form stages a
+// hooks document that no JSON parser can load. The JSON-escaped form keeps the
+// staged document valid JSON while decoding back to exactly the shell-safe
+// --city binding. It equals CityRootShellQuoted for any city root without a
+// character JSON must escape (the common case).
+func CityRootShellQuotedJSON(cityPath string) string {
+	return jsonStringInner(shellquote.Quote(cityPath))
+}
+
+// jsonStringInner returns s escaped for placement inside a JSON string literal,
+// without the surrounding double quotes — the JSON-context analog of shell
+// quoting. It escapes through encoding/json (HTML escaping disabled so shell
+// metacharacters stay readable) rather than by hand, then strips the quotes the
+// encoder adds.
+func jsonStringInner(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	// Encoding a string never errors; Encode appends the literal plus a newline.
+	_ = enc.Encode(s)
+	encoded := strings.TrimRight(buf.String(), "\n")
+	return encoded[1 : len(encoded)-1]
 }
 
 // RuntimeMCPServers converts neutral MCP servers into runtime-owned ACP

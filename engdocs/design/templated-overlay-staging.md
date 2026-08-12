@@ -225,23 +225,30 @@ the asset rather than by a pass over the file staging just wrote:
 
 | Normalizer job | How the asset carries it |
 |---|---|
-| Bind managed commands to the city | `gc --city {{.CityRootShellQuoted}} …` on every managed command |
+| Bind managed commands to the city | `gc --city {{.CityRootShellQuotedJSON}} …` on every managed command |
 | Wrap prompt hooks in the hook runner | `gc hook run --timeout 15s --timeout-exit-code 0 -- …`, already in the asset |
 | Collapse duplicate managed `SessionStart` entries | Ship `matcher: "startup"`, the form the normalizer converged on. Overlay merge is identity-keyed on `matcher`, so a re-stage replaces that entry in place instead of appending a second one |
 
 Two properties are worth stating plainly.
 
-**The binding is shell-quoted, not single-quoted verbatim.** `CityRootShellQuoted`
-is `shellquote.Quote(CityRoot)`, bound alongside `CityRoot` by
-`materialize.PackTemplateData` — the owner of the template vocabulary — so a city
-root containing an apostrophe renders a shell-safe `--city` argument rather than a
-malformed command that both breaks the shell and reads as permanent drift. A
-data-map key, not a `{{shellquote .CityRoot}}` funcmap, is deliberate: the readers
-that rebind a managed command tokenize it with `shellquote.Split`
-(`writeCodexHooksManaged` on the `hooks.Install` path, and
-`NormalizeManagedCodexHooks` below, both read the asset unrendered), and a funcmap
-call carries a space inside the `{{…}}` action that `Split` would break into two
-tokens. A single-token `{{.CityRootShellQuoted}}` rebinds cleanly.
+**The binding is shell-quoted and JSON-escaped, not single-quoted verbatim.** The
+managed command lives inside a JSON string, so its city binding must be safe in two
+layers at once. `CityRootShellQuotedJSON` — `shellquote.Quote(CityRoot)` then
+escaped for a JSON string literal, bound alongside `CityRoot` and the plain
+`CityRootShellQuoted` by `materialize.PackTemplateData`, the owner of the template
+vocabulary — carries both. Shell-quoting alone is not enough: `shellquote.Quote`
+renders an apostrophe in the city root as the sequence `'\''`, whose backslash is
+not a valid JSON string escape, so binding through the plain `CityRootShellQuoted`
+would stage a `.codex/hooks.json` that no JSON parser can load (staging then falls
+back to writing the invalid bytes verbatim, and the drift check reads it as
+permanent drift). The JSON-escaped form keeps the staged document valid JSON while
+decoding back to exactly the shell-safe `--city` argument. A data-map key, not a
+`{{shellquote .CityRoot}}` funcmap, is deliberate: the readers that rebind a managed
+command tokenize it with `shellquote.Split` (`writeCodexHooksManaged` on the
+`hooks.Install` path, and `NormalizeManagedCodexHooks` below, both read the asset
+unrendered), and a funcmap call carries a space inside the `{{…}}` action that
+`Split` would break into two tokens. A single-token `{{.CityRootShellQuotedJSON}}`
+rebinds cleanly.
 
 **A compatibility repair is retained until every embedded pack ships a bound
 asset.** `hooks.NormalizeManagedCodexHooks` and its reconciler call site
