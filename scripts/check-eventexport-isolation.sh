@@ -75,9 +75,16 @@ if [ -n "$deps_file" ]; then
     grep '^//internal/' "$deps_file" >&2
     fail "pkg/eventexport must import nothing from internal/ (see above)"
   fi
-elif go list -deps ./pkg/eventexport 2>/dev/null | grep -q 'gastownhall/gascity/internal'; then
-  go list -deps ./pkg/eventexport | grep 'gastownhall/gascity/internal' >&2
-  fail "pkg/eventexport must import nothing from internal/ (see above)"
+else
+  # Capture once, then match with a here-string: `go list ... | grep -q` would
+  # SIGPIPE go list on an early match, and pipefail promotes that 141 to the
+  # pipeline status — silently misreading a real boundary violation as clean.
+  deps=$(go list -deps ./pkg/eventexport 2>/dev/null || true)
+  internal_hits=$(grep 'gastownhall/gascity/internal' <<<"$deps" || true)
+  if [ -n "$internal_hits" ]; then
+    echo "$internal_hits" >&2
+    fail "pkg/eventexport must import nothing from internal/ (see above)"
+  fi
 fi
 
 echo "check-eventexport-isolation: OK (brand-free, one source of truth, pkg/eventexport internal-free)"
