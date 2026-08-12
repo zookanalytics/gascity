@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/gastownhall/gascity/internal/testpolicy/shellpipeline"
 )
 
 var (
@@ -419,5 +421,36 @@ func TestCoreWorkerPromptsEscalateToConfiguredRecipient(t *testing.T) {
 	if first, second := sections[coreWorkerPrompts[0]], sections[coreWorkerPrompts[1]]; first != second {
 		t.Errorf("Escalation sections differ:\n%s:\n%s\n%s:\n%s",
 			coreWorkerPrompts[0], first, coreWorkerPrompts[1], second)
+	}
+}
+
+// TestCoreShippedScriptsAvoidPipefailGrepQPipelines fails if any shell script
+// shipped in the core pack feeds a writer into `grep -q` while running under
+// `set -o pipefail`. Under pipefail, grep's early exit SIGPIPEs the writer and
+// that 141 becomes the pipeline's status, so a present match is reported as
+// absent — a false negative that has now bitten this repo's shell assets five
+// times. The detector and the full sighting list live in
+// internal/testpolicy/shellpipeline; scripts/prepush_gate_contract_test.go
+// runs the same check over .githooks/.
+func TestCoreShippedScriptsAvoidPipefailGrepQPipelines(t *testing.T) {
+	err := fs.WalkDir(PackFS, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".sh") {
+			return nil
+		}
+		data, err := fs.ReadFile(PackFS, path)
+		if err != nil {
+			return err
+		}
+		for _, offset := range shellpipeline.FindPipefailGrepQPipelines(data) {
+			lineNumber, text := shellpipeline.DescribeLine(data, offset)
+			t.Errorf("%s:%d: %s: %s", path, lineNumber, shellpipeline.Remedy, text)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking embedded core pack: %v", err)
 	}
 }
