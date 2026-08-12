@@ -20,6 +20,8 @@ set -euo pipefail
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "wisp-compact"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_list-helpers.sh"
 
 CITY="${GC_CITY:-.}"
 
@@ -77,7 +79,7 @@ while IFS= read -r bead; do
     fi
 
     # Promote if has comments, keep label, or non-closed.
-    if [ "$comment_count" -gt 0 ] || echo "$labels" | grep -q '^keep$' || [ "$status" != "closed" ]; then
+    if [ "$comment_count" -gt 0 ] || list_contains_line "$labels" "keep" || [ "$status" != "closed" ]; then
         REASON="proven value"
         [ "$status" != "closed" ] && REASON="open past TTL (stuck detection)"
         gc bd update "$id" --persistent 2>/dev/null || true

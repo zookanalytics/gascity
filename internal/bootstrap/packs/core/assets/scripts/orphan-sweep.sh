@@ -18,6 +18,8 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_list-helpers.sh"
 
 # Step 1: Collect in-progress beads from HQ and every rig whose session
 # liveness can be determined.
@@ -157,38 +159,16 @@ LIVE_SESSION_IDS=$(jq -r -s '
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
-# Exact whole-line membership test over a newline-delimited list.
+# list_contains_line — exact whole-line membership over a newline-delimited
+# list — is defined in _list-helpers.sh (sourced above). It replaces the
+# `printf ... | grep -Fxq` pipeline that d416a0085 (reaper.sh) and gc-d760o
+# (here) fixed: under `set -o pipefail` grep -q's early exit SIGPIPEs the
+# writer and a present candidate reads as absent. The pure-bash test also
+# never confuses "candidate absent" with "the check never ran" — the one
+# direction this sweep must not fail in.
 #
-# This is the `printf ... | grep -q` pipefail/SIGPIPE race that d416a0085 fixed
-# in reaper.sh, in a second place. `grep -q` exits the moment it matches without
-# draining stdin, so the upstream printf races into a SIGPIPE, and under this
-# script's `set -o pipefail` that 141 becomes the pipeline's status — a present
-# candidate reported as absent. Below the 64KiB pipe buffer printf's single
-# write usually lands first and the misread is a rare load-sensitive flake
-# (gc-d760o); once the list outgrows the buffer printf must block on a second
-# write and the misread is deterministic, which is where a real city's session
-# list sits.
-#
-# reaper.sh took the minimal local fix (a here-string, which pipefail does not
-# apply to). These two predicates go one step further and fork nothing, because
-# they are called in a loop over every in-progress bead and every configured
-# agent, and because a forked probe cannot distinguish "candidate absent" from
-# "the check never ran" (spawn failure, signal) — both surface as the same
-# non-zero status, and both then read as "not a known agent", routing a LIVE
-# agent's in-progress bead onto the dead-agent reset path. That is the one
-# direction this sweep must never fail in; every other probe here reports
-# unverifiable (return 2) rather than guessing.
-#
-# Quoting $needle inside the pattern keeps glob metacharacters literal, so this
-# stays a fixed-string whole-line match exactly like grep -Fx.
-list_contains_line() {
-    local list="$1"
-    local needle="$2"
-    [ -n "$needle" ] || return 1
-    [ -n "$list" ] || return 1
-    [[ $'\n'"$list"$'\n' == *$'\n'"$needle"$'\n'* ]]
-}
-
+# agent_exists / live_session_match run in a loop over every in-progress bead
+# and every configured agent, so forking nothing per call matters.
 agent_exists() {
     list_contains_line "$AGENTS" "$1"
 }
