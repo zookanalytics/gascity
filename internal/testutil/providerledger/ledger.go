@@ -164,6 +164,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBacked"),
 				"NewSeamBacked selects a distinct reachable empty-cityPath branch with shared /tmp state; the WithDir proof does not exercise that composition",
+				time.Date(2026, time.October, 16, 0, 0, 0, 0, time.UTC),
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/subprocess", "NewSeamBackedWithDir"),
@@ -179,6 +180,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBacked"),
 				"NewSeamBacked always uses shared os.TempDir()/gc-acp state; the WithDir proof does not exercise that composition",
+				time.Date(2026, time.October, 19, 0, 0, 0, 0, time.UTC),
 			),
 			provedRuntime(
 				repoSymbol("internal/runtime/acp", "NewSeamBackedWithDir"),
@@ -195,6 +197,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
 				"the production T3 bridge composition has focused tests but no full shared runtime contract",
+				time.Date(2026, time.October, 22, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -202,6 +205,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
 				"the actual K8s production composition has no full shared runtime contract",
+				time.Date(2026, time.October, 25, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -209,6 +213,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/herdr", "New"),
 				"the existing full conformance run skips in short mode or when the herdr executable is absent",
+				time.Date(2026, time.October, 28, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -216,6 +221,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("cmd/gc", "newHybridProvider"),
 				"cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract",
+				time.Date(2026, time.October, 31, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -231,6 +237,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/t3bridge", "NewSeamBacked"),
 				"the legacy gc-session-t3 prefix branch selects the T3 bridge composition, which has no full shared runtime contract",
+				time.Date(2026, time.November, 3, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -238,6 +245,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/ssh", "NewSeamBacked"),
 				"the production SSH composition has no full shared runtime contract",
+				time.Date(2026, time.November, 6, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		builtin(
@@ -245,6 +253,7 @@ func Catalog() []Entry {
 			waivedRuntime(
 				repoSymbol("internal/runtime/tmux", "NewSeamBackedWithConfig"),
 				"the existing full conformance run skips when the tmux executable is absent",
+				time.Date(2026, time.November, 9, 0, 0, 0, 0, time.UTC),
 			),
 		),
 		{
@@ -320,14 +329,23 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
-func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
+// waivedRuntime records one owned runtime.Provider gap. Every call site passes
+// its own expires date: a shared package-level expiry once lapsed all nine
+// runtime.Provider waivers in the same instant, and the resulting nine-line
+// Validate failure blocked every push in the repo until it was renewed. Keep
+// the dates distinct when renewing, so a lapse stays a one-entry event that
+// names the provider whose gap is overdue. TestCatalogWaiverExpiriesAreStaggered
+// enforces this; maxWaiverHorizon bounds how far out any single date may sit.
+// Waivers lapse against a UTC clock, so each expires is UTC midnight on the day
+// that gap comes back for review.
+func waivedRuntime(constructor SymbolRef, reason string, expires time.Time) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
 		Contract:    ContractRuntimeProvider,
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			Expires: expires,
 			Reason:  reason,
 		},
 	}
