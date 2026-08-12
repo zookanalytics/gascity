@@ -1000,6 +1000,44 @@ func pendingCreateStartInFlightInfo(i sessionpkg.Info, clk clock.Clock, startupT
 	return now.Before(started.Add(startupTimeout + staleKeyDetectDelay + 5*time.Second))
 }
 
+// poolSpawnClaimGrace is the window, added on top of the session startup budget,
+// during which a freshly-woken pool session is protected from disposal
+// (no-wake-reason and pool-orphan drains) so it can claim its first routed bead.
+// A pool worker is spawned with no bead assigned and claims work itself during
+// load-context — a sequence of store round-trips that runs only AFTER startup
+// completes — so the protected window must extend past startup_timeout. Without
+// it, a pool worker whose scale demand fluctuated during startup is force-stopped
+// before it can claim, orphaning its molecule and re-dispatching the work onto a
+// fresh worker that hits the same death: a spawn→drain→respawn crash-loop on the
+// slot (gc-yi1ig).
+const poolSpawnClaimGrace = 60 * time.Second
+
+// withinPoolSpawnClaimGraceInfo reports whether a pool-managed session is still
+// inside its spawn-claim grace window — the configured startup budget plus
+// poolSpawnClaimGrace, measured from the current incarnation's wake time
+// (last_woke_at, which PreWakePatch stamps on every wake). Only pool-managed
+// sessions qualify; a session with no parseable last_woke_at is treated as not
+// in grace (fail toward the normal drain path rather than pinning an unknown
+// session awake). See poolSpawnClaimGrace for why this exists.
+func withinPoolSpawnClaimGraceInfo(i sessionpkg.Info, cfg *config.City, now time.Time) bool {
+	if !isPoolManagedSessionInfo(i) {
+		return false
+	}
+	lastWoke := strings.TrimSpace(i.LastWokeAt)
+	if lastWoke == "" {
+		return false
+	}
+	started, err := time.Parse(time.RFC3339, lastWoke)
+	if err != nil {
+		return false
+	}
+	startupTimeout := 60 * time.Second
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	return now.Before(started.Add(startupTimeout + poolSpawnClaimGrace))
+}
+
 // pendingCreateLeaseActiveInfo reports whether a pending-create claim still
 // holds a live lease.
 func pendingCreateLeaseActiveInfo(i sessionpkg.Info, clk clock.Clock, startupTimeout time.Duration) bool {
@@ -2090,6 +2128,31 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					reason := "orphaned"
 					if configuredNames[name] {
 						reason = "suspended"
+					}
+					// Spawn-claim grace: a freshly-woken pool session that briefly
+					// left the desired set (its scale demand fluctuated during
+					// startup) has not yet had time to claim its routed work. Skip
+					// the orphan drain while it is still inside its spawn-claim
+					// window so it can run load-context and claim, instead of being
+					// force-stopped into the spawn→drain→respawn crash-loop
+					// (gc-yi1ig). Scoped to the pool "orphaned" case: a configured
+					// "suspended" session is an intentional park and still drains,
+					// and withinPoolSpawnClaimGraceInfo itself admits only
+					// pool-managed sessions. Mirrors the no-wake-reason spawn-claim
+					// guard in the wake/drain block below.
+					if reason == "orphaned" && withinPoolSpawnClaimGraceInfo(infoPostHeal, cfg, clk.Now()) {
+						if trace != nil {
+							template := normalizedSessionTemplateInfo(infoPostHeal, cfg)
+							if template == "" {
+								template = infoPostHeal.Template
+							}
+							trace.RecordDecision(TraceSiteReconcilerOrphaned, TraceReasonCode(reason), TraceOutcomeKeptOpen, template, name, traceRecordPayload{
+								"provider_alive":    providerAlive,
+								"spawn_claim_grace": true,
+							})
+						}
+						fmt.Fprintf(stdout, "Skipping drain for '%s': pool session within spawn-claim grace\n", name) //nolint:errcheck
+						continue
 					}
 					hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForConfigInfo(cityPath, cfg, store, rigStores, infoByID[id])
 					if assignedErr != nil {
@@ -3775,6 +3838,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				reason = "idle"
 			default:
 				reason = "no-wake-reason"
+			}
+			// Spawn-claim grace: a freshly-woken pool session has been started to
+			// serve pool demand but claims its work itself during load-context —
+			// between wake and that claim it has no wake reason of its own, so the
+			// default branch above resolves to "no-wake-reason". Suppress that drain
+			// (only) while the session is still inside its spawn-claim window, and
+			// cancel any such drain a prior tick began, so the worker can finish
+			// load-context and claim before the reconciler concludes it has no reason
+			// to be awake. Once it claims, the assigned-work wake reason keeps it
+			// awake through the normal path; once the window elapses with still no
+			// claim, the drain proceeds so a genuinely idle over-spawn is not pinned
+			// awake. Other drain reasons (idle, suspend, config-drift) are
+			// unaffected. Mirrors the pool-orphan spawn-claim guard (see #gc-yi1ig).
+			if reason == "no-wake-reason" && withinPoolSpawnClaimGraceInfo(info, cfg, clk.Now()) {
+				cancelSessionDrainInfo(info, sp, dt)
+				continue
 			}
 			if reason != "idle" {
 				clearCompletedIdleProbe(target.info.ID, dt)
