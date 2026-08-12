@@ -172,15 +172,44 @@ LIVE_SESSION_IDS=$(jq -r -s '
     | select(. != null and . != "")
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
+# Exact whole-line membership test over a newline-delimited list.
+#
+# This is the `printf ... | grep -q` pipefail/SIGPIPE race that d416a0085 fixed
+# in reaper.sh, in a second place. `grep -q` exits the moment it matches without
+# draining stdin, so the upstream printf races into a SIGPIPE, and under this
+# script's `set -o pipefail` that 141 becomes the pipeline's status — a present
+# candidate reported as absent. Below the 64KiB pipe buffer printf's single
+# write usually lands first and the misread is a rare load-sensitive flake
+# (gc-d760o); once the list outgrows the buffer printf must block on a second
+# write and the misread is deterministic, which is where a real city's session
+# list sits.
+#
+# reaper.sh took the minimal local fix (a here-string, which pipefail does not
+# apply to). These two predicates go one step further and fork nothing, because
+# they are called in a loop over every in-progress bead and every configured
+# agent, and because a forked probe cannot distinguish "candidate absent" from
+# "the check never ran" (spawn failure, signal) — both surface as the same
+# non-zero status, and both then read as "not a known agent", routing a LIVE
+# agent's in-progress bead onto the dead-agent reset path. That is the one
+# direction this sweep must never fail in; every other probe here reports
+# unverifiable (return 2) rather than guessing.
+#
+# Quoting $needle inside the pattern keeps glob metacharacters literal, so this
+# stays a fixed-string whole-line match exactly like grep -Fx.
+list_contains_line() {
+    local list="$1"
+    local needle="$2"
+    [ -n "$needle" ] || return 1
+    [ -n "$list" ] || return 1
+    [[ $'\n'"$list"$'\n' == *$'\n'"$needle"$'\n'* ]]
+}
+
 agent_exists() {
-    local candidate="$1"
-    [ -n "$candidate" ] && printf '%s\n' "$AGENTS" | grep -Fxq -- "$candidate"
+    list_contains_line "$AGENTS" "$1"
 }
 
 live_session_match() {
-    local candidate="$1"
-    [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
-        && printf '%s\n' "$LIVE_SESSION_IDS" | grep -Fxq -- "$candidate"
+    list_contains_line "$LIVE_SESSION_IDS" "$1"
 }
 
 CURRENT_BEAD_JSON=""
