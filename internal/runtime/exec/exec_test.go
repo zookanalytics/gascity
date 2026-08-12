@@ -1424,12 +1424,31 @@ esac
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
 
-	data, err := os.ReadFile(interruptFile)
-	if err != nil {
-		t.Fatalf("read interrupt marker (rollback trap never ran): %v", err)
-	}
-	if got := strings.TrimSpace(string(data)); got != "interrupted" {
-		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	// The interrupt marker is written by the child's rollback trap, which the
+	// parent's Start return (drained from done above) does not synchronize
+	// with: under load the child may not have written the marker yet — or may
+	// still be writing it, since the shell truncates the file on `>` before
+	// printf appends the content. Poll on the same ticker+deadline the
+	// readiness marker uses above instead of reading once and racing the trap.
+	interruptDeadline := time.NewTimer(5 * time.Second)
+	defer interruptDeadline.Stop()
+	interruptPoll := time.NewTicker(10 * time.Millisecond)
+	defer interruptPoll.Stop()
+	var marker string
+	for {
+		data, err := os.ReadFile(interruptFile)
+		if err == nil {
+			if marker = strings.TrimSpace(string(data)); marker == "interrupted" {
+				break
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read interrupt marker: %v", err)
+		}
+		select {
+		case <-interruptPoll.C:
+		case <-interruptDeadline.C:
+			t.Fatalf("interrupt marker = %q, want %q (rollback trap never ran)", marker, "interrupted")
+		}
 	}
 }
 
