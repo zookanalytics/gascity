@@ -67,6 +67,15 @@ type TimerFacts struct {
 	Blocker string
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
+	// Attached reports whether a human terminal is currently connected to
+	// the session (runtime.Provider.IsAttached). Unlike Pending and
+	// AssignedWork it is a definite, always-cheap fact — the provider
+	// returns a concrete bool on the same observation as last-activity, and
+	// providers that cannot report attachment return false — so the caller
+	// supplies it up front rather than through a gather round-trip. Only the
+	// idle-timeout ladder consults it; the zero value (false) preserves the
+	// prior behavior for callers that do not set it.
+	Attached bool
 	// AssignedWork is the open-assigned-work fact, gathered on demand.
 	// Both the max-session-age and idle-timeout ladders consult it.
 	AssignedWork AssignedWorkFact
@@ -125,13 +134,23 @@ func DecideMaxSessionAge(f TimerFacts) TimerDecision {
 }
 
 // DecideIdleTimeout evaluates the idle-timeout ladder: blocker, then pending
-// interaction, then assigned work, then stop. A pending interaction cancels
-// any pending drain and keeps the session out of this tick's wake pass — an
-// asymmetry with max-session-age that is part of the existing reconciler
-// contract. Assigned work defers the stop, mirroring DecideMaxSessionAge:
-// without this rung, ComputeAwakeSet's assigned-work exemption re-wakes the
-// session within seconds of the kill, producing an unbounded idle-kill/wake
-// treadmill (ga-3ox7rk).
+// interaction, then attachment, then assigned work, then stop. A pending
+// interaction cancels any pending drain and keeps the session out of this
+// tick's wake pass — an asymmetry with max-session-age that is part of the
+// existing reconciler contract. Attachment defers the stop on the same footing
+// as a pending interaction: idle is measured from provider output activity,
+// which cannot observe a human *reading* an attached pane, so without this rung
+// a session someone is actively watching is indistinguishable from an abandoned
+// one and gets reaped mid-attention (gc-rjtk1). It also mirrors the assigned-work
+// rung's fight against the idle-kill/wake treadmill (ga-3ox7rk): ComputeAwakeSet
+// already re-wakes an attached session ("attached" wake override), so killing it
+// here would only bounce it straight back awake. The defer is re-evaluated every
+// tick, so the stop resumes as soon as the terminal detaches — it is not an
+// unconditional exemption, and unlike the pending arm it does not cancel drains
+// or skip the wake pass. Assigned work defers the stop, mirroring
+// DecideMaxSessionAge: without this rung, ComputeAwakeSet's assigned-work
+// exemption re-wakes the session within seconds of the kill, producing an
+// unbounded idle-kill/wake treadmill (ga-3ox7rk).
 func DecideIdleTimeout(f TimerFacts) TimerDecision {
 	if !f.Triggered {
 		return TimerDecision{Action: TimerActionNone}
@@ -147,6 +166,9 @@ func DecideIdleTimeout(f TimerFacts) TimerDecision {
 		dec.CancelDrain = true
 		dec.SkipWakePass = true
 		return dec
+	}
+	if f.Attached {
+		return deferDecision("attached", "deferred_attached")
 	}
 	switch f.AssignedWork {
 	case AssignedWorkUnknown:
