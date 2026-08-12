@@ -122,6 +122,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonPinned
 	case string(TraceReasonPending):
 		reason = TraceReasonPending
+	case string(TraceReasonAttached):
+		reason = TraceReasonAttached
 	case string(TraceReasonAssignedWork):
 		reason = TraceReasonAssignedWork
 	case string(TraceReasonAssignedWorkExhausted):
@@ -144,6 +146,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredPinned
 	case string(TraceOutcomeDeferredPending):
 		outcome = TraceOutcomeDeferredPending
+	case string(TraceOutcomeDeferredAttached):
+		outcome = TraceOutcomeDeferredAttached
 	case string(TraceOutcomeDeferredBusy):
 		outcome = TraceOutcomeDeferredBusy
 	case string(TraceOutcomeStopDeferExhausted):
@@ -3294,6 +3298,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
+				// Attachment is a cheap, always-available fact (sp is the
+				// reconciler's live provider, probed directly throughout this
+				// loop), unlike the gathered pending / assigned-work facts —
+				// supply it up front. A human *reading* an attached pane
+				// produces no output activity, so without this the idle clock
+				// reaps a session someone is actively watching (gc-rjtk1).
+				// Skip the probe when a blocker already defers:
+				// DecideIdleTimeout checks the blocker first and would ignore
+				// Attached anyway.
+				if facts.Blocker == "" {
+					facts.Attached = sp.IsAttached(name)
+				}
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
 			for dec.Action == sessionpkg.TimerActionGatherPending ||

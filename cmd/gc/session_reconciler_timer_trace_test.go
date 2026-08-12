@@ -22,6 +22,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceReasonQuarantine:            true,
 		TraceReasonPinned:                true,
 		TraceReasonPending:               true,
+		TraceReasonAttached:              true,
 		TraceReasonAssignedWork:          true,
 		TraceReasonAssignedWorkExhausted: true,
 		TraceReasonMinFloorIdleWorker:    true,
@@ -32,6 +33,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceOutcomeDeferredQuarantine: true,
 		TraceOutcomeDeferredPinned:     true,
 		TraceOutcomeDeferredPending:    true,
+		TraceOutcomeDeferredAttached:   true,
 		TraceOutcomeDeferredBusy:       true,
 		TraceOutcomeStopDeferExhausted: true,
 		TraceOutcomeDeferredMinFloor:   true,
@@ -41,6 +43,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 	pendings := []sessionpkg.PendingFact{
 		sessionpkg.PendingUnknown, sessionpkg.PendingNo, sessionpkg.PendingYes,
 	}
+	attachments := []bool{false, true}
 	assigned := []sessionpkg.AssignedWorkFact{
 		sessionpkg.AssignedWorkUnknown, sessionpkg.AssignedWorkNone, sessionpkg.AssignedWorkHas,
 	}
@@ -51,11 +54,13 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 	var decisions []sessionpkg.TimerDecision
 	for _, b := range blockers {
 		for _, p := range pendings {
-			for _, a := range assigned {
-				for _, m := range minfloors {
-					facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: a, MinFloor: m}
-					decisions = append(decisions, sessionpkg.DecideMaxSessionAge(facts))
-					decisions = append(decisions, sessionpkg.DecideIdleTimeout(facts))
+			for _, att := range attachments {
+				for _, a := range assigned {
+					for _, m := range minfloors {
+						facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, Attached: att, AssignedWork: a, MinFloor: m}
+						decisions = append(decisions, sessionpkg.DecideMaxSessionAge(facts))
+						decisions = append(decisions, sessionpkg.DecideIdleTimeout(facts))
+					}
 				}
 			}
 		}
