@@ -337,23 +337,112 @@ func TestDecideMaxSessionAgeIgnoresMinFloor(t *testing.T) {
 	}
 }
 
+// A human terminal attached to the session defers the idle-timeout stop on the
+// same footing as a pending interaction. Idle is measured from provider output
+// activity, which cannot observe a person *reading* an attached pane, so a
+// watched session is otherwise indistinguishable from an abandoned one and gets
+// reaped mid-attention (gc-rjtk1). The defer is a plain defer — no drain-cancel
+// or wake-pass skip, unlike the pending-interaction arm.
+func TestDecideIdleTimeoutDefersWhileAttached(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, Attached: true, AssignedWork: AssignedWorkNone})
+	if dec.Action != TimerActionDefer {
+		t.Fatalf("action = %v, want defer", dec.Action)
+	}
+	if dec.TraceReason != "attached" || dec.TraceOutcome != "deferred_attached" {
+		t.Fatalf("trace = %q/%q, want attached/deferred_attached", dec.TraceReason, dec.TraceOutcome)
+	}
+	if dec.CancelDrain || dec.SkipWakePass {
+		t.Fatalf("attachment deferral must not cancel drain or skip wake pass: %+v", dec)
+	}
+}
+
+// Attachment sits above assigned work in the ladder, so an attached session
+// defers without the caller having to gather the (more expensive) assigned-work
+// fact at all: AssignedWorkUnknown still yields the attachment defer, never a
+// gather action.
+func TestDecideIdleTimeoutAttachedShortCircuitsAssignedWorkGather(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, Attached: true, AssignedWork: AssignedWorkUnknown})
+	if dec.Action != TimerActionDefer {
+		t.Fatalf("action = %v, want defer (not a gather)", dec.Action)
+	}
+	if dec.TraceReason != "attached" {
+		t.Fatalf("trace reason = %q, want attached", dec.TraceReason)
+	}
+}
+
+// A pending interaction outranks attachment: when both are present the decision
+// is the pending defer, which alone carries CancelDrain/SkipWakePass. This keeps
+// the mid-turn drain/wake semantics intact for an agent that is both attached
+// and mid-turn.
+func TestDecideIdleTimeoutPendingOutranksAttachment(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingYes, Attached: true})
+	if dec.TraceReason != "pending" || dec.TraceOutcome != "deferred_pending" {
+		t.Fatalf("trace = %q/%q, want pending/deferred_pending", dec.TraceReason, dec.TraceOutcome)
+	}
+	if !dec.CancelDrain || !dec.SkipWakePass {
+		t.Fatalf("pending must still cancel drain and skip wake pass even when attached: %+v", dec)
+	}
+}
+
+// A timer blocker (user_hold/quarantine) outranks attachment, mirroring how it
+// outranks every other arm.
+func TestDecideIdleTimeoutBlockerOutranksAttachment(t *testing.T) {
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Blocker: "quarantine", Attached: true})
+	if dec.TraceReason != "quarantine" || dec.TraceOutcome != "deferred_quarantine" {
+		t.Fatalf("trace = %q/%q, want quarantine/deferred_quarantine", dec.TraceReason, dec.TraceOutcome)
+	}
+}
+
+// Not-attached (the zero value) preserves the prior ladder exactly: with no
+// human watching, an otherwise-free idle session still stops.
+func TestDecideIdleTimeoutNotAttachedStillStops(t *testing.T) {
+	// MinFloorNo is required, not incidental: upstream added a min_active_sessions
+	// floor rung BELOW assigned work, so a fixture that leaves MinFloor unknown
+	// stalls on TimerActionGatherMinFloor instead of reaching the stop this test
+	// is about.
+	dec := DecideIdleTimeout(TimerFacts{Triggered: true, Pending: PendingNo, Attached: false, AssignedWork: AssignedWorkNone, MinFloor: MinFloorNo})
+	if dec.Action != TimerActionStop {
+		t.Fatalf("action = %v, want stop", dec.Action)
+	}
+	if dec.TraceReason != "idle_timeout" || dec.TraceOutcome != "stop" {
+		t.Fatalf("trace = %q/%q, want idle_timeout/stop", dec.TraceReason, dec.TraceOutcome)
+	}
+}
+
+// Attachment is an idle-timeout-only signal. Max-session-age is a health
+// restart (e.g. cached-credential expiry) that must fire regardless of who is
+// watching, so DecideMaxSessionAge ignores Attached entirely.
+func TestDecideMaxSessionAgeIgnoresAttachment(t *testing.T) {
+	dec := DecideMaxSessionAge(TimerFacts{Triggered: true, Pending: PendingNo, Attached: true, AssignedWork: AssignedWorkNone})
+	if dec.Action != TimerActionStop {
+		t.Fatalf("action = %v, want stop (attachment must not defer a max-age restart)", dec.Action)
+	}
+	if dec.TraceReason != "max_session_age" {
+		t.Fatalf("trace reason = %q, want max_session_age", dec.TraceReason)
+	}
+}
+
 // The gather loop must terminate: once every gatherable fact is known the
-// decider may only defer or stop.
+// decider may only defer or stop. Attachment is a definite bool (no Unknown
+// state), so adding it as a dimension keeps every combination terminal.
 func TestTimerDecisionsTerminate(t *testing.T) {
 	pendings := []PendingFact{PendingNo, PendingYes}
 	works := []AssignedWorkFact{AssignedWorkNone, AssignedWorkHas}
 	minfloors := []MinFloorFact{MinFloorNo, MinFloorYes}
 	blockers := []string{"", "user_hold", "quarantine", "pinned"}
+	atts := []bool{false, true}
 	for _, b := range blockers {
 		for _, p := range pendings {
 			for _, w := range works {
 				for _, m := range minfloors {
-					facts := TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: w, MinFloor: m}
-					for _, dec := range []TimerDecision{DecideMaxSessionAge(facts), DecideIdleTimeout(facts)} {
-						switch dec.Action {
-						case TimerActionDefer, TimerActionStop:
-						default:
-							t.Fatalf("facts %+v produced non-terminal action %v", facts, dec.Action)
+					for _, att := range atts {
+						facts := TimerFacts{Triggered: true, Blocker: b, Pending: p, Attached: att, AssignedWork: w, MinFloor: m}
+						for _, dec := range []TimerDecision{DecideMaxSessionAge(facts), DecideIdleTimeout(facts)} {
+							switch dec.Action {
+							case TimerActionDefer, TimerActionStop:
+							default:
+								t.Fatalf("facts %+v produced non-terminal action %v", facts, dec.Action)
+							}
 						}
 					}
 				}
