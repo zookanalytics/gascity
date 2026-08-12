@@ -195,6 +195,10 @@ const (
 	TraceReasonUserHold              TraceReasonCode = "user_hold"
 	TraceReasonQuarantine            TraceReasonCode = "quarantine"
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
+	// TraceReasonAttached is the idle-timeout defer taken when a human
+	// terminal is attached to the session (DecideIdleTimeout's attachment
+	// rung). It pairs with TraceOutcomeDeferredAttached.
+	TraceReasonAttached TraceReasonCode = "attached"
 )
 
 type TraceOutcomeCode string
