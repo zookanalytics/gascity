@@ -127,6 +127,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		reason = TraceReasonPending
 	case string(TraceReasonPendingUnknown):
 		reason = TraceReasonPendingUnknown
+	case string(TraceReasonAttached):
+		reason = TraceReasonAttached
 	case string(TraceReasonAssignedWork):
 		reason = TraceReasonAssignedWork
 	case string(TraceReasonAssignedWorkExhausted):
@@ -149,6 +151,8 @@ func timerTraceCodes(dec sessionpkg.TimerDecision) (TraceReasonCode, TraceOutcom
 		outcome = TraceOutcomeDeferredPinned
 	case string(TraceOutcomeDeferredPending):
 		outcome = TraceOutcomeDeferredPending
+	case string(TraceOutcomeDeferredAttached):
+		outcome = TraceOutcomeDeferredAttached
 	case string(TraceOutcomeDeferredBusy):
 		outcome = TraceOutcomeDeferredBusy
 	case string(TraceOutcomeStopDeferExhausted):
@@ -3942,6 +3946,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 			if facts.Triggered {
 				facts.Blocker = lifecycleTimerBlockerInfo(infoByID[id], clk.Now())
+				// Attachment is a cheap, always-available fact (sp is the
+				// reconciler's live provider, probed directly throughout this
+				// loop), unlike the gathered pending / assigned-work facts —
+				// supply it up front. A human *reading* an attached pane
+				// produces no output activity, so without this the idle clock
+				// reaps a session someone is actively watching (gc-rjtk1).
+				// The idle stop is a destructive gate, so the probe follows
+				// runtime.AttachProbeHolds: only a confirmed "no client" (or a
+				// vanished session) reads as detached; a probe that cannot
+				// tell may be hiding a watcher and holds the stop (#6900).
+				// Skip the probe when a blocker already defers:
+				// DecideIdleTimeout checks the blocker first and would ignore
+				// Attached anyway.
+				if facts.Blocker == "" {
+					attached, attachErr := attachmentHolds(sp, name)
+					if attachErr != nil {
+						fmt.Fprintf(stderr, "session reconciler: probing attachment for idle-timeout %s: %v; deferring stop\n", name, attachErr) //nolint:errcheck // best-effort stderr
+					}
+					facts.Attached = attached
+				}
 			}
 			dec := sessionpkg.DecideIdleTimeout(facts)
 			pendingHold := pendingInteractionNo

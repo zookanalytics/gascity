@@ -23,6 +23,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceReasonPinned:                true,
 		TraceReasonPending:               true,
 		TraceReasonPendingUnknown:        true,
+		TraceReasonAttached:              true,
 		TraceReasonAssignedWork:          true,
 		TraceReasonAssignedWorkExhausted: true,
 		TraceReasonMinFloorIdleWorker:    true,
@@ -33,6 +34,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 		TraceOutcomeDeferredQuarantine: true,
 		TraceOutcomeDeferredPinned:     true,
 		TraceOutcomeDeferredPending:    true,
+		TraceOutcomeDeferredAttached:   true,
 		TraceOutcomeDeferredBusy:       true,
 		TraceOutcomeStopDeferExhausted: true,
 		TraceOutcomeDeferredMinFloor:   true,
@@ -42,6 +44,7 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 	pendings := []sessionpkg.PendingFact{
 		sessionpkg.PendingUnknown, sessionpkg.PendingNo, sessionpkg.PendingYes,
 	}
+	attachments := []bool{false, true}
 	assigned := []sessionpkg.AssignedWorkFact{
 		sessionpkg.AssignedWorkUnknown, sessionpkg.AssignedWorkNone, sessionpkg.AssignedWorkHas,
 	}
@@ -52,12 +55,14 @@ func TestTimerTraceCodesTotal(t *testing.T) {
 	var decisions []sessionpkg.TimerDecision
 	for _, b := range blockers {
 		for _, p := range pendings {
-			for _, a := range assigned {
-				for _, m := range minfloors {
-					facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, AssignedWork: a, MinFloor: m}
-					for _, hold := range []pendingInteractionAnswer{pendingInteractionNo, pendingInteractionYes, pendingInteractionUnknown} {
-						decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideMaxSessionAge(facts), hold))
-						decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideIdleTimeout(facts), hold))
+			for _, att := range attachments {
+				for _, a := range assigned {
+					for _, m := range minfloors {
+						facts := sessionpkg.TimerFacts{Triggered: true, Blocker: b, Pending: p, Attached: att, AssignedWork: a, MinFloor: m}
+						for _, hold := range []pendingInteractionAnswer{pendingInteractionNo, pendingInteractionYes, pendingInteractionUnknown} {
+							decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideMaxSessionAge(facts), hold))
+							decisions = append(decisions, pendingHoldTimerDecision(sessionpkg.DecideIdleTimeout(facts), hold))
+						}
 					}
 				}
 			}

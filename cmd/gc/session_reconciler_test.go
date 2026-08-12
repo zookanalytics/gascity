@@ -11462,6 +11462,158 @@ func TestReconcileSessionBeads_IdleTimeoutRespectsQuarantineBlocker(t *testing.T
 	}
 }
 
+// TestReconcileSessionBeads_IdleTimeoutDefersWhileAttached guards the
+// session_reconciler.go idle-timeout block's attachment rung (gc-rjtk1). Idle
+// is measured from provider output activity, which cannot observe a human
+// *reading* an attached pane, so a session someone is actively watching would
+// otherwise be reaped mid-attention. Pass 1 (attached) must defer the stop;
+// pass 2 (detached) proves the defer is re-evaluated each tick, not an
+// unconditional exemption — once the terminal detaches the same idle session is
+// reaped normally.
+func TestReconcileSessionBeads_IdleTimeoutDefersWhileAttached(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	// Pass 1: a human terminal is attached. The idle stop must defer.
+	env.sp.SetAttached("worker", true)
+	rec := events.NewFake()
+	env.rec = rec
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("attached worker must not be idle-killed while a terminal is connected")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, must not be idle-timeout for attached session", b.Metadata["sleep_reason"])
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Fatal("SessionIdleKilled must not fire while a terminal is attached")
+		}
+	}
+
+	// Pass 2: the terminal detaches. The same idle session is now reaped.
+	env.sp.SetAttached("worker", false)
+	rec2 := events.NewFake()
+	env.rec = rec2
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{b}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if env.sp.IsRunning("worker") {
+		t.Fatal("detached idle worker must be idle-killed once no terminal is attached")
+	}
+	b2, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, want idle-timeout after detached idle stop", b2.Metadata["sleep_reason"])
+	}
+	sawKill := false
+	for _, e := range rec2.Events {
+		if e.Type == events.SessionIdleKilled {
+			sawKill = true
+		}
+	}
+	if !sawKill {
+		t.Fatal("SessionIdleKilled must fire once the terminal detaches")
+	}
+}
+
+// TestReconcileSessionBeads_IdleTimeoutHoldsOnAttachProbeError pins the
+// fail-closed half of the attachment rung. The idle stop is a destructive
+// gate, so it follows runtime.AttachProbeHolds (#6900): an attachment probe
+// that cannot answer (anything but ErrSessionNotFound) may be hiding a human
+// watcher and must defer the stop exactly like a confirmed attachment, rather
+// than reading as "detached" and reaping the session. Once the probe answers
+// again with a confirmed "no client", the same idle session is reaped,
+// proving the hold is re-evaluated each tick rather than wedging the session.
+func TestReconcileSessionBeads_IdleTimeoutHoldsOnAttachProbeError(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	it := newFakeIdleTracker()
+	it.idle["worker"] = true
+
+	// Pass 1: the probe cannot tell. Fail closed: the idle stop must defer.
+	env.sp.SetAttached("worker", false)
+	env.sp.AttachedErrors["worker"] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
+	rec := events.NewFake()
+	env.rec = rec
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{session}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if !env.sp.IsRunning("worker") {
+		t.Fatal("worker must not be idle-killed while the attachment probe cannot answer")
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["sleep_reason"] == "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, must not be idle-timeout when the attach probe errored", b.Metadata["sleep_reason"])
+	}
+	for _, e := range rec.Events {
+		if e.Type == events.SessionIdleKilled {
+			t.Fatal("SessionIdleKilled must not fire while the attachment probe cannot answer")
+		}
+	}
+	if !strings.Contains(env.stderr.String(), "probing attachment for idle-timeout worker") {
+		t.Fatalf("probe error must be reported on stderr, got %q", env.stderr.String())
+	}
+
+	// Pass 2: the probe answers again with a confirmed "no client". The same
+	// idle session is now reaped.
+	delete(env.sp.AttachedErrors, "worker")
+	rec2 := events.NewFake()
+	env.rec = rec2
+	reconcileSessionBeads(
+		context.Background(), []beads.Bead{b}, env.desiredState, configuredSessionNames(env.cfg, "", env.store),
+		env.cfg, env.sp, env.store, nil, nil, nil, env.dt, map[string]int{}, false, nil, "",
+		it, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if env.sp.IsRunning("worker") {
+		t.Fatal("idle worker must be idle-killed once the probe confirms no terminal is attached")
+	}
+	b2, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Metadata["sleep_reason"] != "idle-timeout" {
+		t.Fatalf("sleep_reason = %q, want idle-timeout after the probe recovers", b2.Metadata["sleep_reason"])
+	}
+}
+
 func TestReconcileSessionBeads_IdleTimeoutNilTrackerSkipped(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
