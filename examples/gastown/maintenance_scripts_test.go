@@ -1797,6 +1797,7 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 		orphanID           string
 		orphanAssignee     string
 		liveSessionName    string
+		liveSessionFillers int
 	}{
 		{
 			name:               "hq-reported-shape",
@@ -1853,6 +1854,28 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			orphanAssignee:     "project-alpha__gastown-retired-gc-live1578",
 			liveSessionName:    "project-alpha__gastown-refinery-gc-live1578",
 		},
+		{
+			// Same shape as rig-live-session-only, but with enough additional
+			// live sessions that the identity list the sweep scans outgrows the
+			// 64KiB pipe buffer. That size is what makes the orphan-sweep defect
+			// deterministic: the membership check used to be a
+			// `printf ... | grep -Fxq` pipeline under `set -o pipefail`, and
+			// `grep -q` exits on its first match without draining stdin, so
+			// printf took a SIGPIPE and the pipeline reported 141 — a match
+			// reported as "not found". Below the buffer printf's single write
+			// usually lands first and the misclassification is a rare
+			// load-sensitive flake; above it printf must block on a second
+			// write and the live agent is misread as dead every time.
+			name:               "rig-live-session-beyond-pipe-buffer",
+			scope:              "project-alpha",
+			configuredIdentity: "project-alpha/gastown.refinery",
+			protectedID:        "gc-wisp-protected-bigsess-1578",
+			protectedAssignee:  "project-alpha__gastown-refinery-gc-bigsess1578",
+			orphanID:           "gc-wisp-orphan-bigsess-1578",
+			orphanAssignee:     "project-alpha__gastown-retired-gc-bigsess1578",
+			liveSessionName:    "project-alpha__gastown-refinery-gc-bigsess1578",
+			liveSessionFillers: orphanSweepPipeBufferFillerSessions,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1877,18 +1900,22 @@ func TestOrphanSweepPreservesProtectedInProgressEphemeralMoleculeWisp(t *testing
 			beadsJSON := orphanSweepProtectedWispBeadsJSON(t, tt.protectedID, tt.protectedAssignee, tt.orphanID, tt.orphanAssignee)
 			hqJSON := "[]"
 			rigJSON := "[]"
-			hqSessionsJSON := orphanSweepSessionListJSON(t)
-			rigSessionsJSON := orphanSweepSessionListJSON(t)
+			// Fillers pad both session lists. The sweep unions every scope's
+			// sessions into one identity list, so splitting them keeps each
+			// fixture small while still growing the list the sweep scans.
+			fillers := orphanSweepFillerSessionNames(tt.liveSessionFillers)
+			hqSessionsJSON := orphanSweepSessionListJSON(t, fillers...)
+			rigSessionsJSON := orphanSweepSessionListJSON(t, fillers...)
 			switch tt.scope {
 			case "hq":
 				hqJSON = beadsJSON
 				if tt.liveSessionName != "" {
-					hqSessionsJSON = orphanSweepSessionListJSON(t, tt.liveSessionName)
+					hqSessionsJSON = orphanSweepSessionListJSON(t, append([]string{tt.liveSessionName}, fillers...)...)
 				}
 			case "project-alpha":
 				rigJSON = beadsJSON
 				if tt.liveSessionName != "" {
-					rigSessionsJSON = orphanSweepSessionListJSON(t, tt.liveSessionName)
+					rigSessionsJSON = orphanSweepSessionListJSON(t, append([]string{tt.liveSessionName}, fillers...)...)
 				}
 			default:
 				t.Fatalf("unsupported scope %q", tt.scope)
@@ -2052,6 +2079,27 @@ func orphanSweepProtectedWispBeadsJSON(t *testing.T, protectedID, protectedAssig
 		t.Fatalf("Marshal(orphan-sweep beads): %v", err)
 	}
 	return string(data)
+}
+
+// orphanSweepPipeBufferFillerSessions pads the sweep's live-session identity
+// list past the 64KiB pipe buffer. Each filler contributes an id and a session
+// name to that list, and every scope's session list is read twice, so 450
+// fillers across two scopes yield roughly 120KiB — comfortably past the buffer
+// without pushing any single fixture near the kernel's per-environment-variable
+// limit. Measured against the pre-fix script: 200 sessions misclassified the
+// live bead in 2 of 10 runs, 600 in 10 of 10.
+const orphanSweepPipeBufferFillerSessions = 450
+
+// orphanSweepFillerSessionNames builds n distinct live-session names for
+// padding a session-list fixture. They are ephemeral pool-instance names so
+// they match no configured agent template, which keeps them inert: they only
+// add bulk to the identity list the sweep scans.
+func orphanSweepFillerSessionNames(n int) []string {
+	names := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		names = append(names, fmt.Sprintf("project-alpha__gastown-filler-agent-instance-gc-%06d", i))
+	}
+	return names
 }
 
 func orphanSweepSessionListJSON(t *testing.T, liveSessionNames ...string) string {
