@@ -200,6 +200,7 @@ func TestSessionLifecycleChaosPendingInteractionDoesNotOverrideOrphanDrain(t *te
 	h.assertStarted()
 
 	h.setDesired(false)
+	h.advancePastSpawnClaimGrace() // steady-state orphan, not a fresh pool spawn
 	h.env.sp.SetPendingInteraction(h.sessionName, &runtime.PendingInteraction{
 		RequestID: "chaos-pending",
 		Kind:      "question",
@@ -624,6 +625,7 @@ func TestSessionLifecycleChaosPendingInteractionPreservesNonCancelableDrains(t *
 			h.assertStarted()
 
 			tc.setup(h)
+			h.advancePastSpawnClaimGrace() // steady-state drain, not a fresh pool spawn
 			h.record("start non-cancelable drain=%s", tc.name)
 			h.reconcileTick()
 			if ds := h.env.dt.get(h.sessionID); ds == nil || ds.reason != tc.name {
@@ -849,6 +851,7 @@ func TestSessionLifecycleChaosPendingInteractionRespectsWakeBlockers(t *testing.
 			h.assertStarted()
 
 			h.setDesired(false)
+			h.advancePastSpawnClaimGrace() // steady-state blocked drain, not a fresh pool spawn
 			if err := h.env.store.SetMetadataBatch(h.sessionID, tc.meta); err != nil {
 				h.failf("set blocker metadata: %v", err)
 			}
@@ -1215,6 +1218,21 @@ func (h *sessionChaosHarness) advanceClock() {
 	d := durations[h.rng.Intn(len(durations))]
 	h.env.clk.Time = h.env.clk.Time.Add(d)
 	h.record("clock += %s now=%s", d, h.env.clk.Now().UTC().Format(time.RFC3339))
+}
+
+// advancePastSpawnClaimGrace moves the clock just beyond the pool spawn-claim
+// grace window (startup_timeout + poolSpawnClaimGrace, measured from the fresh
+// session's last_woke_at) so a just-started pool session is no longer protected
+// from no-wake-reason / orphan drains. Steady-state drain assertions — the ones
+// exercising how orphan/suspend drains interact with pending interactions and
+// wake blockers, independent of freshness — advance past it first so the drain
+// under test actually fires. The advance stays well short of the ~10-minute
+// held_until/quarantined_until fixtures those tests use. See
+// withinPoolSpawnClaimGraceInfo (gc-yi1ig).
+func (h *sessionChaosHarness) advancePastSpawnClaimGrace() {
+	window := h.env.cfg.Session.StartupTimeoutDuration() + poolSpawnClaimGrace
+	h.env.clk.Time = h.env.clk.Time.Add(window + time.Second)
+	h.record("advance past spawn-claim grace now=%s", h.env.clk.Now().UTC().Format(time.RFC3339))
 }
 
 func (h *sessionChaosHarness) injectProviderExit() {
