@@ -735,6 +735,34 @@ func TestTickDebouncer_IndependentInstances(t *testing.T) {
 	}
 }
 
+// TestTickDebouncer_FireDropsStaleGeneration deterministically pins the
+// generation mechanism that fixes gc-l2c6v, with no dependence on timing or
+// load. arm captures d.gen for the timer it schedules and the callback runs
+// fire(gen); cancelPending advances d.gen. Driving fire directly reproduces
+// the exact interleaving load exposed — an in-flight callback from the
+// pre-cancel generation delivering after cancelPending returned — and
+// asserts it is dropped, while fires at the live generation are delivered.
+func TestTickDebouncer_FireDropsStaleGeneration(t *testing.T) {
+	d := newTickDebouncer()
+	// A fire at the current generation (0) is delivered.
+	d.fire(0)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 1 {
+		t.Fatalf("current-generation fire count = %d, want 1", got)
+	}
+	// cancelPending advances the generation. A late callback from the prior
+	// generation (fire(0)) is the canceled tick and must be dropped.
+	d.cancelPending()
+	d.fire(0)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 0 {
+		t.Fatalf("stale-generation fire count = %d, want 0 (canceled tick leaked)", got)
+	}
+	// A fire at the new live generation (1) is delivered again.
+	d.fire(1)
+	if got := drainFiredCount(d, 2*time.Millisecond); got != 1 {
+		t.Fatalf("post-cancel live-generation fire count = %d, want 1", got)
+	}
+}
+
 // drainFiredCount counts how many fires are available on the debouncer's
 // channel within window. It returns once window elapses with no further
 // fires for at least a short tail, so the count is stable.
