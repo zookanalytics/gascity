@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -27,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 type listFailStore struct {
@@ -3030,12 +3033,10 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 // the reconciler's pre-fingerprint materialization reaches the templated-file
 // seam with a real data map — the threading acceptance case for this path.
 //
-// The templated file is deliberately one nothing else rewrites. A templated
-// .codex/hooks.json would also render here, but normalizeStagedCodexHooks runs
-// immediately after staging on this path and rewrites that specific file into
-// managed form, so asserting on it would test the normalizer rather than the
-// seam. The hooks-shaped case is pinned exactly in internal/overlay and
-// internal/runtime instead.
+// The templated file is deliberately a plain one, so the assertion is on the
+// rendering seam alone. The hooks-shaped case — where rendering has to produce
+// a document the codex-hooks-drift check accepts — is pinned separately in
+// TestPrepareTemplateResolution_StagesCodexHooksBoundToCity.
 func TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
@@ -3080,34 +3081,35 @@ func TestPrepareTemplateResolution_RendersTemplateOverlayWithCityRoot(t *testing
 	}
 }
 
-// TestPrepareTemplateResolution_NormalizesStagedCodexHooks guards gc-beez. A
-// pack overlay ships per-provider/codex/.codex/hooks.json in raw form — managed
-// commands that are not bound to this city (`--city <path>`) and prompt hooks
-// that are not wrapped in `gc hook run`. The overlay stager copies (and JSON
-// merges) that file verbatim, but hooks.Install — the only writer that applies
-// the managed normalization — runs solely when install_agent_hooks is
-// non-empty. An agent whose resolved provider is codex therefore gets the codex
-// hook surface staged and audited by the codex-hooks-drift doctor check
-// (agentUsesCodexHookSurface matches on the provider, not on install hooks)
-// while nothing ever normalizes it.
+// TestPrepareTemplateResolution_StagesCodexHooksBoundToCity guards gc-beez on
+// the live code path. A pack overlay ships its Codex hooks as the templated
+// per-provider/codex/.codex/hooks.template.json, and the reconciler's
+// pre-fingerprint materialization is what must reach the templated-file seam
+// with a real data map so the staged commands come out bound to this city.
 //
-// The result was a doctor check that could never go green: every reconciler
-// tick re-staged the raw overlay, so `gc doctor --fix` was undone within
-// seconds and the check re-flagged the file it had just upgraded. Staging must
-// leave managed Codex hooks in current managed form.
-func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
+// That threading is load-bearing here and nowhere else: hooks.Install — the
+// other writer of managed form — runs solely when install_agent_hooks is
+// non-empty, while an agent whose resolved provider is codex gets the codex
+// hook surface staged and audited by the codex-hooks-drift doctor check
+// (agentUsesCodexHookSurface matches on the provider, not on install hooks).
+//
+// The gc-beez failure was a doctor check that could never go green: every
+// reconciler tick re-staged an unbound overlay, so `gc doctor --fix` was undone
+// within seconds and the check re-flagged the file it had just upgraded. It was
+// closed first by a post-hoc normalizer and now by the asset itself, so staging
+// leaves managed Codex hooks in current managed form with no second writer.
+func TestPrepareTemplateResolution_StagesCodexHooksBoundToCity(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)
 	}
 	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
-	hooksSrc := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.json")
+	hooksSrc := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.template.json")
 	if err := os.MkdirAll(filepath.Dir(hooksSrc), 0o755); err != nil {
 		t.Fatalf("MkdirAll(overlay): %v", err)
 	}
-	// Raw pack-overlay form: unbound `gc prime`, unwrapped prompt hooks.
-	rawOverlay := `{
+	templatedOverlay := `{
   "hooks": {
     "SessionStart": [
       {
@@ -3115,7 +3117,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
+            "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '{{.CityRoot}}' prime --hook --hook-format codex"
           }
         ]
       }
@@ -3126,7 +3128,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "gc handoff --auto \"context cycle\""
+            "command": "gc --city '{{.CityRoot}}' handoff --auto --hook-format codex \"context cycle\""
           }
         ]
       }
@@ -3137,15 +3139,27 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "gc nudge drain --inject --hook-format codex"
+            "command": "gc --city '{{.CityRoot}}' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex"
           }
         ]
       }
     ]
   }
 }`
-	if err := os.WriteFile(hooksSrc, []byte(rawOverlay), 0o644); err != nil {
+	if err := os.WriteFile(hooksSrc, []byte(templatedOverlay), 0o644); err != nil {
 		t.Fatalf("WriteFile(overlay hooks): %v", err)
+	}
+
+	// A user-authored entry already in the workdir must survive the merge:
+	// staging adds the managed surface, it does not own the whole document.
+	if err := os.MkdirAll(filepath.Join(rigDir, ".codex"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.codex): %v", err)
+	}
+	const userHook = "printf custom-codex-hook"
+	if err := os.WriteFile(filepath.Join(rigDir, ".codex", "hooks.json"),
+		[]byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"`+userHook+`","type":"command"}]}]}}`),
+		0o644); err != nil {
+		t.Fatalf("WriteFile(user hooks): %v", err)
 	}
 
 	cfg := &config.City{
@@ -3180,10 +3194,16 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(staged): %v", err)
 	}
+	if !strings.Contains(string(first), userHook) {
+		t.Fatalf("staging dropped the user-authored hook entry:\n%s", first)
+	}
+	if _, err := os.Stat(filepath.Join(rigDir, ".codex", "hooks.template.json")); !os.IsNotExist(err) {
+		t.Error("the templated source staged as a stray file alongside the rendered target")
+	}
 
-	// Every reconciler tick re-stages the raw overlay over the normalized file,
-	// so stage+normalize must reach a fixed point rather than accumulating
-	// merged entries. Re-run the pass and require byte stability.
+	// Every reconciler tick re-stages the overlay over the file already there,
+	// so staging must reach a fixed point rather than accumulating merged
+	// entries. Re-run the pass and require byte stability.
 	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
 	second, err := os.ReadFile(staged)
 	if err != nil {
@@ -3197,10 +3217,78 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	}
 }
 
-// TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks ensures the
-// normalization added for gc-beez stays scoped to Gas City's managed hook
-// surface: a workdir whose .codex/hooks.json contains only user-authored hooks
-// is left byte-for-byte alone.
+// TestPrepareTemplateResolution_CodexHooksStableWithInstallHooks covers the
+// agent shape where both writers of managed Codex hooks run on the same file
+// each tick: overlay staging renders the templated asset, then hooks.Install
+// rewrites it because install_agent_hooks names codex.
+//
+// The two must agree byte-for-byte. If the rendered document differed from the
+// canonical form Install writes — key order, indentation, a matcher the asset
+// spells differently — each would undo the other on every reconciler tick, and
+// the file would churn indefinitely without either writer being wrong on its
+// own.
+func TestPrepareTemplateResolution_CodexHooksStableWithInstallHooks(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
+	hooksDst := filepath.Join(overlayDir, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(hooksDst), 0o755); err != nil {
+		t.Fatalf("MkdirAll(overlay): %v", err)
+	}
+	// The real shipped asset, so this pins the two writers against each other
+	// rather than against a fixture that could drift from either.
+	asset, err := fs.ReadFile(core.PackFS, "overlay/per-provider/codex/.codex/hooks.template.json")
+	if err != nil {
+		t.Fatalf("reading core codex hooks asset: %v", err)
+	}
+	if err := os.WriteFile(hooksDst, asset, 0o644); err != nil {
+		t.Fatalf("WriteFile(overlay hooks): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "polecat-codex",
+			Provider:          "codex",
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: []string{"codex"},
+		}},
+		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+
+	staged := filepath.Join(rigDir, ".codex", "hooks.json")
+	first, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("codex hooks not written into workdir: %v", err)
+	}
+	if codexHooksNeedUpgrade(staged, cityDir) {
+		t.Fatalf("Codex hooks need a managed upgrade after stage + install:\n%s", first)
+	}
+
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("staging and hooks.Install disagree — the file churns every tick:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+// TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks pins that an agent
+// whose overlays ship no Codex hooks gets no Codex hooks written for it: a
+// workdir whose .codex/hooks.json contains only user-authored hooks is left
+// byte-for-byte alone. Whether an agent has a managed Codex hook surface at all
+// is the overlay's decision, and materialization adds no writer of its own.
 func TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
@@ -3235,6 +3323,97 @@ func TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks(t *testing.T) {
 	}
 	if !bytes.Equal(got, custom) {
 		t.Fatalf("user-owned Codex hooks were rewritten:\nwant: %s\ngot:  %s", custom, got)
+	}
+}
+
+// TestPrepareTemplateResolution_RepairsForeignRawCodexOverlay pins the
+// compatibility repair (gc-h33ju): a pack that still ships an unbound
+// .codex/hooks.json — the shape gastown (gastownhall/gascity-packs) and
+// gc-toolkit ship today — staged after the core template overwrites the
+// rendered managed surface by matcher, because overlay merge is identity-keyed
+// on matcher. The post-stage repair rebinds the file to managed form so the
+// codex-hooks-drift check does not go permanently red for a city that imports
+// such a pack (gc-beez). Delete the repair only once every embedded pack ships
+// a bound/templated Codex hooks asset (follow-up bead).
+func TestPrepareTemplateResolution_RepairsForeignRawCodexOverlay(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+
+	// Core overlay: the real shipped templated asset, staged first.
+	coreOverlay := filepath.Join(cityDir, "packs", "core", "overlay")
+	coreHooks := filepath.Join(coreOverlay, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(coreHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll(core overlay): %v", err)
+	}
+	asset, err := fs.ReadFile(core.PackFS, "overlay/per-provider/codex/.codex/hooks.template.json")
+	if err != nil {
+		t.Fatalf("reading core codex hooks asset: %v", err)
+	}
+	if err := os.WriteFile(coreHooks, asset, 0o644); err != nil {
+		t.Fatalf("WriteFile(core hooks): %v", err)
+	}
+
+	// Foreign overlay: an unbound raw hooks.json (no --city, prompt hooks not
+	// wrapped in `gc hook run`), staged after core so it wins by matcher. This
+	// is the gastown pack shape verified against gascity-packs v0.4.0.
+	foreignOverlay := filepath.Join(cityDir, "packs", "foreign", "overlay")
+	foreignHooks := filepath.Join(foreignOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(foreignHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll(foreign overlay): %v", err)
+	}
+	const rawForeignHooks = `{
+  "hooks": {
+    "SessionStart": [{"matcher":"startup","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],
+    "PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""}]}],
+    "UserPromptSubmit": [{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc nudge drain --inject --hook-format codex"}]}]
+  }
+}`
+	if err := os.WriteFile(foreignHooks, []byte(rawForeignHooks), 0o644); err != nil {
+		t.Fatalf("WriteFile(foreign hooks): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat-codex",
+			Provider: "codex",
+			Scope:    "rig",
+			Dir:      "myrig",
+		}},
+		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {coreOverlay, foreignOverlay}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+
+	staged := filepath.Join(rigDir, ".codex", "hooks.json")
+	first, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("codex overlay not staged into workdir: %v", err)
+	}
+	if codexHooksNeedUpgrade(staged, cityDir) {
+		t.Fatalf("a foreign pack's raw Codex hooks overwrote the managed surface and\n"+
+			"the post-stage repair did not rebind it — codex-hooks-drift will flag this\n"+
+			"file on every tick (gc-beez).\nstaged content:\n%s", first)
+	}
+	if !strings.Contains(string(first), "--city "+shellquote.Quote(cityDir)) {
+		t.Fatalf("repaired hooks missing explicit city binding:\n%s", first)
+	}
+
+	// The repair must reach a fixed point: a second reconciler pass re-stages
+	// the raw foreign overlay and repairs again, with no churn.
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("repaired Codex hooks are not stable across reconciler passes:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
 

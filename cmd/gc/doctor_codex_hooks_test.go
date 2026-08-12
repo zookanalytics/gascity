@@ -1,14 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/materialize"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -224,6 +231,194 @@ func TestCodexHooksDriftCheckFixRebindsManagedWrongCityBinding(t *testing.T) {
 	if strings.Contains(got, "/old/city") {
 		t.Fatalf("stale city binding survived:\n%s", got)
 	}
+}
+
+// TestStagedCoreCodexHooksAssetIsCurrent pins the contract that replaced
+// hooks.NormalizeManagedCodexHooks (gc-fbc9d): the core pack ships its Codex
+// hooks overlay as a templated asset, so overlay staging alone leaves a
+// workdir whose .codex/hooks.json this check reports as current — no post-hoc
+// rewrite of the file staging just wrote.
+//
+// Staging alone is the load-bearing part. An agent whose resolved provider is
+// codex stages that slot without declaring install_agent_hooks, so hooks.Install
+// — the other writer of managed form — never runs for it, while this check still
+// audits the file (agentUsesCodexHookSurface matches the provider). That gap is
+// gc-beez: each tick re-staged a raw overlay over whatever `gc doctor --fix` had
+// upgraded, so the check could never go green.
+func TestStagedCoreCodexHooksAssetIsCurrent(t *testing.T) {
+	cityDir := t.TempDir()
+	workDir := t.TempDir()
+	overlayDir := materializeCoreOverlayForTest(t)
+
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		codexStageTemplateData(cityDir), io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir: %v", err)
+	}
+
+	staged := filepath.Join(workDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("core codex hooks asset not staged at its target name: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.template.json")); !os.IsNotExist(err) {
+		t.Errorf("the templated source staged as a stray file alongside the rendered target")
+	}
+
+	check := newCodexHooksDriftCheck(cityDir, []string{workDir})
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("staged core Codex hooks need an upgrade — the codex-hooks-drift\n"+
+			"check flags this file on every tick and `gc doctor --fix` is undone by\n"+
+			"the next stage (gc-beez).\nstatus=%v message=%s\nstaged content:\n%s",
+			result.Status, result.Message, data)
+	}
+	if want := shellquote.Quote(cityDir); !strings.Contains(string(data), "--city "+want) {
+		t.Fatalf("staged hooks missing explicit city binding %q:\n%s", want, data)
+	}
+
+	// Every reconciler tick re-stages the overlay over the staged file, so the
+	// merge must reach a fixed point rather than accumulating entries.
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		codexStageTemplateData(cityDir), io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir (second pass): %v", err)
+	}
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(data, second) {
+		t.Fatalf("staged Codex hooks are not stable across staging passes:\nfirst:\n%s\nsecond:\n%s", data, second)
+	}
+}
+
+// TestStagedCoreCodexHooksBindApostropheCityRoot pins that a city root
+// containing a shell metacharacter renders a shell-safe --city binding
+// (gc-h33ju). The staged command is executed by a shell, and the doctor audits
+// it against shellquote.Quote form, so a raw single-quoted binding is both
+// malformed shell and permanent drift for such a city.
+func TestStagedCoreCodexHooksBindApostropheCityRoot(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "gc city'quote")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cityDir): %v", err)
+	}
+	workDir := t.TempDir()
+	overlayDir := materializeCoreOverlayForTest(t)
+
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		codexStageTemplateData(cityDir), io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir: %v", err)
+	}
+
+	staged := filepath.Join(workDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("core codex hooks asset not staged at its target name: %v", err)
+	}
+	// The staged hooks document must be valid JSON: shellquote.Quote renders an
+	// embedded apostrophe as the sequence '\'', whose backslash is not a valid
+	// JSON string escape, so binding the raw shell-quoted form leaves a document
+	// no JSON parser can load. Assert on the decoded commands, not the raw file
+	// bytes — the on-disk JSON-escaped bytes and the shell-safe decoded value
+	// differ once the render is valid JSON.
+	cmds := codexStagedHookCommands(t, data)
+	if len(cmds) == 0 {
+		t.Fatalf("no managed command strings in staged hooks:\n%s", data)
+	}
+	want := "--city " + shellquote.Quote(cityDir)
+	bad := "--city '" + cityDir + "'"
+	for _, cmd := range cmds {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("staged hook command missing shell-safe city binding %q:\n%s", want, cmd)
+		}
+		if strings.Contains(cmd, bad) {
+			t.Fatalf("staged hook command carries a malformed unescaped city binding %q:\n%s", bad, cmd)
+		}
+	}
+	check := newCodexHooksDriftCheck(cityDir, []string{workDir})
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("apostrophe city root left staged hooks needing upgrade: status=%v message=%s\n%s",
+			result.Status, result.Message, data)
+	}
+}
+
+// codexStagedHookCommands unmarshals a staged Codex hooks document — failing
+// the test if it is not valid JSON — and returns every managed command string
+// it carries (the decoded values, not the raw file bytes). The JSON-validity
+// check is the point: a staged hooks.json that does not parse is unusable by
+// Codex.
+func codexStagedHookCommands(t *testing.T, data []byte) []string {
+	t.Helper()
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("staged Codex hooks is not valid JSON: %v\n%s", err, data)
+	}
+	var cmds []string
+	var walk func(any)
+	walk = func(v any) {
+		switch node := v.(type) {
+		case map[string]any:
+			for key, val := range node {
+				if key == "command" {
+					if s, ok := val.(string); ok {
+						cmds = append(cmds, s)
+					}
+				}
+				walk(val)
+			}
+		case []any:
+			for _, item := range node {
+				walk(item)
+			}
+		}
+	}
+	walk(doc)
+	return cmds
+}
+
+// codexStageTemplateData mirrors the subset of the overlay template vocabulary
+// materialize.PackTemplateData binds that the core Codex hooks asset expands
+// against, for tests that stage the asset directly rather than through the
+// production builder. The asset's managed commands expand the city root
+// through CityRootShellQuotedJSON — shell-safe and JSON-string-safe — so the
+// staged .codex/hooks.json is valid JSON even for a city root with an
+// apostrophe (see internal/materialize.CityRootShellQuotedJSON).
+func codexStageTemplateData(cityDir string) map[string]string {
+	return map[string]string{
+		"CityRoot":                cityDir,
+		"CityRootShellQuoted":     shellquote.Quote(cityDir),
+		"CityRootShellQuotedJSON": materialize.CityRootShellQuotedJSON(cityDir),
+	}
+}
+
+// materializeCoreOverlayForTest writes the core pack's embedded overlay tree to
+// a temp directory, the on-disk shape city bootstrap produces and the shape
+// overlay staging consumes.
+func materializeCoreOverlayForTest(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	err := fs.WalkDir(core.PackFS, "overlay", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		dst := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(name, "overlay/")))
+		if d.IsDir() {
+			return os.MkdirAll(dst, 0o755)
+		}
+		data, err := fs.ReadFile(core.PackFS, name)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dst, data, 0o644)
+	})
+	if err != nil {
+		t.Fatalf("materializing core overlay: %v", err)
+	}
+	return root
 }
 
 func TestCodexHookWorkDirsIncludesActiveRigPaths(t *testing.T) {

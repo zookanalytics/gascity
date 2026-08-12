@@ -4691,17 +4691,20 @@ func materializeProviderOverlaysBeforeFingerprint(
 }
 
 // normalizeStagedCodexHooks rebinds a Codex hooks file that overlay staging
-// just wrote into workDir. Staging copies a pack's per-provider/codex overlay
-// verbatim — unbound to this city and with prompt hooks unwrapped — while
-// hooks.Install, the writer that applies the managed normalization, runs only
-// when install_agent_hooks is non-empty. An agent whose resolved provider is
-// codex stages that slot without declaring it, so nothing normalized the file.
+// just wrote into workDir, for the packs that still ship an unbound overlay.
+// The core pack's Codex hooks asset is a template that staging renders bound,
+// so core alone leaves nothing to repair. But gastown (in
+// gastownhall/gascity-packs) and gc-toolkit still ship a raw
+// per-provider/codex/.codex/hooks.json, and overlay merge is identity-keyed on
+// matcher, so one of those staged after core overwrites the rendered managed
+// surface with unbound commands.
 //
-// The codex-hooks-drift doctor check audits the same provider-derived surface
+// The codex-hooks-drift doctor check audits the resolved-provider surface
 // (agentUsesCodexHookSurface matches the resolved provider, not install hooks),
-// which left it permanently red: each reconciler tick re-staged the raw overlay
-// over whatever `gc doctor --fix` had just upgraded, so the check re-flagged
-// files it had already fixed and never went green (gc-beez).
+// so without this repair each reconciler tick re-staged the raw overlay over
+// whatever `gc doctor --fix` had just upgraded and the check never went green
+// (gc-beez). Remove this once every embedded pack ships a bound Codex hooks
+// asset.
 func normalizeStagedCodexHooks(bp *agentBuildParams, overlayProviders []string, qualifiedName, workDir string, stderr io.Writer) {
 	for _, name := range overlayProviders {
 		if !codexHookProviderName(name, bp.providers) {

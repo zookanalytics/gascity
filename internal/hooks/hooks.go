@@ -39,6 +39,17 @@ const (
 	managedOmpHookVersion      = 2
 )
 
+// codexHooksAssetPath is the core pack's Codex hooks overlay, inside
+// core.PackFS. It carries the ".template" marker because overlay staging
+// renders it against install-time data — the city root the managed commands
+// bind to is known only then (see internal/overlay.TemplateMarker).
+//
+// Readers here consume the unrendered bytes, so a command read straight from
+// this asset still carries its placeholder binding. That is safe only for a
+// reader that either rebinds the command (writeCodexHooksManaged normalizes
+// every managed command for a concrete cityDir) or discards it.
+var codexHooksAssetPath = path.Join("overlay", "per-provider", "codex", ".codex", "hooks.template.json")
+
 var (
 	piHookVersionPattern       = regexp.MustCompile(`\bGC_PI_HOOK_VERSION\s*=\s*([0-9]+)\b`)
 	opencodeHookVersionPattern = regexp.MustCompile(`\bGC_OPENCODE_HOOK_VERSION\s*=\s*([0-9]+)\b`)
@@ -187,24 +198,51 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 			return nil
 		}
 		rel := strings.TrimPrefix(name, base+"/")
+		installRel, err := installedOverlayRel(provider, rel)
+		if err != nil {
+			return err
+		}
 		data, err := iofs.ReadFile(core.PackFS, name)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
-		dst := filepath.Join(workDir, filepath.FromSlash(rel))
-		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
+		dst := filepath.Join(workDir, filepath.FromSlash(installRel))
+		if provider == "antigravity" && installRel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
 		}
-		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
+		if provider == "codex" && installRel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, cityDir, dst, data)
 		}
-		if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
+		if overlay.IsMergeablePath(filepath.FromSlash(installRel)) {
 			if normalized, normErr := overlay.CanonicalJSON(data); normErr == nil {
 				data = normalized
 			}
 		}
-		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
+		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, installRel))
 	})
+}
+
+// installedOverlayRel returns the path an embedded overlay asset installs to,
+// resolving the ".template" marker that overlay staging uses to name files
+// carrying install-time values (overlay.TemplateTargetName).
+//
+// This installer renders no templates: it reaches an asset's bound form
+// through a per-file managed writer instead, so only an asset that has such a
+// writer may carry the marker. The Codex hooks asset does —
+// writeCodexHooksManaged rewrites every managed command for cityDir, which
+// replaces the placeholder binding wholesale. Any other templated asset would
+// install with its placeholders intact, so this reports an error rather than
+// writing one.
+func installedOverlayRel(provider, rel string) (string, error) {
+	target, ok := overlay.TemplateTargetName(path.Base(rel))
+	if !ok {
+		return rel, nil
+	}
+	installRel := path.Join(path.Dir(rel), target)
+	if provider == "codex" && installRel == path.Join(".codex", "hooks.json") {
+		return installRel, nil
+	}
+	return "", fmt.Errorf("templated overlay asset %q has no managed writer to bind it", rel)
 }
 
 func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
@@ -688,11 +726,20 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 // cityDir with an explicit --city flag, prompt hooks wrapped in `gc hook run`,
 // and duplicate managed SessionStart entries collapsed.
 //
-// Overlay staging copies a pack's per-provider/codex/.codex/hooks.json into an
-// agent's working directory verbatim, bypassing the normalization Install
-// applies. Callers that stage provider overlays run this afterwards so the
+// The core pack ships its Codex hooks overlay as a template that overlay
+// staging renders into bound form directly, so staging core alone needs no
+// repair. This exists for the packs that do not yet: gastown
+// (gastownhall/gascity-packs) and gc-toolkit still ship an unbound
+// .codex/hooks.json, and overlay merge is identity-keyed on matcher, so one of
+// those staged after core overwrites the rendered managed surface with raw
+// commands. Callers that stage provider overlays run this afterwards so the
 // staged file matches the managed form the codex-hooks-drift doctor check
-// audits.
+// audits (gc-beez). Remove it once every embedded pack ships a bound Codex
+// hooks asset.
+//
+// It reads the templated core asset by its path; writeCodexHooksManaged
+// normalizes every managed command for a concrete cityDir, so the placeholder
+// binding the asset carries unrendered is rebound rather than staged verbatim.
 //
 // It never creates a hooks file: when nothing is staged at workDir the call is
 // a no-op, because whether an agent has a Codex hook surface at all is the
@@ -705,7 +752,7 @@ func NormalizeManagedCodexHooks(fs fsys.FS, cityDir, workDir string) error {
 	if _, err := fs.Stat(dst); err != nil {
 		return nil
 	}
-	desired, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+	desired, err := iofs.ReadFile(core.PackFS, codexHooksAssetPath)
 	if err != nil {
 		return fmt.Errorf("reading managed Codex hooks asset: %w", err)
 	}
@@ -1275,7 +1322,7 @@ func codexHookDocLooksManaged(doc map[string]any) bool {
 func desiredCodexPreCompactHook(desired []byte) any {
 	if len(desired) == 0 {
 		var err error
-		desired, err = iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
+		desired, err = iofs.ReadFile(core.PackFS, codexHooksAssetPath)
 		if err != nil {
 			return nil
 		}

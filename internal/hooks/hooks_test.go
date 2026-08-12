@@ -515,32 +515,17 @@ func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
 	}
 }
 
-func TestNormalizeManagedCodexHooksUpgradesStagedOverlay(t *testing.T) {
-	fs := fsys.NewFake()
-	// Raw pack-overlay form: managed commands not bound to the city and prompt
-	// hooks not wrapped in `gc hook run`. This is what overlay staging writes.
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"gc handoff --auto \"context cycle\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --inject --hook-format codex"}]}]}}`)
-
-	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
-		t.Fatalf("NormalizeManagedCodexHooks: %v", err)
-	}
-
-	got := fs.Files["/work/.codex/hooks.json"]
-	if CodexHooksNeedManagedUpgrade(got, "/city") {
-		t.Fatalf("staged overlay still needs a managed upgrade after normalization:\n%s", got)
-	}
-	if !strings.Contains(string(got), `--city `+shellquote.Quote("/city")) {
-		t.Fatalf("normalized hooks missing explicit city binding:\n%s", got)
-	}
-}
-
-// TestNormalizeManagedCodexHooksAcrossObservedGenerations pins the three hook
-// generations observed live on a long-running city (gc-beez). Each stale
-// generation must be reported as needing an upgrade, must normalize to current
-// managed form, and must then be reported clean — so the codex-hooks-drift
-// doctor check goes green after materialization while still flagging genuinely
-// outdated files.
-func TestNormalizeManagedCodexHooksAcrossObservedGenerations(t *testing.T) {
+// TestInstallCodexUpgradesObservedGenerations pins the three hook generations
+// observed live on a long-running city (gc-beez). Each stale generation must be
+// reported as needing an upgrade, must converge on current managed form when
+// Install rewrites it, and must then be reported clean — so `gc doctor --fix`,
+// which repairs a flagged file through Install, still resolves every shape the
+// codex-hooks-drift check flags.
+//
+// Staging is what keeps a freshly written file current (the core asset is
+// templated and binds the city at stage time); this covers the files already on
+// disk from older generations, which staging merges over rather than replaces.
+func TestInstallCodexUpgradesObservedGenerations(t *testing.T) {
 	const city = "/home/city"
 	// Every generation shipped on disk carries this PATH prefix; normalization
 	// rewrites the gc invocation after it and preserves the prefix verbatim.
@@ -593,12 +578,12 @@ func TestNormalizeManagedCodexHooksAcrossObservedGenerations(t *testing.T) {
 
 			fs := fsys.NewFake()
 			fs.Files["/work/.codex/hooks.json"] = []byte(gen.doc)
-			if err := NormalizeManagedCodexHooks(fs, city, "/work"); err != nil {
-				t.Fatalf("NormalizeManagedCodexHooks: %v", err)
+			if err := Install(fs, city, "/work", []string{"codex"}); err != nil {
+				t.Fatalf("Install: %v", err)
 			}
 			got := fs.Files["/work/.codex/hooks.json"]
 			if CodexHooksNeedManagedUpgrade(got, city) {
-				t.Fatalf("%s still needs an upgrade after normalization:\n%s", gen.name, got)
+				t.Fatalf("%s still needs an upgrade after Install:\n%s", gen.name, got)
 			}
 			if !bytes.Equal(got, current) {
 				t.Fatalf("%s did not converge on current managed form:\nwant:\n%s\ngot:\n%s", gen.name, current, got)
@@ -607,18 +592,82 @@ func TestNormalizeManagedCodexHooksAcrossObservedGenerations(t *testing.T) {
 	}
 }
 
-func TestNormalizeManagedCodexHooksIsIdempotent(t *testing.T) {
+// TestInstallCodexPreservesUserOwnedHooks keeps Install scoped to Gas City's
+// managed hook surface: a workdir whose .codex/hooks.json holds only
+// user-authored hooks is left byte-for-byte alone, even though Install is also
+// the writer that creates the file when none exists.
+func TestInstallCodexPreservesUserOwnedHooks(t *testing.T) {
+	fs := fsys.NewFake()
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
+
+	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-owned Codex hooks were rewritten:\nwant: %s\ngot:  %s", custom, got)
+	}
+}
+
+// TestInstallCodexStagesTemplatedAssetAtItsTargetName pins that Install
+// resolves the ".template" marker the core Codex hooks asset now carries: it
+// writes .codex/hooks.json, bound to the city, and never leaves the unrendered
+// source name behind in the workdir.
+func TestInstallCodexStagesTemplatedAssetAtItsTargetName(t *testing.T) {
 	fs := fsys.NewFake()
 	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
+	got, ok := fs.Files["/work/.codex/hooks.json"]
+	if !ok {
+		t.Fatal("Install did not write .codex/hooks.json for the templated asset")
+	}
+	if _, stray := fs.Files["/work/.codex/hooks.template.json"]; stray {
+		t.Error("Install wrote the unrendered template source into the workdir")
+	}
+	if strings.Contains(string(got), "{{") {
+		t.Fatalf("installed hooks still carry an unbound template placeholder:\n%s", got)
+	}
+	if want := `--city ` + shellquote.Quote("/city"); !strings.Contains(string(got), want) {
+		t.Fatalf("installed hooks missing explicit city binding %q:\n%s", want, got)
+	}
+}
+
+// TestInstalledOverlayRelRejectsUnboundTemplatedAsset guards the rule that
+// makes the marker safe on this path: Install renders nothing, so an asset may
+// only carry the marker when a managed writer rebinds it. A new templated asset
+// without one must fail loudly rather than install its placeholders verbatim.
+func TestInstalledOverlayRelRejectsUnboundTemplatedAsset(t *testing.T) {
+	got, err := installedOverlayRel("codex", ".codex/hooks.template.json")
+	if err != nil || got != ".codex/hooks.json" {
+		t.Fatalf("installedOverlayRel(codex hooks) = %q, %v; want the staged hooks.json name", got, err)
+	}
+	if got, err := installedOverlayRel("codex", ".codex/config.toml"); err != nil || got != ".codex/config.toml" {
+		t.Fatalf("installedOverlayRel(untemplated) = %q, %v; want the name unchanged", got, err)
+	}
+	if _, err := installedOverlayRel("gemini", ".gemini/settings.template.json"); err == nil {
+		t.Fatal("a templated asset with no managed writer installed silently")
+	}
+}
+
+func TestNormalizeManagedCodexHooksUpgradesStagedOverlay(t *testing.T) {
+	fs := fsys.NewFake()
+	// Raw pack-overlay form: managed commands not bound to the city and prompt
+	// hooks not wrapped in `gc hook run`. This is what a pack that still ships an
+	// unbound .codex/hooks.json (gastown, gc-toolkit) leaves in a workdir after
+	// its overlay is staged over the core template.
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"gc handoff --auto \"context cycle\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --inject --hook-format codex"}]}]}}`)
 
 	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
 		t.Fatalf("NormalizeManagedCodexHooks: %v", err)
 	}
-	if after := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(before, after) {
-		t.Fatalf("normalization rewrote already-current hooks:\nbefore:\n%s\nafter:\n%s", before, after)
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	if CodexHooksNeedManagedUpgrade(got, "/city") {
+		t.Fatalf("staged overlay still needs a managed upgrade after normalization:\n%s", got)
+	}
+	if !strings.Contains(string(got), `--city `+shellquote.Quote("/city")) {
+		t.Fatalf("normalized hooks missing explicit city binding:\n%s", got)
 	}
 }
 
