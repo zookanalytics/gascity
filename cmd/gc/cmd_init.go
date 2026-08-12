@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/overlay"
 	"github.com/gastownhall/gascity/internal/pricing"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/spf13/cobra"
 )
 
@@ -1563,7 +1564,10 @@ func materializeCityRootPackOverlays(fs fsys.FS, cityPath string, stderr io.Writ
 	// bind the one value init knows: the city root. That is the token this
 	// seam exists for; anything else in a city-root overlay template fails
 	// loudly (missingkey=error) rather than installing half-bound.
-	templateData := map[string]string{"CityRoot": cityPath}
+	templateData := map[string]string{
+		"CityRoot":            cityPath,
+		"CityRootShellQuoted": shellquote.Quote(cityPath),
+	}
 	for _, od := range cfg.PackOverlayDirs {
 		if err := overlay.CopyDirForProviders(od, cityPath, nil, stderr, overlay.WithTemplateData(templateData)); err != nil {
 			fmt.Fprintf(stderr, "gc init: materializing pack overlay %s: %v\n", od, err) //nolint:errcheck // best-effort stderr

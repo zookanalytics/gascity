@@ -250,7 +250,7 @@ func TestStagedCoreCodexHooksAssetIsCurrent(t *testing.T) {
 
 	if err := runtime.StageProviderOverlayDir(
 		overlayDir, workDir, []string{"codex"},
-		map[string]string{"CityRoot": cityDir}, io.Discard,
+		codexStageTemplateData(cityDir), io.Discard,
 	); err != nil {
 		t.Fatalf("StageProviderOverlayDir: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestStagedCoreCodexHooksAssetIsCurrent(t *testing.T) {
 	// merge must reach a fixed point rather than accumulating entries.
 	if err := runtime.StageProviderOverlayDir(
 		overlayDir, workDir, []string{"codex"},
-		map[string]string{"CityRoot": cityDir}, io.Discard,
+		codexStageTemplateData(cityDir), io.Discard,
 	); err != nil {
 		t.Fatalf("StageProviderOverlayDir (second pass): %v", err)
 	}
@@ -289,6 +289,56 @@ func TestStagedCoreCodexHooksAssetIsCurrent(t *testing.T) {
 	}
 	if !bytes.Equal(data, second) {
 		t.Fatalf("staged Codex hooks are not stable across staging passes:\nfirst:\n%s\nsecond:\n%s", data, second)
+	}
+}
+
+// TestStagedCoreCodexHooksBindApostropheCityRoot pins that a city root
+// containing a shell metacharacter renders a shell-safe --city binding
+// (gc-h33ju). The staged command is executed by a shell, and the doctor audits
+// it against shellquote.Quote form, so a raw single-quoted binding is both
+// malformed shell and permanent drift for such a city.
+func TestStagedCoreCodexHooksBindApostropheCityRoot(t *testing.T) {
+	cityDir := filepath.Join(t.TempDir(), "gc city'quote")
+	if err := os.MkdirAll(cityDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(cityDir): %v", err)
+	}
+	workDir := t.TempDir()
+	overlayDir := materializeCoreOverlayForTest(t)
+
+	if err := runtime.StageProviderOverlayDir(
+		overlayDir, workDir, []string{"codex"},
+		codexStageTemplateData(cityDir), io.Discard,
+	); err != nil {
+		t.Fatalf("StageProviderOverlayDir: %v", err)
+	}
+
+	staged := filepath.Join(workDir, ".codex", "hooks.json")
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("core codex hooks asset not staged at its target name: %v", err)
+	}
+	if want := "--city " + shellquote.Quote(cityDir); !strings.Contains(string(data), want) {
+		t.Fatalf("staged hooks missing shell-safe city binding %q:\n%s", want, data)
+	}
+	if bad := "--city '" + cityDir + "'"; strings.Contains(string(data), bad) {
+		t.Fatalf("staged hooks contain a malformed unescaped city binding %q:\n%s", bad, data)
+	}
+	check := newCodexHooksDriftCheck(cityDir, []string{workDir})
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("apostrophe city root left staged hooks needing upgrade: status=%v message=%s\n%s",
+			result.Status, result.Message, data)
+	}
+}
+
+// codexStageTemplateData mirrors the subset of the overlay template vocabulary
+// materialize.PackTemplateData binds that the core Codex hooks asset expands
+// against, for tests that stage the asset directly rather than through the
+// production builder. CityRootShellQuoted carries the shell-safe city binding
+// (see internal/materialize.PackTemplateData).
+func codexStageTemplateData(cityDir string) map[string]string {
+	return map[string]string{
+		"CityRoot":            cityDir,
+		"CityRootShellQuoted": shellquote.Quote(cityDir),
 	}
 }
 

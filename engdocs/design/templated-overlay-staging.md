@@ -209,37 +209,50 @@ city-binding, wrapping prompt hooks in `gc hook run`, and deduping managed
 
 ## Follow-ups
 
-1. ~~Ship the Codex hooks asset as a template and shed the normalizer.~~ Landed
-   in gc-fbc9d. See "The first templated asset" below.
-2. Decide the exec-provider boundary above.
+1. ~~Ship the Codex hooks asset as a template.~~ Landed in gc-fbc9d (reworked in
+   gc-h33ju). See "The first templated asset" below.
+2. Shed `hooks.NormalizeManagedCodexHooks` and its reconciler call site once every
+   embedded pack ships a bound Codex hooks asset — gc-9myqp, blocked on the
+   foreign-pack conversion gc-efti4. The rework kept the repair because shedding it
+   before the foreign packs convert re-opens gc-beez.
+3. Decide the exec-provider boundary above.
 
-## The first templated asset (gc-fbc9d)
+## The first templated asset (gc-fbc9d, reworked in gc-h33ju)
 
 `internal/bootstrap/packs/core/overlay/per-provider/codex/.codex/hooks.template.json`
-is the convention's first user, and `hooks.NormalizeManagedCodexHooks` and its
-reconciler call site are gone. All three of the normalizer's jobs are carried by
+is the convention's first user. All three of the normalizer's jobs are carried by
 the asset rather than by a pass over the file staging just wrote:
 
 | Normalizer job | How the asset carries it |
 |---|---|
-| Bind managed commands to the city | `gc --city '{{.CityRoot}}' …` on every managed command |
+| Bind managed commands to the city | `gc --city {{.CityRootShellQuoted}} …` on every managed command |
 | Wrap prompt hooks in the hook runner | `gc hook run --timeout 15s --timeout-exit-code 0 -- …`, already in the asset |
 | Collapse duplicate managed `SessionStart` entries | Ship `matcher: "startup"`, the form the normalizer converged on. Overlay merge is identity-keyed on `matcher`, so a re-stage replaces that entry in place instead of appending a second one |
 
-Two consequences are worth stating plainly.
+Two properties are worth stating plainly.
 
-**The binding is single-quoted verbatim** — `--city '{{.CityRoot}}'` — which is
-what `shellquote.Quote` emits for every path that contains no apostrophe. The
-staging renderer has no funcmap, so a city root containing `'` would render a
-malformed command. Adding a shell-quoting function to the seam, or a
-pre-quoted key to the data map, is the fix if that ever stops being hypothetical.
+**The binding is shell-quoted, not single-quoted verbatim.** `CityRootShellQuoted`
+is `shellquote.Quote(CityRoot)`, bound alongside `CityRoot` by
+`materialize.PackTemplateData` — the owner of the template vocabulary — so a city
+root containing an apostrophe renders a shell-safe `--city` argument rather than a
+malformed command that both breaks the shell and reads as permanent drift. A
+data-map key, not a `{{shellquote .CityRoot}}` funcmap, is deliberate: the readers
+that rebind a managed command tokenize it with `shellquote.Split`
+(`writeCodexHooksManaged` on the `hooks.Install` path, and
+`NormalizeManagedCodexHooks` below, both read the asset unrendered), and a funcmap
+call carries a space inside the `{{…}}` action that `Split` would break into two
+tokens. A single-token `{{.CityRootShellQuoted}}` rebinds cleanly.
 
-**Packs outside this repo that ship an unbound `.codex/hooks.json` are no longer
-repaired.** The normalizer ran after every overlay had staged, so it rebound
-whatever the last pack wrote; nothing does that now. Overlay merge is
-last-writer-wins per entry identity, so a pack staging after core with an
-unbound `SessionStart` command puts the workdir back in the state
-codex-hooks-drift flags — and, because staging re-runs every tick,
-`gc doctor --fix` is undone again. Both `gastown` (in `gastownhall/gascity-packs`)
-and `gc-toolkit` ship such a file today; each needs the same conversion in its
-own repo, tracked as gc-efti4.
+**A compatibility repair is retained until every embedded pack ships a bound
+asset.** `hooks.NormalizeManagedCodexHooks` and its reconciler call site
+`normalizeStagedCodexHooks` still run after every overlay has staged. Staging the
+core template alone needs no repair — it renders bound. But overlay merge is
+last-writer-wins per entry identity, so a pack staging after core with an unbound
+`.codex/hooks.json` puts the workdir back in the state codex-hooks-drift flags,
+and because staging re-runs every tick, `gc doctor --fix` is undone again
+(gc-beez). Both `gastown` (in `gastownhall/gascity-packs`, still unbound through
+v0.4.0) and `gc-toolkit` ship such a file today; each needs the same conversion in
+its own repo, tracked as gc-efti4. The repair — and the coupling that keeps the
+normalizer reading the renamed asset — is deleted once that conversion lands,
+tracked as gc-9myqp. Shedding the normalizer outright, as the original gc-fbc9d
+did, regressed that case; the pre-open codex gate (gc-wfcgv) caught it.

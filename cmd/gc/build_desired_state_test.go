@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 type listFailStore struct {
@@ -3322,6 +3323,97 @@ func TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks(t *testing.T) {
 	}
 	if !bytes.Equal(got, custom) {
 		t.Fatalf("user-owned Codex hooks were rewritten:\nwant: %s\ngot:  %s", custom, got)
+	}
+}
+
+// TestPrepareTemplateResolution_RepairsForeignRawCodexOverlay pins the
+// compatibility repair (gc-h33ju): a pack that still ships an unbound
+// .codex/hooks.json — the shape gastown (gastownhall/gascity-packs) and
+// gc-toolkit ship today — staged after the core template overwrites the
+// rendered managed surface by matcher, because overlay merge is identity-keyed
+// on matcher. The post-stage repair rebinds the file to managed form so the
+// codex-hooks-drift check does not go permanently red for a city that imports
+// such a pack (gc-beez). Delete the repair only once every embedded pack ships
+// a bound/templated Codex hooks asset (follow-up bead).
+func TestPrepareTemplateResolution_RepairsForeignRawCodexOverlay(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+
+	// Core overlay: the real shipped templated asset, staged first.
+	coreOverlay := filepath.Join(cityDir, "packs", "core", "overlay")
+	coreHooks := filepath.Join(coreOverlay, "per-provider", "codex", ".codex", "hooks.template.json")
+	if err := os.MkdirAll(filepath.Dir(coreHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll(core overlay): %v", err)
+	}
+	asset, err := fs.ReadFile(core.PackFS, "overlay/per-provider/codex/.codex/hooks.template.json")
+	if err != nil {
+		t.Fatalf("reading core codex hooks asset: %v", err)
+	}
+	if err := os.WriteFile(coreHooks, asset, 0o644); err != nil {
+		t.Fatalf("WriteFile(core hooks): %v", err)
+	}
+
+	// Foreign overlay: an unbound raw hooks.json (no --city, prompt hooks not
+	// wrapped in `gc hook run`), staged after core so it wins by matcher. This
+	// is the gastown pack shape verified against gascity-packs v0.4.0.
+	foreignOverlay := filepath.Join(cityDir, "packs", "foreign", "overlay")
+	foreignHooks := filepath.Join(foreignOverlay, "per-provider", "codex", ".codex", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(foreignHooks), 0o755); err != nil {
+		t.Fatalf("MkdirAll(foreign overlay): %v", err)
+	}
+	const rawForeignHooks = `{
+  "hooks": {
+    "SessionStart": [{"matcher":"startup","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],
+    "PreCompact": [{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""}]}],
+    "UserPromptSubmit": [{"matcher":"","hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc nudge drain --inject --hook-format codex"}]}]
+  }
+}`
+	if err := os.WriteFile(foreignHooks, []byte(rawForeignHooks), 0o644); err != nil {
+		t.Fatalf("WriteFile(foreign hooks): %v", err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:     "polecat-codex",
+			Provider: "codex",
+			Scope:    "rig",
+			Dir:      "myrig",
+		}},
+		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
+		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
+		RigOverlayDirs: map[string][]string{"myrig": {coreOverlay, foreignOverlay}},
+	}
+
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+
+	staged := filepath.Join(rigDir, ".codex", "hooks.json")
+	first, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("codex overlay not staged into workdir: %v", err)
+	}
+	if codexHooksNeedUpgrade(staged, cityDir) {
+		t.Fatalf("a foreign pack's raw Codex hooks overwrote the managed surface and\n"+
+			"the post-stage repair did not rebind it — codex-hooks-drift will flag this\n"+
+			"file on every tick (gc-beez).\nstaged content:\n%s", first)
+	}
+	if !strings.Contains(string(first), "--city "+shellquote.Quote(cityDir)) {
+		t.Fatalf("repaired hooks missing explicit city binding:\n%s", first)
+	}
+
+	// The repair must reach a fixed point: a second reconciler pass re-stages
+	// the raw foreign overlay and repairs again, with no churn.
+	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
+	second, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatalf("ReadFile(staged, second pass): %v", err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatalf("repaired Codex hooks are not stable across reconciler passes:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
 }
 

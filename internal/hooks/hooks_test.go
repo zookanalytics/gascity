@@ -650,6 +650,48 @@ func TestInstalledOverlayRelRejectsUnboundTemplatedAsset(t *testing.T) {
 	}
 }
 
+func TestNormalizeManagedCodexHooksUpgradesStagedOverlay(t *testing.T) {
+	fs := fsys.NewFake()
+	// Raw pack-overlay form: managed commands not bound to the city and prompt
+	// hooks not wrapped in `gc hook run`. This is what a pack that still ships an
+	// unbound .codex/hooks.json (gastown, gc-toolkit) leaves in a workdir after
+	// its overlay is staged over the core template.
+	fs.Files["/work/.codex/hooks.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"gc handoff --auto \"context cycle\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --inject --hook-format codex"}]}]}}`)
+
+	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
+		t.Fatalf("NormalizeManagedCodexHooks: %v", err)
+	}
+
+	got := fs.Files["/work/.codex/hooks.json"]
+	if CodexHooksNeedManagedUpgrade(got, "/city") {
+		t.Fatalf("staged overlay still needs a managed upgrade after normalization:\n%s", got)
+	}
+	if !strings.Contains(string(got), `--city `+shellquote.Quote("/city")) {
+		t.Fatalf("normalized hooks missing explicit city binding:\n%s", got)
+	}
+}
+
+func TestNormalizeManagedCodexHooksSkipsMissingAndCustomFiles(t *testing.T) {
+	fs := fsys.NewFake()
+	// Absent file: nothing to normalize, and nothing may be created — the
+	// overlay decides whether an agent has a Codex hook surface at all.
+	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
+		t.Fatalf("NormalizeManagedCodexHooks(missing): %v", err)
+	}
+	if _, ok := fs.Files["/work/.codex/hooks.json"]; ok {
+		t.Fatal("normalization created a Codex hooks file where none was staged")
+	}
+
+	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
+	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
+	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
+		t.Fatalf("NormalizeManagedCodexHooks(custom): %v", err)
+	}
+	if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, custom) {
+		t.Fatalf("user-owned Codex hooks were rewritten:\nwant: %s\ngot:  %s", custom, got)
+	}
+}
+
 func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
 	staleManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
 	if !CodexHooksMissingManagedPreCompact(staleManaged) {

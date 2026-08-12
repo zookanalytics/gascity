@@ -721,6 +721,44 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 	return data, changed, nil
 }
 
+// NormalizeManagedCodexHooks rewrites an already-staged Codex hooks file in
+// workDir into current managed form for cityDir: managed commands bound to
+// cityDir with an explicit --city flag, prompt hooks wrapped in `gc hook run`,
+// and duplicate managed SessionStart entries collapsed.
+//
+// The core pack ships its Codex hooks overlay as a template that overlay
+// staging renders into bound form directly, so staging core alone needs no
+// repair. This exists for the packs that do not yet: gastown
+// (gastownhall/gascity-packs) and gc-toolkit still ship an unbound
+// .codex/hooks.json, and overlay merge is identity-keyed on matcher, so one of
+// those staged after core overwrites the rendered managed surface with raw
+// commands. Callers that stage provider overlays run this afterwards so the
+// staged file matches the managed form the codex-hooks-drift doctor check
+// audits (gc-beez). Remove it once every embedded pack ships a bound Codex
+// hooks asset.
+//
+// It reads the templated core asset by its path; writeCodexHooksManaged
+// normalizes every managed command for a concrete cityDir, so the placeholder
+// binding the asset carries unrendered is rebound rather than staged verbatim.
+//
+// It never creates a hooks file: when nothing is staged at workDir the call is
+// a no-op, because whether an agent has a Codex hook surface at all is the
+// overlay's decision. User-owned hook documents are left untouched.
+func NormalizeManagedCodexHooks(fs fsys.FS, cityDir, workDir string) error {
+	if strings.TrimSpace(workDir) == "" {
+		return nil
+	}
+	dst := filepath.Join(workDir, ".codex", "hooks.json")
+	if _, err := fs.Stat(dst); err != nil {
+		return nil
+	}
+	desired, err := iofs.ReadFile(core.PackFS, codexHooksAssetPath)
+	if err != nil {
+		return fmt.Errorf("reading managed Codex hooks asset: %w", err)
+	}
+	return writeCodexHooksManaged(fs, cityDir, dst, desired)
+}
+
 // CodexHooksMissingManagedPreCompact reports whether data is a Gas City
 // managed Codex hooks document that can be upgraded with a PreCompact hook.
 func CodexHooksMissingManagedPreCompact(data []byte) bool {

@@ -8,6 +8,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -39,6 +40,11 @@ func EffectiveMCPForSession(
 // directory. One surface means a pack author learns one vocabulary —
 // CityRoot, RigRoot, WorkDir, AgentName, the queries, and the agent env —
 // rather than one per loader.
+//
+// CityRootShellQuoted is the shell-safe form of CityRoot (shellquote.Quote):
+// an overlay file that embeds the city root inside a shell command must expand
+// it through this key, not by wrapping {{.CityRoot}} in literal quotes, or a
+// city root containing a shell metacharacter renders a malformed command.
 func PackTemplateData(
 	cfg *config.City,
 	cityPath string,
@@ -49,12 +55,13 @@ func PackTemplateData(
 	if agent == nil {
 		branch := defaultMCPBranch(workDir)
 		return map[string]string{
-			"CityRoot":      cityPath,
-			"AgentName":     identity,
-			"TemplateName":  identity,
-			"WorkDir":       workDir,
-			"Branch":        branch,
-			"DefaultBranch": branch,
+			"CityRoot":            cityPath,
+			"CityRootShellQuoted": shellquote.Quote(cityPath),
+			"AgentName":           identity,
+			"TemplateName":        identity,
+			"WorkDir":             workDir,
+			"Branch":              branch,
+			"DefaultBranch":       branch,
 		}
 	}
 	var rigs []config.Rig
@@ -75,6 +82,7 @@ func PackTemplateData(
 	}
 	branch := defaultMCPBranch(workDir)
 	data["CityRoot"] = cityPath
+	data["CityRootShellQuoted"] = shellquote.Quote(cityPath)
 	data["AgentName"] = identity
 	data["TemplateName"] = templateName
 	data["RigName"] = rigName
