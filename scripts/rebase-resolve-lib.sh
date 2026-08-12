@@ -305,16 +305,19 @@ attempt_trivial_conflict_resolution() {
 
     # Guard: if NOTHING was resolved but git still reports unmerged files, the
     # porcelain parse missed something — treat as real conflict, don't claim
-    # success on an unresolved tree.
-    if (( resolved_count == 0 )) && git ls-files --unmerged 2>/dev/null | grep -q .; then
+    # success on an unresolved tree. Test a captured value rather than piping
+    # git ls-files into grep -q: under a caller's `set -o pipefail` grep's
+    # early-exit SIGPIPE would misreport present unmerged files as absent.
+    if (( resolved_count == 0 )) && [ -n "$(git ls-files --unmerged 2>/dev/null)" ]; then
         return 1
     fi
 
     # Final safety net: no conflict markers may remain in any tracked file.
+    # git grep's own exit status is the signal (0 = a file still has markers);
+    # a second grep -q recheck over its output would only reintroduce the
+    # pipefail SIGPIPE false-negative.
     if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . >/dev/null 2>&1; then
-        if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .; then
-            return 1
-        fi
+        return 1
     fi
 
     return 0
@@ -444,8 +447,11 @@ attempt_bounded_self_rebase() {
         done
     fi
 
-    # Belt-and-suspenders: no conflict markers may remain anywhere.
-    if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null | grep -q .; then
+    # Belt-and-suspenders: no conflict markers may remain anywhere. git grep's
+    # own exit status is the signal (0 = a file still has markers); piping into
+    # grep -q would let a caller's `set -o pipefail` misread grep's early-exit
+    # SIGPIPE as a clean tree and force-push conflict markers to main.
+    if git -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . >/dev/null 2>&1; then
         git rebase --abort >/dev/null 2>&1 || true
         return 12
     fi
