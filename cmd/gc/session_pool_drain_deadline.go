@@ -316,9 +316,10 @@ func poolSlotRetireHasAssignedWork(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+	_, has, err := assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
 	})
+	return has, err
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -456,7 +457,7 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, info.ID, "drained", now, stderr) {
+	if !closeBead(store, workAssignmentStores(store, rigStores), info.ID, "drained", now, stderr) { // residency:allow the gate above is poolSlotRetireHasAssignedWork, which walks the resolver plan but answers with a bool only, so there is no walked leg set to release into; the release takes the whole reachable union the gate covered (gc-d9qnh).
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}

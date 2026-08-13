@@ -195,9 +195,10 @@ func sessionHasOpenAssignedWorkForEscalation(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := drainAckAssigneeIdentities(info, cfg)
-	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+	_, has, err := assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
 	})
+	return has, err
 }
 
 // drainAckEscalationDue reports whether a wedged row has exceeded its bound, and
