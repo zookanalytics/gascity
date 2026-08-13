@@ -195,7 +195,8 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		step.Assignee = binding.DirectSessionID
 		return
 	}
-	if binding.QualifiedName == "" {
+	// DirectSessionID returned above, so this is exactly "names no queue".
+	if !graphBindingIsDeliverable(binding) {
 		// Mirror ApplyGraphControlRouteBinding: drop the key rather than
 		// persisting an empty route. Stamping the pool markers here too would
 		// dress an undeliverable step up as claimable pool work — the shape
