@@ -172,6 +172,14 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata[beadmeta.RunTargetMetadataKey], routeVars))}
 }
 
+// graphBindingIsDeliverable reports whether a resolved binding names somewhere
+// a step can actually be delivered — a routed queue (QualifiedName) or a
+// concrete session (DirectSessionID). A binding naming neither leaves the step
+// unclaimable no matter which stamp path runs.
+func graphBindingIsDeliverable(binding GraphRouteBinding) bool {
+	return strings.TrimSpace(binding.QualifiedName) != "" || strings.TrimSpace(binding.DirectSessionID) != ""
+}
+
 // ApplyGraphRouteBinding sets the routing metadata on a recipe step.
 func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
 	// Clear any prior session back-references so the metadata always matches
@@ -185,6 +193,20 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// the transient Assignee is cleared on close. (#2843)
 		step.Metadata[beadmeta.SessionIDMetadataKey] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
+		return
+	}
+	if binding.QualifiedName == "" {
+		// Mirror ApplyGraphControlRouteBinding: drop the key rather than
+		// persisting an empty route. Stamping the pool markers here too would
+		// dress an undeliverable step up as claimable pool work — the shape
+		// that made gc-rfxju's stalled workflows unreadable after the fact.
+		// DecorateGraphWorkflowRecipeWithDefaultBinding rejects this binding
+		// outright; this keeps the state legible for the CLI decorators that
+		// build bindings themselves and call in here directly.
+		delete(step.Metadata, beadmeta.RoutedToMetadataKey)
+		delete(step.Metadata, beadmeta.ContinuationGroupMetadataKey)
+		delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)
+		step.Assignee = ""
 		return
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
@@ -597,6 +619,18 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		if IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
 			AssignGraphStepRoute(step, binding, &controlRoute)
 			continue
+		}
+		// A pool-shaped binding with no route name is undeliverable under every
+		// configuration. Before this guard the pour went ahead: the step was
+		// stamped with the pool markers (gc.continuation_group,
+		// gc.session_affinity) alongside an EMPTY gc.routed_to, and the empty
+		// value is dropped at persist time. The bead then landed carrying every
+		// marker of claimable pool work and no route at all, invisible to every
+		// demand and claim reader, so the workflow generated zero pool demand
+		// and sat in_progress forever while `gc sling` reported success
+		// (gc-rfxju). Fail the pour instead of materializing dead beads.
+		if binding.MetadataOnly && !graphBindingIsDeliverable(binding) {
+			return fmt.Errorf("step %s: formulas v2 pool route resolved with no target name; the step would be unclaimable (check the sling target agent and any gc.run_target on this step)", step.ID)
 		}
 		AssignGraphStepRoute(step, binding, nil)
 	}
