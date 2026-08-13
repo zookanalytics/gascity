@@ -827,6 +827,12 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead.ID, fmt.Errorf("%s: preflighting source bead chain: %w", rootID, err))
 		}
 	}
+	// The store refuses to close a bead that still has an open blocking
+	// dependency, and graph.v2 gives every workflow root a blocks edge onto its
+	// own workflow-finalize step bead (formula.addWorkflowRootDeps). Detach that
+	// edge first or the root close below fails against our own liveness and
+	// quarantines the finalizer, stranding the root open (gc-892g5).
+	detachWorkflowRootBlocker(store, rootID, bead.ID, opts)
 	// Close the root BEFORE the finalize bead. If the root close fails and
 	// the control-dispatcher crashes, the finalize bead stays open so the
 	// next serve cycle will retry. Source-chain propagation is preflighted first
@@ -866,6 +872,34 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	}
 
 	return ControlResult{Processed: true, Action: "workflow-" + outcome}, nil
+}
+
+// detachWorkflowRootBlocker removes the blocks edge a workflow root carries
+// onto its own workflow-finalize step bead, so the root can be closed while
+// that step bead is still open. Keeping the finalize bead open until the root
+// is durably closed is what makes the finalize retry safe, so the edge has to
+// go rather than the ordering.
+//
+// The edge is looked up before removal so a replay after a crash between the
+// detach and the root close is a no-op rather than a remove of something that
+// is already gone. Failures are traced, not returned: the root close is the
+// authority here and reports the store's own blocked-close error if the edge
+// really did survive.
+func detachWorkflowRootBlocker(store beads.Store, rootID, finalizeID string, opts ProcessOptions) {
+	deps, err := store.DepList(rootID, "down")
+	if err != nil {
+		opts.tracef("workflow-finalize bead=%s root=%s blocker-list-err=%v", finalizeID, rootID, err)
+		return
+	}
+	for _, dep := range deps {
+		if dep.DependsOnID != finalizeID || !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if err := store.DepRemove(rootID, finalizeID); err != nil {
+			opts.tracef("workflow-finalize bead=%s root=%s blocker-detach-err=%v", finalizeID, rootID, err)
+		}
+		return
+	}
 }
 
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
