@@ -119,15 +119,24 @@ func TestWorktreeBeadRedirect(t *testing.T) {
 
 func git(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
-		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test")
-	out, err := cmd.CombinedOutput()
+	out, err := runGitCommand(dir, args...)
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// runGitCommand runs git in dir and returns its combined output without
+// asserting on the result. Shared by git (strict) and by tests that need
+// a git invocation to fail — the same split as runScript /
+// runScriptCommand below, so the package has one os/exec call site per
+// binary rather than one per caller.
+func runGitCommand(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test")
+	return cmd.CombinedOutput()
 }
 
 func runScript(t *testing.T, script, repoDir, wt, agent string) {
