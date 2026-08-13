@@ -26,14 +26,37 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 		"claude-3-5-haiku-20241022",
 		"claude-opus-4",
 		"claude-sonnet-4-6",
+		"claude-opus-4-6",
 		"claude-opus-4-7",
 		"claude-opus-4-8",
 		"claude-haiku-4-5-20251001",
+		"claude-haiku-4-5",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-fable-5",
+		"claude-mythos-5",
 	}
 	r := New(DefaultPricings())
 	for _, m := range known {
 		if _, ok := r.Lookup("claude", m); !ok {
 			t.Errorf("default Claude pricing missing for model %q", m)
+		}
+	}
+}
+
+// TestDefaultPricingsCoverModelsSeenInProduction pins the models the fleet
+// actually runs today. An unpriced (family, model) pair is skipped entirely by
+// the cost recorder rather than zero-filled, so a missing entry here does not
+// surface as a zero-cost datapoint — it surfaces as the agent being absent from
+// gc.agent.invocation.cost_usd altogether, which reads as "free" rather than
+// "not instrumented" (gc-kawr5). Aliases are matched exactly by
+// Registry.Lookup, so a dated entry does not cover its undated alias.
+func TestDefaultPricingsCoverModelsSeenInProduction(t *testing.T) {
+	r := New(DefaultPricings())
+	// Model strings observed on live invocation-usage facts across the fleet.
+	for _, m := range []string{"claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"} {
+		if _, ok := r.Lookup("claude", m); !ok {
+			t.Errorf("no default pricing for %q: its agents vanish from cost_usd entirely", m)
 		}
 	}
 }
@@ -80,6 +103,27 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 			completion:    5.00,
 			cacheRead:     0.10,
 			cacheCreation: 1.25,
+		},
+		{
+			model:         "claude-opus-5",
+			prompt:        5.00,
+			completion:    25.00,
+			cacheRead:     0.50,
+			cacheCreation: 6.25,
+		},
+		{
+			model:         "claude-sonnet-5",
+			prompt:        3.00,
+			completion:    15.00,
+			cacheRead:     0.30,
+			cacheCreation: 3.75,
+		},
+		{
+			model:         "claude-fable-5",
+			prompt:        10.00,
+			completion:    50.00,
+			cacheRead:     1.00,
+			cacheCreation: 12.50,
 		},
 	}
 	r := New(DefaultPricings())

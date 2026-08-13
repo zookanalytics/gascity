@@ -87,6 +87,18 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 3.75,
 		},
 	},
+	// Claude 4.6 Opus.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-4-6",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        5.00,
+			CompletionUSDPer1M:    25.00,
+			CacheReadUSDPer1M:     0.50,
+			CacheCreationUSDPer1M: 6.25,
+		},
+	},
 	// Claude 4.7 Opus.
 	{
 		Provider:     "claude",
@@ -121,6 +133,71 @@ var claudeDefaults = []ModelPricing{
 			CompletionUSDPer1M:    5.00,
 			CacheReadUSDPer1M:     0.10,
 			CacheCreationUSDPer1M: 1.25,
+		},
+	},
+	// Claude 4.5 Haiku, undated alias. Registry.Lookup matches the model
+	// string exactly, so the dated entry above does not cover transcripts
+	// that report the alias.
+	{
+		Provider:     "claude",
+		Model:        "claude-haiku-4-5",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        1.00,
+			CompletionUSDPer1M:    5.00,
+			CacheReadUSDPer1M:     0.10,
+			CacheCreationUSDPer1M: 1.25,
+		},
+	},
+	// Claude Sonnet 5. The published rate is $3/$15 per 1M; an introductory
+	// $2/$10 applies through 2026-08-31. The standing rate is used here so
+	// estimates do not silently under-report once the introductory window
+	// closes — operators wanting the promotional rate override in city.toml.
+	{
+		Provider:     "claude",
+		Model:        "claude-sonnet-5",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        3.00,
+			CompletionUSDPer1M:    15.00,
+			CacheReadUSDPer1M:     0.30,
+			CacheCreationUSDPer1M: 3.75,
+		},
+	},
+	// Claude Opus 5. Same regular usage pricing as Opus 4.8.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-5",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        5.00,
+			CompletionUSDPer1M:    25.00,
+			CacheReadUSDPer1M:     0.50,
+			CacheCreationUSDPer1M: 6.25,
+		},
+	},
+	// Claude Fable 5.
+	{
+		Provider:     "claude",
+		Model:        "claude-fable-5",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        10.00,
+			CompletionUSDPer1M:    50.00,
+			CacheReadUSDPer1M:     1.00,
+			CacheCreationUSDPer1M: 12.50,
+		},
+	},
+	// Claude Mythos 5. Same capabilities and pricing as Fable 5.
+	{
+		Provider:     "claude",
+		Model:        "claude-mythos-5",
+		LastVerified: "2026-08-13",
+		Tier: Tier{
+			PromptUSDPer1M:        10.00,
+			CompletionUSDPer1M:    50.00,
+			CacheReadUSDPer1M:     1.00,
+			CacheCreationUSDPer1M: 12.50,
 		},
 	},
 }
