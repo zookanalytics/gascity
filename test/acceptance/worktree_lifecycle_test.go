@@ -108,3 +108,144 @@ func TestLifecycleWorktreeSetupRedirectAppliesToPreExistingWorktree(t *testing.T
 		t.Fatalf(".beads/redirect = %q, want %q", got, want)
 	}
 }
+
+// divergedWorktree builds the shape that wedges an agent worktree: a
+// persistent branch tracking the rig's default branch, carrying a local
+// commit the default branch never took, where the default branch has
+// since evolved the same file. Returns the rig root (the fetch origin)
+// and the worktree path.
+//
+// The worktree's parent is a clone rather than the rig itself, so it has
+// a real "origin" remote to fetch from, exactly as a rig checkout does.
+func divergedWorktree(t *testing.T, file string) (rigRoot, wt string) {
+	t.Helper()
+
+	rigRoot = t.TempDir()
+	git(t, rigRoot, "init")
+	mustWriteTestFile(t, filepath.Join(rigRoot, file), "base\n")
+	git(t, rigRoot, "add", file)
+	git(t, rigRoot, "commit", "-m", "initial")
+
+	cloneParent := t.TempDir()
+	clone := filepath.Join(cloneParent, "clone")
+	git(t, cloneParent, "clone", rigRoot, clone)
+
+	wt = filepath.Join(t.TempDir(), "home")
+	git(t, clone, "worktree", "add", "-b", "gc-agent-home", wt, "origin/"+currentBranch(t, clone))
+
+	// The agent's persistent branch accumulates a local commit...
+	mustWriteTestFile(t, filepath.Join(wt, file), "agent-local\n")
+	git(t, wt, "commit", "-am", "local commit the default branch later sheds")
+
+	// ...that the default branch never takes, and then supersedes.
+	// Replaying the local commit onto the new tip now conflicts.
+	mustWriteTestFile(t, filepath.Join(rigRoot, file), "upstream\n")
+	git(t, rigRoot, "commit", "-am", "default branch evolves the same file")
+
+	return rigRoot, wt
+}
+
+// assertNoInterruptedRebase fails if the worktree is parked mid-rebase,
+// holds a conflicted index, or has conflict markers in file.
+func assertNoInterruptedRebase(t *testing.T, wt, file string) {
+	t.Helper()
+
+	for _, state := range []string{"rebase-merge", "rebase-apply"} {
+		dir := git(t, wt, "rev-parse", "--git-path", state)
+		if _, err := os.Stat(dir); err == nil {
+			t.Errorf("worktree left mid-rebase: %s exists", state)
+		}
+	}
+
+	if status := git(t, wt, "status", "--porcelain"); status != "" {
+		t.Errorf("worktree not clean after sync:\n%s", status)
+	}
+
+	data, err := os.ReadFile(filepath.Join(wt, file))
+	if err != nil {
+		t.Fatalf("reading %s: %v", file, err)
+	}
+	if strings.Contains(string(data), "<<<<<<<") || strings.Contains(string(data), ">>>>>>>") {
+		t.Errorf("%s holds conflict markers after sync:\n%s", file, data)
+	}
+}
+
+// TestLifecycleWorktreeSetupSyncDoesNotWedgeDivergedBranch is a
+// regression test for gc-16sh5: --sync ran "git pull --rebase" in the
+// agent's persistent worktree, which replays every local commit on that
+// scratch branch onto the freshly fetched tip. Once the default branch
+// sheds those commits the first pick conflicts, and because the failure
+// was swallowed the worktree was left mid-rebase with a conflicted index
+// and conflict markers in tracked files -- including .githooks/pre-commit,
+// which core.hooksPath makes an executable hook, so the next commit from
+// that worktree runs a syntactically broken hook.
+func TestLifecycleWorktreeSetupSyncDoesNotWedgeDivergedBranch(t *testing.T) {
+	const hook = ".githooks/pre-commit"
+	rigRoot, wt := divergedWorktree(t, hook)
+
+	before := git(t, wt, "rev-parse", "HEAD")
+
+	runLifecycleScript(t, lifecycleWorktreeSetupScript(t), rigRoot, wt, "agent")
+
+	assertNoInterruptedRebase(t, wt, hook)
+
+	// A branch that cannot fast-forward is left exactly as it was: the
+	// local commits are the agent's, not ours to replay or discard.
+	if after := git(t, wt, "rev-parse", "HEAD"); after != before {
+		t.Errorf("diverged branch moved during sync: %s -> %s", before, after)
+	}
+}
+
+// TestLifecycleWorktreeSetupSyncClearsWedgedWorktree covers the
+// fail-safe half of gc-16sh5: a worktree found already parked mid-rebase
+// (from an earlier cycle, or a session that died mid-conflict) must be
+// cleared before the session starts, because pre_start runs before any
+// agent can commit and the conflicted files include the hook that commit
+// would run.
+func TestLifecycleWorktreeSetupSyncClearsWedgedWorktree(t *testing.T) {
+	const hook = ".githooks/pre-commit"
+	rigRoot, wt := divergedWorktree(t, hook)
+
+	// Wedge it exactly the way the old sync did.
+	git(t, wt, "fetch", "origin")
+	if out, err := runGitCommand(wt, "pull", "--rebase"); err == nil {
+		t.Fatalf("test setup: pull --rebase was expected to conflict, got:\n%s", out)
+	}
+	rebaseDir := git(t, wt, "rev-parse", "--git-path", "rebase-merge")
+	if _, err := os.Stat(rebaseDir); err != nil {
+		t.Fatalf("test setup: worktree is not mid-rebase: %v", err)
+	}
+
+	runLifecycleScript(t, lifecycleWorktreeSetupScript(t), rigRoot, wt, "agent")
+
+	assertNoInterruptedRebase(t, wt, hook)
+}
+
+// TestLifecycleWorktreeSetupSyncFastForwardsCleanBranch is the control
+// for the two tests above: refusing to rebase a diverged branch must not
+// turn --sync into a no-op. A worktree with no local commits still
+// converges on the fetched tip.
+func TestLifecycleWorktreeSetupSyncFastForwardsCleanBranch(t *testing.T) {
+	rigRoot := t.TempDir()
+	git(t, rigRoot, "init")
+	mustWriteTestFile(t, filepath.Join(rigRoot, "file.txt"), "base\n")
+	git(t, rigRoot, "add", "file.txt")
+	git(t, rigRoot, "commit", "-m", "initial")
+
+	cloneParent := t.TempDir()
+	clone := filepath.Join(cloneParent, "clone")
+	git(t, cloneParent, "clone", rigRoot, clone)
+
+	wt := filepath.Join(t.TempDir(), "home")
+	git(t, clone, "worktree", "add", "-b", "gc-agent-home", wt, "origin/"+currentBranch(t, clone))
+
+	mustWriteTestFile(t, filepath.Join(rigRoot, "file.txt"), "advanced\n")
+	git(t, rigRoot, "commit", "-am", "default branch advances")
+	want := git(t, rigRoot, "rev-parse", "HEAD")
+
+	runLifecycleScript(t, lifecycleWorktreeSetupScript(t), rigRoot, wt, "agent")
+
+	if got := git(t, wt, "rev-parse", "HEAD"); got != want {
+		t.Errorf("clean branch did not fast-forward: HEAD = %s, want %s", got, want)
+	}
+}

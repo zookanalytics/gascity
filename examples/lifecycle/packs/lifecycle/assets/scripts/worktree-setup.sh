@@ -89,10 +89,60 @@ ensure_worktree_provisioning() {
     append_exclude "state.json"
 }
 
+# rebase_in_progress reports whether the worktree is parked mid-rebase.
+rebase_in_progress() {
+    for STATE in rebase-merge rebase-apply; do
+        DIR=$(git -C "$WT" rev-parse --git-path "$STATE" 2>/dev/null) || DIR=""
+        if [ -n "$DIR" ] && [ -d "$DIR" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Bring the worktree up to the fetched tip when — and only when — that is
+# a fast-forward.
+#
+# An agent's persistent worktree branch tracks the rig's default branch
+# but accumulates local commits. "git pull --rebase" replays every one of
+# them onto the freshly fetched tip, so once the default branch has
+# dropped those commits the first pick conflicts and leaves the worktree
+# parked mid-rebase with a conflicted index. This runs from pre_start,
+# before the session starts, so the agent then works in a tree holding
+# conflict markers in tracked files — and core.hooksPath makes one of
+# them an executable hook, so its next commit runs a broken hook.
+#
+# Fast-forward instead: converge when the branch is merely behind, leave
+# it alone when it has diverged. Those local commits belong to the agent,
+# and replaying them is what wedges the tree.
+sync_worktree() {
+    [ "$SYNC" = "--sync" ] || return 0
+
+    # A worktree found mid-rebase or mid-merge already carries a
+    # conflicted index from an earlier cycle. Clear it before the session
+    # starts; --abort restores the branch tip, so no commit is at risk.
+    if rebase_in_progress; then
+        git -C "$WT" rebase --abort 2>/dev/null || true
+    fi
+    if git -C "$WT" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        git -C "$WT" merge --abort 2>/dev/null || true
+    fi
+
+    git -C "$WT" fetch origin 2>/dev/null || true
+
+    UPSTREAM=$(git -C "$WT" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null) || return 0
+    [ -n "$UPSTREAM" ] || return 0
+
+    # A branch that cannot fast-forward — diverged, or dirty enough that
+    # the merge would clobber uncommitted work — is left as it stands.
+    # That is the designed outcome here, not a failure to report.
+    git -C "$WT" merge --ff-only "$UPSTREAM" >/dev/null 2>&1 || true
+}
+
 # Idempotent: skip if worktree already exists.
 if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
     ensure_worktree_provisioning
-    [ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
+    sync_worktree
     exit 0
 fi
 
@@ -166,6 +216,6 @@ trap - EXIT HUP INT TERM
 ensure_worktree_provisioning
 
 # Optional sync.
-[ "$SYNC" = "--sync" ] && { git -C "$WT" fetch origin 2>/dev/null; git -C "$WT" pull --rebase 2>/dev/null || true; }
+sync_worktree
 
 exit 0
