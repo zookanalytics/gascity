@@ -621,18 +621,14 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			AssignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
-		// A pool-shaped binding with no route name is undeliverable under every
-		// configuration. Before this guard the pour went ahead: the step was
-		// stamped with the pool markers (gc.continuation_group,
-		// gc.session_affinity) alongside an EMPTY gc.routed_to, and the empty
-		// value is dropped at persist time. The bead then landed carrying every
-		// marker of claimable pool work and no route at all, invisible to every
-		// demand and claim reader, so the workflow generated zero pool demand
-		// and sat in_progress forever while `gc sling` reported success
-		// (gc-rfxju). Fail the pour instead of materializing dead beads.
-		if binding.MetadataOnly && !graphBindingIsDeliverable(binding) {
-			return fmt.Errorf("step %s: formulas v2 pool route resolved with no target name; the step would be unclaimable (check the sling target agent and any gc.run_target on this step)", step.ID)
-		}
+		// An unrouted runnable step is legitimate here: `gc formula cook`
+		// deliberately decorates with a nameless MetadataOnly binding so the
+		// cooked DAG stays unrouted until something dispatches it later
+		// (decorateFormulaCookGraphV2Recipe), and drain-item recipes pass a zero
+		// binding for steps that declare their own gc.run_target. Only a pour
+		// that IS the dispatch — a sling — can judge an unrouted step fatal, so
+		// that check lives at the sling boundary (sling.ensureGraphWorkflowHasClaimableStep)
+		// rather than here. See gc-rfxju.
 		AssignGraphStepRoute(step, binding, nil)
 	}
 	return nil

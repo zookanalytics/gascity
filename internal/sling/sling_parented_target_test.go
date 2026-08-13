@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -18,7 +19,8 @@ import (
 // deadlocked all had one and the pours that worked did not. The parent turned
 // out to be a coincidence — the real cause was a nameless pool binding stamping
 // steps with the pool markers and an empty gc.routed_to (see
-// TestDecorateGraphWorkflowRecipe_NamelessPoolRouteIsRejected). This test pins
+// TestDecorateGraphWorkflowRecipe_NamelessPoolRouteLeavesStepUnrouted and
+// TestEnsureGraphWorkflowHasClaimableStep). This test pins
 // the coincidence down so it stays one: a parented target routes exactly like a
 // parentless one, and every runnable step lands claimable.
 func TestAttachGraphFormulaOnParentedBeadRoutesEveryStep(t *testing.T) {
@@ -86,5 +88,64 @@ func TestAttachGraphFormulaOnParentedBeadRoutesEveryStep(t *testing.T) {
 	}
 	if runnable == 0 {
 		t.Fatalf("no runnable steps inspected among %d beads under root %s — the assertion above proved nothing", len(steps), root.ID)
+	}
+}
+
+// TestEnsureGraphWorkflowHasClaimableStep is the direct unit coverage for the
+// gc-rfxju guard. The incident shape is the third case: the control step routed
+// fine while every worker step came out with no route, so a naive "some step is
+// routed" check would have passed while the target pool saw nothing.
+func TestEnsureGraphWorkflowHasClaimableStep(t *testing.T) {
+	step := func(id string, meta map[string]string) formula.RecipeStep {
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		return formula.RecipeStep{ID: id, Metadata: meta}
+	}
+	root := formula.RecipeStep{ID: "wf.root", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}}
+
+	tests := []struct {
+		name    string
+		steps   []formula.RecipeStep
+		wantErr bool
+	}{
+		{
+			name:  "routed worker step is claimable",
+			steps: []formula.RecipeStep{root, step("wf.work", map[string]string{"gc.routed_to": "rig/pool"})},
+		},
+		{
+			name:  "worker step bound to a concrete session is claimable",
+			steps: []formula.RecipeStep{root, {ID: "wf.work", Assignee: "s-worker-1", Metadata: map[string]string{}}},
+		},
+		{
+			name: "incident shape: control routed, every worker step unrouted",
+			steps: []formula.RecipeStep{
+				root,
+				step("wf.load-context", nil),
+				step("wf.implement", nil),
+				step("wf.finalize", map[string]string{"gc.kind": "workflow-finalize", "gc.routed_to": "rig/core.control-dispatcher"}),
+			},
+			wantErr: true,
+		},
+		{
+			name:  "control-only graph needs no pool demand",
+			steps: []formula.RecipeStep{root, step("wf.finalize", map[string]string{"gc.kind": "workflow-finalize", "gc.routed_to": "rig/core.control-dispatcher"})},
+		},
+		{
+			name:  "topology beads are never claimable and do not count",
+			steps: []formula.RecipeStep{root, step("wf.scope", map[string]string{"gc.kind": "scope"})},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ensureGraphWorkflowHasClaimableStep(&formula.Recipe{Name: "wf", Steps: tt.steps}, "wf")
+			if tt.wantErr && err == nil {
+				t.Fatal("ensureGraphWorkflowHasClaimableStep = nil, want an error")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("ensureGraphWorkflowHasClaimableStep = %v, want nil", err)
+			}
+		})
 	}
 }

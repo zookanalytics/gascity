@@ -1,29 +1,27 @@
 package graphroute
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
-// TestDecorateGraphWorkflowRecipe_NamelessPoolRouteIsRejected pins the fix for
-// the silent-deadlock class reported in gc-rfxju.
+// TestDecorateGraphWorkflowRecipe_NamelessPoolRouteLeavesStepUnrouted pins what
+// decoration does with the binding at the heart of gc-rfxju: pool-shaped but
+// nameless (MetadataOnly with no QualifiedName).
 //
-// A graph.v2 pour whose default binding resolves pool-shaped but nameless
-// (MetadataOnly with no QualifiedName) used to stamp every runnable step with
-// the pool markers gc.continuation_group and gc.session_affinity while writing
-// an EMPTY gc.routed_to. The empty value is dropped at persist time, so the
-// step beads landed carrying every marker of pool routing and no route at all.
-// Nothing errored: `gc sling` reported ok/routed=true, the workflow root was
-// created and routed, and the steps were invisible to every demand and claim
-// reader — so the pool never spawned and the workflow sat in_progress forever
-// with no failure signal anywhere.
+// Decoration must NOT reject it. `gc formula cook` passes exactly this binding
+// on purpose so a cooked DAG stays unrouted until something dispatches it later
+// (decorateFormulaCookGraphV2Recipe). What decoration must do is leave the step
+// honestly unrouted rather than dressed up as claimable pool work: before the
+// fix it stamped gc.continuation_group and gc.session_affinity alongside an
+// EMPTY gc.routed_to, and the empty value is dropped at persist time, so the
+// bead landed carrying every marker of pool routing and no route at all.
 //
-// A nameless pool route is undeliverable under every configuration, so the pour
-// must fail loudly at sling time instead of materializing dead beads.
-func TestDecorateGraphWorkflowRecipe_NamelessPoolRouteIsRejected(t *testing.T) {
+// The judgement that an unrouted worker step is fatal belongs to a pour that is
+// itself the dispatch; sling.ensureGraphWorkflowHasClaimableStep makes it.
+func TestDecorateGraphWorkflowRecipe_NamelessPoolRouteLeavesStepUnrouted(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
 	}}
@@ -39,21 +37,27 @@ func TestDecorateGraphWorkflowRecipe_NamelessPoolRouteIsRejected(t *testing.T) {
 	deps := Deps{Resolver: testAgentResolver{}}
 
 	// routedTo and sessionName both empty -> defaultRoute is
-	// {QualifiedName: "", MetadataOnly: true}: the exact broken binding.
-	err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "", "", nil, "test-city", cfg, deps)
-	if err == nil {
-		t.Fatalf("DecorateGraphWorkflowRecipe returned nil error; want rejection of nameless pool route. work step metadata = %#v", r.Steps[1].Metadata)
+	// {QualifiedName: "", MetadataOnly: true}: the cook-shaped binding.
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "", "", nil, "test-city", cfg, deps); err != nil {
+		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
-	if !strings.Contains(err.Error(), "wf-test.work") {
-		t.Errorf("error = %q, want it to name the undeliverable step wf-test.work", err)
+	work := r.Steps[1]
+	if got, ok := work.Metadata["gc.routed_to"]; ok {
+		t.Errorf("work gc.routed_to = %q, want the key absent rather than an empty route", got)
+	}
+	if got := work.Metadata["gc.continuation_group"]; got != "" {
+		t.Errorf("work gc.continuation_group = %q, want empty: an unrouted step is not claimable pool work", got)
+	}
+	if got := work.Metadata["gc.session_affinity"]; got != "" {
+		t.Errorf("work gc.session_affinity = %q, want empty: an unrouted step is not claimable pool work", got)
 	}
 }
 
 // TestDecorateGraphWorkflowRecipe_EmptyDefaultBindingStillAllowed guards the
-// legitimate no-default-binding pour: a drain-item recipe (see
+// other legitimate no-default-binding caller: a drain-item recipe (see
 // decorateDrainItemRecipe) passes a zero GraphRouteBinding on purpose, and its
-// runnable steps carry their own gc.run_target. That binding is NOT pool-shaped
-// (MetadataOnly is false), so the nameless-pool-route rejection must not fire.
+// runnable steps carry their own gc.run_target. The nameless default must not
+// clobber those per-step targets.
 func TestDecorateGraphWorkflowRecipe_EmptyDefaultBindingStillAllowed(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1)},
