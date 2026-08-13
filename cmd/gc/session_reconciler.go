@@ -3817,17 +3817,20 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		//
 		// A pre-tick ownership snapshot predates the agent's own `bd close`
 		// of its last unit of work, so this gate (and the drain-ack handler
-		// above) queries the live store — across the primary store AND any
-		// attached rig stores — via sessionHasOpenAssignedWork to avoid
-		// closing a session that still owns work. Only pool-managed sessions
-		// are disposable; singleton/named controller-managed identities must
-		// keep the same bead so later wake/restart happens in place instead
-		// of minting a fresh canonical owner.
+		// above) queries live, across every store the session's configured
+		// agent can reach, to avoid closing a session that still owns work.
+		// Only pool-managed sessions are disposable; singleton/named
+		// controller-managed identities must keep the same bead so later
+		// wake/restart happens in place instead of minting a fresh canonical
+		// owner.
 		hasAssignedWork := false
+		// The reachable scope this gate proved, carried to the close below so
+		// the close-release mutates exactly the stores checked here.
+		var reachableWorkStores []beads.Store
 		poolFreeable := !shouldWake && !target.alive && isPoolSessionSlotFreeableInfo(info) && isPoolManagedSessionInfo(info)
 		if poolFreeable {
 			var assignedErr error
-			hasAssignedWork, assignedErr = sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+			reachableWorkStores, hasAssignedWork, assignedErr = reachableAssignedWorkScope(cityPath, cfg, store, rigStores, info)
 			if assignedErr != nil {
 				fmt.Fprintf(stderr, "session reconciler: checking assigned work for drained %s: %v\n", name, assignedErr) //nolint:errcheck
 				hasAssignedWork = true
@@ -3881,7 +3884,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeBead(store, rigStores, target.info.ID, closeReason, clk.Now().UTC(), stderr) {
+			if closeBead(store, reachableWorkStores, target.info.ID, closeReason, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
@@ -4061,17 +4064,37 @@ func sessionHasOpenAssignedWorkForReachableStore(
 	rigStores map[string]beads.Store,
 	info sessionpkg.Info,
 ) (bool, error) {
-	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
+	_, has, err := reachableAssignedWorkScope(cityPath, cfg, store, rigStores, info)
+	return has, err
+}
+
+// reachableAssignedWorkScope resolves the store set the session's configured
+// agent can query and reports whether any open or in-progress work is still
+// assigned to the session anywhere in it.
+//
+// It returns the scope alongside the answer so a caller that closes the session
+// on a negative answer can hand that exact set to closeBead as the release
+// scope. The gate proves nothing about stores outside it — work there may be
+// unrelated and merely share an assignment token — so releasing beyond the
+// returned slice would mutate work this check never covered.
+func reachableAssignedWorkScope(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	info sessionpkg.Info,
+) ([]beads.Store, bool, error) {
 	stores, err := reachableStoresForSessionInfo(cityPath, cfg, store, rigStores, info)
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
+	identifiers := sessionAssignmentIdentifiersForConfigInfo(info, cfg)
 	for _, s := range stores {
 		if has, err := sessionHasOpenAssignedWorkInStoreByIdentifiers(s, identifiers); err != nil || has {
-			return has, err
+			return stores, has, err
 		}
 	}
-	return false, nil
+	return stores, false, nil
 }
 
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
