@@ -45,7 +45,7 @@ func closeSessionBeadIfUnassigned(
 	if isFailedCreateSessionBead(session) {
 		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
 	}
-	return closeBead(store, session.ID, reason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), session.ID, reason, now, stderr)
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -78,7 +78,7 @@ func closeSessionInfoIfUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
 	}
-	return closeBead(store, info.ID, reason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -90,6 +90,13 @@ func closeSessionInfoIfUnassigned(
 // (which already funnels its writes through sessionFrontDoor AND runs the
 // extmsg/orphaned-work release cascade Store.Close does not — so the close stays
 // on closeBead, not Store.Close, to preserve that behavior).
+//
+// Unlike closeSessionBeadIfUnassigned, this gate deliberately ignores work in
+// stores the session's agent cannot reach: that work may be unrelated and merely
+// share an assignment token. The close therefore hands closeBead the reachable
+// scope it just proved, NOT the full city+rig fan-out — releasing outside the
+// proven scope would clear assignees, reopen in_progress work and stamp this
+// session's pool route onto beads the gate was never allowed to judge.
 func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
@@ -103,7 +110,7 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	hasAssignedWork, err := sessionHasOpenAssignedWorkForReachableStore(cityPath, cfg, store, rigStores, info)
+	reachableStores, hasAssignedWork, err := reachableAssignedWorkScope(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
@@ -114,5 +121,5 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
 	}
-	return closeBead(store, info.ID, reason, now, stderr)
+	return closeBead(store, reachableStores, info.ID, reason, now, stderr)
 }
