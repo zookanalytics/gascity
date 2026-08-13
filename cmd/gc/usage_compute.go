@@ -28,6 +28,34 @@ const usageComputeEmittedAtKey = "usage_compute_emitted_at"
 // session-interval accounting markers, not domain metadata).
 const usageModelSweptAtKey = "usage_model_swept_at"
 
+// usageModelLiveSweptAtKey records when the model-usage lane last swept a
+// session WHILE ITS INTERVAL WAS STILL OPEN, as an RFC3339 instant.
+//
+// Its two siblings above key on an interval epoch and so fire exactly once per
+// interval. This one is a plain cadence stamp because the sessions it exists
+// for have no interval end to key on: an always-on agent stays in a live state
+// for days, so a once-per-interval marker would mean once-per-lifetime. The
+// stamp is a rate limiter, not a completion record — double-counting is
+// prevented by the persisted invocation-usage cursor, not by this marker.
+const usageModelLiveSweptAtKey = "usage_model_live_swept_at"
+
+// liveModelSweepInterval bounds how often a still-awake session's transcript
+// tail is swept. Each sweep costs one store Get plus a bounded transcript
+// discovery and tail read on the synchronous reconcile tick, so the cadence
+// trades resolution against tick cost: fine enough that an hourly metrics
+// rollup sees several samples per bucket, coarse enough that a fleet of
+// long-lived sessions adds only a few Gets per minute.
+//
+// Discovery cost note: the live lane hands the sweep the session's real
+// [awake_started_at, now] window, exactly what the terminal lane would compute
+// once the session slept. For codex that means the keyed rollout lookup lists
+// one day-directory per day the session has been awake — bounded by awake
+// duration, not by total codex history, and identical in width to the terminal
+// lane's. Clamping it to a recent lookback was tried and rejected: a rollout's
+// filename timestamp is its FIRST start, so a narrower window would exclude the
+// transcript of precisely the long-awake sessions this lane exists to measure.
+const liveModelSweepInterval = 10 * time.Minute
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -166,15 +194,64 @@ func computeFactGetCandidate(info session.Info) bool {
 	return strings.TrimSpace(info.UsageComputeEmittedAt) != start
 }
 
-// emitDueComputeFacts emits a compute Fact for any of the given open sessions whose
-// awake interval has ended (terminal state) and has not yet been recorded. It reuses the
-// reconcile tick's already-loaded Info snapshot for the cheap candidate filter
-// (computeFactGetCandidate), then fetches the raw bead ONLY for the few sessions that
-// pass it: the usage lane genuinely needs the whole bead (ResolveRunID walks the
-// run-chain keys, and slept_at is not projected onto session.Info), so this is the usage
-// lane's OWN edge read rather than a snapshot raw-half read. A steady fleet of parked
-// sessions whose intervals are already accounted issues zero Gets. Best-effort: it never
-// blocks or fails the reconcile tick.
+// liveModelSweepCandidate reports whether a still-awake session is due an
+// in-interval model-usage sweep, decided purely from its Info projection —
+// BEFORE any Get. It is the exact complement of computeFactGetCandidate: that
+// gate claims sessions whose interval has ENDED, this one claims sessions whose
+// interval is still open, so the two lanes partition the fleet and never sweep
+// the same session on the same tick.
+//
+// A session qualifies when it is not in a compute-terminal state, has an awake
+// interval to account (awake_started_at set), and has not been live-swept
+// within interval. An unparseable marker sweeps and restamps rather than
+// wedging the session out of the lane forever; a marker in the future (clock
+// skew, or a stamp written by a peer with a fast clock) simply defers until it
+// ages past, which self-heals without letting skew force a sweep every tick.
+func liveModelSweepCandidate(info session.Info, now time.Time, interval time.Duration) bool {
+	if isComputeTerminalState(info.MetadataState) {
+		return false
+	}
+	if strings.TrimSpace(info.AwakeStartedAt) == "" {
+		return false
+	}
+	last := strings.TrimSpace(info.UsageModelLiveSweptAt)
+	if last == "" {
+		return true
+	}
+	stamped, err := time.Parse(time.RFC3339, last)
+	if err != nil {
+		return true
+	}
+	return !now.Before(stamped.Add(interval))
+}
+
+// emitDueComputeFacts drives both usage lanes over the given open sessions.
+//
+// For a session whose awake interval has ENDED (terminal state) and has not yet
+// been recorded, it emits a compute Fact and runs the end-of-interval model-usage
+// sweep. For a session whose interval is still OPEN, it runs the in-interval
+// model-usage sweep on a cadence (liveModelSweepInterval). The two candidate
+// gates partition on terminal state, so exactly one lane claims each session.
+//
+// The live lane exists because the terminal lane can only account a session that
+// stops. An always-on agent never reaches a terminal state, so its entire token
+// and cost history came from whatever the prompt-op seam happened to catch at a
+// nudge — which for a self-driving agent is a handful of samples at wake and then
+// nothing, reading as a flatlined series rather than an unmeasured one (gc-kawr5).
+//
+// It reuses the reconcile tick's already-loaded Info snapshot for the cheap candidate
+// filters, then fetches the raw bead ONLY for the few sessions that pass one: the usage
+// lane genuinely needs the whole bead (ResolveRunID walks the run-chain keys, and
+// slept_at is not projected onto session.Info), so this is the usage lane's OWN edge
+// read rather than a snapshot raw-half read. A steady fleet of parked sessions whose
+// intervals are already accounted issues zero Gets. Best-effort: it never blocks or
+// fails the reconcile tick.
+//
+// Both lanes are gated on a configured usage-fact sink, so a city running
+// [usage] provider = "discard" keeps the prompt-op seam's metrics and nothing
+// more. That is inherited rather than chosen: the sweep's OTel emission is
+// documented as a mirror of its fact emission, and decoupling the two is a
+// separate change.
 func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []session.Info) {
 	if cr.cs == nil {
 		return
@@ -228,6 +305,10 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 	now := time.Now().UTC()
 	for _, info := range sessions {
+		if liveModelSweepCandidate(info, now, liveModelSweepInterval) {
+			cr.sweepLiveSessionModelUsage(ctx, modelSweepFactory(), store, info.ID, now, logf)
+			continue
+		}
 		if !computeFactGetCandidate(info) {
 			continue
 		}
@@ -276,5 +357,48 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// recorded (idempotent), so wall-time accounting is never delayed by a pending
 		// sweep.
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+	}
+}
+
+// sweepLiveSessionModelUsage runs the in-interval model-usage sweep for one
+// still-awake session and stamps the cadence marker. Best-effort throughout: it
+// never blocks or fails the reconcile tick.
+//
+// Three things it deliberately does NOT do:
+//
+// It does not stamp usageModelSweptAtKey. That marker means "this interval's
+// END has been accounted", and the interval has not ended — stamping it here
+// would suppress the terminal sweep that recovers the interval's final
+// invocations, trading a live series for a truncated one.
+//
+// It does not emit a compute Fact. Wall-clock is accounted once per interval by
+// the terminal lane; a per-cadence compute fact would multiply-count the same
+// awake time under a single idempotency key.
+//
+// It stamps the cadence marker even when the sweep did not settle. The marker
+// rate-limits work rather than recording completion, so a session whose
+// transcript is permanently undiscoverable costs one attempt per cadence rather
+// than one per tick; the persisted invocation-usage cursor, not this marker, is what
+// keeps a re-swept invocation single-counted.
+func (cr *CityRuntime) sweepLiveSessionModelUsage(ctx context.Context, factory *worker.Factory, store beads.Store, id string, now time.Time, logf func(string, ...any)) {
+	if factory == nil || store == nil {
+		return
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		logf("usage: loading session %s for live model-usage sweep failed: %v", id, err)
+		return
+	}
+	// Re-check from the FRESH bead that the interval is still open: a session
+	// that went terminal since the snapshot was taken belongs to the other lane,
+	// whose sweep bounds its discovery window by the real slept_at.
+	if b.Metadata == nil || isComputeTerminalState(b.Metadata["state"]) {
+		return
+	}
+	if _, _, serr := factory.SweepSessionModelUsage(ctx, b.ID, b.Metadata, now); serr != nil {
+		logf("usage: live model-usage sweep for session %s failed; will retry: %v", b.ID, serr)
+	}
+	if merr := store.SetMetadata(b.ID, usageModelLiveSweptAtKey, now.Format(time.RFC3339)); merr != nil {
+		logf("usage: marking live model-usage swept for session %s failed; may re-sweep next tick (deduped by idempotency key): %v", b.ID, merr)
 	}
 }

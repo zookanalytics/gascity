@@ -681,3 +681,202 @@ func TestIsComputeTerminalState(t *testing.T) {
 		}
 	}
 }
+
+// TestLiveModelSweepCandidate is the in-interval lane's Get-budget gate, the
+// mirror image of computeFactGetCandidate: the end-of-interval lane fires once
+// when a session goes terminal, this one fires on a cadence while the session
+// is still awake. A session whose interval never ends — the always-on patrol
+// tier — is invisible to the terminal lane entirely, which is why its token
+// series flatlined at whatever the last prompt op happened to catch and its
+// cost series never appeared at all (gc-kawr5).
+func TestLiveModelSweepCandidate(t *testing.T) {
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	info := func(state, awake, liveSwept string) session.Info {
+		return sessiontest.SeedBead(t, beads.Bead{
+			ID: "gc-x", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"state":                     state,
+				"awake_started_at":          awake,
+				"usage_model_live_swept_at": liveSwept,
+			},
+		})
+	}
+	const awake = "2026-01-01T00:00:00Z"
+	cases := []struct {
+		name string
+		info session.Info
+		want bool
+	}{
+		{"awake-never-swept", info("active", awake, ""), true},
+		{"awake-swept-long-ago", info("active", awake, "2026-01-02T11:00:00Z"), true},
+		{"awake-swept-just-now", info("active", awake, "2026-01-02T11:55:00Z"), false},
+		{"awake-swept-exactly-at-interval", info("active", awake, "2026-01-02T11:50:00Z"), true},
+		{"awake-no-interval-start", info("active", "", ""), false},
+		{"terminal-belongs-to-other-lane", info("asleep", awake, ""), false},
+		{"drained-belongs-to-other-lane", info("drained", awake, ""), false},
+		{"unparseable-marker-sweeps-and-restamps", info("active", awake, "not-a-timestamp"), true},
+		{"clock-skewed-future-marker", info("active", awake, "2026-01-03T00:00:00Z"), false},
+	}
+	for _, tc := range cases {
+		if got := liveModelSweepCandidate(tc.info, now, liveModelSweepInterval); got != tc.want {
+			t.Errorf("%s: liveModelSweepCandidate = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestEmitDueComputeFactsSweepsLiveSessionModelUsage is the core regression for
+// the patrol-tier telemetry blind spot (gc-kawr5): before the live lane, the
+// ONLY model-usage emitters were the prompt-op seam and an end-of-interval
+// sweep gated on a terminal state. An always-on agent — refinery, witness,
+// deacon, mayor — never reaches a terminal state, so the sweep never ran for it
+// and its token series showed whatever the last nudge happened to catch and
+// then nothing, while its cost series never existed at all. Querying such an
+// agent returned 0 calls / $0.00, which reads as "free" rather than
+// "not instrumented".
+//
+// A live session must be swept on a cadence, WITHOUT minting a compute fact
+// (its wall-clock interval has not ended) and WITHOUT stamping the
+// end-of-interval marker (which would suppress the terminal sweep later).
+func TestEmitDueComputeFactsSweepsLiveSessionModelUsage(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	// An always-on agent: awake, no slept_at, and it will never acquire one.
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "always-on patrol session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "active",
+			"session_name":     "rig--patrol",
+			"awake_started_at": start.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-LIVE",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+	info := session.Info{ID: b.ID, MetadataState: "active", AwakeStartedAt: start.Format(time.RFC3339)}
+
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info})
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if got := kindCount(facts, usage.KindModel); got != 2 {
+		t.Fatalf("live model facts = %d, want 2 (an always-on session must not be invisible to the model lane): %+v", got, facts)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 0 {
+		t.Fatalf("live compute facts = %d, want 0 (the awake interval has not ended)", got)
+	}
+
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Metadata[usageModelLiveSweptAtKey] == "" {
+		t.Error("live sweep must stamp its cadence marker so the next tick does not re-sweep immediately")
+	}
+	if got := after.Metadata[usageModelSweptAtKey]; got != "" {
+		t.Errorf("live sweep must NOT stamp the end-of-interval marker (got %q): doing so suppresses the terminal sweep that recovers the interval's final invocations", got)
+	}
+	if got := after.Metadata[usageComputeEmittedAtKey]; got != "" {
+		t.Errorf("live sweep must NOT commit the interval (got %q)", got)
+	}
+}
+
+// TestLiveSweepDoesNotSuppressTerminalSweep pins the marker split: after a live
+// session has been swept mid-interval, going terminal must still run the
+// end-of-interval lane, which is what recovers the invocations between the last
+// live sweep and sleep and mints the interval's compute fact.
+func TestLiveSweepDoesNotSuppressTerminalSweep(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+	sessionKey := "019e3e8e-3591-7532-a1ef-8b9e882bea2f"
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "session that sleeps after a live sweep",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "active",
+			"session_name":     "rig--patrol",
+			"awake_started_at": start.Format(time.RFC3339),
+			"session_key":      sessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-LIVE2",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCodexRolloutForSweep(t, codexRoot, workDir, sessionKey, [][3]int{{150, 100, 50}})
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+
+	// Tick 1: live lane sweeps the awake session.
+	cr.emitDueComputeFacts(context.Background(), []session.Info{
+		{ID: b.ID, MetadataState: "active", AwakeStartedAt: start.Format(time.RFC3339)},
+	})
+
+	// The session sleeps.
+	slept := start.Add(90 * time.Second)
+	if err := store.SetMetadata(b.ID, "state", "asleep"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadata(b.ID, "slept_at", slept.Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick 2: terminal lane must still run — the live marker must not gate it.
+	cr.emitDueComputeFacts(context.Background(), []session.Info{
+		{ID: b.ID, MetadataState: "asleep", AwakeStartedAt: start.Format(time.RFC3339)},
+	})
+
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if got := kindCount(facts, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1 (the terminal lane must still account the interval after a live sweep)", got)
+	}
+	after, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awake := start.Format(time.RFC3339)
+	if got := after.Metadata[usageModelSweptAtKey]; got != awake {
+		t.Errorf("terminal sweep marker = %q, want %q (the end-of-interval sweep must still run)", got, awake)
+	}
+	if got := after.Metadata[usageComputeEmittedAtKey]; got != awake {
+		t.Errorf("compute marker = %q, want %q", got, awake)
+	}
+}

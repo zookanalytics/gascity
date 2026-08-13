@@ -108,6 +108,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		LastWokeAt:                 b.Metadata["last_woke_at"],
 		AwakeStartedAt:             b.Metadata["awake_started_at"],
 		UsageComputeEmittedAt:      b.Metadata["usage_compute_emitted_at"],
+		UsageModelLiveSweptAt:      b.Metadata["usage_model_live_swept_at"],
 		StateReason:                b.Metadata["state_reason"],
 		CreationCompleteAt:         b.Metadata["creation_complete_at"],
 		ContinuationResetPending:   b.Metadata["continuation_reset_pending"],

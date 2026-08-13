@@ -288,6 +288,14 @@ type Info struct {
 	// terminal session whose current interval is already accounted BEFORE issuing a
 	// per-session store Get.
 	UsageComputeEmittedAt string // usage_compute_emitted_at (raw)
+	// UsageModelLiveSweptAt is the RAW usage_model_live_swept_at metadata
+	// (RFC3339 or empty): when the model-usage lane last swept this session's
+	// transcript WHILE ITS INTERVAL WAS STILL OPEN. Unlike the two markers
+	// above — which key on an interval epoch and fire once per interval — this
+	// one is a cadence stamp, because a session whose interval never ends
+	// (an always-on patrol agent) would otherwise never be swept at all. The
+	// live lane compares it to now BEFORE issuing a per-session store Get.
+	UsageModelLiveSweptAt string // usage_model_live_swept_at (raw)
 	// StateReason is the RAW state_reason metadata. The pool sweep's
 	// post-create-protection window matches state_reason == "creation_complete".
 	StateReason string // state_reason (raw)

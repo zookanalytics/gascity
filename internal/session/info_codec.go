@@ -153,6 +153,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"last_woke_at", func(i *Info, v string) { i.LastWokeAt = v }},
 	{"awake_started_at", func(i *Info, v string) { i.AwakeStartedAt = v }},
 	{"usage_compute_emitted_at", func(i *Info, v string) { i.UsageComputeEmittedAt = v }},
+	{"usage_model_live_swept_at", func(i *Info, v string) { i.UsageModelLiveSweptAt = v }},
 	{"state_reason", func(i *Info, v string) { i.StateReason = v }},
 	{"creation_complete_at", func(i *Info, v string) { i.CreationCompleteAt = v }},
 	{"continuation_reset_pending", func(i *Info, v string) { i.ContinuationResetPending = v }},

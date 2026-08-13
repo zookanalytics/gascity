@@ -66,6 +66,7 @@ hold-label-routed-to
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
+agent-token-telemetry
 session-model
 dolt-server
 fork-rate
