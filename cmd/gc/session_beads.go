@@ -1497,7 +1497,7 @@ func repairStrandedPoolWorkerBead(
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
-	return closeBead(store, info.ID, strandedRepairCloseReason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, strandedRepairCloseReason, now, stderr)
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
@@ -2736,6 +2736,7 @@ func closeFailedCreateBead(sessFront *session.Store, id string, now time.Time, s
 // Returns the number of beads reaped.
 func reapStaleSessionBeads(
 	store beads.Store,
+	rigStores map[string]beads.Store,
 	sp runtime.Provider,
 	dt *drainTracker,
 	clk clock.Clock,
@@ -2830,7 +2831,7 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
-		if closeBead(store, info.ID, "stale-session", now.UTC(), stderr) {
+		if closeBead(store, workAssignmentStores(store, rigStores), info.ID, "stale-session", now.UTC(), stderr) {
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -2840,7 +2841,7 @@ func reapStaleSessionBeads(
 
 func cleanupDeadRuntimeSessionCorpses(
 	store beads.Store,
-	_ map[string]beads.Store,
+	rigStores map[string]beads.Store,
 	_ *config.City,
 	sessionBeads *sessionBeadSnapshot,
 	dt *drainTracker,
@@ -2915,17 +2916,18 @@ func cleanupDeadRuntimeSessionCorpses(
 		// asleep/runtime-missing ghosts on the same slot indefinitely
 		// (gastownhall/gascity#2437).
 		//
-		// closeBead now releases any in-progress work assigned to this
-		// session (via releaseWorkFromClosedSessionBead), so closing is
-		// safe even when the session has assigned work. A session whose
-		// runtime has been confirmed dead and stopped cannot be resumed,
-		// so releasing its work is the correct action.
+		// closeBead releases any in-progress work assigned to this session
+		// (via releaseWorkFromClosedSessionBead) across the city store and
+		// every attached rig store, so closing is safe even when the session
+		// has assigned work in a rig. A session whose runtime has been
+		// confirmed dead and stopped cannot be resumed, so releasing its work
+		// is the correct action.
 		//
 		// The outer `if store != nil` guard tolerates a nil store so the
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
 		if store != nil {
-			closeBead(store, info.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			closeBead(store, workAssignmentStores(store, rigStores), info.ID, "dead-runtime", clk.Now().UTC(), stderr)
 		}
 		cleaned++
 	}
@@ -3132,7 +3134,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if isFailedCreateSessionBead(b) {
 		return closeFailedCreateBead(sessionFrontDoor(store), b.ID, now, stderr)
 	}
-	return closeBead(store, b.ID, closeReason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), b.ID, closeReason, now, stderr)
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -3232,6 +3234,63 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 	return startedAt, true
 }
 
+// workAssignmentStores returns the store set a closing session's work may be
+// assigned in: the leading work store, then every distinct rig store in a
+// deterministic (rig-name) order, then any extra legs the caller knows about.
+//
+// Upstream retired this helper in favour of the storeref resolver
+// (assignedWorkPlanForSessionInfo), which builds a plan from a session Info.
+// The close paths that call this hold a raw bead rather than an Info, and they
+// close for reasons — stale-session, dead-runtime, stranded repair — that are
+// NOT gated on a proven-empty scope, so there is no proven scope to release
+// into. They release across the whole reachable set instead. Keeping that union
+// here confines the fork delta to one function rather than six call sites.
+//
+// The close-GATE path is the opposite case and does not use this: it releases
+// only into the scope reachableAssignedWorkScope proved empty (gc-d9qnh).
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store {
+	if store == nil {
+		return nil
+	}
+	stores := []beads.Store{store}
+	names := make([]string, 0, len(rigStores))
+	for name, rs := range rigStores {
+		if rs == nil {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		stores = append(stores, rigStores[name])
+	}
+	for _, candidate := range extra {
+		if candidate == nil || workAssignmentStoresHave(stores, candidate) {
+			continue
+		}
+		stores = append(stores, candidate)
+	}
+	return stores
+}
+
+// workAssignmentStoresHave reports whether candidate is already a leg. The
+// sessions and graph classes are served from ONE binding on a converged split
+// (openStorageRoutes keys every assigned class to the engine it opened), so a
+// reconciler scan led by the sessions-class store is already reading the store a
+// caller would add here.
+func workAssignmentStoresHave(stores []beads.Store, candidate beads.Store) bool {
+	key, ok := storePointerKey(candidate)
+	if !ok {
+		return false
+	}
+	for _, existing := range stores {
+		if existingKey, ok := storePointerKey(existing); ok && existingKey == key {
+			return true
+		}
+	}
+	return false
+}
+
 // closeBead sets final metadata on a session bead and closes it.
 // This completes the bead's lifecycle record. The close_reason distinguishes
 // why the bead was closed (e.g., "orphaned", "suspended").
@@ -3251,7 +3310,24 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // have their assignee cleared and their status reset to "open" so the
 // pool reconciler can re-pick them. Without this, work orphaned by a
 // reap stays orphaned until someone clears the assignee by hand.
-func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
+//
+// releaseStores is the RELEASE SCOPE: the set of work stores the caller has
+// already proven holds no work this session may keep. It must be exactly the
+// store set the caller's ownership check covered, never a wider one — the
+// release clears assignees, resets in_progress -> open and stamps the closing
+// session's pool route, so scanning a store the caller never proved would mutate
+// work nobody established the session owns.
+//
+// Callers whose ownership check is cross-store (closeSessionBeadIfUnassigned and
+// friends) and callers that close unconditionally on a confirmed-dead runtime
+// pass workAssignmentStores(store, rigStores) — the city work store plus every
+// attached rig work store. That fan-out is what a session bead in the city store
+// needs to release work living in a rig store; scanning only the session bead's
+// own store left that work stranded in_progress with no assignee and no route
+// (gc-d9qnh). Callers gated on a narrower scope — the reachable-store close paths
+// — pass the reachable set they proved instead. A nil/empty slice skips the
+// release entirely.
+func closeBead(store beads.Store, releaseStores []beads.Store, id, reason string, now time.Time, stderr io.Writer) bool {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -3299,7 +3375,7 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 	// slack (#1939).
 	cancelStateAssignedToRetiredSessionBead(store, id, now, stderr)
 	if snapshotErr == nil {
-		releaseWorkFromClosedSessionBead(store, snapshot, stderr)
+		releaseWorkFromClosedSessionBead(releaseStores, snapshot, stderr)
 	}
 	return true
 }
@@ -3311,11 +3387,27 @@ func closeBead(store beads.Store, id, reason string, now time.Time, stderr io.Wr
 // identity, alias, and alias history) — any one of these may appear as a
 // work bead's assignee.
 //
+// releaseStores is the caller's proven release scope (see closeBead). It is
+// normally the city work store plus every attached rig work store, because a
+// session bead in the city store routinely owns work that lives in a rig store:
+// scanning only the session bead's own store found nothing there and skipped the
+// release entirely, leaving that work in_progress with a cleared assignee and no
+// route — invisible to the pool demand probe and to
+// releaseOrphanedPoolAssignments, which skips beads whose gc.routed_to is empty
+// (graph.v2 step beads always are). The read-side guard
+// sessionHasOpenAssignedWorkInStores already fans out this way; the write-side
+// not doing so was the oversight (gc-d9qnh).
+//
+// The scope is a parameter rather than a fan-out computed here so it can never
+// outrun the ownership check that authorized the close. Reachable-store closes
+// prove only the store their configured agent can query and pass exactly that
+// set; releasing beyond it would mutate work the gate deliberately left alone.
+//
 // Best-effort: errors are logged to stderr but never fail the caller, since
 // releaseOrphanedPoolAssignments at the top of the next reconcile tick is
 // our idempotent fallback.
-func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead, stderr io.Writer) {
-	if store == nil {
+func releaseWorkFromClosedSessionBead(releaseStores []beads.Store, sessionBead beads.Bead, stderr io.Writer) {
+	if len(releaseStores) == 0 {
 		return
 	}
 	if stderr == nil {
@@ -3325,7 +3417,13 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 	// The closing session is losing every bead it owns, so its claim
 	// back-channel must stop naming one — otherwise a later reader of
 	// `gc hook current` for this id would be handed a bead it no longer owns.
-	if err := clearSessionCurrentClaim(store, sessionBead.ID); err != nil {
+	//
+	// The claim is a property of the SESSION bead, which lives in the leading
+	// store, so this clears there and not across the whole release scope.
+	// releaseStores[0] is that leading store by construction: every caller
+	// builds the scope with the session's own store first (workAssignmentStores
+	// prepends it; the close-gate scope is the resolver plan led by it).
+	if err := clearSessionCurrentClaim(releaseStores[0], sessionBead.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: clearing current claim on closing session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
 
@@ -3347,43 +3445,52 @@ func releaseWorkFromClosedSessionBead(store beads.Store, sessionBead beads.Bead,
 		addAssignee(id)
 	}
 
+	// Dedupe per (store, bead) like the sibling retirement scans: bead IDs are
+	// only unique within a store, so a bare ID key could mask a real release in
+	// a second store.
 	seenWork := make(map[string]struct{})
-	wa := workAssignmentForStore(beads.WorkStore{Store: store})
-	for assignee := range seenAssignees {
-		for _, status := range []string{"in_progress", "open"} {
-			work, err := wa.OpenAssignedToBasic(assignee, status)
-			if err != nil {
-				fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s (%s): %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
-				continue
-			}
-			for _, item := range work {
-				if session.IsSessionBeadOrRepairable(item) {
+	for storeIndex, ownerStore := range releaseStores {
+		if ownerStore == nil {
+			continue
+		}
+		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
+		for assignee := range seenAssignees {
+			for _, status := range []string{"in_progress", "open"} {
+				work, err := wa.OpenAssignedToBasic(assignee, status)
+				if err != nil {
+					fmt.Fprintf(stderr, "session beads: listing work assigned to closing session %s (%s): %v\n", sessionBead.ID, assignee, err) //nolint:errcheck
 					continue
 				}
-				if _, dup := seenWork[item.ID]; dup {
-					continue
-				}
-				seenWork[item.ID] = struct{}{}
-				// The session owning this work is closing, so the work is
-				// fully detached (not preserved to a new assignee). The
-				// release primitive clears the assignee (empty-string) and
-				// stale session-affinity metadata and resets in_progress to
-				// open — the same stale-affinity bug fixed on the retry,
-				// reopen, and orphan-pool release paths.
-				//
-				// ga-n2d.2: pass the owning pool route (retiredSessionFallbackRoute,
-				// derived from the closing session's own template metadata) as the
-				// run_target fallback instead of "". A polecat that pushed its branch
-				// but died before completing the refinery handoff can leave work whose
-				// gc.routed_to was cleared; releasing it here with no route would
-				// strand it open+unassigned+unrouted — invisible to both the pool
-				// demand probe (keys on gc.routed_to) and releaseOrphanedPoolAssignments
-				// (skips empty-routed beads). ReleaseWorkBead applies the fallback only
-				// when BOTH routed_to and run_target are empty, and restoreCarriedWorkRoutes
-				// (#3421) then backfills gc.routed_to from that run_target so the work
-				// re-enters pool demand.
-				if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
-					fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+				for _, item := range work {
+					if session.IsSessionBeadOrRepairable(item) {
+						continue
+					}
+					key := strconv.Itoa(storeIndex) + "\x00" + item.ID
+					if _, dup := seenWork[key]; dup {
+						continue
+					}
+					seenWork[key] = struct{}{}
+					// The session owning this work is closing, so the work is
+					// fully detached (not preserved to a new assignee). The
+					// release primitive clears the assignee (empty-string) and
+					// stale session-affinity metadata and resets in_progress to
+					// open — the same stale-affinity bug fixed on the retry,
+					// reopen, and orphan-pool release paths.
+					//
+					// ga-n2d.2: pass the owning pool route (retiredSessionFallbackRoute,
+					// derived from the closing session's own template metadata) as the
+					// run_target fallback instead of "". A polecat that pushed its branch
+					// but died before completing the refinery handoff can leave work whose
+					// gc.routed_to was cleared; releasing it here with no route would
+					// strand it open+unassigned+unrouted — invisible to both the pool
+					// demand probe (keys on gc.routed_to) and releaseOrphanedPoolAssignments
+					// (skips empty-routed beads). ReleaseWorkBead applies the fallback only
+					// when BOTH routed_to and run_target are empty, and restoreCarriedWorkRoutes
+					// (#3421) then backfills gc.routed_to from that run_target so the work
+					// re-enters pool demand.
+					if err := wa.ReleaseWorkBead(item, fallbackRoute); err != nil {
+						fmt.Fprintf(stderr, "session beads: releasing work %s from closing session %s: %v\n", item.ID, sessionBead.ID, err) //nolint:errcheck
+					}
 				}
 			}
 		}
