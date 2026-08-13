@@ -201,9 +201,9 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// persisting an empty route. Stamping the pool markers here too would
 		// dress an undeliverable step up as claimable pool work — the shape
 		// that made gc-rfxju's stalled workflows unreadable after the fact.
-		// DecorateGraphWorkflowRecipeWithDefaultBinding rejects this binding
-		// outright; this keeps the state legible for the CLI decorators that
-		// build bindings themselves and call in here directly.
+		// A nameless binding is legitimate for `gc formula cook`, which leaves
+		// a DAG unrouted on purpose; what is not legitimate is recording it as
+		// routed pool work.
 		delete(step.Metadata, beadmeta.RoutedToMetadataKey)
 		delete(step.Metadata, beadmeta.ContinuationGroupMetadataKey)
 		delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)

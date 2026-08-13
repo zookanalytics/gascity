@@ -1405,14 +1405,12 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 		return nil, err
 	}
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
+	var replacedRootID string
 	if graphWorkflow {
 		if err := ensureGraphWorkflowHasClaimableStep(recipe, formulaName); err != nil {
 			SlingTracef("instantiate unclaimable formula=%s err=%v", formulaName, err)
 			return nil, err
 		}
-	}
-	var replacedRootID string
-	if graphWorkflow {
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {
 			return nil, err
 		}
