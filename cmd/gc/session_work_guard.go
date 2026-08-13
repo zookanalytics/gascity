@@ -46,7 +46,7 @@ func closeSessionBeadIfUnassigned(
 	if isFailedCreateSessionBead(session) {
 		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(session), now, stderr)
 	}
-	return closeBead(store, sessionInfoFromBead(session), reason, now, stderr)
+	return closeBead(store, sessionInfoFromBead(session), sweepCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -80,7 +80,7 @@ func closeSessionInfoIfUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, info, reason, now, stderr)
+	return closeBead(store, info, sweepCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -129,5 +129,9 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, info, reason, now, stderr)
+	// The release reads the same reachable plan the gate just proved empty
+	// (plus the session bead's own store), so a claim the gate's narrower
+	// identity set could not see — one under a rotated alias — is still
+	// released, and a store the gate never read is left alone (gc-d9qnh).
+	return closeBead(store, info, reachableCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }

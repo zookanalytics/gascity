@@ -1624,7 +1624,7 @@ func (cr *CityRuntime) tickLoadSessionSnapshot(p *tickPass) bool {
 // reconciler to read/write hashes during reconciliation.
 func (cr *CityRuntime) phaseCleanupDeadRuntimeSessionCorpses(p *tickPass) bool {
 	phaseStart := time.Now()
-	cleanupDeadRuntimeSessionCorpses(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
+	cleanupDeadRuntimeSessionCorpses(cr.cityPath, cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.cfg, p.sessionBeads, cr.sessionDrains, cr.sp, p.inv, clock.Real{}, cr.stderr)
 	p.recordPhase(TraceSiteControllerTickPhase, "cleanup_dead_runtime_session_corpses", phaseStart, p.inv.corpsePhaseFields())
 	return false
 }
@@ -3705,9 +3705,11 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 }
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
-// endpoint capacity breaker holds.
+// endpoint capacity breaker holds. A reaped row's work is released in every
+// store of the city (gc-d9qnh).
 func (cr *CityRuntime) reapStaleSessionBeads() int {
-	return reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
+	scope := sweepCloseReleaseScope(cr.cityPath, cr.cfg, cr.rigBeadStores()) // residency:allow release-scope input for the stale reaper's close (gc-d9qnh); the resolver plans the legs
+	return reapStaleSessionBeads(scope, cr.sessionsBeadStore().Store, cr.sp, cr.sessionDrains, endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
