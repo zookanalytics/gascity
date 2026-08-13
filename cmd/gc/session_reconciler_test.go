@@ -9509,6 +9509,107 @@ func TestReconcileSessionBeads_FreshPoolWorkerSurvivesOrphanDrainWithinGrace(t *
 	}
 }
 
+// TestReconcileSessionBeads_WorkingPoolWorkerSurvivesOrphanDrainPastGrace covers
+// gc-rxqp7: a pool worker that HAS claimed work must never be orphan-drained, no
+// matter how long it has been awake. The spawn-claim grace above only bridges the
+// pre-claim window; once it lapses the assigned-work guard is the only thing
+// keeping a working pool session alive, because a pool session's dynamic name is
+// never in configuredNames and demand leaves the desired set as soon as the work
+// is claimed and no longer ready. Draining here kills the agent mid-molecule and
+// strands the step bead in_progress with its assignee cleared.
+func TestReconcileSessionBeads_WorkingPoolWorkerSurvivesOrphanDrainPastGrace(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed":   "true",
+		"pool_slot":      "1",
+		"session_origin": "ephemeral",
+	})
+
+	// The worker claimed its routed work during load-context: a step bead now
+	// sits in_progress assigned to the session's runtime name.
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "Implement the solution",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.Metadata["session_name"],
+	}); err != nil {
+		t.Fatalf("Create assigned work bead: %v", err)
+	}
+
+	// Well past the spawn-claim window, and out of the desired set (the claimed
+	// work is no longer ready, so it generates no scale demand).
+	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("working pool worker must not be orphan-drained, got drain state %+v", ds)
+	}
+	if strings.Contains(env.stdout.String(), "Draining session 'worker': orphaned") {
+		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
+	}
+}
+
+// TestReconcileSessionBeads_WorkingCrossRigPoolWorkerSurvivesOrphanDrainPastGrace
+// is the cross-rig arm of gc-rxqp7: the pool worker's session bead lives in the
+// city store while the work it claimed lives in a RIG store. The guard must scan
+// the rig stores too, or a working cross-rig pool polecat is orphan-drained
+// mid-molecule.
+func TestReconcileSessionBeads_WorkingCrossRigPoolWorkerSurvivesOrphanDrainPastGrace(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"pool_managed":   "true",
+		"pool_slot":      "1",
+		"session_origin": "ephemeral",
+	})
+
+	rigStore := beads.NewMemStore()
+	if _, err := rigStore.Create(beads.Bead{
+		Title:    "Implement the solution",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.Metadata["session_name"],
+	}); err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	rigStores := map[string]beads.Store{"some-rig": rigStore}
+
+	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+
+	reconcileSessionBeadsAtPath(
+		context.Background(), "", []beads.Bead{got}, env.desiredState,
+		configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
+		newFakeDrainOps(), nil, rigStores, nil, env.dt, map[string]int{}, false, nil, "",
+		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
+	)
+
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("working cross-rig pool worker must not be orphan-drained, got drain state %+v", ds)
+	}
+	if strings.Contains(env.stdout.String(), "Draining session 'worker': orphaned") {
+		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
+	}
+}
+
 // TestReconcileSessionBeads_FreshPoolWorkerSurvivesNoWakeDrainWithinGrace guards
 // the no-wake-reason spawn-claim grace against the pool-worker crash-loop
 // (gc-yi1ig). A pool worker still in the desired set but with no scale demand
