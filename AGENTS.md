@@ -535,6 +535,15 @@ bd close <id>         # Complete work
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
    a doomed `origin` remote (ga-9wsri). Use `git push` only.
+
+   NOTE: run this from the branch you intend to land. Never `git pull --rebase`
+   in an agent home worktree (`.gc/worktrees/<rig>/<agent>/`): that branch is
+   scratch and tracks `main`, so the rebase replays every local commit on it —
+   including ones main has since shed — and the first conflict parks the
+   worktree mid-rebase with conflict markers in `.githooks/pre-commit`, which
+   `core.hooksPath` makes the hook your next commit runs (gc-16sh5). To refresh
+   a home worktree, fast-forward instead: `git fetch origin && git merge
+   --ff-only @{upstream}`.
 5. **Clean up** - Clear stashes, prune remote branches
 6. **Verify** - All changes committed AND pushed
 7. **Hand off** - Provide context for next session
