@@ -79,6 +79,7 @@ v2-session-migration
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
+agent-token-telemetry
 session-model
 startup-health-episodes
 ownerless-runtimes
