@@ -65,17 +65,20 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "bf97b73749ac3ef2fca2365b54537ac041ad4293"
-		bdSourceSHA256 = "a8b1d8dd85b2c008093615cb85937067a9597e760e8d39f93fe55f5c1cbb4d37"
-		bdBuild        = "bf97b73749"
+		bdSourceRef    = "4ad99760b8954c19345feb34b7e44c2c91a940c3"
+		bdSourceSHA256 = "f9d0599a1d387f8a4a84ff70786249b0c35a136af9e27baa4401e6011e1b15d2"
+		bdBuild        = "4ad99760b8"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.82.1"
+		// Agent-scoped grpc floor: it tracks the grpc-go that beads itself
+		// requires at bdSourceRef, so it moves with the bd pin and is
+		// deliberately independent of Dockerfile.base's gh/Dolt floor above.
+		grpcVersion = "1.83.0"
 	)
 
 	root := repoRoot(t)
 	bdVersion := readDotenv(t, root+"/deps.env")["BD_VERSION"]
-	if bdVersion != "v1.1.0" {
-		t.Fatalf("deps.env BD_VERSION = %q, want v1.1.0 for the pinned source build", bdVersion)
+	if bdVersion != "v1.2.1" {
+		t.Fatalf("deps.env BD_VERSION = %q, want v1.2.1 for the pinned source build", bdVersion)
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
