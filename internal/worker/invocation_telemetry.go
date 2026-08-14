@@ -77,7 +77,11 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 // Cost is skipped entirely (not zero-filled) when the pricing registry has
 // no entry for the (provider family, model) pair, so missing pricing data is
-// never mistaken for free usage. gc.agent.invocation.latency_ms is
+// never mistaken for free usage. Because a skipped cost leaves no datapoint at
+// all, the same beat records gc.agent.invocation.unpriced under the identical
+// labels: absence from cost_usd is otherwise indistinguishable from an agent
+// that ran for free, and a whole tier of agents can go missing without any
+// metric saying so (gc-kawr5). gc.agent.invocation.latency_ms is
 // intentionally NOT recorded here: no measured per-invocation latency source
 // exists, and the wrapping operation's DurationMs is explicitly excluded by
 // RecordInvocationLatency's contract.
@@ -193,6 +197,8 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		})
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		} else {
+			telemetry.RecordInvocationUnpriced(ctx, labels)
 		}
 		if emitFacts {
 			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now))
@@ -643,6 +649,8 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		} else {
+			telemetry.RecordInvocationUnpriced(ctx, labels)
 		}
 		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now)
 		if recErr := sink.Record(ctx, fact); recErr != nil {
