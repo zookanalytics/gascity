@@ -269,6 +269,15 @@ func TestNewSessionSucceedsOnDrainedLiveServer(t *testing.T) {
 	}
 }
 
+// ensureTestSocketSession starts a throwaway session on the package's private
+// test socket, giving the caller the running server that bind-key needs.
+//
+// This is the whole precondition — callers must NOT additionally gate on
+// IsInsideTmux(). TestMain unsets TMUX for env hermeticity, so such a gate is
+// unsatisfiable and silently skips the test on every host. That is how the
+// bind-key round-trip tests (isGTBinding detection, user-fallback capture,
+// repeated-call idempotency) sat dead long enough for tmux 3.7 to break the
+// binding capture they exist to protect.
 func ensureTestSocketSession(t *testing.T, tm *Tmux) {
 	t.Helper()
 
@@ -3005,12 +3014,44 @@ func TestGetKeyBinding_CapturesDefaultBindingWithArgs(t *testing.T) {
 	}
 }
 
-func TestGetKeyBinding_SkipsGasTownBindings(t *testing.T) {
+// TestGetKeyBinding_UnfilteredListKeysStaysParseable is the version-drift
+// guard. getKeyBinding reads the *unfiltered* `list-keys -T <table>` output and
+// selects the row in Go, because tmux 3.7 made the positional key filter
+// (`list-keys -T prefix s`) exit 0 with no output — which turned every capture
+// into a silent "" and made callers overwrite user bindings with their
+// defaults. That failure was invisible: nothing errored.
+//
+// This test separates the two ways the capture can break, so the next tmux CLI
+// change lands as a named failure instead of a silent fallback:
+//
+//	tmux stopped producing output  -> the first assertion fires
+//	tmux changed the line format   -> the second assertion fires
+func TestGetKeyBinding_UnfilteredListKeysStaysParseable(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
+	tm := testTmux()
+
+	output, err := tm.run("list-keys", "-T", "prefix")
+	if err != nil {
+		t.Fatalf("list-keys -T prefix: %v", err)
+	}
+	if strings.TrimSpace(output) == "" {
+		t.Fatal("tmux `list-keys -T prefix` produced no output; getKeyBinding has no source " +
+			"to parse and every binding capture will silently return \"\"")
+	}
+
+	// prefix-s is a builtin default present on every supported tmux.
+	if got := parseKeyBindingCommand(output, "prefix", "s"); !strings.Contains(got, "choose-tree") {
+		t.Fatalf("parseKeyBindingCommand(list-keys output, prefix, s) = %q, want it to contain "+
+			"'choose-tree'; tmux's list-keys line format likely changed and the parser in "+
+			"getKeyBinding must be updated. Raw output:\n%s", got, output)
+	}
+}
+
+func TestGetKeyBinding_SkipsGasTownBindings(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
 	}
 	tm := testTmux()
 	ensureTestSocketSession(t, tm)
@@ -3035,9 +3076,6 @@ func TestGetKeyBinding_CapturesUserBinding(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
 	ensureTestSocketSession(t, tm)
 
@@ -3060,9 +3098,6 @@ func TestGetKeyBinding_CapturesUserBinding(t *testing.T) {
 func TestIsGTBinding_DetectsGasTownBindings(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
-	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
 	}
 	tm := testTmux()
 	ensureTestSocketSession(t, tm)
@@ -3091,9 +3126,6 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
 	}
-	if !IsInsideTmux() {
-		t.Skip("not inside tmux — need server for bind-key")
-	}
 	tm := testTmux()
 	ensureTestSocketSession(t, tm)
 
@@ -3107,8 +3139,11 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 		"run-shell 'gt feed --window'",
 		"display-message custom-user-cmd")
 
-	// Record the binding after first configuration
-	firstRaw, _ := tm.run("list-keys", "-T", "prefix", "F11")
+	// Record the binding after first configuration. Read it through
+	// bindingCommand rather than `list-keys -T prefix F11`: tmux 3.7 answers
+	// the positional key filter with empty output, which would make this
+	// probe report a lost fallback on every run.
+	firstBinding := tm.bindingCommand("prefix", "F11")
 
 	// isGTBinding should return true, causing Set*Binding to skip
 	if !tm.isGTBinding("prefix", "F11") {
@@ -3116,8 +3151,8 @@ func TestSetBindings_PreserveFallbackOnRepeatedCalls(t *testing.T) {
 	}
 
 	// Verify the original user fallback is preserved in the binding
-	if !strings.Contains(firstRaw, "custom-user-cmd") {
-		t.Errorf("original user fallback not found in binding: %q", firstRaw)
+	if !strings.Contains(firstBinding, "custom-user-cmd") {
+		t.Errorf("original user fallback not found in binding: %q", firstBinding)
 	}
 
 	// Clean up
