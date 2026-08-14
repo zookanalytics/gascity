@@ -32,6 +32,7 @@ func TestDefaultPricingsCoverKnownClaudeModels(t *testing.T) {
 		"claude-haiku-4-5-20251001",
 		"claude-opus-5",
 		"claude-sonnet-5",
+		"claude-sonnet-5-5",
 		"claude-fable-5",
 		"claude-fable-5-1",
 	}
@@ -102,6 +103,13 @@ func TestDefaultPricingsCurrentClaudeRates(t *testing.T) {
 		},
 		{
 			model:         "claude-sonnet-5",
+			prompt:        2.00,
+			completion:    10.00,
+			cacheRead:     0.20,
+			cacheCreation: 2.50,
+		},
+		{
+			model:         "claude-sonnet-5-5",
 			prompt:        2.00,
 			completion:    10.00,
 			cacheRead:     0.20,
@@ -190,6 +198,23 @@ func TestDefaultPricingsLastVerifiedParseable(t *testing.T) {
 		if _, err := time.Parse(LastVerifiedLayout, p.LastVerified); err != nil {
 			t.Errorf("%s/%s last_verified=%q failed to parse: %v",
 				p.Provider, p.Model, p.LastVerified, err)
+		}
+	}
+}
+
+// TestDefaultPricingsCoverModelsSeenInProduction pins the models the fleet
+// actually runs today. An unpriced (family, model) pair is skipped entirely by
+// the cost recorder rather than zero-filled, so a missing entry here does not
+// surface as a zero-cost datapoint — it surfaces as the agent being absent from
+// gc.agent.invocation.cost_usd altogether, which reads as "free" rather than
+// "not instrumented" (gc-kawr5). Aliases are matched exactly by
+// Registry.Lookup, so a dated entry does not cover its undated alias.
+func TestDefaultPricingsCoverModelsSeenInProduction(t *testing.T) {
+	r := New(DefaultPricings())
+	// Model strings observed on live invocation-usage facts across the fleet.
+	for _, m := range []string{"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-opus-4-8"} {
+		if _, ok := r.Lookup("claude", m); !ok {
+			t.Errorf("no default pricing for %q: its agents vanish from cost_usd entirely", m)
 		}
 	}
 }
