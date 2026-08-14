@@ -150,7 +150,9 @@ endif
 ##     against that same checkout instead — in Gas Town, `build-optimized.sh gc`,
 ##     which applies a `replace` onto the checkout. `make install` does NOT.
 ## The post-install guard below reports when this install produced the first
-## while the bd on PATH came from the second; see scripts/check-beads-linkage.sh.
+## while the bd on PATH came from the second. It speaks only where a local beads
+## checkout exists to rebuild against, so it stays silent on a machine where the
+## pinned build is the right one; see scripts/check-beads-linkage.sh.
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \

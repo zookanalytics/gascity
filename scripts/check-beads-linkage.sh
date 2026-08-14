@@ -19,8 +19,11 @@
 #
 # Contract: this guard ALWAYS exits 0. It reports; it never fails an install.
 # It stays silent whenever it lacks the evidence to judge — no Go toolchain, no
-# bd on PATH (CI and upstream contributors), unreadable build info, or a binary
-# that links no beads library at all.
+# bd on PATH, unreadable build info, a binary that links no beads library at
+# all, or no local beads checkout to rebuild against. That last one is what
+# keeps CI and upstream contributors quiet: on a machine with no checkout, a gc
+# linking the pinned library is the only thing `make install` can produce, so a
+# bd built from some other published version is not evidence of a mistake.
 set -uo pipefail
 
 # The module gc links for its in-process beads library. Kept equal to
@@ -60,6 +63,43 @@ beads_linkage() {
 	'
 }
 
+# is_beads_checkout reports whether dir is a source checkout of the beads
+# module — a directory whose go.mod declares that module path. Reading the
+# module line is what keeps an unrelated directory of the same name, or a
+# checkout of something else, from reading as a replace target.
+is_beads_checkout() {
+	local dir="$1" module="$2" declared
+	[ -n "$dir" ] && [ -f "$dir/go.mod" ] || return 1
+	declared="$(awk '$1 == "module" { print $2; exit }' "$dir/go.mod" 2>/dev/null)"
+	[ "$declared" = "$module" ]
+}
+
+# local_beads_checkout prints the local beads checkout a `replace` could point
+# gc at, and fails when the machine has none.
+#
+# This is the gate on the whole warning. What the warning asks for is a rebuild
+# against local beads source, so it is only worth printing where that source
+# exists: on a machine without it — CI, a fresh clone, a contributor tracking
+# the go.mod pin — there is no skew to fix and no build-optimized.sh to run.
+#
+# Two places reveal a checkout. bd's own `replace` names one directly, which is
+# how a deployment that keeps its checkout somewhere unusual reveals it. Failing
+# that, "$HOME/beads" is the location Gas Town's build-optimized.sh resolves,
+# so it finds the town shape even when bd itself came from a published version.
+local_beads_checkout() {
+	local module="$1" bd_kind="$2" bd_detail="$3"
+	if [ "$bd_kind" = "local" ] && is_beads_checkout "$bd_detail" "$module"; then
+		printf '%s' "$bd_detail"
+		return 0
+	fi
+	local home="${HOME:-}"
+	if [ -n "$home" ] && is_beads_checkout "$home/beads" "$module"; then
+		printf '%s' "$home/beads"
+		return 0
+	fi
+	return 1
+}
+
 # describe_bd renders bd's side of the comparison for the warning.
 describe_bd() {
 	local kind="$1" detail="$2" module="$3"
@@ -75,7 +115,7 @@ describe_bd() {
 # report_skew prints the warning banner on stderr. It names both sides of the
 # comparison so the reader can confirm the finding without re-running anything.
 report_skew() {
-	local binary="$1" module="$2" version="$3" bd_binary="$4" bd_summary="$5"
+	local binary="$1" module="$2" version="$3" bd_binary="$4" bd_summary="$5" checkout="$6"
 	cat >&2 <<EOF
 
 !! ====================================================================
@@ -86,6 +126,8 @@ report_skew() {
 !!     links    $module $version (pinned by go.mod)
 !!   bd         $bd_binary
 !!     $bd_summary
+!!   beads      $checkout
+!!     the local checkout gc should have been built against
 !!
 !! gc runs the beads library in-process, so a gc built this way can
 !! disagree with the bd beside it. Nothing at runtime will say so: the
@@ -132,8 +174,12 @@ main() {
 		return 0
 	fi
 
+	# Nothing to rebuild against, so nothing to report.
+	local checkout
+	checkout="$(local_beads_checkout "$module" "$bd_kind" "$bd_detail")" || return 0
+
 	report_skew "$binary" "$module" "$version" "$bd_binary" \
-		"$(describe_bd "$bd_kind" "$bd_detail" "$module")"
+		"$(describe_bd "$bd_kind" "$bd_detail" "$module")" "$checkout"
 }
 
 main "$@"
