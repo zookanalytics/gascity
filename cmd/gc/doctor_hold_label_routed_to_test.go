@@ -218,3 +218,230 @@ type holdLabelListErrorStore struct {
 func (s holdLabelListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// TestHoldLabelRoutedToAcceptsBoundAliasRoute covers gc-yzxra: in a city that
+// binds its route targets, the canonical gc.routed_to value is
+// binding-qualified ("gastown.mayor") while the canonical hold label value
+// stays short ("hold:mayor" — hold-label-conventions.md sanctions only "mayor"
+// and "external"). Comparing the two by exact string equality reports that
+// canonical pairing as drift, so a gc.routed_to holding a bound alias of the
+// hold value must count as a match, and --fix must backfill the qualified form
+// so the repair does not immediately re-trip v2-routed-to-namespace.
+func TestHoldLabelRoutedToAcceptsBoundAliasRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", BindingName: "gastown"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Canonical pairing: short hold label, binding-qualified route.
+		{
+			ID: "B-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+		},
+		// Missing route: --fix must backfill the qualified form, not "mayor".
+		{ID: "B-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		// Short-form route matches the label exactly, so this check has no
+		// quarrel with it; rewriting it to the qualified form belongs to
+		// v2-routed-to-namespace, which owns that finding.
+		{
+			ID: "B-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+		// Unbound hold value: no alias exists, so the short-form backfill stands.
+		{ID: "B-4", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa-lead"}},
+		// A different bound agent's route is still drift, alias or not.
+		{
+			ID: "B-5", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "gastown.reviewer"},
+		},
+	}, nil)
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{"B-2", "B-4", "B-5"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"B-1", "B-3"} {
+		if strings.Contains(details, notWant) {
+			t.Fatalf("details should not mention %q (routed_to already denotes the hold target):\n%s", notWant, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
+	}
+
+	for _, tc := range []struct{ id, want string }{
+		{"B-1", "gastown.mayor"},
+		{"B-2", "gastown.mayor"},
+		{"B-3", "mayor"},
+		{"B-4", "qa-lead"},
+		{"B-5", "gastown.mayor"},
+	} {
+		bead, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", tc.id, err)
+		}
+		if got := bead.Metadata["gc.routed_to"]; got != tc.want {
+			t.Errorf("%s gc.routed_to = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestHoldLabelAndV2RoutedToChecksConverge is the regression test for the
+// oscillation gc-yzxra and gc-sci79 reported from opposite directions against
+// the same bead: v2-routed-to-namespace --fix rewrote gc.routed_to to the
+// binding-qualified form, hold-label-routed-to --fix rewrote it straight back
+// to the short form, and each pass left the other check red. Both must report
+// OK in the same pass once either has run.
+func TestHoldLabelAndV2RoutedToChecksConverge(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor", BindingName: "gastown"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{
+			ID: "C-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+	namespaceCheck := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+	holdCheck := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	if res := namespaceCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusWarning {
+		t.Fatalf("v2-routed-to-namespace status = %v, want warning: %#v", res.Status, res)
+	}
+	if err := namespaceCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("v2-routed-to-namespace Fix: %v", err)
+	}
+
+	bead, err := store.Get("C-1")
+	if err != nil {
+		t.Fatalf("get C-1: %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "gastown.mayor" {
+		t.Fatalf("C-1 gc.routed_to = %q, want gastown.mayor after namespace fix", got)
+	}
+
+	// The qualified form must not read as hold-label drift, and running the
+	// hold check's --fix must not undo it.
+	if res := holdCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("hold-label-routed-to status = %v, want OK: %#v", res.Status, res)
+	}
+	if err := holdCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("hold-label-routed-to Fix: %v", err)
+	}
+	bead, err = store.Get("C-1")
+	if err != nil {
+		t.Fatalf("get C-1: %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "gastown.mayor" {
+		t.Fatalf("C-1 gc.routed_to = %q, want gastown.mayor preserved by hold-label fix", got)
+	}
+	if res := namespaceCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("v2-routed-to-namespace status = %v, want OK after hold-label fix: %#v", res.Status, res)
+	}
+}
+
+// TestHoldLabelRoutedToKeepsShortFormWhenAliasAmbiguous pins the one case
+// where the two checks stably disagree: when several bindings each define the
+// hold value's agent, no single qualified route can be inferred. --fix must
+// backfill the short form rather than guess a binding, and the resulting state
+// must be a fixpoint — v2-routed-to-namespace reports the ambiguity for manual
+// resolution but its own Fix leaves the value alone, so neither check rewrites
+// what the other wrote.
+func TestHoldLabelRoutedToKeepsShortFormWhenAliasAmbiguous(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", BindingName: "gastown"},
+		{Name: "mayor", BindingName: "gc-toolkit"},
+	}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Missing route, ambiguous hold value: --fix must not pick a binding.
+		{ID: "A-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		// An explicitly-qualified route is one of the bound aliases, so it
+		// already denotes the hold target even though the short form is
+		// ambiguous — leave it as the operator wrote it.
+		{
+			ID: "A-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "gc-toolkit.mayor"},
+		},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+	holdCheck := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	namespaceCheck := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+
+	res := holdCheck.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	if !strings.Contains(details, "A-1") {
+		t.Fatalf("details missing A-1:\n%s", details)
+	}
+	if strings.Contains(details, "A-2") {
+		t.Fatalf("details should not mention A-2 (route is a bound alias of the hold value):\n%s", details)
+	}
+	if !strings.Contains(details, `use "mayor"`) {
+		t.Fatalf("details should advise the short form %q when the alias is ambiguous:\n%s", "mayor", details)
+	}
+
+	if err := holdCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, tc := range []struct{ id, want string }{
+		{"A-1", "mayor"},
+		{"A-2", "gc-toolkit.mayor"},
+	} {
+		bead, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", tc.id, err)
+		}
+		if got := bead.Metadata["gc.routed_to"]; got != tc.want {
+			t.Errorf("%s gc.routed_to = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+	if res2 := holdCheck.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
+	}
+
+	// The sibling check reports the ambiguous short form but must not rewrite
+	// it, so the short-form backfill above is stable across a --fix pass.
+	if res := namespaceCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusWarning {
+		t.Fatalf("v2-routed-to-namespace status = %v, want warning for the ambiguous value: %#v", res.Status, res)
+	}
+	if err := namespaceCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("v2-routed-to-namespace Fix: %v", err)
+	}
+	bead, err := store.Get("A-1")
+	if err != nil {
+		t.Fatalf("get A-1: %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("A-1 gc.routed_to = %q, want mayor preserved (ambiguous values are left for manual resolution)", got)
+	}
+	if res := holdCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("hold-label-routed-to status = %v, want OK to remain after the sibling fix: %#v", res.Status, res)
+	}
+}
