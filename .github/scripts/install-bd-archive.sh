@@ -57,6 +57,10 @@ version_no_v="${version#v}"
 platform_tuple="${os}_${arch}"
 expected_sha=""
 case "${version}:${platform_tuple}" in
+  v1.2.1:linux_amd64) expected_sha="48aecf42ffdefa6470298d8022deeb762e30c8729dc0a4bdda93888c0b0354e2" ;;
+  v1.2.1:linux_arm64) expected_sha="507c35d0fbf382b5ac64824386460a80849d73064d3f50b23eb247eabb68c7a8" ;;
+  v1.2.1:darwin_amd64) expected_sha="5c72c6773433cb40540441176d8f2e983028c4e4a656eb25c879c8008d21cac3" ;;
+  v1.2.1:darwin_arm64) expected_sha="d71ea29b5c5879ea0ef927efffb266cfedf7ba75d4e4db6689daffec3697595a" ;;
   v1.1.0:linux_amd64) expected_sha="b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34" ;;
   v1.1.0:linux_arm64) expected_sha="e64eb6f5f998c9eae3ef9ec786f5f1c907ab3ed04fe220ebf265ca9952e21b2f" ;;
   v1.1.0:darwin_amd64) expected_sha="5d7d30fdadcf012b7e0c1933a62cdfaef106e2561509b904e50a6733621cf8da" ;;
