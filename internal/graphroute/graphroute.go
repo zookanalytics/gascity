@@ -172,6 +172,14 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 	return graphStepTarget{value: strings.TrimSpace(formula.Substitute(step.Metadata[beadmeta.RunTargetMetadataKey], routeVars))}
 }
 
+// graphBindingIsDeliverable reports whether a resolved binding names somewhere
+// a step can actually be delivered — a routed queue (QualifiedName) or a
+// concrete session (DirectSessionID). A binding naming neither leaves the step
+// unclaimable no matter which stamp path runs.
+func graphBindingIsDeliverable(binding GraphRouteBinding) bool {
+	return strings.TrimSpace(binding.QualifiedName) != "" || strings.TrimSpace(binding.DirectSessionID) != ""
+}
+
 // ApplyGraphRouteBinding sets the routing metadata on a recipe step.
 func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) {
 	// Clear any prior session back-references so the metadata always matches
@@ -185,6 +193,21 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// the transient Assignee is cleared on close. (#2843)
 		step.Metadata[beadmeta.SessionIDMetadataKey] = binding.DirectSessionID
 		step.Assignee = binding.DirectSessionID
+		return
+	}
+	// DirectSessionID returned above, so this is exactly "names no queue".
+	if !graphBindingIsDeliverable(binding) {
+		// Mirror ApplyGraphControlRouteBinding: drop the key rather than
+		// persisting an empty route. Stamping the pool markers here too would
+		// dress an undeliverable step up as claimable pool work — the shape
+		// that made gc-rfxju's stalled workflows unreadable after the fact.
+		// A nameless binding is legitimate for `gc formula cook`, which leaves
+		// a DAG unrouted on purpose; what is not legitimate is recording it as
+		// routed pool work.
+		delete(step.Metadata, beadmeta.RoutedToMetadataKey)
+		delete(step.Metadata, beadmeta.ContinuationGroupMetadataKey)
+		delete(step.Metadata, beadmeta.SessionAffinityMetadataKey)
+		step.Assignee = ""
 		return
 	}
 	step.Metadata[beadmeta.RoutedToMetadataKey] = binding.QualifiedName
@@ -598,6 +621,14 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			AssignGraphStepRoute(step, binding, &controlRoute)
 			continue
 		}
+		// An unrouted runnable step is legitimate here: `gc formula cook`
+		// deliberately decorates with a nameless MetadataOnly binding so the
+		// cooked DAG stays unrouted until something dispatches it later
+		// (decorateFormulaCookGraphV2Recipe), and drain-item recipes pass a zero
+		// binding for steps that declare their own gc.run_target. Only a pour
+		// that IS the dispatch — a sling — can judge an unrouted step fatal, so
+		// that check lives at the sling boundary (sling.ensureGraphWorkflowHasClaimableStep)
+		// rather than here. See gc-rfxju.
 		AssignGraphStepRoute(step, binding, nil)
 	}
 	return nil

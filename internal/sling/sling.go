@@ -1352,6 +1352,54 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	return result, nil
 }
 
+// ensureGraphWorkflowHasClaimableStep rejects a graph.v2 pour that would
+// materialize a workflow no worker can ever pick up.
+//
+// A sling IS the dispatch, so the pour must leave behind demand. The workflow
+// root never supplies it: the root is blocked by its own workflow-finalize step
+// from the moment it is created, so it is excluded from every ready query.
+// Demand therefore rests entirely on the runnable steps, and if none of them
+// carries a route the whole workflow is inert.
+//
+// Control steps do not count. In the gc-rfxju incident the workflow-finalize
+// step routed correctly to the control dispatcher while all six worker steps
+// resolved to a nameless pool binding and landed with no gc.routed_to at all —
+// so "some step is routed" was true while the target pool saw nothing. Nothing
+// errored: sling reported ok/routed=true, the root sat in_progress, and five
+// dispatches over three days died in that state with no failure signal.
+//
+// This lives here rather than in graphroute because only a dispatching pour can
+// judge an unrouted step fatal. `gc formula cook` deliberately produces an
+// unrouted DAG for later dispatch, and drain-item recipes decorate with a zero
+// binding; both are legitimate and must keep working.
+func ensureGraphWorkflowHasClaimableStep(recipe *formula.Recipe, formulaName string) error {
+	if recipe == nil {
+		return nil
+	}
+	unrouted := make([]string, 0, len(recipe.Steps))
+	for i := range recipe.Steps {
+		step := &recipe.Steps[i]
+		if step.IsRoot || graphroute.IsWorkflowTopologyKind(step.Metadata[beadmeta.KindMetadataKey]) {
+			continue
+		}
+		if graphroute.IsControlDispatcherKind(step.Metadata[beadmeta.KindMetadataKey]) {
+			continue
+		}
+		if strings.TrimSpace(step.Metadata[beadmeta.RoutedToMetadataKey]) != "" ||
+			strings.TrimSpace(step.Metadata[beadmeta.SessionIDMetadataKey]) != "" ||
+			strings.TrimSpace(step.Assignee) != "" {
+			return nil
+		}
+		unrouted = append(unrouted, step.ID)
+	}
+	if len(unrouted) == 0 {
+		// No worker steps at all: a control-only graph is driven entirely by the
+		// dispatcher and needs no pool demand.
+		return nil
+	}
+	return fmt.Errorf("formulas v2 %q would materialize no claimable work: every worker step (%s) resolved with no route, so the target pool would see no demand and the workflow would stall silently", formulaName, strings.Join(unrouted, ", "))
+}
+
 // materializeCompiledSlingFormula performs the routing, dedupe lookup, and
 // instantiation for a compiled recipe. For graph workflows the caller invokes
 // it under the RootKey file lock so the live-root lookup and creation are
@@ -1365,6 +1413,10 @@ func materializeCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 	privatizeAttachedRootOnlyWisp(recipe, sourceBeadID)
 	var replacedRootID string
 	if graphWorkflow {
+		if err := ensureGraphWorkflowHasClaimableStep(recipe, formulaName); err != nil {
+			SlingTracef("instantiate unclaimable formula=%s err=%v", formulaName, err)
+			return nil, err
+		}
 		if err := closeFailedGraphV2Roots(graphStore, recipe); err != nil {
 			return nil, err
 		}
