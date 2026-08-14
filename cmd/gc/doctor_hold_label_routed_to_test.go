@@ -358,3 +358,90 @@ func TestHoldLabelAndV2RoutedToChecksConverge(t *testing.T) {
 		t.Fatalf("v2-routed-to-namespace status = %v, want OK after hold-label fix: %#v", res.Status, res)
 	}
 }
+
+// TestHoldLabelRoutedToKeepsShortFormWhenAliasAmbiguous pins the one case
+// where the two checks stably disagree: when several bindings each define the
+// hold value's agent, no single qualified route can be inferred. --fix must
+// backfill the short form rather than guess a binding, and the resulting state
+// must be a fixpoint — v2-routed-to-namespace reports the ambiguity for manual
+// resolution but its own Fix leaves the value alone, so neither check rewrites
+// what the other wrote.
+func TestHoldLabelRoutedToKeepsShortFormWhenAliasAmbiguous(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "mayor", BindingName: "gastown"},
+		{Name: "mayor", BindingName: "gc-toolkit"},
+	}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Missing route, ambiguous hold value: --fix must not pick a binding.
+		{ID: "A-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		// An explicitly-qualified route is one of the bound aliases, so it
+		// already denotes the hold target even though the short form is
+		// ambiguous — leave it as the operator wrote it.
+		{
+			ID: "A-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "gc-toolkit.mayor"},
+		},
+	}, nil)
+	factory := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+	holdCheck := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	namespaceCheck := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+
+	res := holdCheck.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	if !strings.Contains(details, "A-1") {
+		t.Fatalf("details missing A-1:\n%s", details)
+	}
+	if strings.Contains(details, "A-2") {
+		t.Fatalf("details should not mention A-2 (route is a bound alias of the hold value):\n%s", details)
+	}
+	if !strings.Contains(details, `use "mayor"`) {
+		t.Fatalf("details should advise the short form %q when the alias is ambiguous:\n%s", "mayor", details)
+	}
+
+	if err := holdCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, tc := range []struct{ id, want string }{
+		{"A-1", "mayor"},
+		{"A-2", "gc-toolkit.mayor"},
+	} {
+		bead, err := store.Get(tc.id)
+		if err != nil {
+			t.Fatalf("get %s: %v", tc.id, err)
+		}
+		if got := bead.Metadata["gc.routed_to"]; got != tc.want {
+			t.Errorf("%s gc.routed_to = %q, want %q", tc.id, got, tc.want)
+		}
+	}
+	if res2 := holdCheck.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
+	}
+
+	// The sibling check reports the ambiguous short form but must not rewrite
+	// it, so the short-form backfill above is stable across a --fix pass.
+	if res := namespaceCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusWarning {
+		t.Fatalf("v2-routed-to-namespace status = %v, want warning for the ambiguous value: %#v", res.Status, res)
+	}
+	if err := namespaceCheck.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("v2-routed-to-namespace Fix: %v", err)
+	}
+	bead, err := store.Get("A-1")
+	if err != nil {
+		t.Fatalf("get A-1: %v", err)
+	}
+	if got := bead.Metadata["gc.routed_to"]; got != "mayor" {
+		t.Errorf("A-1 gc.routed_to = %q, want mayor preserved (ambiguous values are left for manual resolution)", got)
+	}
+	if res := holdCheck.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("hold-label-routed-to status = %v, want OK to remain after the sibling fix: %#v", res.Status, res)
+	}
+}
