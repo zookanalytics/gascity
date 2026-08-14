@@ -242,3 +242,58 @@ func TestRecordAgentStop_DropsBlankAgentLabel(t *testing.T) {
 		t.Fatalf("gc.agent.stops.total agent labels = %+v, want exactly [gascity/gc.worker] (blank identities dropped)", agents)
 	}
 }
+
+// TestRecordInvocationUnpricedIsObservable pins the false-clean guard: cost is
+// skipped (not zero-filled) when the pricing registry has no entry for a
+// (provider, model) pair, so without this counter a whole tier of agents is
+// simply absent from gc.agent.invocation.cost_usd and reads as free. The
+// counter carries the same bounded label set as the cost counter, so the
+// missing entry is attributable to a specific model (gc-kawr5).
+func TestRecordInvocationUnpricedIsObservable(t *testing.T) {
+	resetInvocationInstruments(t)
+
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	prevProvider := otel.GetMeterProvider()
+	otel.SetMeterProvider(provider)
+	t.Cleanup(func() { otel.SetMeterProvider(prevProvider) })
+
+	ctx := context.Background()
+	labels := InvocationLabels{
+		AgentName: "rig/refinery",
+		Model:     "claude-model-from-the-future",
+		Provider:  "claude",
+	}
+	RecordInvocationUnpriced(ctx, labels)
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	var found bool
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gc.agent.invocation.unpriced" {
+				continue
+			}
+			found = true
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("gc.agent.invocation.unpriced: data type %T, want Sum[int64]", m.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("gc.agent.invocation.unpriced: %d datapoints, want 1", len(sum.DataPoints))
+			}
+			if got := sum.DataPoints[0].Value; got != 1 {
+				t.Errorf("gc.agent.invocation.unpriced = %d, want 1", got)
+			}
+			if n := sum.DataPoints[0].Attributes.Len(); n != 3 {
+				t.Errorf("gc.agent.invocation.unpriced carries %d attrs, want 3", n)
+			}
+		}
+	}
+	if !found {
+		t.Error("gc.agent.invocation.unpriced not registered/observed")
+	}
+}
