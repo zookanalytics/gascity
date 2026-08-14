@@ -29,6 +29,7 @@ type invocationInstruments struct {
 	tokensCacheCreation metric.Int64Counter
 	invocationLatencyMs metric.Float64Histogram
 	invocationCostUSD   metric.Float64Counter
+	invocationUnpriced  metric.Int64Counter
 }
 
 var (
@@ -66,6 +67,10 @@ func initInvocationInstruments() {
 		invInst.invocationCostUSD, _ = m.Float64Counter("gc.agent.invocation.cost_usd",
 			metric.WithDescription("Estimated invocation cost in USD (decision-support, not invoice-grade)"),
 			metric.WithUnit("USD"),
+		)
+		invInst.invocationUnpriced, _ = m.Int64Counter("gc.agent.invocation.unpriced",
+			metric.WithDescription("Invocations whose (provider, model) pair had no pricing entry, so no cost was recorded"),
+			metric.WithUnit("{invocation}"),
 		)
 	})
 }
@@ -134,4 +139,16 @@ func RecordInvocationCostEstimate(ctx context.Context, labels InvocationLabels, 
 		return
 	}
 	invInst.invocationCostUSD.Add(ctx, costUSD, metric.WithAttributes(labels.toOTel()...))
+}
+
+// RecordInvocationUnpriced counts one invocation whose (provider, model) pair
+// had no pricing entry. Cost is skipped entirely rather than zero-filled in
+// that case, so without this counter the whole (agent, model) series is simply
+// absent from gc.agent.invocation.cost_usd — indistinguishable from an agent
+// that ran for free. Emit it at the same seam that would have recorded cost, so
+// "unpriced" is a positive signal naming the model whose rates are missing
+// rather than an inference drawn from a metric's silence.
+func RecordInvocationUnpriced(ctx context.Context, labels InvocationLabels) {
+	initInvocationInstruments()
+	invInst.invocationUnpriced.Add(ctx, 1, metric.WithAttributes(labels.toOTel()...))
 }
