@@ -74,9 +74,10 @@ model generation.
 
 - **`internal/pricing/defaults.go`** — entries for `claude-opus-5`,
   `claude-sonnet-5`, `claude-fable-5`, `claude-mythos-5`, `claude-opus-4-6`,
-  and the undated `claude-haiku-4-5` alias. Sonnet 5 uses the standing
-  $3/$15 rate, not the introductory $2/$10 that expires 2026-08-31, so
-  estimates do not silently under-report once the window closes.
+  and the undated `claude-haiku-4-5` alias. Sonnet 5 is priced at $2/$10,
+  which is the standard rate: it launched as introductory pricing through
+  2026-08-31, and the scheduled 2026-09-01 increase to $3/$15 was cancelled
+  on 2026-08-10, so no step-up is pending.
 - **`gc.agent.invocation.unpriced`** — new counter, wired into both emission
   seams (prompt-op finish and the model-usage sweep).
 - **`agent-token-telemetry` doctor check** — reports awake sessions with no

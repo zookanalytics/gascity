@@ -149,19 +149,19 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 1.25,
 		},
 	},
-	// Claude Sonnet 5. The published rate is $3/$15 per 1M; an introductory
-	// $2/$10 applies through 2026-08-31. The standing rate is used here so
-	// estimates do not silently under-report once the introductory window
-	// closes — operators wanting the promotional rate override in city.toml.
+	// Claude Sonnet 5. $2/$10 per 1M is the standard rate: it launched as
+	// introductory pricing through 2026-08-31, and the scheduled 2026-09-01
+	// increase to $3/$15 was canceled on 2026-08-10. There is no pending
+	// step-up, so these rates need no expiry handling.
 	{
 		Provider:     "claude",
 		Model:        "claude-sonnet-5",
-		LastVerified: "2026-08-13",
+		LastVerified: "2026-08-14",
 		Tier: Tier{
-			PromptUSDPer1M:        3.00,
-			CompletionUSDPer1M:    15.00,
-			CacheReadUSDPer1M:     0.30,
-			CacheCreationUSDPer1M: 3.75,
+			PromptUSDPer1M:        2.00,
+			CompletionUSDPer1M:    10.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 2.50,
 		},
 	},
 	// Claude Opus 5. Same regular usage pricing as Opus 4.8.

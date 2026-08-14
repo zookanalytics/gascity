@@ -18,7 +18,7 @@ import (
 // post-wake grace period, so a session that just started is never flagged for
 // not having emitted yet.
 //
-// It must stay comfortably above liveModelSweepInterval: the in-interval sweep
+// It must stay comfortably above liveModelSweepMinInterval: the in-interval sweep
 // is what keeps a self-driving agent's samples flowing, so a threshold at or
 // below its cadence would report sessions that are merely between sweeps.
 const tokenTelemetrySilenceThreshold = time.Hour
