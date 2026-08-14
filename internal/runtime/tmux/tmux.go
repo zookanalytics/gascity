@@ -3902,7 +3902,9 @@ func parseKeyBindingCommand(output, table, key string) string {
 				break
 			}
 		}
-		// Need the table name, the key, and at least one command field.
+		// Need at least the table name and the key to identify the row. A row
+		// that then carries no command yields "" from restAfterField, which is
+		// the same fail-safe answer as no match.
 		if tableIdx < 0 || tableIdx+3 > len(fields) {
 			continue
 		}
