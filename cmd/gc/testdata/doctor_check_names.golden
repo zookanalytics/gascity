@@ -72,6 +72,7 @@ pool-idle-routed-work
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
+agent-token-telemetry
 session-model
 startup-health-episodes
 gate-sandbox-reads
