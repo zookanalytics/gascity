@@ -248,11 +248,15 @@ func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
 	}
 }
 
-// listKeysPrefixSample is verbatim `tmux list-keys -T prefix` output (tmux
-// 3.7b, default bindings), trimmed to the rows the parser has to survive:
-// column-padded keys, the `-r` repeat flag ahead of `-T`, backslash-escaped
-// key names, a command carrying its own `-T` flag, and a Gas Town if-shell
-// binding. Column alignment and escaping are load-bearing — do not reflow.
+// listKeysPrefixSample holds `tmux list-keys -T prefix` rows (tmux 3.7b,
+// default bindings) copied verbatim, keeping the shapes the parser has to
+// survive: column-padded keys, the `-r` repeat flag ahead of `-T`,
+// backslash-escaped key names, a command carrying its own `-T` flag, and a Gas
+// Town if-shell binding. Two rows are not full copies — the real `<`
+// display-menu row runs past 1 KB, so it is cut after the `-T` that matters,
+// and the `g` row is a Gas Town binding this package installs rather than a
+// tmux default. Column alignment and escaping are load-bearing — do not
+// reflow.
 const listKeysPrefixSample = `bind-key    -T prefix Space   next-layout
 bind-key    -T prefix \"      split-window
 bind-key    -T prefix \#      list-buffers
