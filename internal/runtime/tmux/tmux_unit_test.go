@@ -247,3 +247,122 @@ func TestReparentedOrphans_SkipsKnownDescendants(t *testing.T) {
 		t.Fatalf("reparentedOrphans = %v, want empty (all are known descendants)", got)
 	}
 }
+
+// listKeysPrefixSample holds `tmux list-keys -T prefix` rows (tmux 3.7b,
+// default bindings) copied verbatim, keeping the shapes the parser has to
+// survive: column-padded keys, the `-r` repeat flag ahead of `-T`,
+// backslash-escaped key names, a command carrying its own `-T` flag, and a Gas
+// Town if-shell binding. Two rows are not full copies — the real `<`
+// display-menu row runs past 1 KB, so it is cut after the `-T` that matters,
+// and the `g` row is a Gas Town binding this package installs rather than a
+// tmux default. Column alignment and escaping are load-bearing — do not
+// reflow.
+const listKeysPrefixSample = `bind-key    -T prefix Space   next-layout
+bind-key    -T prefix \"      split-window
+bind-key    -T prefix \#      list-buffers
+bind-key    -T prefix \$      command-prompt -I "#S" { rename-session "%%" }
+bind-key    -T prefix <       display-menu -T "#[align=center]#{window_index}" -x W -y W Kill X { kill-window }
+bind-key    -T prefix c       new-window
+bind-key    -T prefix g       if-shell echo '#{session_name}' | grep -Eq '^(gc)-' "run-shell 'gt agents menu'" :
+bind-key    -T prefix n       next-window
+bind-key    -T prefix p       previous-window
+bind-key    -T prefix s       choose-tree -Zs
+bind-key -r -T prefix Up      select-pane -U`
+
+// TestParseKeyBindingCommand pins the parse of the unfiltered
+// `list-keys -T <table>` output. tmux 3.7 broke the positional key filter
+// (`list-keys -T prefix s` exits 0 with no output), so selecting the row in Go
+// is the only version-stable way to read a binding — which makes this parser
+// the load-bearing half of getKeyBinding.
+func TestParseKeyBindingCommand(t *testing.T) {
+	tests := []struct {
+		name  string
+		table string
+		key   string
+		want  string
+	}{
+		{"single-word command", "prefix", "n", "next-window"},
+		{"multi-word command", "prefix", "s", "choose-tree -Zs"},
+		{"padded key column", "prefix", "Space", "next-layout"},
+		{"repeat flag before -T", "prefix", "Up", "select-pane -U"},
+		{"escaped double quote key", "prefix", `"`, "split-window"},
+		{"escaped hash key", "prefix", "#", "list-buffers"},
+		{"escaped dollar key", "prefix", "$", `command-prompt -I "#S" { rename-session "%%" }`},
+		{
+			// The command itself contains `-T`; anchoring on the first `-T`
+			// must not mistake it for the key table.
+			name:  "command containing its own -T flag",
+			table: "prefix",
+			key:   "<",
+			want:  `display-menu -T "#[align=center]#{window_index}" -x W -y W Kill X { kill-window }`,
+		},
+		{
+			// Gas Town filtering belongs to the caller, not the parser.
+			name:  "gas town binding returned verbatim",
+			table: "prefix",
+			key:   "g",
+			want:  `if-shell echo '#{session_name}' | grep -Eq '^(gc)-' "run-shell 'gt agents menu'" :`,
+		},
+		{"unbound key", "prefix", "F12", ""},
+		{"key bound in a different table", "root", "n", ""},
+		{"empty key", "prefix", "", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseKeyBindingCommand(listKeysPrefixSample, tc.table, tc.key); got != tc.want {
+				t.Errorf("parseKeyBindingCommand(sample, %q, %q) = %q, want %q", tc.table, tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseKeyBindingCommand_FailsSafeOnUnparseableOutput pins the fail-safe
+// contract: output that does not match the documented
+// `bind-key [-r] -T <table> <key> <command...>` shape yields "" so callers
+// install their own default rather than a corrupt binding.
+func TestParseKeyBindingCommand_FailsSafeOnUnparseableOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+	}{
+		{"empty output", ""},
+		{"no -T marker", "bind-key prefix n next-window"},
+		{"truncated after table", "bind-key    -T prefix"},
+		{"key present but no command", "bind-key    -T prefix n"},
+		{"key present, command is whitespace", "bind-key    -T prefix n   "},
+		{"unrelated text", "no server running on /tmp/tmux-1000/default"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseKeyBindingCommand(tc.output, "prefix", "n"); got != "" {
+				t.Errorf("parseKeyBindingCommand(%q, prefix, n) = %q, want \"\"", tc.output, got)
+			}
+		})
+	}
+}
+
+// TestIsGasTownBindingCommand pins the guard that keeps ConfigureGasTownSession
+// from wrapping its own if-shell binding in another if-shell on a repeat call.
+func TestIsGasTownBindingCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		want bool
+	}{
+		{"gas town if-shell binding", `if-shell "echo x | grep -Eq '^(gc)-'" "run-shell 'gt feed --window'" :`, true},
+		{"tmux default", "next-window", false},
+		{"user binding mentioning gt without if-shell", "run-shell 'gt status'", false},
+		{"if-shell without gt", `if-shell "true" "display-message hi" :`, false},
+		{"unbound", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isGasTownBindingCommand(tc.cmd); got != tc.want {
+				t.Errorf("isGasTownBindingCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+}

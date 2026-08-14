@@ -3852,78 +3852,128 @@ func (t *Tmux) SetTownCycleBindings(session string) error {
 // Used to skip redundant re-binding on repeated ConfigureGasTownSession calls,
 // preserving the user's original fallback captured on the first call.
 func (t *Tmux) isGTBinding(table, key string) bool {
-	output, err := t.run("list-keys", "-T", table, key)
+	return isGasTownBindingCommand(t.bindingCommand(table, key))
+}
+
+// isGasTownBindingCommand reports whether cmd is a binding this package
+// installed. GT bindings use if-shell with a run-shell/display-popup invoking
+// "gt ". Both markers are required, to avoid false positives on user bindings
+// that happen to contain "gt " without the if-shell guard.
+func isGasTownBindingCommand(cmd string) bool {
+	return strings.Contains(cmd, "if-shell") && strings.Contains(cmd, "gt ")
+}
+
+// bindingCommand returns the tmux command currently bound to key in table, or
+// "" when the key is unbound, the query fails, or the output cannot be parsed.
+//
+// It reads the whole table (`list-keys -T <table>`) and selects the row in Go
+// rather than asking tmux to filter (`list-keys -T <table> <key>`). The
+// positional key filter is not version-stable: tmux 3.7 exits 0 and prints
+// nothing for it, which made every capture return "" and every caller
+// overwrite the user's binding with its own default. The unfiltered form is
+// well-formed from tmux 3.3 through 3.7+.
+func (t *Tmux) bindingCommand(table, key string) string {
+	output, err := t.run("list-keys", "-T", table)
 	if err != nil || output == "" {
-		return false
+		return ""
 	}
-	// GT bindings use if-shell with a run-shell/display-popup invoking "gt ".
-	// Require both "if-shell" and "gt " to avoid false positives on user
-	// bindings that happen to contain "gt " without the if-shell guard.
-	return strings.Contains(output, "if-shell") && strings.Contains(output, "gt ")
+	return parseKeyBindingCommand(output, table, key)
+}
+
+// parseKeyBindingCommand extracts the command bound to key in table from the
+// output of `tmux list-keys -T <table>`.
+//
+// Each row has the shape `bind-key [-r] -T <table> <key> <command...>`, padded
+// to align columns. The key name is backslash-escaped by tmux (`\"`, `\#`,
+// `\$`, `\;`, ...), so it is unescaped before comparison. A command may carry
+// its own `-T` flag (display-menu does), so the table is anchored on the first
+// `-T` only.
+//
+// Returns "" if no row binds key in table, or if no row has the documented
+// shape — a parse failure must leave callers on their own default rather than
+// installing a corrupt binding.
+func parseKeyBindingCommand(output, table, key string) string {
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		tableIdx := -1
+		for i, f := range fields {
+			if f == "-T" {
+				tableIdx = i
+				break
+			}
+		}
+		// Need at least the table name and the key to identify the row. A row
+		// that then carries no command yields "" from restAfterField, which is
+		// the same fail-safe answer as no match.
+		if tableIdx < 0 || tableIdx+3 > len(fields) {
+			continue
+		}
+		if fields[tableIdx+1] != table {
+			continue
+		}
+		if unescapeTmuxKey(fields[tableIdx+2]) != key {
+			continue
+		}
+		return restAfterField(line, tableIdx+2)
+	}
+	return ""
+}
+
+// unescapeTmuxKey reverses the backslash escaping tmux applies to key names in
+// list-keys output, so `\"` matches the key `"`.
+func unescapeTmuxKey(token string) string {
+	if !strings.Contains(token, `\`) {
+		return token
+	}
+	var b strings.Builder
+	b.Grow(len(token))
+	for i := 0; i < len(token); i++ {
+		if token[i] == '\\' && i+1 < len(token) {
+			i++
+		}
+		b.WriteByte(token[i])
+	}
+	return b.String()
+}
+
+// restAfterField returns the remainder of s following the whitespace-separated
+// field at index idx (0-based), trimmed. Returns "" if s holds no more than
+// idx+1 fields. Used instead of a substring search for the key so a key name
+// that also appears earlier in the row cannot shift the cut point.
+func restAfterField(s string, idx int) string {
+	rest := s
+	for i := 0; i <= idx; i++ {
+		rest = strings.TrimLeft(rest, " \t")
+		end := strings.IndexAny(rest, " \t")
+		if end < 0 {
+			return ""
+		}
+		rest = rest[end:]
+	}
+	return strings.TrimSpace(rest)
 }
 
 // getKeyBinding returns the current tmux command bound to the given key in the
-// specified key table. Returns empty string if no binding exists or if querying
-// fails. This is used to capture user bindings before overwriting them, so the
-// original binding can be preserved in the else branch of an if-shell guard.
+// specified key table. Returns empty string if no binding exists, if querying
+// fails, or if the output cannot be parsed. This is used to capture user
+// bindings before overwriting them, so the original binding can be preserved in
+// the else branch of an if-shell guard.
 //
 // The returned string is a tmux command (e.g., "next-window", "run-shell 'lazygit'")
 // suitable for use as a command argument to bind-key or if-shell.
 //
 // If the existing binding is already a Gas Town if-shell binding (detected by
-// the presence of both "if-shell" and "gt " in the output), it is treated as
-// no prior binding to avoid recursive wrapping on repeated calls.
+// the presence of both "if-shell" and "gt " in the bound command), it is treated
+// as no prior binding to avoid recursive wrapping on repeated calls.
 func (t *Tmux) getKeyBinding(table, key string) string {
-	// tmux list-keys -T <table> <key> outputs a line like:
-	//   bind-key -T prefix g if-shell "..." "run-shell 'gt agents menu'" ":"
-	// We need to extract just the command portion.
-	//
-	// Assumed format (tested with tmux 3.3+):
-	//   bind-key [-r] -T <table> <key> <command...>
-	// If tmux changes this format, parsing fails safely (returns ""),
-	// which causes the caller to use its default fallback.
-	output, err := t.run("list-keys", "-T", table, key)
-	if err != nil || output == "" {
-		return ""
-	}
+	cmd := t.bindingCommand(table, key)
 
-	// If this is already a Gas Town binding (from a previous ConfigureGasTownSession call),
-	// don't capture it — we'd end up wrapping our own if-shell in another if-shell.
-	// We check for both "if-shell" and "gt " to avoid false-positiving on user
-	// bindings that happen to contain the substring "gt ".
-	if strings.Contains(output, "if-shell") && strings.Contains(output, "gt ") {
+	// If this is already a Gas Town binding (from a previous
+	// ConfigureGasTownSession call), don't capture it — we'd end up wrapping
+	// our own if-shell in another if-shell.
+	if isGasTownBindingCommand(cmd) {
 		return ""
 	}
-
-	// Parse the binding command from list-keys output.
-	// Format: "bind-key [-r] -T <table> <key> <command...>"
-	// We need everything after the key name.
-	// Find the key in the output and take everything after it.
-	fields := strings.Fields(output)
-	keyIdx := -1
-	for i, f := range fields {
-		if f == "-T" && i+2 < len(fields) {
-			// Skip table name, the next field is the key
-			keyIdx = i + 2
-			break
-		}
-	}
-	if keyIdx < 0 || keyIdx >= len(fields)-1 {
-		return ""
-	}
-
-	// Everything after the key is the command
-	// Rejoin from keyIdx+1 onward, but we need to preserve the original spacing.
-	// Find the key token in the original string and take everything after it.
-	idx := strings.Index(output, " "+fields[keyIdx]+" ")
-	if idx < 0 {
-		return ""
-	}
-	cmd := strings.TrimSpace(output[idx+len(" "+fields[keyIdx]+" "):])
-	if cmd == "" {
-		return ""
-	}
-
 	return cmd
 }
 
