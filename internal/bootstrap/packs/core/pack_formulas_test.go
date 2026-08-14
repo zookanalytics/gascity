@@ -207,3 +207,52 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 		t.Fatalf("walking embedded core pack: %v", err)
 	}
 }
+
+// TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup pins the fail-closed
+// duplicate-dispatch gate in every core formula that derives its work bead from
+// an input convoy and then creates a worktree for it.
+//
+// The pour-side fix (sling retires the direct pool route when a graph.v2
+// workflow starts) closes the one observed producer of two live dispatch
+// surfaces. This gate is the independent backstop: it holds for ANY producer,
+// including pours that never go through `gc sling`. It has to run before
+// workspace-setup, because that step is what recreates the branch — the step
+// that turns a duplicate dispatch into destroyed uncommitted work.
+//
+// Fail-closed is the load-bearing half. An unreadable bead or an unreadable
+// session list is not proof that nobody holds the work, and the earlier
+// generation of this check (a bare `gc bd show | jq` capture with no
+// validation) let a transient read failure read as "unowned" and proceed.
+func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
+	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
+		t.Run(file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, file), "load-context")
+
+			if !strings.Contains(step, "gc session list --state all") {
+				t.Error("load-context must resolve the current owner's session liveness; a stale-looking worktree or an idle owner is not proof of death")
+			}
+			if !strings.Contains(step, "OWNER_LIVE=1") {
+				t.Error("an unreadable session list must default OWNER_LIVE=1 (fail closed), not fall through as unowned")
+			}
+			if !strings.Contains(step, "WORK_STATUS=unknown") {
+				t.Error("an unreadable work bead must be treated as blocked, not as unowned")
+			}
+			if !strings.Contains(step, "gc runtime drain-ack") {
+				t.Error("the held session must drain rather than idle on a pool slot it cannot use")
+			}
+			// Holding means the step bead stays open: closing it is what advances
+			// the workflow into workspace-setup.
+			if !strings.Contains(step, "NOT closed") && !strings.Contains(step, "NOT close this step") {
+				t.Error("load-context must say explicitly that the step bead stays OPEN when the gate trips")
+			}
+			// The gate is worthless if the agent has already made the branch.
+			ownerAt := strings.Index(step, "OWNER_LIVE")
+			if ownerAt < 0 {
+				t.Fatal("load-context carries no owner-liveness gate")
+			}
+			if setupAt := strings.Index(step, "git worktree add"); setupAt >= 0 && setupAt < ownerAt {
+				t.Error("load-context creates a worktree before the owner-liveness gate; the gate must run first")
+			}
+		})
+	}
+}

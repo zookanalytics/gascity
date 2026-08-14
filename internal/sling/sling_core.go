@@ -511,6 +511,9 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err := checkLegacySourceWorkflowConflict(deps, beadID); err != nil {
 				return result, fmt.Errorf("%w", err)
 			}
+			if err := checkLiveInputConvoyWorkflowConflict(deps, beadID, graphInv.InputConvoy, formulaName, formulaVars, opts); err != nil {
+				return result, fmt.Errorf("%w", err)
+			}
 			// The replaced root is a graph.v2 workflow root, and every root
 			// this sling can find here was BORN through deps.graphStore()
 			// (InstantiateSlingFormula). Looking it up through deps.Store on a
@@ -750,26 +753,35 @@ func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.
 	}
 }
 
-// restampWorkBeadRouting stamps gc.execution_routed_to on the work bead a
-// graph workflow was attached to. A graph.v2 work bead must not get the
-// claim-semantics gc.routed_to key once its workflow has started, because the
-// pool's tier-3 claim query and the drain engine's own dispatch are two
-// uncoordinated authorities -- neither checks the bead's Assignee/the other's
-// lock field, so stamping gc.routed_to there is a structural double-dispatch
-// hazard, not merely an observability fix. The existing ExecutionRoutedToKey
-// (gc.execution_routed_to) is already read by the graphroute resolver, convoy
-// dispatch, dashboard orders feed, and dispatch engine. Apply
-// NormalizePoolRouteTarget to the computed target so slot-suffixed pool
-// instances collapse to their base template name (the same pass every other
-// gc.routed_to writer applies). Failures are reported as metadata errors
-// rather than failing the launch: by this point the workflow is already
-// running, and unwinding it over a routing restamp would be worse than a
-// surfaced warning.
+// restampWorkBeadRouting converts a work bead's routing from claim semantics to
+// execution semantics once the graph workflow driving it has started: it clears
+// gc.routed_to and stamps gc.execution_routed_to.
+//
+// A graph.v2 work bead must not CARRY the claim-semantics gc.routed_to key once
+// its workflow has started, because the pool's tier-3 claim query and the drain
+// engine's own dispatch are two uncoordinated authorities -- neither checks the
+// bead's Assignee/the other's lock field, so leaving gc.routed_to there is a
+// structural double-dispatch hazard, not merely an observability fix. Not
+// writing the key is only half of that: a bead an earlier plain sling already
+// routed keeps its route through the pour, and both surfaces then dispatch the
+// same work onto one branch. Retiring the route is what makes the started
+// workflow the single live dispatch surface.
+//
+// The existing ExecutionRoutedToKey (gc.execution_routed_to) is already read by
+// the graphroute resolver, convoy dispatch, dashboard orders feed, and dispatch
+// engine. Apply NormalizePoolRouteTarget to the computed target so slot-suffixed
+// pool instances collapse to their base template name (the same pass every other
+// gc.routed_to writer applies); a target that resolves to nothing still retires
+// the claim route, since the hazard is the stale route rather than the new
+// record. Failures are reported as metadata errors rather than failing the
+// launch: by this point the workflow is already running, and unwinding it over a
+// routing restamp would be worse than a surfaced warning.
 func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, result *SlingResult) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" || deps.Store == nil || result == nil {
 		return
 	}
+	retireClaimRoute(deps.Store, beadID, result)
 	target := agentutil.NormalizePoolRouteTarget(deps.Cfg, strings.TrimSpace(agentutil.RoutedToIdentity(&a)))
 	if target == "" {
 		return
@@ -777,6 +789,64 @@ func restampWorkBeadRouting(deps SlingDeps, beadID string, a config.Agent, resul
 	if err := deps.Store.SetMetadata(beadID, beadmeta.ExecutionRoutedToMetadataKey, target); err != nil {
 		result.MetadataErrors = append(result.MetadataErrors,
 			fmt.Sprintf("setting %s on %s: %v", beadmeta.ExecutionRoutedToMetadataKey, beadID, err))
+	}
+}
+
+// retireClaimRoute clears the pool claim route (gc.routed_to) on beadID so a
+// started graph.v2 workflow is the only live dispatch surface for that work.
+// Idempotent: a bead with no route is left untouched, so re-pouring the same
+// workflow costs no write.
+func retireClaimRoute(store beads.Store, beadID string, result *SlingResult) {
+	bead, err := store.Get(beadID)
+	if err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("reading %s to retire %s: %v", beadID, beadmeta.RoutedToMetadataKey, err))
+		return
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.RoutedToMetadataKey]) == "" {
+		return
+	}
+	if err := store.SetMetadata(beadID, beadmeta.RoutedToMetadataKey, ""); err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("clearing %s on %s: %v", beadmeta.RoutedToMetadataKey, beadID, err))
+	}
+}
+
+// retireInputConvoyClaimRoutes retires the claim route on every bead the input
+// convoy of a just-started graph.v2 workflow tracks.
+//
+// restampWorkBeadRouting covers the single bead a workflow was attached to; this
+// covers the convoy-first shape, where the pour targets a convoy and the work
+// beads are its tracked members. Both are needed: a multi-member convoy has no
+// single attach bead, and a member routed by an earlier plain sling is exactly
+// the bead a pool would claim out from under the running workflow.
+//
+// Membership lives with the work beads (deps.Store) while the root lives in the
+// graph store, so the convoy id is read from the root through graphStore. Read
+// failures surface as metadata errors for the same reason as above: the
+// workflow is already running and must not be unwound over a routing write.
+func retireInputConvoyClaimRoutes(deps SlingDeps, rootID string, result *SlingResult) {
+	if deps.Store == nil || result == nil {
+		return
+	}
+	root, err := deps.graphStore().Get(rootID)
+	if err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("reading workflow root %s to retire member routes: %v", rootID, err))
+		return
+	}
+	inputConvoyID := strings.TrimSpace(root.Metadata[beadmeta.InputConvoyIDMetadataKey])
+	if inputConvoyID == "" {
+		return
+	}
+	members, err := convoycore.Members(deps.Store, inputConvoyID, false)
+	if err != nil {
+		result.MetadataErrors = append(result.MetadataErrors,
+			fmt.Sprintf("listing members of input convoy %s: %v", inputConvoyID, err))
+		return
+	}
+	for _, member := range members {
+		retireClaimRoute(deps.Store, member.ID, result)
 	}
 }
 
@@ -812,6 +882,11 @@ func doStartGraphWorkflow(rootID, sourceBeadID string, a config.Agent, method st
 		}
 		restampWorkBeadRouting(deps, sourceBeadID, a, &result)
 	}
+	// The workflow is live from here on, so its work beads must stop being
+	// independently claimable. Runs for every launch shape: sourceBeadID is
+	// empty on the convoy-first path, where the work is reachable only through
+	// the root's input convoy.
+	retireInputConvoyClaimRoutes(deps, rootID, &result)
 	telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, nil)
 	if deps.Notify != nil {
 		deps.Notify.PokeController(deps.CityPath)
@@ -1421,6 +1496,60 @@ func validateSlingFormulaRuntimeVars(ctx context.Context, formulaName string, se
 		return err
 	}
 	return molecule.ValidateRecipeRuntimeVars(recipe, opts)
+}
+
+// checkLiveInputConvoyWorkflowConflict refuses a graph.v2 pour when the target
+// is already driven by a live convoy-first workflow.
+//
+// checkLegacySourceWorkflowConflict enforces the same "one live graph workflow
+// per unit of work" invariant through gc.source_bead_id, but a convoy-first
+// pour deliberately clears that key: its only durable link back to the work is
+// gc.input_convoy_id -> the convoy -> its tracked members. Nothing else sees
+// that binding either — the bead carries no gc.molecule_id — so without this
+// check a second `--on <formula>` mints a whole new molecule and reports a
+// successful attach, leaving two workflows driving one bead.
+//
+// Two scans, because the target can be either shape. A convoy target IS the
+// input convoy, so a live root over it collides directly. A bare-bead target
+// gets a FRESH synthetic input convoy on every pour, so the direct scan can
+// never see a predecessor and the reverse walk from the bead is what finds it.
+// The pour's own root key is excluded from both, so an idempotent re-pour
+// reuses its root instead of conflicting with itself.
+//
+// --force skips the check, matching every other bead-state guard on this path
+// (shouldCheckBeadState, snapshotGraphV2ReplacementRoot): launching a second
+// workflow beside a live one stays possible, but only when asked for
+// explicitly.
+func checkLiveInputConvoyWorkflowConflict(deps SlingDeps, beadID, inputConvoyID, formulaName string, vars map[string]string, opts SlingOpts) error {
+	if opts.Force || deps.Store == nil {
+		return nil
+	}
+	rootKey := graphv2.RootKey(strings.TrimSpace(inputConvoyID), formulaName, vars, opts.ScopeKind, opts.ScopeRef)
+	graphStore := deps.graphStore()
+	roots, err := sourceworkflow.ListLiveInputConvoyRoots(graphStore, inputConvoyID, rootKey)
+	if err != nil {
+		return fmt.Errorf("list live workflows for input convoy %s: %w", inputConvoyID, err)
+	}
+	viaItem, err := sourceworkflow.ListLiveInputConvoyRootsForItem(deps.Store, graphStore, beadID, rootKey)
+	if err != nil {
+		return fmt.Errorf("list live workflows for %s: %w", beadID, err)
+	}
+	seen := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		seen[root.ID] = true
+	}
+	for _, root := range viaItem {
+		if !seen[root.ID] {
+			roots = append(roots, root)
+		}
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	return &sourceworkflow.ConflictError{
+		SourceBeadID: beadID,
+		WorkflowIDs:  sourceworkflow.BlockingWorkflowIDs(roots),
+	}
 }
 
 func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID string) error {

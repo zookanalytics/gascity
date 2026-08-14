@@ -57,10 +57,52 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-gc bd show "$WORK_BEAD_ID"
-gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'
+WORK_BEAD_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
+printf '%s' "$WORK_BEAD_JSON" | jq '.[0]'
+printf '%s' "$WORK_BEAD_JSON" | jq '.[0].metadata'
 gc mail inbox
 ```
+
+Then verify the work bead is not already in flight under someone else, and
+FAIL CLOSED if you cannot prove that it isn't. A work bead can be reachable
+from two dispatch surfaces at once — this workflow and a direct route left on
+the bead — and both firing puts two sessions on one branch, where
+`workspace-setup` destroys the live one's uncommitted work.
+
+```bash
+WORK_STATUS=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].status // empty')
+WORK_OWNER=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].assignee // empty')
+if [ -z "$WORK_STATUS" ]; then
+  # An unreadable bead is not proof of safety. Treat it as blocked.
+  WORK_STATUS=unknown
+  WORK_OWNER="${WORK_OWNER:-unreadable}"
+fi
+OWNER_LIVE=0
+case "$WORK_OWNER" in
+  ""|"$GC_SESSION_NAME"|"$GC_AGENT"|"$GC_ALIAS") ;;   # unowned, or owned by you
+  *)
+    if [ "$WORK_STATUS" = "in_progress" ] || [ "$WORK_STATUS" = "unknown" ]; then
+      OWNER_LIVE=$(gc session list --state all --json 2>/dev/null \
+        | jq -r --arg o "$WORK_OWNER" \
+            '[.sessions[]? | select(((.alias // "") == $o) or ((.alias // "") | endswith($o)) or ((.name // "") == $o))] | length' 2>/dev/null)
+      # No answer means you could not disprove a live owner — assume one.
+      [ -z "$OWNER_LIVE" ] && OWNER_LIVE=1
+    fi ;;
+esac
+if [ "$OWNER_LIVE" != "0" ]; then
+  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER (convoy {{convoy_id}}). Held at load-context; no workspace touched."
+  gc runtime drain-ack
+  exit 1
+fi
+```
+
+Do NOT close this step when the check trips. Closing it advances the workflow
+into `workspace-setup`; leaving it open holds the workflow, which is the safe
+state, and the note on the work bead is the durable record of why.
+
+Liveness is the gate, not staleness: an idle worker between claims is
+indistinguishable from an abandoned one, so only a session absent from
+`gc session list --state all` is safely gone.
 """
 metadata = { "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
