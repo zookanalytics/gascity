@@ -142,6 +142,17 @@ ifneq ($(_NIX_ICU_DEV),)
 endif
 
 ## install: build and install gc to GOPATH/bin (same location as go install)
+##
+## Supported build paths for the beads library gc links in-process:
+##   - `make install` links the beads version go.mod pins. Correct for CI, for
+##     a fresh machine, and for contributors who track the pinned dependency.
+##   - A deployment that runs bd from a local beads checkout must build gc
+##     against that same checkout instead — in Gas Town, `build-optimized.sh gc`,
+##     which applies a `replace` onto the checkout. `make install` does NOT.
+## The post-install guard below reports when this install produced the first
+## while the bd on PATH came from the second. It speaks only where a local beads
+## checkout exists to rebuild against, so it stays silent on a machine where the
+## pinned build is the right one; see scripts/check-beads-linkage.sh.
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
@@ -162,6 +173,8 @@ install: check-self-contained
 		fi; \
 	fi
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@# Advisory only — the guard always exits 0 and never fails this install.
+	@scripts/check-beads-linkage.sh "$(INSTALL_DIR)/$(BINARY)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
