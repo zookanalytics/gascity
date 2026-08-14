@@ -240,6 +240,18 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 			if !strings.Contains(step, "gc runtime drain-ack") {
 				t.Error("the held session must drain rather than idle on a pool slot it cannot use")
 			}
+			// The gate resolves an assignee against the session list, so it has
+			// to match the form the claim path actually writes. `bd update
+			// --claim` sets assignee to the session NAME
+			// (<binding>__<agent>-<session-id>), which `gc session list --json`
+			// exposes as .session_name; the record carries no .name field at
+			// all, and .alias holds the agent address instead. Matching only
+			// .alias/.name resolves a live owner to zero sessions, so the gate
+			// reports "unowned" and fails OPEN in exactly the case it exists
+			// for.
+			if !strings.Contains(step, "session_name") {
+				t.Error("the owner-liveness query must match the assignee against .session_name; that is the form --claim writes, and the session record has no .name field")
+			}
 			// Holding means the step bead stays open: closing it is what advances
 			// the workflow into workspace-setup.
 			if !strings.Contains(step, "NOT closed") && !strings.Contains(step, "NOT close this step") {

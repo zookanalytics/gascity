@@ -79,12 +79,16 @@ if [ -z "$WORK_STATUS" ]; then
 fi
 OWNER_LIVE=0
 case "$WORK_OWNER" in
-  ""|"$GC_SESSION_NAME"|"$GC_AGENT"|"$GC_ALIAS") ;;   # unowned, or owned by you
+  ""|"$GC_SESSION_NAME"|"$GC_SESSION_ID"|"$GC_AGENT"|"$GC_ALIAS") ;;   # unowned, or owned by you
   *)
     if [ "$WORK_STATUS" = "in_progress" ] || [ "$WORK_STATUS" = "unknown" ]; then
+      # An assignee can be any of the three forms a claim writes: the session
+      # name (what `gc bd update --claim` sets), the session id, or the agent
+      # address. Match all of them — a session record exposes them as
+      # .session_name, .id and .alias respectively, and has no .name field.
       OWNER_LIVE=$(gc session list --state all --json 2>/dev/null \
         | jq -r --arg o "$WORK_OWNER" \
-            '[.sessions[]? | select(((.alias // "") == $o) or ((.alias // "") | endswith($o)) or ((.name // "") == $o))] | length' 2>/dev/null)
+            '[.sessions[]? | select(((.alias // "") == $o) or ((.alias // "") | endswith($o)) or ((.session_name // "") == $o) or ((.id // "") == $o))] | length' 2>/dev/null)
       # No answer means you could not disprove a live owner — assume one.
       [ -z "$OWNER_LIVE" ] && OWNER_LIVE=1
     fi ;;
