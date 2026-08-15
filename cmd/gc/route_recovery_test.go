@@ -5,7 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
 // TestRestoreCarriedWorkRoutes covers ga-n2d.4: after a controller restart,
@@ -64,7 +66,7 @@ func TestRestoreCarriedWorkRoutes(t *testing.T) {
 		}},
 	}, nil)
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := restoreCarriedWorkRoutes(store, nil)
 	if err != nil {
 		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
 	}
@@ -94,7 +96,7 @@ func TestRestoreCarriedWorkRoutes(t *testing.T) {
 
 	// Idempotent: a second pass restores nothing because WR-1 and T-1 now carry
 	// gc.routed_to and yield no recoverable carried route.
-	restored2, err := restoreCarriedWorkRoutes(store)
+	restored2, err := restoreCarriedWorkRoutes(store, nil)
 	if err != nil {
 		t.Fatalf("restoreCarriedWorkRoutes (second pass): %v", err)
 	}
@@ -106,9 +108,9 @@ func TestRestoreCarriedWorkRoutes(t *testing.T) {
 // TestRestoreCarriedWorkRoutesNilStore guards the nil-store path the controller
 // hits when a scope's bead store is unavailable.
 func TestRestoreCarriedWorkRoutesNilStore(t *testing.T) {
-	restored, err := restoreCarriedWorkRoutes(nil)
+	restored, err := restoreCarriedWorkRoutes(nil, nil)
 	if err != nil {
-		t.Fatalf("restoreCarriedWorkRoutes(nil): %v", err)
+		t.Fatalf("restoreCarriedWorkRoutes(nil, nil): %v", err)
 	}
 	if restored != 0 {
 		t.Errorf("restored = %d, want 0 for nil store", restored)
@@ -160,7 +162,7 @@ func TestRestoreCarriedWorkRoutesSkipsRaceClaimedBead(t *testing.T) {
 		},
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := restoreCarriedWorkRoutes(store, nil)
 	if err != nil {
 		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
 	}
@@ -239,7 +241,7 @@ func TestRestoreCarriedWorkRoutesSkipsCacheStaleClaimedBead(t *testing.T) {
 		},
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := restoreCarriedWorkRoutes(store, nil)
 	if err != nil {
 		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
 	}
@@ -364,7 +366,7 @@ func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
 		liveSnapshot: nil,
 	}
 
-	restored, err := restoreCarriedWorkRoutes(store)
+	restored, err := restoreCarriedWorkRoutes(store, nil)
 	if err != nil {
 		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
 	}
@@ -374,4 +376,153 @@ func TestRestoreCarriedWorkRoutesSkipsBlockedBead(t *testing.T) {
 	if route := strings.TrimSpace(mustRoutedTo(t, live, "EB-42o8")); route != "" {
 		t.Errorf("gc.routed_to = %q, want empty (a blocked bead must stay unrouted)", route)
 	}
+}
+
+// liveGraphV2Root creates a started convoy-first graph.v2 workflow root over
+// inputConvoyID — the shape internal/sling's doStartGraphWorkflow leaves behind.
+func liveGraphV2Root(t *testing.T, store beads.Store, inputConvoyID string) beads.Bead {
+	t.Helper()
+	root, err := store.Create(beads.Bead{
+		Title:  "workflow root",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+			beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			beadmeta.InputConvoyIDMetadataKey:   inputConvoyID,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	return root
+}
+
+// TestRestoreCarriedWorkRoutesSkipsBeadDrivenByLiveConvoyFirstWorkflow is the
+// full-chain regression for the retire this recovery used to undo: a bead
+// carrying BOTH gc.routed_to and gc.run_target has a graph.v2 workflow poured
+// over it, the pour retires gc.routed_to so the workflow is the only live
+// dispatch surface, and a patrol tick must leave it retired.
+//
+// gc.run_target is deliberately NOT cleared by the retire — it is the archived
+// route this recovery and reopen-source restore the bead from once the workflow
+// is gone (ga-20zd) — so the bead lands in carriedPoolRoute's recoverable shape
+// while a workflow is actively dispatching it. Re-promoting the archived route
+// here would hand the pool a bead the workflow already drives: the two-workers-
+// on-one-branch double dispatch the retire exists to prevent (gc-p64nt), back
+// one tick later.
+//
+// The second half proves the gate is liveness, not a permanent marker: closing
+// the root makes the same bead recoverable again, so a workflow that dies
+// without cleanup cannot strand its work unrouted.
+func TestRestoreCarriedWorkRoutesSkipsBeadDrivenByLiveConvoyFirstWorkflow(t *testing.T) {
+	const pool = "gascity/gastown.polecat"
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RoutedToMetadataKey:  pool,
+		beadmeta.RunTargetMetadataKey: pool,
+	}})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	inputConvoy, err := store.Create(beads.Bead{Title: "input convoy", Type: "convoy", Status: "open"})
+	if err != nil {
+		t.Fatalf("create input convoy: %v", err)
+	}
+	if err := convoycore.TrackItem(store, inputConvoy.ID, work.ID); err != nil {
+		t.Fatalf("TrackItem: %v", err)
+	}
+	root := liveGraphV2Root(t, store, inputConvoy.ID)
+	// The pour retires the claim route; the archived gc.run_target survives it.
+	if err := store.SetMetadata(work.ID, beadmeta.RoutedToMetadataKey, ""); err != nil {
+		t.Fatalf("retire claim route: %v", err)
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store, nil)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 0 {
+		t.Fatalf("restored = %d, want 0 (a live workflow already dispatches %s)", restored, work.ID)
+	}
+	if got := mustRoutedTo(t, store, work.ID); got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (the retire must survive a patrol tick)", got)
+	}
+	if got := mustRunTarget(t, store, work.ID); got != pool {
+		t.Fatalf("gc.run_target = %q, want %q (the archived route must survive for reopen-source)", got, pool)
+	}
+
+	// Workflow over: the archived route becomes recoverable again.
+	if err := store.Close(root.ID); err != nil {
+		t.Fatalf("close root: %v", err)
+	}
+	restored, err = restoreCarriedWorkRoutes(store, nil)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes (after close): %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d after the workflow closed, want 1 (liveness gate, not a permanent marker)", restored)
+	}
+	if got := mustRoutedTo(t, store, work.ID); got != pool {
+		t.Errorf("gc.routed_to = %q, want %q (recoverable once no live workflow drives it)", got, pool)
+	}
+}
+
+// TestRestoreCarriedWorkRoutesSkipsBeadDrivenByLiveAttachedWorkflow is the same
+// regression for the other launch shape. A workflow attached to a source bead
+// stamps that bead's workflow_id and carries no input convoy to walk back
+// from, so the convoy walk alone cannot see it.
+//
+// A workflow_id pointing at a root that no longer exists is not a link to a
+// live workflow — the bead must stay recoverable, or a deleted root would
+// strand its work forever.
+func TestRestoreCarriedWorkRoutesSkipsBeadDrivenByLiveAttachedWorkflow(t *testing.T) {
+	const pool = "gascity/gastown.polecat"
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{
+		Title:    "workflow root",
+		Type:     "task",
+		Status:   "in_progress",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	if err != nil {
+		t.Fatalf("create workflow root: %v", err)
+	}
+	work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RunTargetMetadataKey: pool,
+		workflowIDMetadataKey:         root.ID,
+	}})
+	if err != nil {
+		t.Fatalf("create work: %v", err)
+	}
+	dangling, err := store.Create(beads.Bead{Title: "dangling", Type: "task", Status: "open", Metadata: map[string]string{
+		beadmeta.RunTargetMetadataKey: pool,
+		workflowIDMetadataKey:         "WF-deleted",
+	}})
+	if err != nil {
+		t.Fatalf("create dangling: %v", err)
+	}
+
+	restored, err := restoreCarriedWorkRoutes(store, nil)
+	if err != nil {
+		t.Fatalf("restoreCarriedWorkRoutes: %v", err)
+	}
+	if restored != 1 {
+		t.Fatalf("restored = %d, want 1 (only the dangling-workflow_id bead is recoverable)", restored)
+	}
+	if got := mustRoutedTo(t, store, work.ID); got != "" {
+		t.Errorf("gc.routed_to = %q, want empty (a live attached workflow already dispatches it)", got)
+	}
+	if got := mustRoutedTo(t, store, dangling.ID); got != pool {
+		t.Errorf("dangling gc.routed_to = %q, want %q (a workflow_id naming no bead links to nothing live)", got, pool)
+	}
+}
+
+func mustRunTarget(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 }

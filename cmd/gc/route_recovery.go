@@ -7,6 +7,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
 // carriedPoolRoute returns the pool route a bead already declares for itself and
@@ -75,7 +77,13 @@ func carriedPoolRoute(b beads.Bead) string {
 // in_progress, which mapBdStatus preserves, while a block flips it to a status
 // that collapses to "open" (gc-4zb). Blocked work is therefore excluded at the
 // snapshot, by the Live query below, and not here.
-func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
+//
+// It also cannot guard a graph workflow, which drives its work without claiming
+// or blocking the bead: the bead stays open and unassigned for the workflow's
+// whole life. liveGraphWorkflowDrivesBead is the guard for that shape, and
+// graphStore is where it reads roots on a city that relocates the graph class
+// (nil where graph collapses onto the work store).
+func restoreCarriedWorkRoutes(store, graphStore beads.Store) (int, error) {
 	if store == nil {
 		return 0, nil
 	}
@@ -144,6 +152,23 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 		if live.Status != "open" || strings.TrimSpace(live.Assignee) != "" || carriedPoolRoute(live) != route {
 			continue // claimed, closed, or already routed since the snapshot — don't clobber
 		}
+		// A started graph workflow is the single live dispatch surface for the
+		// work it drives, and it establishes that by retiring gc.routed_to on its
+		// bead (internal/sling: retireClaimRoute). gc.run_target survives that
+		// retire on purpose — it is the archived route reopen-source and this
+		// recovery restore the bead from once the workflow is gone (ga-20zd) — so
+		// without this gate the retire lasts exactly until the next patrol tick,
+		// which re-promotes the archived route and hands the pool a bead the
+		// workflow is already dispatching. That is the double-dispatch the retire
+		// exists to prevent, reintroduced one tick later.
+		driven, drivenErr := liveGraphWorkflowDrivesBead(store, graphStore, live)
+		if drivenErr != nil {
+			errs = append(errs, fmt.Errorf("bead %s: checking for a live workflow before route restore: %w", b.ID, drivenErr))
+			continue // fail closed: an unproven bead keeps its retired route
+		}
+		if driven {
+			continue
+		}
 		if setErr := store.SetMetadata(b.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {
 			errs = append(errs, fmt.Errorf("bead %s: restoring gc.routed_to=%q: %w", b.ID, route, setErr))
 			continue
@@ -151,6 +176,57 @@ func restoreCarriedWorkRoutes(store beads.Store) (int, error) {
 		restored++
 	}
 	return restored, errors.Join(errs...)
+}
+
+// workflowIDMetadataKey is the BARE (non-gc-prefixed) key a graph workflow
+// launch stamps on its source bead to point at the root now driving it, and
+// that every path returning the bead to the pool clears. It is deliberately not
+// beadmeta.WorkflowIDMetadataKey ("gc.workflow_id"), which names a different
+// key on a different bead — see the same distinction in
+// internal/api/handler_beads.go.
+const workflowIDMetadataKey = "workflow_id"
+
+// liveGraphWorkflowDrivesBead reports whether a graph workflow is currently
+// driving b's work, in which case b's retired pool route must stay retired.
+//
+// Liveness — not the mere presence of a link — is the gate, so the answer stops
+// being true the moment the workflow reaches a terminal status and the bead
+// becomes recoverable again. A marker that outlived its workflow would strand
+// the bead in the one state this recovery exists to heal.
+//
+// Both launch shapes are checked because they leave different links behind. A
+// convoy-first pour (the graph.v2 shape: `gc sling <bead> --on <formula>` mints
+// a synthetic input convoy over the bead) clears gc.source_bead_id and links
+// back only through gc.input_convoy_id -> the convoy -> its tracked members,
+// which is the reverse walk. A workflow attached to a source bead instead
+// stamps that bead's workflow_id with the root id, and carries no input convoy
+// to walk. Neither link alone sees the other's shape.
+//
+// graphStore is where workflow roots live on a city that relocates the graph
+// coordination class; pass nil where graph collapses onto the work store.
+func liveGraphWorkflowDrivesBead(store, graphStore beads.Store, b beads.Bead) (bool, error) {
+	rootStore := graphStore
+	if rootStore == nil {
+		rootStore = store
+	}
+	if rootID := strings.TrimSpace(b.Metadata[workflowIDMetadataKey]); rootID != "" {
+		root, err := rootStore.Get(rootID)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			// The root is gone, so nothing dispatches through it. Fall through
+			// rather than return: a bead can carry a stale attachment link and
+			// still be a live convoy-first workflow's member.
+		case err != nil:
+			return false, fmt.Errorf("reading workflow %s: %w", rootID, err)
+		case !convoycore.IsTerminalStatus(root.Status):
+			return true, nil
+		}
+	}
+	roots, err := sourceworkflow.ListLiveInputConvoyRootsForItem(store, rootStore, b.ID, "")
+	if err != nil {
+		return false, err
+	}
+	return len(roots) > 0, nil
 }
 
 // routeRecoveryScope pairs a bead store with a human label for logging.
@@ -169,11 +245,15 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutes() {
 	for name, store := range cr.rigBeadStores() {
 		scopes = append(scopes, routeRecoveryScope{label: "rig " + name, store: store})
 	}
+	// Where the graph class is relocated every scope's workflow roots live in the
+	// one binding; where it is not, they live beside the work in each scope's own
+	// store, which is what a nil graphStore selects.
+	graphStore := cr.relocatedGraphStore()
 	for _, sc := range scopes {
 		if sc.store == nil {
 			continue
 		}
-		restored, err := restoreCarriedWorkRoutes(sc.store)
+		restored, err := restoreCarriedWorkRoutes(sc.store, graphStore)
 		if err != nil {
 			fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %v\n", cr.logPrefix, sc.label, err) //nolint:errcheck // best-effort stderr
 		}

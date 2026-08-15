@@ -17,7 +17,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two workers then set up the same branch, where one silently destroys the
   other's uncommitted work. Starting a workflow now retires that route on
   the attached bead and on every member of its input convoy, keeping the
-  execution-semantics `gc.execution_routed_to` record. Separately,
+  execution-semantics `gc.execution_routed_to` record. The retire now also
+  survives the controller's route recovery, which used to promote the bead's
+  archived `gc.run_target` route straight back into `gc.routed_to` on the
+  next patrol tick — undoing the retire seconds after the workflow started.
+  The archived route is deliberately left in place (it is what reopens the
+  bead to the pool once the workflow is gone), so recovery instead skips a
+  bead a live workflow drives; a workflow that dies without cleanup still
+  leaves its work recoverable. Separately,
   `gc sling <bead> --on <formula>` now refuses to pour a second workflow
   over work a live one already drives instead of minting a duplicate
   molecule and reporting a successful attach — the binding was invisible to
