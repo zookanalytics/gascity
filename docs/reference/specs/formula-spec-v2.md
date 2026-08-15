@@ -643,6 +643,50 @@ inject `convoy_id`, resolve the deprecated `issue` alias to the single
 tracked convoy member, and stamp the root as specified in section 2. The
 reserved-variable rules of section 1.4 are enforced at this point.
 
+**One live dispatch surface per unit of work.** A started v2 workflow is the
+only thing allowed to dispatch the work it drives, and invocation enforces
+that from both directions:
+
+- *Existing routes are retired.* Starting a workflow clears `gc.routed_to`
+  on the bead it was attached to and on every member of its input convoy,
+  leaving the execution-semantics record `gc.execution_routed_to` in its
+  place. A route an earlier plain sling left on the bead would otherwise
+  survive the pour, and the pool's claim query and the workflow's own
+  dispatch are uncoordinated authorities: both fire, and two workers land on
+  one branch. The retire holds for as long as the workflow is live: a bead
+  keeps any `gc.run_target` it carried, because that is the archived route it
+  is restored from once the workflow is gone, and route recovery declines to
+  promote an archived route back to `gc.routed_to` while a live workflow
+  drives the bead. A workflow that ends without cleanup does not strand its
+  work — the gate is the workflow's liveness, not a mark left on the bead.
+- *A second workflow is refused.* A **sling** invocation targeting work that
+  a live v2 workflow already drives fails with `source bead <id> already has
+  live workflow(s): <ids>`. The check keys on `gc.input_convoy_id` and, for a
+  bare-bead target, walks convoy membership back from the bead — a targeted
+  invocation over a bare bead mints a FRESH synthetic input convoy every
+  time, so a convoy-ID comparison alone never sees the predecessor. The
+  invocation's own `gc.graphv2_root_key` is excluded, so an idempotent
+  re-invocation reuses its root rather than conflicting with itself.
+  `gc sling --force` overrides the refusal.
+
+The refusal is scoped to sling because sling is what *starts* a workflow over
+work. `gc formula cook --attach` grafts a sub-DAG the attach bead then BLOCKS
+on: it leaves the bead's own metadata untouched — no `workflow_id`, no
+`molecule_id`, no route retired — so nothing about the graft makes the bead a
+second dispatch surface, and a blocked bead is not pool-claimable anyway.
+Attach enforces two narrower refusals: a second pour over the same *explicit*
+convoy, and a graft onto a bead a live legacy source workflow already drives.
+It does not walk convoy membership back from a bare bead, so repeated
+bare-bead grafts each mint their own one-item convoy and their own root. That
+is the deliberate v0 rule — a caller that wants dedupe creates and targets an
+explicit convoy (`engdocs/design/convoy-first-formulas-and-drain-v0.md`) — not
+a gap in the check. Attach has no `--force`, so its two refusals cannot be
+overridden.
+
+A plain `gc sling <bead>` (no formula) is not covered by either rule: it
+still routes work a live workflow drives, which re-pools stalled work
+deliberately but is also how a second dispatch surface can reappear.
+
 **Attach on a split city.** A city that serves the graph coordination class
 from its own `[storage]` binding refuses most of `gc formula cook --attach`
 rather than serving it. A graft is graph class whatever the formula's

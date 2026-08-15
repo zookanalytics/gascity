@@ -833,7 +833,7 @@ store, copy them into the binding with
 							result = existing
 							return ensureFormulaCookAttachDep(store, attach, result.RootID)
 						}
-						if roots, err := formulaCookLiveInputConvoyGraphRoots(store, inv.InputConvoy, graphRootKey); err != nil {
+						if roots, err := sourceworkflow.ListLiveInputConvoyRoots(store, inv.InputConvoy, graphRootKey); err != nil {
 							return err
 						} else if len(roots) > 0 {
 							return &sourceworkflow.ConflictError{
@@ -1168,35 +1168,6 @@ func ensureFormulaCookAttachDep(store beads.Store, attachBeadID, rootID string) 
 		return fmt.Errorf("wiring attach dependency %s -> %s: %w", attachBeadID, rootID, err)
 	}
 	return nil
-}
-
-func formulaCookLiveInputConvoyGraphRoots(store beads.Store, inputConvoyID, allowedRootKey string) ([]beads.Bead, error) {
-	inputConvoyID = strings.TrimSpace(inputConvoyID)
-	if store == nil || inputConvoyID == "" {
-		return nil, nil
-	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.InputConvoyIDMetadataKey: inputConvoyID}, 0)
-	if err != nil {
-		return nil, fmt.Errorf("checking live graph roots for input convoy %s: %w", inputConvoyID, err)
-	}
-	allowedRootKey = strings.TrimSpace(allowedRootKey)
-	roots := make([]beads.Bead, 0, len(matches))
-	for _, root := range matches {
-		if root.Status == "closed" || !sourceworkflow.IsWorkflowRoot(root) {
-			continue
-		}
-		if root.Metadata[beadmeta.FormulaContractMetadataKey] != beadmeta.FormulaContractGraphV2 {
-			continue
-		}
-		if allowedRootKey != "" && strings.TrimSpace(root.Metadata[beadmeta.Graphv2RootKeyMetadataKey]) == allowedRootKey {
-			continue
-		}
-		roots = append(roots, root)
-	}
-	slices.SortFunc(roots, func(a, b beads.Bead) int {
-		return strings.Compare(a.ID, b.ID)
-	})
-	return roots, nil
 }
 
 func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
