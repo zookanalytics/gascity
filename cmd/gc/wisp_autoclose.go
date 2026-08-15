@@ -216,7 +216,7 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 				continue
 			}
 			// Restrict to graph.v2 roots, matching the documented intent and
-			// formulaCookLiveInputConvoyGraphRoots: only graph workflows clear
+			// sourceworkflow.ListLiveInputConvoyRoots: only graph workflows clear
 			// gc.source_bead_id and link back solely through gc.input_convoy_id,
 			// so a legacy gc.kind=workflow root is reaped via its source-bead
 			// attachment instead and must not be force-closed here.
