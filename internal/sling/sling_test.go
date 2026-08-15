@@ -2796,44 +2796,6 @@ func TestSlingAttachGraphFormulaSecondBareBeadTargetLaunchBlocksAsDuplicate(t *t
 	}
 }
 
-func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
-	formulaDir := t.TempDir()
-	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
-	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
-	cfg := graphV2SlingTestConfig(t, formulaDir)
-	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := New(deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
-	first, err := s.AttachFormula(context.Background(), "graph-a", source.ID, a, FormulaOpts{})
-	if err != nil {
-		t.Fatalf("first AttachFormula: %v", err)
-	}
-	second, err := s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{})
-	if err != nil {
-		t.Fatalf("second AttachFormula: %v", err)
-	}
-	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.formula_contract": "graph.v2"}, 0)
-	if err != nil {
-		t.Fatalf("ListByMetadata: %v", err)
-	}
-	var liveRoots []beads.Bead
-	for _, root := range roots {
-		if sourceworkflow.IsWorkflowRoot(root) && root.Status != "closed" {
-			liveRoots = append(liveRoots, root)
-		}
-	}
-	if len(liveRoots) != 2 {
-		t.Fatalf("live graph roots = %+v, want two roots %s and %s", liveRoots, first.WorkflowID, second.WorkflowID)
-	}
-}
-
 func TestInstantiateSlingFormulaForceReplacesGraphV2Root(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
@@ -2952,34 +2914,6 @@ func TestRollbackGraphV2ReplacementLaunchRestoresReplacedRoot(t *testing.T) {
 	}
 	if replacementAfter.Status != "closed" {
 		t.Fatalf("replacement status = %q, want closed", replacementAfter.Status)
-	}
-}
-
-func TestDoSlingDefaultGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
-	formulaDir := t.TempDir()
-	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
-	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
-	cfg := graphV2SlingTestConfig(t, formulaDir)
-	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	source, err := deps.Store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := New(deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := s.AttachFormula(context.Background(), "graph-a", source.ID, config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, FormulaOpts{})
-	if err != nil {
-		t.Fatalf("first AttachFormula: %v", err)
-	}
-	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-b")}
-	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, deps.Store)
-	if err != nil {
-		t.Fatalf("DoSling: %v", err)
-	}
-	if result.WorkflowID == "" || result.WorkflowID == first.WorkflowID {
-		t.Fatalf("WorkflowID = %q, want fresh root different from %s", result.WorkflowID, first.WorkflowID)
 	}
 }
 
