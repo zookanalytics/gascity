@@ -2709,7 +2709,11 @@ func TestInstantiateGraphFormulaPreservesMaterializationWhenProjectionFails(t *t
 	}
 }
 
-func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) {
+// A bare-bead target gets a fresh synthetic input convoy on every pour, so a
+// re-pour cannot collide on the root key and used to mint a second live
+// workflow over the same bead. The singleton check walks convoy membership to
+// see the predecessor and refuses; --force still mints the fresh root.
+func TestSlingAttachGraphFormulaRefusesRepourOverLiveBareBeadWorkflow(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
 	cfg := graphV2SlingTestConfig(t, formulaDir)
@@ -2727,16 +2731,23 @@ func TestSlingAttachGraphFormulaCreatesFreshRootForBareBeadTarget(t *testing.T) 
 	if err != nil {
 		t.Fatalf("first AttachFormula: %v", err)
 	}
-	second, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
-	if err != nil {
-		t.Fatalf("second AttachFormula: %v", err)
+	_, err = s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{})
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("second AttachFormula error = %v, want *sourceworkflow.ConflictError", err)
 	}
-	if second.WorkflowID == first.WorkflowID {
-		t.Fatalf("WorkflowID = %q, want fresh root for fresh input convoy", second.WorkflowID)
+	forced, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{Force: true})
+	if err != nil {
+		t.Fatalf("forced AttachFormula: %v", err)
+	}
+	if forced.WorkflowID == first.WorkflowID {
+		t.Fatalf("forced WorkflowID = %q, want fresh root for fresh input convoy", forced.WorkflowID)
 	}
 }
 
-func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
+// Same shape across two different formulas: a live workflow over the bead
+// blocks a second one, and --force is the way to run both.
+func TestSlingAttachGraphFormulaRefusesDifferentFormulaOverLiveBareBead(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
@@ -2755,9 +2766,14 @@ func TestSlingAttachGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first AttachFormula: %v", err)
 	}
-	second, err := s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{})
+	_, err = s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{})
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("second AttachFormula error = %v, want *sourceworkflow.ConflictError", err)
+	}
+	second, err := s.AttachFormula(context.Background(), "graph-b", source.ID, a, FormulaOpts{Force: true})
 	if err != nil {
-		t.Fatalf("second AttachFormula: %v", err)
+		t.Fatalf("forced AttachFormula: %v", err)
 	}
 	roots, err := deps.Store.ListByMetadata(map[string]string{"gc.formula_contract": "graph.v2"}, 0)
 	if err != nil {
@@ -2895,7 +2911,11 @@ func TestRollbackGraphV2ReplacementLaunchRestoresReplacedRoot(t *testing.T) {
 	}
 }
 
-func TestDoSlingDefaultGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T) {
+// The target's default_sling_formula reaches the same attach path as an
+// explicit --on, so it inherits the same refusal over a live workflow —
+// otherwise every plain sling of an already-running bead would mint a rival
+// molecule. --force remains the override.
+func TestDoSlingDefaultGraphFormulaRefusesSecondLiveBareBeadRoot(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-a")
 	writeNamedGraphV2ConvoyFormula(t, formulaDir, "graph-b")
@@ -2914,12 +2934,17 @@ func TestDoSlingDefaultGraphFormulaAllowsDifferentLiveBareBeadRoots(t *testing.T
 		t.Fatalf("first AttachFormula: %v", err)
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-b")}
-	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, deps.Store)
+	_, err = DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID}, deps, deps.Store)
+	var conflictErr *sourceworkflow.ConflictError
+	if !errors.As(err, &conflictErr) {
+		t.Fatalf("DoSling error = %v, want *sourceworkflow.ConflictError", err)
+	}
+	result, err := DoSling(SlingOpts{Target: a, BeadOrFormula: source.ID, Force: true}, deps, deps.Store)
 	if err != nil {
-		t.Fatalf("DoSling: %v", err)
+		t.Fatalf("forced DoSling: %v", err)
 	}
 	if result.WorkflowID == "" || result.WorkflowID == first.WorkflowID {
-		t.Fatalf("WorkflowID = %q, want fresh root different from %s", result.WorkflowID, first.WorkflowID)
+		t.Fatalf("forced WorkflowID = %q, want fresh root different from %s", result.WorkflowID, first.WorkflowID)
 	}
 }
 

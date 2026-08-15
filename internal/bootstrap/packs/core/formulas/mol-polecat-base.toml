@@ -81,11 +81,64 @@ gc bd list --assignee=$GC_AGENT --status=in_progress
 
 The work bead is your assigned issue. Read it carefully:
 ```bash
-gc bd show "$WORK_BEAD_ID"           # Full issue details
-gc bd show "$WORK_BEAD_ID" --json | jq '.[0].metadata'  # Check for existing metadata
+WORK_BEAD_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
+printf '%s' "$WORK_BEAD_JSON" | jq '.[0]'           # Full issue details
+printf '%s' "$WORK_BEAD_JSON" | jq '.[0].metadata'  # Check for existing metadata
 ```
 
-**3. Check for rejection (IMPORTANT):**
+**3. Verify nobody else is already working it (FAIL CLOSED):**
+
+Two dispatch surfaces can reach one work bead — this workflow, and a direct
+pool route left on the bead itself. When both fire, two workers set up the same
+branch and one silently destroys the other's commits. Before touching the
+workspace, prove that the bead is not already in flight elsewhere:
+
+```bash
+WORK_STATUS=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].status // empty')
+WORK_OWNER=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].assignee // empty')
+if [ -z "$WORK_STATUS" ]; then
+  # An unreadable bead is not proof of safety. Treat it as blocked.
+  WORK_STATUS=unknown
+  WORK_OWNER="${WORK_OWNER:-unreadable}"
+fi
+OWNER_LIVE=0
+case "$WORK_OWNER" in
+  ""|"$GC_SESSION_NAME"|"$GC_SESSION_ID"|"$GC_AGENT"|"$GC_ALIAS") ;;   # unowned, or owned by you
+  *)
+    if [ "$WORK_STATUS" = "in_progress" ] || [ "$WORK_STATUS" = "unknown" ]; then
+      # An assignee can be any of the three forms a claim writes: the session
+      # name (what `gc bd update --claim` sets), the session id, or the agent
+      # address. Match all of them — a session record exposes them as
+      # .session_name, .id and .alias respectively, and has no .name field.
+      OWNER_LIVE=$(gc session list --state all --json 2>/dev/null \
+        | jq -r --arg o "$WORK_OWNER" \
+            '[.sessions[]? | select(((.alias // "") == $o) or ((.alias // "") | endswith($o)) or ((.session_name // "") == $o) or ((.id // "") == $o))] | length' 2>/dev/null)
+      # No answer means you could not disprove a live owner — assume one.
+      [ -z "$OWNER_LIVE" ] && OWNER_LIVE=1
+    fi ;;
+esac
+if [ "$OWNER_LIVE" != "0" ]; then
+  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER."
+  gc mail send "${GC_RIG:+$GC_RIG/}witness" -s "ESCALATION: duplicate dispatch on $WORK_BEAD_ID [HIGH]" -m "Work bead: $WORK_BEAD_ID
+Convoy: {{convoy_id}}
+Already held by: $WORK_OWNER (session still live), status=$WORK_STATUS
+This session: $GC_SESSION_NAME
+Held at load-context; no workspace was touched and this step was NOT closed."
+  gc runtime drain-ack
+  exit 1
+fi
+```
+
+**Leave this step bead OPEN when the check trips.** Closing it advances the
+workflow into workspace-setup, which is exactly the branch-recreating step that
+destroys the live worker's uncommitted work. An open step is a held workflow —
+the safe state. The escalation above is what resolves it.
+
+Owner liveness, not staleness, is the gate: an idle pool worker between claims
+looks identical to an abandoned one. Only a session absent from
+`gc session list --state all` is safely gone.
+
+**4. Check for rejection (IMPORTANT):**
 
 If `metadata.rejection_reason` exists, this bead was previously attempted
 and rejected by the refinery. Read the reason carefully:
@@ -95,14 +148,14 @@ and rejected by the refinery. Read the reason carefully:
 If `metadata.branch` exists, a branch already exists from the prior attempt.
 You will use it in workspace-setup instead of creating a new one.
 
-**4. Check inbox for additional context:**
+**5. Check inbox for additional context:**
 ```bash
 gc mail inbox
 # Read any HANDOFF or assignment messages, then archive after absorbing context
 # gc mail read <id> → process → gc mail archive <id>
 ```
 
-**5. Understand the requirements:**
+**6. Understand the requirements:**
 - What exactly needs to be done?
 - What files are likely involved?
 - Are there dependencies or blockers?

@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A formulas-v2 workflow is now the only dispatch surface for the work it
+  drives.** A bead an earlier plain `gc sling` had routed to a pool kept its
+  `gc.routed_to` when a v2 workflow was later poured over the convoy
+  tracking it, leaving two uncoordinated authorities — the pool's claim
+  query and the workflow's own dispatch — able to fire on the same bead.
+  Two workers then set up the same branch, where one silently destroys the
+  other's uncommitted work. Starting a workflow now retires that route on
+  the attached bead and on every member of its input convoy, keeping the
+  execution-semantics `gc.execution_routed_to` record. The retire now also
+  survives the controller's route recovery, which used to promote the bead's
+  archived `gc.run_target` route straight back into `gc.routed_to` on the
+  next patrol tick — undoing the retire seconds after the workflow started.
+  The archived route is deliberately left in place (it is what reopens the
+  bead to the pool once the workflow is gone), so recovery instead skips a
+  bead a live workflow drives; a workflow that dies without cleanup still
+  leaves its work recoverable. Separately,
+  `gc sling <bead> --on <formula>` now refuses to pour a second workflow
+  over work a live one already drives instead of minting a duplicate
+  molecule and reporting a successful attach — the binding was invisible to
+  every existing check, reachable only by walking convoy membership back
+  from the bead. `--force` overrides the refusal. The shipped
+  `mol-polecat-base` and `mol-scoped-work` formulas gained a fail-closed
+  backstop that holds at `load-context` — before any worktree exists — when
+  the work bead is already in flight under a live session.
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)
