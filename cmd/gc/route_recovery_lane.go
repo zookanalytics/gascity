@@ -599,7 +599,7 @@ func planeReadsLeg(plane storePlane, ref storeref.StoreRef, bindingOnly bool) bo
 //
 // The steady-state property this whole slice exists for lives in the first two
 // lines: no candidates, no plan, no store read at all.
-func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []string) routeRecoveryReport {
+func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, graphStore beads.Store, candidates []string) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "delta", candidates: len(candidates)}
 	if len(candidates) == 0 {
 		return report
@@ -615,7 +615,7 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 		}
 		for _, row := range rows {
 			resolved[row.ID] = struct{}{}
-			outcome := l.restoreRoute(leg.store, row, false)
+			outcome := l.restoreRoute(leg.store, graphStore, row, false)
 			report.legReads += outcome.writes
 			switch {
 			case outcome.restored:
@@ -642,19 +642,19 @@ func (l *routeRecoveryLane) deltaPass(plan storeref.ResolvedPlan, candidates []s
 // backstopPass is the authoritative convergence scan: today's full live open
 // read of every work leg, with the per-candidate Get fan-out replaced by one
 // batched IN-list re-verify per leg.
-func (l *routeRecoveryLane) backstopPass(plan storeref.ResolvedPlan, reason string) routeRecoveryReport {
-	return l.backstopPassOnPlane(plan, reason, reconcilePlane)
+func (l *routeRecoveryLane) backstopPass(plan storeref.ResolvedPlan, graphStore beads.Store, reason string) routeRecoveryReport {
+	return l.backstopPassOnPlane(plan, graphStore, reason, reconcilePlane)
 }
 
 // backstopPassOnPlane is the scan restricted to one plane's legs. Only the
 // convergence lane's plane is used in production; the parameter exists so the
 // invariant can be asserted from both sides of it.
-func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reason string, plane storePlane) routeRecoveryReport {
+func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, graphStore beads.Store, reason string, plane storePlane) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "backstop", reason: reason}
 	var errs []error
 	partial, walkErr := walkPlaneLegs(plan, plane, func(leg planeLeg) error {
 		report.legs++
-		legReport := l.backstopLeg(leg)
+		legReport := l.backstopLeg(leg, graphStore)
 		report.candidates += legReport.candidates
 		report.restored += legReport.restored
 		report.quarantined += legReport.quarantined
@@ -692,7 +692,7 @@ func (l *routeRecoveryLane) backstopPassOnPlane(plan storeref.ResolvedPlan, reas
 // The window between the re-verify and the write is narrowed, not closed. The
 // re-stamp stays monotonic (never worse than the prior blind write), so the
 // residual degrades to the pre-guard behavior rather than a new failure.
-func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
+func (l *routeRecoveryLane) backstopLeg(leg planeLeg, graphStore beads.Store) routeRecoveryReport {
 	report := routeRecoveryReport{lane: "backstop"}
 	store := leg.store
 	if store == nil {
@@ -737,7 +737,7 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 	returned := make(map[string]struct{}, len(rows))
 	for _, row := range rows {
 		returned[row.ID] = struct{}{}
-		outcome := l.restoreRoute(store, row, true)
+		outcome := l.restoreRoute(store, graphStore, row, true)
 		report.legReads += outcome.writes
 		switch {
 		case outcome.restored:
@@ -823,7 +823,7 @@ type routeRestoreOutcome struct {
 // what keeps a claim that landed since the scan from being clobbered — a claim
 // flips the bead to in_progress and consumes gc.routed_to in one update (ga-sa0,
 // ga-bgu).
-func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, backstop bool) routeRestoreOutcome {
+func (l *routeRecoveryLane) restoreRoute(store, graphStore beads.Store, live beads.Bead, backstop bool) routeRestoreOutcome {
 	route := carriedPoolRoute(live)
 	if route == "" || live.Status != "open" || strings.TrimSpace(live.Assignee) != "" {
 		if backstop {
@@ -833,6 +833,30 @@ func (l *routeRecoveryLane) restoreRoute(store beads.Store, live beads.Bead, bac
 			}
 			return routeRestoreOutcome{err: err}
 		}
+		return routeRestoreOutcome{}
+	}
+
+	// A live graph workflow drives its work WITHOUT claiming or blocking the
+	// bead — it stays open and unassigned for the workflow's whole life — so
+	// neither the raw-open filter above nor the assignee check can see it. The
+	// launch retired gc.routed_to to make the workflow the single dispatch
+	// surface, and gc.run_target deliberately survives that retire, which is
+	// exactly carriedPoolRoute's recoverable shape. Re-promoting it here would
+	// hand the pool a bead the workflow is already dispatching: two polecats on
+	// one branch (gc-p64nt). This is the only place either lane writes a route,
+	// so gating it here gates the delta pass and the backstop scan alike.
+	//
+	// It is NOT a re-check failure: the scan and the live row agree, and the
+	// bead is legitimately unrecoverable for as long as the workflow runs.
+	// Quarantining it would make a healthy workflow look like a defect, so the
+	// outcome is a clean skip that does not touch the flap tally either.
+	driven, drivenErr := liveGraphWorkflowDrivesBead(store, graphStore, live)
+	if drivenErr != nil {
+		// Fail closed: an unproven bead keeps its retired route. Restoring on a
+		// read error would trade a stalled bead for a double dispatch.
+		return routeRestoreOutcome{err: fmt.Errorf("bead %s: checking for a live workflow before route restore: %w", live.ID, drivenErr)}
+	}
+	if driven {
 		return routeRestoreOutcome{}
 	}
 

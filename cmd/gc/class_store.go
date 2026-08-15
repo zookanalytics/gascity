@@ -161,6 +161,17 @@ func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
 	return resolveOrderStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
 }
 
+// relocatedGraphStore returns the runtime's GRAPH-class binding store when
+// [storage] relocates the graph class, and nil when it does not — the graph
+// twin of relocatedOrdersStore. It differs from graphBeadStore(), which falls
+// back to the CITY work store: a caller iterating per-scope work stores must
+// fall back to the scope's own store instead, because an unrelocated rig's
+// workflow roots live in that rig's ledger, not the city's. nil is what lets
+// each caller pick its own fallback.
+func (cr *CityRuntime) relocatedGraphStore() beads.Store {
+	return resolveGraphStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
+}
+
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
 // the default/residual coordination class; this is its typed accessor, distinct
 // from the federation/by-id/default cityBeadStore() root. Returned as the

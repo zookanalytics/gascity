@@ -414,7 +414,7 @@ func TestSteadyTickLedgerRoundTripBudgetIsZero(t *testing.T) {
 
 	// A steady tick names nothing and touches nothing.
 	plan, ledger, binding := newCity(t)
-	if report := newRouteRecoveryLane().deltaPass(plan, nil); report.legReads != 0 {
+	if report := newRouteRecoveryLane().deltaPass(plan, nil, nil); report.legReads != 0 {
 		t.Fatalf("a steady tick reported %d leg read(s), want 0", report.legReads)
 	}
 	if ledger.roundTrips != 0 || binding.roundTrips != 0 {
@@ -423,7 +423,7 @@ func TestSteadyTickLedgerRoundTripBudgetIsZero(t *testing.T) {
 
 	// A tick WITH work still owes the ledger nothing: the binding answers.
 	plan, ledger, binding = newCity(t)
-	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1", "GB-1"})
+	report := newRouteRecoveryLane().deltaPass(plan, nil, []string{"CW-1", "GB-1"})
 	if ledger.roundTrips != 0 {
 		t.Fatalf("a working tick issued %d ledger round trip(s), want 0 — that is %v of tick at maintainer-city's RTT",
 			ledger.roundTrips, time.Duration(ledger.roundTrips)*5400*time.Millisecond)
