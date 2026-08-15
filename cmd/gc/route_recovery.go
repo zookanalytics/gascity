@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,7 +10,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -43,6 +46,67 @@ func carriedPoolRoute(b beads.Bead) string {
 		return ""
 	}
 	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
+}
+
+// workflowIDMetadataKey is the BARE (non-gc-prefixed) key a graph workflow
+// launch stamps on its source bead to point at the root now driving it, and
+// that every path returning the bead to the pool clears. It is deliberately not
+// beadmeta.WorkflowIDMetadataKey ("gc.workflow_id"), which names a different
+// key on a different bead — see the same distinction in
+// internal/api/handler_beads.go.
+const workflowIDMetadataKey = "workflow_id"
+
+// liveGraphWorkflowDrivesBead reports whether a graph workflow is currently
+// driving b's work, in which case b's retired pool route must stay retired.
+//
+// A started graph workflow is the single live dispatch surface for the work it
+// drives, and it establishes that by retiring gc.routed_to on its bead
+// (internal/sling: retireClaimRoute). gc.run_target survives that retire on
+// purpose — it is the archived route reopen-source and this recovery restore
+// the bead from once the workflow is gone (ga-20zd) — so without this gate the
+// retire lasts exactly until the next pass, which re-promotes the archived
+// route and hands the pool a bead the workflow is already dispatching. That is
+// the double dispatch the retire exists to prevent (gc-p64nt), reintroduced one
+// pass later: two polecats on one branch.
+//
+// Liveness — not the mere presence of a link — is the gate, so the answer stops
+// being true the moment the workflow reaches a terminal status and the bead
+// becomes recoverable again. A marker that outlived its workflow would strand
+// the bead in the one state this recovery exists to heal.
+//
+// Both launch shapes are checked because they leave different links behind. A
+// convoy-first pour (the graph.v2 shape: `gc sling <bead> --on <formula>` mints
+// a synthetic input convoy over the bead) clears gc.source_bead_id and links
+// back only through gc.input_convoy_id -> the convoy -> its tracked members,
+// which is the reverse walk. A workflow attached to a source bead instead
+// stamps that bead's workflow_id with the root id, and carries no input convoy
+// to walk. Neither link alone sees the other's shape.
+//
+// graphStore is where workflow roots live on a city that relocates the graph
+// coordination class; pass nil where graph collapses onto the work store.
+func liveGraphWorkflowDrivesBead(store, graphStore beads.Store, b beads.Bead) (bool, error) {
+	rootStore := graphStore
+	if rootStore == nil {
+		rootStore = store
+	}
+	if rootID := strings.TrimSpace(b.Metadata[workflowIDMetadataKey]); rootID != "" {
+		root, err := rootStore.Get(rootID)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			// The root is gone, so nothing dispatches through it. Fall through
+			// rather than return: a bead can carry a stale attachment link and
+			// still be a live convoy-first workflow's member.
+		case err != nil:
+			return false, fmt.Errorf("reading workflow %s: %w", rootID, err)
+		case !convoycore.IsTerminalStatus(root.Status):
+			return true, nil
+		}
+	}
+	roots, err := sourceworkflow.ListLiveInputConvoyRootsForItem(store, rootStore, b.ID, "")
+	if err != nil {
+		return false, err
+	}
+	return len(roots) > 0, nil
 }
 
 // routeRecoveryLaneOf returns this runtime's lane, creating it on first use so a
@@ -149,7 +213,10 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 		return routeRecoveryReport{lane: "backstop", reason: reason, err: err}
 	}
 	started := time.Now()
-	report := lane.backstopPass(plan, reason)
+	// Where the graph class is relocated every scope's workflow roots live in
+	// the one binding; where it is not, they live beside the work in each
+	// scope's own store, which is what a nil graphStore selects.
+	report := lane.backstopPass(plan, cr.relocatedGraphStore(), reason)
 	report.duration = time.Since(started)
 	lane.noteBackstopRan(time.Now(), reason, report.partial || report.err != nil)
 	cr.logRouteRecovery(report)
@@ -182,7 +249,7 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 		lane.force(backstopReasonCursorGap)
 		return routeRecoveryReport{lane: "delta", candidates: len(candidates), err: err}
 	}
-	report := lane.deltaPass(plan, candidates)
+	report := lane.deltaPass(plan, cr.relocatedGraphStore(), candidates)
 	if report.partial || report.err != nil {
 		// A leg the delta pass could not read is a leg whose convergence is now
 		// owed to the scan.
