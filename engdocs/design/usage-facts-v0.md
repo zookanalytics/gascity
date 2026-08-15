@@ -206,9 +206,22 @@ yet settled.
   `usage_compute_emitted_at:<epoch>` marker, then writes the marker. This is
   at-least-once: a crash between the durable sink append and the marker write
   re-emits next tick, and `IdempotencyKey` collapses the duplicate at read time
-  (fix double-count, not under-count). The scan only sees the open set, so a
-  session closed directly from active without first reaching an open terminal
-  state (asleep/drained/archived/suspended/quarantined) is a known under-count.
+  (fix double-count, not under-count).
+
+  The scan itself only sees the open set, and that alone made the lane nearly
+  silent: the reconciler stamps a session's terminal state and closes its bead in
+  the SAME pass, so almost no session is ever observed open AND terminal (on
+  2026-08-15, 68 of 70 drained sessions were dropped — gc-23ep6). The scan is
+  therefore paired with a cross-pass diff: the ids still owing an unaccounted
+  interval are remembered, and any that leave the open set next pass are fetched
+  by id — the one closed-record read `loadSessionBeadSnapshot` sanctions — and
+  routed by the same per-session logic, deciding from the FRESH bead so a session
+  that merely dropped out of a partial snapshot is not mis-billed. What remains an
+  under-count is narrower: a session whose close writes a state that is not
+  compute-terminal (`gc_swept`, `failed-create`, `stranded-repair`) still records
+  nothing, because the terminal-state predicate — not the open-set scan — rejects
+  it.
+
   The single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped
