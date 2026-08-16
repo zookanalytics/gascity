@@ -216,7 +216,10 @@ yet settled.
   interval are remembered, and any that leave the open set next pass are fetched
   by id — the one closed-record read `loadSessionBeadSnapshot` sanctions — and
   routed by the same per-session logic, deciding from the FRESH bead so a session
-  that merely dropped out of a partial snapshot is not mis-billed. What remains an
+  that merely dropped out of a partial snapshot is neither mis-billed nor
+  forgotten: it bills nothing while it is still live, and it stays in the owing
+  set until its bead closes, because the pass that tolerates a partial snapshot is
+  otherwise also the pass that drops the last reference to it. What remains an
   under-count is narrower: a session whose close writes a state that is not
   compute-terminal (`gc_swept`, `failed-create`, `stranded-repair`) still records
   nothing, because the terminal-state predicate — not the open-set scan — rejects

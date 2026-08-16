@@ -126,9 +126,9 @@ passes. A session that leaves the open snapshot costs exactly one `Get` by id �
 the closed-record read the snapshot loader sanctions — and is routed by the
 **same** `processSessionBead` the open lane uses, so the decision is made on the
 fresh bead: a session that merely dropped out of a *partial* snapshot is re-read
-and left alone rather than mis-billed for an interval that has not ended.
+and not mis-billed for an interval that has not ended.
 
-Two properties worth keeping in mind when reading it:
+Three properties worth keeping in mind when reading it:
 
 - `processSessionBead` reports whether anything is still **owed**, which is
   deliberately not "did this call write a fact". `emitComputeFactForBead` returns
@@ -137,8 +137,27 @@ Two properties worth keeping in mind when reading it:
   settled session forever and re-`Get`s it every pass — an unbounded leak on the
   synchronous reconcile tick. Guarded by
   `TestEmitDueComputeFactsDropsSettledVanishedSession`.
-- The tracking set is bounded by the fleet, and accounting that does not settle
-  stays in it and is retried.
+- **Not mis-billing is only half of the partial-snapshot case.** The first cut
+  reported the still-live session as *settled*, which drops it from the tracking
+  set — and `takeVanishedIntervalSessions` has by then already replaced that set
+  with the partial snapshot that omitted it. If the session drained and closed
+  before it reappeared in an open snapshot, no owed id remained to diff against
+  and nothing rescans closed history, so the interval was lost outright: the
+  tolerated partial snapshot became the thing that discarded the session. A
+  still-live session is therefore reported **still owed**, so it stays tracked
+  until it really ends (pre-open review of `polecat/gc-23ep6`, bead gc-zigay).
+  Guarded by `TestEmitDueComputeFactsKeepsTrackingLiveVanishedSession`, and by
+  `TestEmitDueComputeFactsDoesNotBillStillLiveVanishedSession`, whose final pass
+  now uses an EMPTY snapshot — feeding the stale awake row back in re-added the
+  session through a snapshot `OpenInfos()` cannot produce (it never returns a
+  closed bead) and masked the loss.
+- That retention stops at the bead's own close, which is what keeps the set
+  bounded by the live fleet: a bead closed straight from active never reaches a
+  compute-terminal state (see *What this does NOT fix* below) and its metadata
+  will never change again, so retaining it would park it in the set permanently.
+  Guarded by `TestEmitDueComputeFactsDropsClosedNonTerminalVanishedSession`.
+  Accounting that does not settle for the other reasons — failed sink write,
+  pending model sweep — stays in the set and is retried.
 
 ## What this does NOT fix
 
