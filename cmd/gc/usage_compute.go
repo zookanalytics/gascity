@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -430,8 +431,9 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 // ends — otherwise the pass that tolerated the partial snapshot would also be the pass
 // that forgot it. Retention stops at the bead's own close: a closed bead that never
 // reached a compute-terminal state can never tell a later pass anything more, and is
-// dropped rather than re-Got forever. One whose bead can no longer be read is likewise
-// dropped, with the failure logged.
+// dropped rather than re-Got forever. A bead the store reports ABSENT is dropped for
+// the same reason; a bead that merely failed to read is retained, because that failure
+// can clear and the Get is the last reference the interval has left.
 func (cr *CityRuntime) accountVanishedIntervals(
 	ctx context.Context,
 	store beads.Store,
@@ -447,7 +449,18 @@ func (cr *CityRuntime) accountVanishedIntervals(
 		}
 		b, err := store.Get(id)
 		if err != nil {
-			logf("usage: loading closed session %s for usage facts failed; its interval is not accounted: %v", id, err)
+			// This Get holds the LAST reference to the owed interval: the pass has
+			// already replaced the tracked set with the current open snapshot, and a
+			// closed session never reappears in OpenInfos(). Only ErrNotFound proves
+			// the bead is gone and nothing further can ever be learned about it; every
+			// other error is a read that may succeed next pass, so retaining it is what
+			// keeps a transient backend failure from losing the interval permanently.
+			if !errors.Is(err, beads.ErrNotFound) {
+				cr.retainVanishedIntervalSession(id)
+				logf("usage: loading closed session %s for usage facts failed; retrying next pass: %v", id, err)
+				continue
+			}
+			logf("usage: closed session %s is absent from the store; its interval cannot be accounted: %v", id, err)
 			continue
 		}
 		if !processSessionBead(b) {

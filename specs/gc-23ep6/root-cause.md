@@ -158,6 +158,19 @@ Three properties worth keeping in mind when reading it:
   Guarded by `TestEmitDueComputeFactsDropsClosedNonTerminalVanishedSession`.
   Accounting that does not settle for the other reasons — failed sink write,
   pending model sweep — stays in the set and is retried.
+- **The catch-up `Get` is itself the last reference to the interval**, so what it
+  does on failure decides whether the interval survives. Only `beads.ErrNotFound`
+  proves the bead is absent and nothing more can ever be learned; every other
+  error is a read that may succeed next pass. Dropping on all of them recreated
+  the original loss one edge later — a session seen awake on pass 1, drained and
+  closed before pass 2, and hit by a transient backend failure on pass 2 is never
+  billed, even after the store recovers, because the tracking set has by then been
+  replaced with the current open snapshot and a closed session never reappears in
+  `OpenInfos()`. Non-`ErrNotFound` failures are therefore retained and retried
+  (round-2 pre-open review of `polecat/gc-23ep6`, bead gc-9gosq). Guarded by
+  `TestEmitDueComputeFactsRetainsVanishedSessionOnTransientGetError`, with
+  `TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence` holding the
+  bound so a genuinely deleted bead is not re-`Get` forever.
 
 ## What this does NOT fix
 

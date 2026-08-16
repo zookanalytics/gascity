@@ -1492,3 +1492,117 @@ func TestEmitDueComputeFactsDropsSettledVanishedSession(t *testing.T) {
 		t.Fatalf("settled session %s stayed in the owing set; it would be re-Got on every pass forever", h.beadID)
 	}
 }
+
+// getFailingStore fails Get for one bead id until failures is exhausted, then
+// serves the embedded store normally. It stands in for a transient backend read
+// failure — a dropped connection, a busy backend — which is NOT proof the bead is
+// absent.
+type getFailingStore struct {
+	beads.Store
+	id       string
+	failures int
+	err      error
+	calls    int
+}
+
+func (s *getFailingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.calls++
+		if s.failures > 0 {
+			s.failures--
+			return beads.Bead{}, s.err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestEmitDueComputeFactsRetainsVanishedSessionOnTransientGetError closes the
+// last hole in the catch-up's convergence. The vanished lane decides from a fresh
+// Get, and that Get is the only remaining reference to the owed interval: the
+// pass has already replaced the tracked set with the current open snapshot, and a
+// closed session never reappears in OpenInfos(). So a Get that fails for a reason
+// other than confirmed absence must NOT consume the session — that would recreate
+// the very data loss this branch fixes, one edge later, for a session that drained
+// between passes and was hit by a transient backend failure on the next one.
+//
+// Only beads.ErrNotFound proves the bead is gone; every other error is a read that
+// may succeed next tick.
+func TestEmitDueComputeFactsRetainsVanishedSessionOnTransientGetError(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "transient-get-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	// Pass 1 sees it awake and starts tracking its unaccounted interval.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+
+	// It drains and closes in one reconciler pass, so no pass ever observes it
+	// open AND terminal — the window the catch-up exists to cover.
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 2 catches it, but the closed-record read fails transiently.
+	failing := &getFailingStore{Store: h.store, id: h.beadID, failures: 1, err: errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")}
+	h.cr.cs.cityBeadStore = failing
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if failing.calls == 0 {
+		t.Fatal("the catch-up never issued the closed-record Get for the vanished session")
+	}
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 0 {
+		t.Fatalf("compute facts = %d, want 0: nothing can be billed from a bead that could not be read", got)
+	}
+	if _, retained := h.cr.owingIntervals[h.beadID]; !retained {
+		t.Fatalf("session %s was dropped from the owing set on a transient Get failure; "+
+			"nothing else ever revisits a closed session bead, so its interval is lost permanently", h.beadID)
+	}
+
+	// Pass 3 reads the bead successfully and must bill the interval it retained.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: the interval retained across a transient Get failure must bill once the read recovers", got)
+	}
+}
+
+// TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence bounds the
+// retention above. Retaining on every Get error would turn a genuinely deleted
+// bead into a permanent entry in the owing set, re-Got on every reconcile tick
+// forever. beads.ErrNotFound is the one error that proves the bead is gone and
+// nothing further can ever be learned about it, so that — and only that — drops it.
+func TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "absent-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+
+	// The bead is gone for good. Stores report that as a wrapped ErrNotFound.
+	absent := &getFailingStore{
+		Store:    h.store,
+		id:       h.beadID,
+		failures: 1,
+		err:      fmt.Errorf("getting bead %q: %w", h.beadID, beads.ErrNotFound),
+	}
+	h.cr.cs.cityBeadStore = absent
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if absent.calls == 0 {
+		t.Fatal("the catch-up never issued the closed-record Get for the vanished session")
+	}
+	if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+		t.Fatalf("absent session %s stayed in the owing set; it would be re-Got on every pass forever", h.beadID)
+	}
+}
