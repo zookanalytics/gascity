@@ -4022,6 +4022,7 @@ gc session
 | [gc session peek](#gc-session-peek) | View session output without attaching |
 | [gc session pin](#gc-session-pin) | Keep a session awake |
 | [gc session prune](#gc-session-prune) | Close old dormant sessions |
+| [gc session release-name](#gc-session-release-name) | Free a runtime name still reserved by a closed session |
 | [gc session rename](#gc-session-rename) | Rename a session |
 | [gc session reset](#gc-session-reset) | Restart a session fresh while preserving the bead |
 | [gc session submit](#gc-session-submit) | Submit a message with semantic delivery intent |
@@ -4238,6 +4239,35 @@ gc session prune --state asleep,suspended,drained --before 1h
 | `--before` | string | `7d` | prune sessions older than this duration (e.g., 7d, 24h) |
 | `--json` | bool |  | emit JSONL |
 | `--state` | string | `suspended` | comma-separated states to prune (suspended, asleep, drained) |
+
+## gc session release-name
+
+Clear the runtime session name, alias, and canonical-identity record held
+by closed session beads matching the given name or alias.
+
+A closed session bead keeps the identifiers it ran under, and name resolution
+still consults them, so the name can stay reserved after every runtime that
+used it is gone. Nothing else releases it: nudge, wake, and kill all reject a
+closed bead, and prune does not accept the closed state. Use this when
+creating or waking a session fails with "already belongs to &lt;bead-id&gt;
+(closed)".
+
+A name held by a live session is refused — stop that session instead.
+
+```
+gc session release-name <session-name-or-alias> [flags]
+```
+
+**Example:**
+
+```
+gc session release-name rig/pack.refinery
+gc session release-name city--pack__refinery --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSONL |
 
 ## gc session rename
 
