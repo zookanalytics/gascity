@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 210,
+  "next_id": 211,
   "permanent_ids": [
     {
       "name": "help",
@@ -3764,6 +3764,21 @@
       "classification": "session-prune",
       "owner": "immediate",
       "id": 149
+    },
+    {
+      "path": "gc session release-name",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "session-release-name",
+      "owner": "immediate",
+      "id": 210
     },
     {
       "path": "gc session rename",
