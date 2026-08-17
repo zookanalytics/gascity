@@ -186,6 +186,15 @@ type CityRuntime struct {
 	// bounded discovery and transcript reads for every awake session.
 	liveSweepMemos sync.Map // session bead id -> liveSweepMemo
 
+	// owingIntervals is the set of session bead ids that owed an unaccounted
+	// compute interval as of the previous usage pass. The next pass diffs the
+	// open snapshot against it to find sessions whose interval ended in between:
+	// the reconciler stamps a session's terminal state and closes its bead in one
+	// pass, so the open-bead scan the usage lane reads would otherwise never
+	// observe the interval end at all (gc-23ep6).
+	owingIntervalsMu sync.Mutex
+	owingIntervals   map[string]struct{}
+
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
 	// is permitted for this supervisor lifetime; a restart deliberately rebuilds
