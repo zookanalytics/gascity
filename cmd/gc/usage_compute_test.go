@@ -1152,3 +1152,671 @@ func TestIsComputeTerminalState(t *testing.T) {
 		}
 	}
 }
+
+// TestEmitDueComputeFactsAccountsIntervalsClosedBetweenPasses is the
+// blind-cost-measurement regression (gc-23ep6). The usage lane is fed
+// sessionBeadSnapshot.OpenInfos(), and that snapshot deliberately never loads
+// closed history, so a session is only ever accounted if some pass observes it
+// while it is BOTH open AND terminal. The reconciler flips a drained session to
+// its terminal state and closes it in the SAME pass, so that window is normally
+// empty: the pass before the drain sees an awake session, and the pass after it
+// sees nothing at all. In production on 2026-08-15, 68 of 70 drained sessions
+// closed with no compute fact and no terminal model sweep, and .gc/usage.jsonl
+// stopped growing entirely — cost measurement went blind city-wide.
+//
+// A session that vanishes from the open snapshot between passes must still have
+// its interval accounted, from an explicit per-id Get — the one closed-record
+// read the snapshot loader sanctions.
+func TestEmitDueComputeFactsAccountsIntervalsClosedBetweenPasses(t *testing.T) {
+	start := liveSweepStart()
+	awakeMeta := map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "drained-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	}
+	h := newLiveSweepHarness(t, t.TempDir(), awakeMeta)
+
+	// A second session stays awake for every pass, so the open snapshot is never
+	// empty and the lane is exercised the way a live fleet exercises it.
+	awake := h.addSession(t, map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "awake-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	// Pass 1 sees it AWAKE. Nothing terminal has happened, so nothing bills.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info, awake}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 0 {
+		t.Fatalf("pass 1 compute facts = %d, want 0: the interval has not ended", got)
+	}
+
+	// The reconciler now drains and CLOSES it in one pass, exactly as
+	// closeSessionBeadIfReachableStoreUnassigned does on the drain path: the
+	// terminal state and the close land together, so no pass ever observes the
+	// bead open AND terminal.
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 2 no longer sees it. Its interval must still be accounted.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{awake}, false)
+
+	facts := mustReadFacts(t, h.sinkPath)
+	if got := kindCount(facts, usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: an interval that ended between passes must still bill; facts: %+v", got, facts)
+	}
+	for _, f := range facts {
+		if f.Kind != usage.KindCompute {
+			continue
+		}
+		if f.SessionID != h.beadID {
+			t.Fatalf("compute fact SessionID = %q, want %q", f.SessionID, h.beadID)
+		}
+		if f.WallSeconds <= 0 {
+			t.Fatalf("compute fact WallSeconds = %v, want the elapsed awake interval", f.WallSeconds)
+		}
+	}
+
+	// The interval is marker-closed so a later pass cannot re-bill it.
+	closed, err := h.store.Get(h.beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := closed.Metadata[usageComputeEmittedAtKey]; got != awakeMeta["awake_started_at"] {
+		t.Fatalf("usage_compute_emitted_at = %q, want %q", got, awakeMeta["awake_started_at"])
+	}
+
+	// Pass 3: the session is long gone from the snapshot and already accounted.
+	// It must not bill again.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{awake}, false)
+	if got := rawSinkComputeFactCount(t, h.sinkPath); got != 1 {
+		t.Fatalf("appended compute facts = %d, want 1: a closed, accounted interval must not re-bill", got)
+	}
+}
+
+// mustReadFacts reads the sink, failing the test on an I/O error or any
+// malformed-record warning.
+func mustReadFacts(t *testing.T, path string) []usage.Fact {
+	t.Helper()
+	facts, warnings, err := usage.ReadFacts(path)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	return facts
+}
+
+// rawSinkComputeFactCount counts compute facts APPENDED to the sink file,
+// without usage.ReadFacts's IdempotencyKey dedup — a re-billed interval is
+// collapsed at read time, so only the raw count can catch it.
+func rawSinkComputeFactCount(t *testing.T, path string) int {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("reading usage sink %s: %v", path, err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(body), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var f usage.Fact
+		if err := json.Unmarshal([]byte(line), &f); err != nil {
+			t.Fatalf("malformed usage fact %q: %v", line, err)
+		}
+		if f.Kind == usage.KindCompute {
+			n++
+		}
+	}
+	return n
+}
+
+// TestEmitDueComputeFactsDoesNotBillStillLiveVanishedSession guards the
+// closed-between-passes catch-up against its own failure mode. A session can
+// leave the open snapshot for reasons other than closing — most importantly a
+// PARTIAL session query, which the reconcile tick tolerates and reports rather
+// than failing on. Billing a vanished session from the stale snapshot row would
+// mint a compute fact for an interval that has not ended and stamp the marker
+// that suppresses the real end-of-interval emission, permanently undercounting
+// a long-lived session.
+//
+// The catch-up must therefore decide from the FRESH bead: a session that is
+// still awake is left alone, keeps its interval open, and bills normally once it
+// really does end.
+func TestEmitDueComputeFactsDoesNotBillStillLiveVanishedSession(t *testing.T) {
+	start := liveSweepStart()
+	awakeMeta := map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "still-live-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	}
+	h := newLiveSweepHarness(t, t.TempDir(), awakeMeta)
+
+	// Pass 1 sees it awake and starts tracking its unaccounted interval.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+
+	// Pass 2's snapshot omits it, but the bead is untouched: still open, still
+	// awake. Nothing may bill, and the interval must stay open.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 0 {
+		t.Fatalf("compute facts = %d, want 0: a still-awake session must not bill an interval that has not ended", got)
+	}
+	live, err := h.store.Get(h.beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := live.Metadata[usageComputeEmittedAtKey]; got != "" {
+		t.Fatalf("usage_compute_emitted_at = %q, want unset: stamping it would suppress the real end-of-interval fact", got)
+	}
+
+	// It really ends now. The interval must still bill — the catch-up must not
+	// have consumed its one chance on the false alarm above.
+	//
+	// The snapshot stays EMPTY for this pass. Re-feeding the stale awake row
+	// would re-add the session to the owing set through a snapshot the real
+	// loader cannot produce (OpenInfos never returns a closed bead), which
+	// hides whether the false alarm above dropped it — the masking this case
+	// exists to rule out.
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1 once the interval really ends", got)
+	}
+}
+
+// TestEmitDueComputeFactsKeepsTrackingLiveVanishedSession pins the tracking-set
+// invariant that makes the case above work. A tolerated PARTIAL snapshot drops a
+// still-live session's row; the pass that follows replaces the owing set with
+// that partial snapshot, so the only thing standing between the session and a
+// lost interval is the catch-up RETAINING it. Reporting the live no-op as
+// settled instead deletes the last reference to the session, and if it drains
+// and closes before it reappears in an open snapshot there is no owed id left to
+// diff against and its interval is never billed.
+func TestEmitDueComputeFactsKeepsTrackingLiveVanishedSession(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "partial-snapshot-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	// Pass 1 sees it awake and starts tracking its unaccounted interval.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+
+	// Pass 2's snapshot is partial and omits it. The bead is untouched — still
+	// open, still awake, still owing — so it must stay tracked.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was dropped from the owing set by a partial snapshot; "+
+			"its interval can no longer be billed once it closes", h.beadID)
+	}
+
+	// It drains and closes without ever reappearing in an open snapshot — the
+	// sequence the tracking set exists to survive.
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: an interval that ended while its session was "+
+			"missing from a partial snapshot must still bill", got)
+	}
+}
+
+// TestEmitDueComputeFactsDropsClosedNonTerminalVanishedSession bounds the
+// retention above. Retaining a vanished session because its state is not
+// compute-terminal is only safe while its bead is still OPEN, where a later pass
+// can still observe the interval end. A bead closed straight from active never
+// reaches a compute-terminal state — the known v0 scan limitation — so no later
+// pass can learn anything more about it. Retaining that one would park it in the
+// owing set permanently and re-Get it on every reconcile tick forever.
+func TestEmitDueComputeFactsDropsClosedNonTerminalVanishedSession(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateActive),
+		"session_name":     "closed-from-active-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+
+	// Closed without ever passing through a compute-terminal state, so its
+	// metadata still reads active.
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+		t.Fatalf("closed-from-active session %s stayed in the owing set; "+
+			"it would be re-Got on every pass forever", h.beadID)
+	}
+}
+
+// TestEmitDueComputeFactsRetriesUnaccountedVanishedInterval pins the catch-up's
+// convergence property: a vanished session whose sink write FAILS must stay
+// tracked and be retried, not consumed. Without the retry a single transient
+// sink failure loses that session's interval permanently, because nothing else
+// ever revisits a closed session bead.
+func TestEmitDueComputeFactsRetriesUnaccountedVanishedInterval(t *testing.T) {
+	start := liveSweepStart()
+	awakeMeta := map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "retry-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	}
+	h := newLiveSweepHarness(t, t.TempDir(), awakeMeta)
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 2 catches the vanished session, but the sink rejects the write.
+	failing := &erroringSink{}
+	h.cr.cs.usageSink = failing
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if failing.calls == 0 {
+		t.Fatal("the catch-up never reached the sink for a vanished session")
+	}
+	unmarked, err := h.store.Get(h.beadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unmarked.Metadata[usageComputeEmittedAtKey]; got != "" {
+		t.Fatalf("usage_compute_emitted_at = %q, want unset after a failed sink write", got)
+	}
+
+	// Pass 3 with a working sink must retry it rather than having dropped it. The
+	// session is closed, so the retry waits out closedUsageRetryInterval first.
+	h.setVanishedRetry(t, owedIntervalRetry{until: h.vanishedRetry(t).until})
+	h.cr.cs.usageSink = usage.NewLocalSink(h.sinkPath)
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: a failed vanished-interval write must be retried", got)
+	}
+}
+
+// TestEmitDueComputeFactsDropsSettledVanishedSession pins the tracking set's
+// upper bound. A session is added to the owing set from the snapshot row taken
+// BEFORE that pass accounts it, so the very next pass — where the bead has since
+// closed — sees a vanished session whose interval is already marker-closed.
+// emitComputeFactForBead reports that no-op with the same false it uses for a
+// failed write, so reading it as a failure would retain the session forever and
+// re-Get it on every subsequent pass: an unbounded, permanently growing leak on
+// the synchronous reconcile tick.
+func TestEmitDueComputeFactsDropsSettledVanishedSession(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateDrained),
+		"session_name":     "settled-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	// Pass 1 observes it open AND terminal: it is tracked from the pre-accounting
+	// row and accounted in the same pass.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("pass 1 compute facts = %d, want 1", got)
+	}
+
+	// It closes and vanishes. The interval is already settled, so the catch-up must
+	// recognize that and stop tracking it.
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := rawSinkComputeFactCount(t, h.sinkPath); got != 1 {
+		t.Fatalf("appended compute facts = %d, want 1: a settled interval must not re-bill", got)
+	}
+	if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+		t.Fatalf("settled session %s stayed in the owing set; it would be re-Got on every pass forever", h.beadID)
+	}
+}
+
+// usageGetFailingStore fails Get for one bead id until failures is exhausted, then
+// serves the embedded store normally. It stands in for a transient backend read
+// failure — a dropped connection, a busy backend — which is NOT proof the bead is
+// absent.
+type usageGetFailingStore struct {
+	beads.Store
+	id       string
+	failures int
+	err      error
+	calls    int
+}
+
+func (s *usageGetFailingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.calls++
+		if s.failures > 0 {
+			s.failures--
+			return beads.Bead{}, s.err
+		}
+	}
+	return s.Store.Get(id)
+}
+
+// TestEmitDueComputeFactsRetainsVanishedSessionOnTransientGetError closes the
+// last hole in the catch-up's convergence. The vanished lane decides from a fresh
+// Get, and that Get is the only remaining reference to the owed interval: the
+// pass has already replaced the tracked set with the current open snapshot, and a
+// closed session never reappears in OpenInfos(). So a Get that fails for a reason
+// other than confirmed absence must NOT consume the session — that would recreate
+// the very data loss this branch fixes, one edge later, for a session that drained
+// between passes and was hit by a transient backend failure on the next one.
+//
+// Only beads.ErrNotFound proves the bead is gone; every other error is a read that
+// may succeed next tick.
+func TestEmitDueComputeFactsRetainsVanishedSessionOnTransientGetError(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "transient-get-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	// Pass 1 sees it awake and starts tracking its unaccounted interval.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+
+	// It drains and closes in one reconciler pass, so no pass ever observes it
+	// open AND terminal — the window the catch-up exists to cover.
+	if err := h.store.SetMetadata(h.beadID, "state", string(session.StateDrained)); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pass 2 catches it, but the closed-record read fails transiently.
+	failing := &usageGetFailingStore{Store: h.store, id: h.beadID, failures: 1, err: errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")}
+	h.cr.cs.cityBeadStore = failing
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if failing.calls == 0 {
+		t.Fatal("the catch-up never issued the closed-record Get for the vanished session")
+	}
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 0 {
+		t.Fatalf("compute facts = %d, want 0: nothing can be billed from a bead that could not be read", got)
+	}
+	if _, retained := h.cr.owingIntervals[h.beadID]; !retained {
+		t.Fatalf("session %s was dropped from the owing set on a transient Get failure; "+
+			"nothing else ever revisits a closed session bead, so its interval is lost permanently", h.beadID)
+	}
+
+	// Pass 3 reads the bead successfully and must bill the interval it retained.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: the interval retained across a transient Get failure must bill once the read recovers", got)
+	}
+}
+
+// TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence bounds the
+// retention above. Retaining on every Get error would turn a genuinely deleted
+// bead into a permanent entry in the owing set, re-Got on every reconcile tick
+// forever. beads.ErrNotFound is the one error that proves the bead is gone and
+// nothing further can ever be learned about it, so that — and only that — drops it.
+func TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence(t *testing.T) {
+	start := liveSweepStart()
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "absent-1",
+		"awake_started_at": start.Format(time.RFC3339),
+	})
+
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{h.info}, false)
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+
+	// The bead is gone for good. Stores report that as a wrapped ErrNotFound.
+	absent := &usageGetFailingStore{
+		Store:    h.store,
+		id:       h.beadID,
+		failures: 1,
+		err:      fmt.Errorf("getting bead %q: %w", h.beadID, beads.ErrNotFound),
+	}
+	h.cr.cs.cityBeadStore = absent
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if absent.calls == 0 {
+		t.Fatal("the catch-up never issued the closed-record Get for the vanished session")
+	}
+	if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+		t.Fatalf("absent session %s stayed in the owing set; it would be re-Got on every pass forever", h.beadID)
+	}
+}
+
+// sessionReadCountingStore counts the reads the usage lane makes for one
+// session: Gets by its id, and the closed-inclusive Lists that transcript
+// discovery issues while the session is closed.
+type sessionReadCountingStore struct {
+	beads.Store
+	id          string
+	gets        int
+	closedLists int
+}
+
+func (s *sessionReadCountingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.gets++
+	}
+	return s.Store.Get(id)
+}
+
+func (s *sessionReadCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.IncludesClosed() {
+		s.closedLists++
+	}
+	return s.Store.List(query)
+}
+
+// closeTimeHidingStore serves one bead with no UpdatedAt, standing in for a
+// backend that records no update time. With closed_at also unset, the bead
+// carries no close time at all.
+type closeTimeHidingStore struct {
+	beads.Store
+	id string
+}
+
+func (s *closeTimeHidingStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if err == nil && id == s.id {
+		b.UpdatedAt = time.Time{}
+	}
+	return b, err
+}
+
+// newUnsettledClaudeHarness builds a keyed Claude session whose transcript is
+// on disk nowhere, so every terminal model sweep misses its keyed path and does
+// not settle. The session starts awake and one pass tracks it.
+func newUnsettledClaudeHarness(t *testing.T) liveSweepHarness {
+	t.Helper()
+	// Discovery also searches $HOME/.claude/projects; an empty home keeps the
+	// miss independent of the machine running the test.
+	t.Setenv("HOME", t.TempDir())
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "claude-unsettled-1",
+		"awake_started_at": liveSweepStart().Format(time.RFC3339),
+		"provider":         "claude",
+		"session_key":      "6f1c0e0a-3b7d-4c8e-9a51-2d4f8b9c7e10",
+		"work_dir":         t.TempDir(),
+	})
+	h.tick()
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+	return h
+}
+
+// closeDrained drains and closes the harness session in one step, as the
+// reconciler's drain path does. A non-zero closedAt is stamped as the closed_at
+// session.ClosePatch writes.
+func (h liveSweepHarness) closeDrained(t *testing.T, closedAt time.Time) {
+	t.Helper()
+	patch := map[string]string{"state": string(session.StateDrained)}
+	if !closedAt.IsZero() {
+		patch["closed_at"] = closedAt.UTC().Format(time.RFC3339)
+	}
+	if err := h.store.SetMetadataBatch(h.beadID, patch); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// vanishedRetry returns the retry schedule the usage lane holds for the harness
+// session, failing the test when the session is not tracked.
+func (h liveSweepHarness) vanishedRetry(t *testing.T) owedIntervalRetry {
+	t.Helper()
+	h.cr.owingIntervalsMu.Lock()
+	defer h.cr.owingIntervalsMu.Unlock()
+	retry, tracked := h.cr.owingIntervals[h.beadID]
+	if !tracked {
+		t.Fatalf("session %s is not tracked by the usage lane", h.beadID)
+	}
+	return retry
+}
+
+// setVanishedRetry replaces the harness session's retry schedule, standing in
+// for time passing between usage passes.
+func (h liveSweepHarness) setVanishedRetry(t *testing.T, retry owedIntervalRetry) {
+	t.Helper()
+	h.vanishedRetry(t)
+	h.cr.owingIntervalsMu.Lock()
+	defer h.cr.owingIntervalsMu.Unlock()
+	h.cr.owingIntervals[h.beadID] = retry
+}
+
+// TestEmitDueComputeFactsRetriesUnsettledClosedSessionOnFloor pins the cost of a
+// closed session whose accounting never settles. Its transcript is found
+// nowhere, so every attempt re-runs transcript discovery, and a Claude discovery
+// that misses its keyed path lists the sessions that shared the work_dir, closed
+// ones included. The vanished lane retries such a session once per
+// closedUsageRetryInterval and reads nothing for it in between.
+func TestEmitDueComputeFactsRetriesUnsettledClosedSessionOnFloor(t *testing.T) {
+	h := newUnsettledClaudeHarness(t)
+	h.closeDrained(t, time.Now())
+	reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
+	h.cr.cs.cityBeadStore = reads
+
+	// The first pass after the close reaches it through the vanished lane. The
+	// sweep does not settle, and the compute fact bills anyway.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if reads.gets == 0 || reads.closedLists == 0 {
+		t.Fatalf("first attempt reads: gets=%d closed lists=%d, want both: the vanished lane must reach transcript discovery", reads.gets, reads.closedLists)
+	}
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: an unsettled sweep must not hold back the compute fact", got)
+	}
+	retry := h.vanishedRetry(t)
+	if retry.next.IsZero() {
+		t.Fatalf("retry schedule %+v has no floor after an unsettled attempt", retry)
+	}
+
+	// Passes inside the retry floor read nothing for it.
+	gets, lists := reads.gets, reads.closedLists
+	for range 3 {
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	}
+	if reads.gets != gets || reads.closedLists != lists {
+		t.Fatalf("passes inside the retry floor read the session: gets %d -> %d, closed lists %d -> %d", gets, reads.gets, lists, reads.closedLists)
+	}
+	if got := h.vanishedRetry(t); got != retry {
+		t.Fatalf("retry schedule moved from %+v to %+v while the session waited out its floor", retry, got)
+	}
+
+	// Once the floor elapses, the next pass retries it.
+	h.setVanishedRetry(t, owedIntervalRetry{until: retry.until})
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if reads.gets == gets || reads.closedLists == lists {
+		t.Fatalf("the pass after the retry floor did not retry the session: gets=%d closed lists=%d", reads.gets, reads.closedLists)
+	}
+	if got := h.vanishedRetry(t); got.next.IsZero() || got.until != retry.until {
+		t.Fatalf("retry schedule after the retry = %+v, want a new floor and the deadline %v", got, retry.until)
+	}
+}
+
+// TestEmitDueComputeFactsStopsRetryingClosedSessionAfterWindow bounds the
+// retries above. Once closedUsageRetryWindow has passed since its close, a closed
+// session whose accounting has not settled is dropped after one more attempt,
+// and no later pass reads it.
+func TestEmitDueComputeFactsStopsRetryingClosedSessionAfterWindow(t *testing.T) {
+	t.Run("window elapses while retained", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		closedAt := time.Now().UTC().Truncate(time.Second)
+		h.closeDrained(t, closedAt)
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		retry := h.vanishedRetry(t)
+		if want := closedAt.Add(closedUsageRetryWindow); !retry.until.Equal(want) {
+			t.Fatalf("retry deadline = %v, want %v: the window runs from the recorded close", retry.until, want)
+		}
+
+		h.setVanishedRetry(t, owedIntervalRetry{until: time.Now().Add(-time.Second)})
+		reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
+		h.cr.cs.cityBeadStore = reads
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if reads.gets == 0 {
+			t.Fatal("the pass after the window did not make its last attempt")
+		}
+		if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+			t.Fatalf("session %s is still tracked past its retry window", h.beadID)
+		}
+
+		gets, lists := reads.gets, reads.closedLists
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if reads.gets != gets || reads.closedLists != lists {
+			t.Fatalf("a pass after the drop read the session: gets %d -> %d, closed lists %d -> %d", gets, reads.gets, lists, reads.closedLists)
+		}
+	})
+
+	t.Run("closed longer ago than the window", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		h.closeDrained(t, time.Now().Add(-closedUsageRetryWindow-time.Minute))
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+			t.Fatalf("compute facts = %d, want 1: the one attempt still bills the interval", got)
+		}
+		if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+			t.Fatalf("session %s closed before the retry window was retained", h.beadID)
+		}
+	})
+
+	t.Run("no recorded close time", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		h.closeDrained(t, time.Time{})
+		h.cr.cs.cityBeadStore = &closeTimeHidingStore{Store: h.store, id: h.beadID}
+		before := time.Now()
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		after := time.Now()
+		retry := h.vanishedRetry(t)
+		if retry.until.Before(before.Add(closedUsageRetryWindow)) || retry.until.After(after.Add(closedUsageRetryWindow)) {
+			t.Fatalf("retry deadline = %v, want closedUsageRetryWindow after the first attempt (%v to %v)",
+				retry.until, before.Add(closedUsageRetryWindow), after.Add(closedUsageRetryWindow))
+		}
+	})
+}
