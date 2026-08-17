@@ -365,6 +365,29 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 			if b.Status == "closed" && wasConfiguredNamedSession(b) {
 				continue
 			}
+			// Owner-scoped counterpart of the release above, for the pre-ga841
+			// phantom shape whose identity survives only as an alias /
+			// agent_name / template label (ga-n2d Gap C). The named-session
+			// start path clears its cfg-aware pre-check
+			// (EnsureSessionNameAvailableWithConfigForOwner's legacy bypass)
+			// and then Manager.CreateSession re-checks the same name here
+			// without a cfg. Recognizing only the flag/identity made this
+			// inner check veto what the outer check had just allowed, so a
+			// closed phantom bricked its configured identity's runtime name
+			// permanently — and every documented lever (nudge, wake, kill,
+			// prune, new) rejects the holder for being closed, leaving no CLI
+			// escape (gc-5fdrr; a live 40h on_demand-agent outage).
+			//
+			// configuredNamedIdentitySignalsMatch is the owner-SCOPED
+			// recognizer already used for this same trap in name_claim_sweep.go
+			// and the alias-availability check: it requires a non-empty owner
+			// and matches the bead's recorded identity, alias, agent_name, or
+			// template/role label against THAT owner. So only the configured
+			// identity that owns the reserved name reclaims it — never an
+			// unrelated claimant, and never a live holder.
+			if b.Status == "closed" && configuredNamedIdentitySignalsMatch(b, selfOwner) {
+				continue
+			}
 			// A retired ephemeral pool slot must not permanently reserve the
 			// name either. The reconciler closes the slot bead without
 			// clearing session_name, and a configured named session that was
@@ -378,7 +401,7 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 				strings.TrimSpace(b.Metadata["session_origin"]) == "ephemeral" {
 				continue
 			}
-			return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
+			return sessionNameHolderError(name, b)
 		}
 		if b.Status == "closed" {
 			continue
@@ -408,6 +431,22 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.Store, name, selfID, 
 		}
 	}
 	return nil
+}
+
+// sessionNameHolderError reports that a session name is reserved by another
+// session bead, naming both the holder and the remedy.
+//
+// A CLOSED holder is the dangerous shape: it has no runtime to stop, so an
+// operator reading only "already belongs to <id>" has no way to tell the name
+// is held by a dead record rather than a live session, and no lever to try.
+// That ambiguity is what turned gc-5fdrr into a ~40h outage resolved by hand
+// metadata surgery. Say the holder is closed and name the release lever.
+func sessionNameHolderError(name string, b beads.Bead) error {
+	if b.Status == "closed" {
+		return fmt.Errorf("%w: %q already belongs to %s (closed); release it with: gc session release-name %q",
+			ErrSessionNameExists, name, b.ID, name)
+	}
+	return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 }
 
 func failedCreateIdentityReleased(b beads.Bead) bool {
