@@ -213,7 +213,8 @@
               "ready",
               "storage-recover-stranded",
               "beads-metadata-cas",
-              "nudge-show"
+              "nudge-show",
+              "session-release-name"
             ]
           },
           "event_id": {

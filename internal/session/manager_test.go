@@ -5494,3 +5494,64 @@ func TestPersistInvocationUsageCursor(t *testing.T) {
 		t.Fatalf("cursor metadata after no-ops = %q, want u2", got)
 	}
 }
+
+// TestCreateSessionBeadOnlyReclaimsNameFromClosedLegacyHolder is the
+// end-to-end regression guard for gc-5fdrr, at the layer that actually vetoed
+// the spawn.
+//
+// The named-session start path pre-clears the name through the cfg-aware
+// EnsureSessionNameAvailableWithConfigForOwner, whose legacy bypass handles
+// exactly this closed-phantom shape — and then CreateSession re-checks the same
+// name through the cfg-less helper. When that inner check recognized a closed
+// configured-named holder only by flag/identity, the phantom below (identity
+// carried solely by alias/agent_name) made the inner check reject what the
+// outer check had just allowed, permanently bricking an on_demand agent.
+func TestCreateSessionBeadOnlyReclaimsNameFromClosedLegacyHolder(t *testing.T) {
+	const (
+		sessionName = "shutupandlisten--gc-toolkit__refinery"
+		identity    = "shutupandlisten/gc-toolkit.refinery"
+	)
+	store := beads.NewMemStore()
+	holder, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"alias":                       identity,
+			"agent_name":                  identity,
+			CanonicalInstanceNameMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(holder): %v", err)
+	}
+	if err := store.Update(holder.ID, beads.UpdateOpts{Metadata: map[string]string{"session_name": sessionName}}); err != nil {
+		t.Fatalf("Update(session_name): %v", err)
+	}
+	if err := store.Close(holder.ID); err != nil {
+		t.Fatalf("Close(holder): %v", err)
+	}
+
+	mgr := NewManagerWithOptions(store, runtime.NewFake())
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{
+		BeadOnly:     true,
+		Alias:        identity,
+		ExplicitName: sessionName,
+		Template:     "refinery",
+		Command:      "claude",
+		WorkDir:      "/tmp",
+		Provider:     "claude",
+		ExtraMeta: map[string]string{
+			NamedSessionMetadataKey:      "true",
+			NamedSessionIdentityMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateSession over closed legacy holder: %v", err)
+	}
+	if info.ID == holder.ID {
+		t.Fatalf("CreateSession reused the closed holder %s instead of creating a fresh bead", holder.ID)
+	}
+	if info.SessionName != sessionName {
+		t.Fatalf("SessionName = %q, want %q", info.SessionName, sessionName)
+	}
+}
