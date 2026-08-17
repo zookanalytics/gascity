@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -181,14 +183,41 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 // asleep) session whose interval is already accounted costs zero Gets — the common steady
 // state. It is the pure, testable gate behind emitDueComputeFacts's per-session Get.
 func computeFactGetCandidate(info session.Info) bool {
-	if !isComputeTerminalState(info.MetadataState) {
-		return false
-	}
+	return isComputeTerminalState(info.MetadataState) && unaccountedInterval(info)
+}
+
+// unaccountedInterval reports whether info has an awake interval that no compute
+// fact has closed yet — true for a still-live session as well as a terminal one.
+// It is the tracking predicate behind the closed-between-passes catch-up: a
+// session is worth following across passes exactly while it still owes an
+// interval, whatever state it is in right now.
+func unaccountedInterval(info session.Info) bool {
 	start := strings.TrimSpace(info.AwakeStartedAt)
-	if start == "" {
-		return false
-	}
-	return strings.TrimSpace(info.UsageComputeEmittedAt) != start
+	return start != "" && strings.TrimSpace(info.UsageComputeEmittedAt) != start
+}
+
+// beadOwesInterval is unaccountedInterval's predicate read off the raw bead
+// rather than the Info projection, for the paths that have already paid for the
+// Get and must decide from the FRESH metadata instead of a snapshot row.
+func beadOwesInterval(meta beads.StringMap) bool {
+	start := strings.TrimSpace(meta["awake_started_at"])
+	return start != "" && strings.TrimSpace(meta[usageComputeEmittedAtKey]) != start
+}
+
+// beadOwesUnendedInterval reports whether a session bead whose state is NOT
+// compute-terminal still owes an interval that a later pass could bill. That is
+// true only while the bead is OPEN: its interval has not ended, but it is also
+// not accounted, so the tracking set must keep following it (a session dropped
+// by a partial snapshot is otherwise forgotten, and if it closes before it
+// reappears its interval is never billed — nothing rescans closed history).
+//
+// A CLOSED bead that never reached a compute-terminal state is the v0
+// closed-from-active scan limitation (see engdocs/design/usage-facts-v0.md). Its
+// metadata will never change again, so no later pass can learn more about it;
+// retaining it would park it in the tracking set permanently and re-Get it on
+// every reconcile tick forever.
+func beadOwesUnendedInterval(b beads.Bead) bool {
+	return b.Status != "closed" && beadOwesInterval(b.Metadata)
 }
 
 // liveModelSweepCandidate reports whether an open snapshot row is worth
@@ -274,9 +303,9 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 	now := time.Now().UTC()
 	liveLane := !bootReconcile
-	processSessionBead := func(b beads.Bead) {
+	processSessionBead := func(b beads.Bead) bool {
 		if b.Metadata == nil {
-			return
+			return true
 		}
 		state := b.Metadata["state"]
 		if isLiveModelSweepState(state) {
@@ -286,14 +315,25 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			if liveLane {
 				cr.sweepLiveSessionModelUsage(ctx, b, now, logf, modelSweepFactory)
 			}
-			return
+			// Still live: its interval has not ended, so nothing bills yet — but it is
+			// still UNACCOUNTED, which is what the return value reports. Calling a live
+			// session settled here drops it from the tracking set, and the open snapshot
+			// cannot be relied on to put it back: the pass that reached this line may
+			// have been handed a PARTIAL snapshot that omitted the session entirely, and
+			// takeVanishedIntervalSessions has already replaced the tracked set with it.
+			// A session that then drains and closes before it reappears leaves no owed id
+			// to diff against and no closed-history scan to catch it, so its interval is
+			// lost outright (the review finding on gc-23ep6).
+			return !beadOwesUnendedInterval(b)
 		}
 		// Re-check the terminal state from the FRESH bead: a session that re-awoke in
 		// the window since the snapshot was taken must not mint a tiny-wall fact for its
 		// just-STARTED interval and suppress the real end-of-interval emission. Best-
 		// effort accounting, the same NDI class as the sync-tail re-list delta.
 		if !isComputeTerminalState(state) {
-			return
+			// Neither live nor terminal (a transitional or unrecognized state). Same
+			// rule as the live branch: still unaccounted is still owed.
+			return !beadOwesUnendedInterval(b)
 		}
 		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
 		// Model-usage lane FIRST, symmetric to and beside the compute fact: recover the
@@ -327,14 +367,32 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// candidate so both lanes retry next tick. The compute fact itself is always
 		// recorded (idempotent), so wall-time accounting is never delayed by a pending
 		// sweep.
-		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+		recorded := emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
+		// Report whether anything is still OWED, which is not the same as whether this
+		// call wrote a fact: emitComputeFactForBead returns false both when the write
+		// failed AND when there was nothing to write (no interval at all, or a marker an
+		// earlier pass already stamped). Only the first is a failure worth retrying —
+		// reading the other two as failures would keep a settled session in the tracking
+		// set and re-Get it on every later pass forever.
+		if !beadOwesInterval(b.Metadata) {
+			return true
+		}
+		return recorded && sweepSettled
 	}
+	// Sessions still owing an interval at the end of this pass. The next pass diffs
+	// against it to find the ones that ended in between (see takeVanishedIntervalSessions).
+	owing := make(map[string]struct{}, len(sessions))
 	for _, info := range sessions {
 		// A canceled tick (controller shutdown, reconcile deadline) stops here
 		// rather than working through the rest of the fleet: every remaining
-		// session is picked up idempotently by the next tick.
+		// session is picked up idempotently by the next tick. The tracking set is
+		// left untouched so nothing is judged vanished on the strength of a
+		// truncated pass.
 		if ctx.Err() != nil {
 			return
+		}
+		if unaccountedInterval(info) {
+			owing[info.ID] = struct{}{}
 		}
 		liveCandidate := liveLane && liveModelSweepCandidate(info)
 		if !computeFactGetCandidate(info) && !liveCandidate {
@@ -347,6 +405,99 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		}
 		processSessionBead(b)
 	}
+	cr.accountVanishedIntervals(ctx, store, owing, processSessionBead, logf)
+}
+
+// accountVanishedIntervals accounts the intervals of sessions that were owing one
+// on an earlier pass and have since left the open snapshot.
+//
+// The lane is fed sessionBeadSnapshot.OpenInfos(), and that snapshot deliberately
+// never loads closed history (it is re-listed several times per tick, and closed
+// history grows without bound). A session is therefore accounted only if some pass
+// observes it while it is BOTH open AND terminal — but the reconciler stamps the
+// terminal state and closes the bead in the SAME pass, so the pass before the drain
+// sees an awake session and the pass after it sees nothing. That window is normally
+// empty, which silently dropped nearly every interval (gc-23ep6).
+//
+// Diffing the owing set across passes closes it without re-introducing a closed-history
+// scan: each vanished session costs exactly one Get by id, which is the closed-record
+// read the snapshot loader sanctions, and the fleet bounds how many can vanish at once.
+// The decision is then made on that FRESH bead by the same processSessionBead the open
+// lane uses, so a session that merely dropped out of a partial snapshot — rather than
+// closing — is re-read and routed by its real state instead of being mis-billed.
+// A session whose accounting does not settle stays in the set and is retried next pass.
+// "Does not settle" covers the session that merely dropped out of a partial snapshot:
+// it is still open and still owes its interval, so it stays tracked until it really
+// ends — otherwise the pass that tolerated the partial snapshot would also be the pass
+// that forgot it. Retention stops at the bead's own close: a closed bead that never
+// reached a compute-terminal state can never tell a later pass anything more, and is
+// dropped rather than re-Got forever. A bead the store reports ABSENT is dropped for
+// the same reason; a bead that merely failed to read is retained, because that failure
+// can clear and the Get is the last reference the interval has left.
+func (cr *CityRuntime) accountVanishedIntervals(
+	ctx context.Context,
+	store beads.Store,
+	owing map[string]struct{},
+	processSessionBead func(beads.Bead) bool,
+	logf func(string, ...any),
+) {
+	for _, id := range cr.takeVanishedIntervalSessions(owing) {
+		if ctx.Err() != nil {
+			// Hand the rest back so a canceled tick defers them instead of dropping them.
+			cr.retainVanishedIntervalSession(id)
+			continue
+		}
+		b, err := store.Get(id)
+		if err != nil {
+			// This Get holds the LAST reference to the owed interval: the pass has
+			// already replaced the tracked set with the current open snapshot, and a
+			// closed session never reappears in OpenInfos(). Only ErrNotFound proves
+			// the bead is gone and nothing further can ever be learned about it; every
+			// other error is a read that may succeed next pass, so retaining it is what
+			// keeps a transient backend failure from losing the interval permanently.
+			if !errors.Is(err, beads.ErrNotFound) {
+				cr.retainVanishedIntervalSession(id)
+				logf("usage: loading closed session %s for usage facts failed; retrying next pass: %v", id, err)
+				continue
+			}
+			logf("usage: closed session %s is absent from the store; its interval cannot be accounted: %v", id, err)
+			continue
+		}
+		if !processSessionBead(b) {
+			cr.retainVanishedIntervalSession(id)
+		}
+	}
+}
+
+// takeVanishedIntervalSessions replaces the tracked owing-interval set with owing
+// and returns the ids that were tracked before this pass but are absent from it —
+// the sessions whose interval ended since the last pass. Ids are returned in a
+// stable order so a tick's work is reproducible.
+func (cr *CityRuntime) takeVanishedIntervalSessions(owing map[string]struct{}) []string {
+	cr.owingIntervalsMu.Lock()
+	defer cr.owingIntervalsMu.Unlock()
+	var vanished []string
+	for id := range cr.owingIntervals {
+		if _, stillOpen := owing[id]; !stillOpen {
+			vanished = append(vanished, id)
+		}
+	}
+	sort.Strings(vanished)
+	cr.owingIntervals = owing
+	return vanished
+}
+
+// retainVanishedIntervalSession puts a vanished session back into the tracked set
+// so the next pass retries its accounting. Used when the interval did not settle
+// (a sink write failed, or a model sweep is still pending) or when the tick was
+// canceled before reaching it.
+func (cr *CityRuntime) retainVanishedIntervalSession(id string) {
+	cr.owingIntervalsMu.Lock()
+	defer cr.owingIntervalsMu.Unlock()
+	if cr.owingIntervals == nil {
+		cr.owingIntervals = make(map[string]struct{}, 1)
+	}
+	cr.owingIntervals[id] = struct{}{}
 }
 
 // liveSweepMemo is one awake session's live model-usage sweep state, held for
