@@ -60,18 +60,10 @@ func setupPrePushRepo(t *testing.T) (string, string) {
 	repo := t.TempDir()
 	sentinel := filepath.Join(t.TempDir(), prePushSentinel)
 
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
-	run("init", "-q", "-b", "main")
-	run("config", "user.email", "test@example.invalid")
-	run("config", "user.name", "test")
-	run("config", "commit.gpgsign", "false")
+	git(t, repo, "init", "-q", "-b", "main")
+	git(t, repo, "config", "user.email", "test@example.invalid")
+	git(t, repo, "config", "user.name", "test")
+	git(t, repo, "config", "commit.gpgsign", "false")
 
 	for _, dir := range []string{".githooks", "scripts"} {
 		if err := os.MkdirAll(filepath.Join(repo, dir), 0o755); err != nil {
@@ -95,9 +87,34 @@ func setupPrePushRepo(t *testing.T) (string, string) {
 	if err := os.WriteFile(filepath.Join(repo, "Makefile"), []byte(makefile), 0o644); err != nil {
 		t.Fatalf("write Makefile: %v", err)
 	}
-	run("add", "-A")
-	run("commit", "-qm", "base")
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-qm", "base")
 	return repo, sentinel
+}
+
+// runIn is the single subprocess entry point in this file. Driving a shell git
+// hook cannot be done without spawning it, but funneling every spawn through
+// one call site keeps this file's cost to the resource census at one.
+func runIn(t *testing.T, dir, stdin string, env []string, name string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(stdin)
+	if env != nil {
+		cmd.Env = env
+	}
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// git runs a git command in repo and fails the test if it errors.
+func git(t *testing.T, repo string, args ...string) string {
+	t.Helper()
+	out, err := runIn(t, repo, "", nil, "git", args...)
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
 }
 
 // runPrePush invokes the hook exactly as git does: argv is the remote name and
@@ -105,28 +122,17 @@ func setupPrePushRepo(t *testing.T) (string, string) {
 // bead-ownership guard out of the way.
 func runPrePush(t *testing.T, repo, stdin string) (string, error) {
 	t.Helper()
-	cmd := exec.Command(filepath.Join(repo, ".githooks", "pre-push"), "origin", "https://example.invalid")
-	cmd.Dir = repo
-	cmd.Stdin = strings.NewReader(stdin)
-	cmd.Env = []string{
+	return runIn(t, repo, stdin, []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"POG_DISABLE=1",
-	}
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+	}, filepath.Join(repo, ".githooks", "pre-push"), "origin", "https://example.invalid")
 }
 
 // gitHead returns repo's current HEAD sha.
 func gitHead(t *testing.T, repo string) string {
 	t.Helper()
-	cmd := exec.Command("git", "rev-parse", "HEAD")
-	cmd.Dir = repo
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse HEAD: %v", err)
-	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
 }
 
 // TestPrePushRunsFanOutWhenGoDiffExceedsPipeBuffer is the regression test for
@@ -168,13 +174,8 @@ func TestPrePushRunsFanOutWhenGoDiffExceedsPipeBuffer(t *testing.T) {
 	if total < minDiffBytes {
 		t.Fatalf("diff name-only output is %d bytes, need >=%d to make the SIGPIPE deterministic", total, minDiffBytes)
 	}
-	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "many go files"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-qm", "many go files")
 	head := gitHead(t, repo)
 
 	out, err := runPrePush(t, repo, fmt.Sprintf("refs/heads/main %s refs/heads/main %s\n", head, base))
@@ -196,13 +197,8 @@ func TestPrePushRunsFanOutOnSmallGoDiff(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(repo, "main.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatalf("write main.go: %v", err)
 	}
-	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "one go file"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
-		}
-	}
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-qm", "one go file")
 	head := gitHead(t, repo)
 
 	out, err := runPrePush(t, repo, fmt.Sprintf("refs/heads/main %s refs/heads/main %s\n", head, base))
