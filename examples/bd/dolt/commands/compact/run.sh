@@ -58,7 +58,7 @@
 #      preservation directly and defers to the next run; added and modified
 #      rows are ordinary live-city traffic. Any removed row, or a probe
 #      failure, fails closed to the quarantine.
-#   4b. Committed-root drift gate. When per-table verification passed but the
+#   4c. Committed-root drift gate. When per-table verification passed but the
 #      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
 #      differ across the flatten. Drift is benign only when every named table
 #      is either already verified or a table the -Am first-committed whose

@@ -225,6 +225,10 @@ quarantines only when rows were **removed** (or the diff probe itself failed),
 and defers to the next run when nothing was removed. Added and modified rows are
 expected on a live store.
 
+That verdict decides drift alone. A run that also saw a row-count decrease, a
+table appear or disappear, or any probe fail never reaches the diff and
+quarantines on that reason regardless of what was removed.
+
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
 postflight database value hashes when available, `integrity_table_drift` for
