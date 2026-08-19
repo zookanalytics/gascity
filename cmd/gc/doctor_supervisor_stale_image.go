@@ -149,6 +149,13 @@ func (c *supervisorStaleImageCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 // all. An unavailable or unknown identity on either side yields
 // (false, false): the caller must not escalate on a comparison it could not
 // make.
+//
+// What counts as drift is DetectBinaryDrift's decision, not this function's,
+// so the doctor check and the `gc start` drift path cannot disagree about two
+// build identities — this only adds the comparability guard the escalation
+// needs. That matters because the identity is not a bare hash: it carries the
+// dirtySuffix a `gc start` restart is expected to clear, and only one place
+// should own how such stamps are matched.
 func supervisorBuildDrifted(localBuildID, supervisorBuildID string, queryErr error) (drifted, comparable bool) {
 	if queryErr != nil {
 		return false, false
@@ -156,7 +163,7 @@ func supervisorBuildDrifted(localBuildID, supervisorBuildID string, queryErr err
 	if !knownBuildID(localBuildID) || !knownBuildID(supervisorBuildID) {
 		return false, false
 	}
-	return localBuildID != supervisorBuildID, true
+	return DetectBinaryDrift(localBuildID, SupervisorStatus{BuildID: supervisorBuildID}), true
 }
 
 // knownBuildID reports whether a build identity is usable for comparison.

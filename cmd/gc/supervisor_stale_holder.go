@@ -125,6 +125,14 @@ func classifySupervisorHolder(pid int) (supervisorHolderState, string) {
 // wrong process, and under systemd's Restart=always that is an unbounded
 // crash loop (83439 restarts over five days in gc-f1081). Naming the state and
 // the remedy is what turns a silent loop into something an operator can act on.
+//
+// The loud form claims the process exits "instead of restarting", which is
+// only true where RestartPreventExitStatus is honored. That claim cannot
+// mislead on darwin — where launchd restarts any nonzero exit regardless of
+// code — because reaching this form requires classifySupervisorHolder to have
+// read /proc, which darwin does not have; it returns Unknown there and this
+// renders the plain form. supervisorPortInUseMessage has to condition on GOOS
+// explicitly for the same reason; here the procfs dependency does it.
 func supervisorAlreadyRunningMessage(prefix string, pid int, state supervisorHolderState, exePath string) string {
 	if state != supervisorHolderStaleImage {
 		return fmt.Sprintf("%s: supervisor already running (PID %d)\n", prefix, pid)
