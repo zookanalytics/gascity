@@ -13,9 +13,11 @@ set -euo pipefail
 
 zero="0000000000000000000000000000000000000000"
 
+refs_seen=0
 go_changed=0
 any_non_deletion=0
 while read -r _local_ref local_sha _remote_ref remote_sha; do
+  refs_seen=$((refs_seen + 1))
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
     continue
@@ -26,7 +28,21 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
     go_changed=1
     continue
   fi
-  if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
+  # Capture the file list and test it, rather than piping into `grep -q`:
+  # grep exits the instant it matches without draining stdin, so under the
+  # `set -o pipefail` above git races into a SIGPIPE and that 141 becomes the
+  # pipeline's exit status — reporting CHANGED Go sources as unchanged and
+  # silently disabling this whole gate. Rare below the pipe buffer, certain
+  # once the path list outgrows it (gc-01o2l; same class as gc-atrp1,
+  # gc-u2fyx). Guarded by TestGitHooksAvoidPipefailGrepQPipelines.
+  if changed_go=$(git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null); then
+    if [ -n "$changed_go" ]; then
+      go_changed=1
+    fi
+  else
+    # The diff could not be computed (unreachable base, corrupt ref). That is
+    # not evidence the push carries no Go, so fail closed and run the suite.
+    echo "pre-push: could not diff ${remote_sha}..${local_sha}; running the suite rather than assuming no Go changed" >&2
     go_changed=1
   fi
 done
@@ -46,10 +62,22 @@ if [ "$any_non_deletion" -eq 1 ]; then
   fi
 fi
 
+# Every skip announces itself. A silent `exit 0` here is indistinguishable from
+# a suite that ran and passed, so a gate that fails open leaves no trace for
+# anyone — human or machine — to notice (gc-01o2l, gc-uz8az). Guarded by
+# TestPrePushAnnouncesEverySkip.
 if [ "$go_changed" -eq 0 ]; then
+  if [ "$refs_seen" -eq 0 ]; then
+    echo "pre-push: git supplied no ref lines on stdin; nothing to test, skipping the Go suite" >&2
+  elif [ "$any_non_deletion" -eq 0 ]; then
+    echo "pre-push: pushed refs are deletions only; nothing to test, skipping the Go suite" >&2
+  else
+    echo "pre-push: no Go sources changed in the pushed range; skipping the Go suite" >&2
+  fi
   exit 0
 fi
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
+echo "pre-push: Go sources changed; running make test-fast-parallel" >&2
 exec make test-fast-parallel
