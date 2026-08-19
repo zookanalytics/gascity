@@ -826,7 +826,11 @@ case "$query" in
       print_cell hash-beads-after-writer
       exit 0
     fi
-    if [ "$mode" = "same_row_count_writer" ] && [ "$(current_head)" = "compactcommit" ]; then
+    # same_row_count_writer and same_row_count_row_loss share this shape: the
+    # row count is unchanged and the table value hash drifts. They differ only
+    # in what DOLT_DIFF reports — an in-place update (nothing removed) versus
+    # real row loss — which is what the gate must decide on.
+    if { [ "$mode" = "same_row_count_writer" ] || [ "$mode" = "same_row_count_row_loss" ]; } && [ "$(current_head)" = "compactcommit" ]; then
       print_cell hash-beads-after-writer
       exit 0
     fi
@@ -985,6 +989,31 @@ case "$query" in
       exit 0
     fi
     print_cell beads
+    exit 0
+    ;;
+  *"DOLT_DIFF("*"diff_type = 'removed'"*)
+    # Row-preservation proof (gc-800l). Counts rows that stopped being
+    # reachable between the pre-flight snapshot HEAD and the flatten commit.
+    # MUST precede the SELECT COUNT(*) FROM <table> arms below, whose patterns
+    # also match this query's text. Matching the diff_type = 'removed' clause
+    # rather than DOLT_DIFF alone keeps this clear of the additive-only probe
+    # on a first-committed table, which asks diff_type <> 'added' and is
+    # answered by its own arm further down.
+    #
+    # The modes listed here model genuine row loss — rows replaced or dropped
+    # across the flatten. Every other mode models ordinary live-city traffic
+    # (appends and in-place updates), which produces the same row-count and
+    # value-hash drift but removes nothing, so the drift is proven benign.
+    # That opposition is the whole point of the removal-based gate: identical
+    # count/hash evidence, opposite verdicts, discriminated by removals alone.
+    case "$mode" in
+      same_table_replacement_with_row_gain|writer_race_with_mixed_same_count_hash_drift|same_row_count_row_loss)
+        print_cell 2
+        ;;
+      *)
+        print_cell 0
+        ;;
+    esac
     exit 0
     ;;
   *"SELECT COUNT(*) FROM"*"blocked_issues"*)
@@ -2311,17 +2340,29 @@ func TestCompactScriptQuarantinesSameTableRowGainWithValueHashDriftBeforeFullGC(
 	}
 }
 
-func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t *testing.T) {
+// The exact signature the lx city produced on the first scheduled run after
+// auto-compaction was enabled (gc-800l): an append-only table gains a row and
+// drifts, while a second table is updated in place and drifts at an unchanged
+// row count. Both were ordinary traffic — DOLT_DIFF across the recorded HEADs
+// showed zero removals in either table. Every defer arm excluded same-count
+// drift categorically, so this quarantined and cost a human review. With no
+// rows removed, the flatten preserved everything it was asked to preserve:
+// defer and retry next run.
+func TestCompactScriptDefersMixedRowGainAndSameCountHashDrift(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "mixed_row_count_gain_and_same_count_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite mixed row gain and same-count hash drift:\n%s", out)
+	if err != nil {
+		t.Fatalf("live-writer append plus in-place update must defer, not fail: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "table=beads gained rows during flatten") {
 		t.Fatalf("output missing row-count gain evidence:\n%s", out)
 	}
 	if !strings.Contains(out, "table=notes value hash changed after flatten without row-count increase") {
 		t.Fatalf("output missing same-count hash drift warning:\n%s", out)
+	}
+	if !strings.Contains(out, "removed no pre-flight rows") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing removal-based preservation defer message:\n%s", out)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
@@ -2331,12 +2372,18 @@ func TestCompactScriptQuarantinesMixedRowGainAndSameCountHashDriftBeforeFullGC(t
 	if !strings.Contains(log, "DOLT_HASHOF_TABLE('beads')") || !strings.Contains(log, "DOLT_HASHOF_TABLE('notes')") {
 		t.Fatalf("mixed drift test should probe table value hashes:\n%s", log)
 	}
+	// Both drifted tables must be proven, not just the gained one: the
+	// same-count table is the half that had no proof path before.
+	if !strings.Contains(log, "DOLT_DIFF('headcommit', 'compactcommit', 'beads')") ||
+		!strings.Contains(log, "DOLT_DIFF('headcommit', 'compactcommit', 'notes')") {
+		t.Fatalf("every drifted table must be covered by the removal probe:\n%s", log)
+	}
 	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("mixed row gain and same-count hash drift must block full GC:\n%s", log)
+		t.Fatalf("preservation defer must skip GC this run:\n%s", log)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
-	if reason := compactMarkerValue(t, marker, "reason"); reason != "post-flatten table value hash changed with row-count increase" {
-		t.Fatalf("quarantine reason should identify first table hash drift, got %q", reason)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("live-writer drift must NOT write a quarantine marker; stat=%v", statErr)
 	}
 }
 
@@ -2585,9 +2632,11 @@ func TestCompactScriptWriterRaceGateUsesFlagNotReasonText(t *testing.T) {
 	}
 }
 
-// Control: the same gain+drift signal with a STABLE HEAD (no writer proven) is a
-// genuine anomaly and must still write the blocking quarantine marker and fail.
-// This guards against the writer-race gate weakening real-corruption detection.
+// Control: the same gain+drift signal with a STABLE HEAD (no writer proven),
+// where the diff also shows rows removed, is a genuine anomaly and must still
+// write the blocking quarantine marker and fail. This guards against the
+// writer-race gate and the preservation proof weakening real-corruption
+// detection: neither a HEAD proxy nor a removal probe may pass this run.
 func TestCompactScriptStillQuarantinesGainAndHashDriftWithStableHead(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "same_table_replacement_with_row_gain", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
@@ -3190,29 +3239,83 @@ func TestCompactScriptIntegrityReasonOutranksEarlierProbeFailure(t *testing.T) {
 	}
 }
 
-func TestCompactScriptQuarantinesSameRowCountWriterBeforeFullGC(t *testing.T) {
+// Production incident (lx 2026-08-09 and again 2026-08-15, gc-800l/gc-i52hj):
+// a concurrent `bd update` rewrites an existing row in place. The row count is
+// unchanged and the table value hash drifts — the signature of the single most
+// common write in a running city, which the check used to treat as unexplained
+// and quarantine on, with no proof path at all. Every defer arm was guarded off
+// by that one category, so an unattended 24h timer generated a human review per
+// pass and never reclaimed; the second incident blocked reclaim for 4 days and
+// let one database reach 7-11x its peers. An in-place update removes nothing,
+// so the removal-based proof settles it directly: defer and retry next run.
+func TestCompactScriptDefersSameRowCountWriterDrift(t *testing.T) {
 	fixture := newCompactScriptFixture(t)
 	out, err := fixture.run(t, "same_row_count_writer", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
-	if err == nil {
-		t.Fatalf("compact succeeded despite same-row-count value-hash drift:\n%s", out)
+	if err != nil {
+		t.Fatalf("in-place update drift must defer, not fail: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "value hash changed after flatten") {
 		t.Fatalf("output missing value-hash drift warning:\n%s", out)
+	}
+	if !strings.Contains(out, "removed no pre-flight rows") ||
+		!strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("output missing removal-based preservation defer message:\n%s", out)
+	}
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("in-place update drift must NOT write a quarantine marker; stat=%v", statErr)
+	}
+	pendingGC := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", "beads")
+	if reason := compactMarkerValue(t, pendingGC, "reason"); reason != "writer race during flatten deferred full GC" {
+		t.Fatalf("preservation defer should record pending-GC retry marker, got reason %q", reason)
 	}
 	logData, err := os.ReadFile(fixture.doltLog)
 	if err != nil {
 		t.Fatalf("read dolt log: %v", err)
 	}
 	log := string(logData)
-	if !strings.Contains(log, "DOLT_HASHOF_DB") {
-		t.Fatalf("same-row-count writer test should probe database value hash:\n%s", log)
+	if !strings.Contains(log, "DOLT_DIFF(") || !strings.Contains(log, "diff_type = 'removed'") {
+		t.Fatalf("defer must be justified by a removal probe, not by the hash comparison:\n%s", log)
 	}
 	if strings.Contains(log, "DOLT_GC") {
-		t.Fatalf("same-row-count value-hash drift must block full GC:\n%s", log)
+		t.Fatalf("preservation defer must skip GC this run:\n%s", log)
+	}
+}
+
+// The other half of the positive control: the SAME count/hash signature as the
+// benign in-place update above, but the diff reports rows that stopped being
+// reachable. Removing the false alarm must not remove the alarm — this is real
+// row loss and must still quarantine before full GC, with the drift evidence
+// recorded for the human who clears the marker.
+func TestCompactScriptQuarantinesSameRowCountDriftWithRemovedRows(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "same_row_count_row_loss", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("compact succeeded despite rows removed across the flatten:\n%s", out)
+	}
+	if !strings.Contains(out, "value hash changed after flatten") {
+		t.Fatalf("output missing value-hash drift warning:\n%s", out)
+	}
+	if strings.Contains(out, "deferring, will retry next run") {
+		t.Fatalf("row loss must never defer:\n%s", out)
+	}
+	if !strings.Contains(out, "post-flatten INTEGRITY check failed") {
+		t.Fatalf("row loss should escalate as an integrity failure:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "diff_type = 'removed'") {
+		t.Fatalf("row-loss quarantine should be decided by the removal probe:\n%s", log)
+	}
+	if strings.Contains(log, "DOLT_GC") {
+		t.Fatalf("row loss must block full GC:\n%s", log)
 	}
 	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-quarantine", "beads")
 	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("same-row-count value-hash drift should write quarantine marker: %v", err)
+		t.Fatalf("row loss should write quarantine marker: %v", err)
 	}
 	assertCompactMarkerHasEvidence(t, marker,
 		"reason=post-flatten table value hash changed without row-count increase",

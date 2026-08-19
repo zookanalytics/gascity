@@ -206,14 +206,24 @@ should treat these strings as the current vocabulary:
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
 | `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
-| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. |
-| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed, and rows were removed across the flatten (or the removal probe failed). |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain, and rows were removed across the flatten (or the removal probe failed). |
 | `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
 | `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
 | `post-flatten value hash probe failed` | The database hash query failed after flatten. |
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. |
+
+Table value-hash drift on its own is **not** a quarantine reason. Against a
+running city both row counts and value hashes drift on every pass from ordinary
+traffic — an append-only event log always gains rows, and an in-place update
+(any `bd update`) shifts a table's hash at an unchanged row count — so neither
+can tell row loss from concurrent writes. Drift is only the trigger. The verdict
+comes from `DOLT_DIFF(<preflight head>, <flatten head>, <table>)`: the run
+quarantines only when rows were **removed** (or the diff probe itself failed),
+and defers to the next run when nothing was removed. Added and modified rows are
+expected on a live store.
 
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
