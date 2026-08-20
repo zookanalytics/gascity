@@ -60,6 +60,7 @@ beads-role
 controller
 supervisor-http-api
 supervisor-unit-ownership
+supervisor-stale-image
 agent-sessions
 zombie-sessions
 orphan-sessions
