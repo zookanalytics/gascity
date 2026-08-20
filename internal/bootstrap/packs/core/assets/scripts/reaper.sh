@@ -179,6 +179,9 @@ TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
+# Why bulk prune was skipped for a non-anomalous reason, if it was. Reported in
+# the run summary rather than escalated — see the Step 6 backup-age gate.
+SESSION_PRUNE_SKIP_REASON=""
 ANOMALIES=""
 
 sanitize_output() {
@@ -1248,9 +1251,33 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         # judged on the legacy embedded-store state. `bd backup sync` writes
         # only dolt-backup-state.json, so reading the legacy file on a migrated
         # scope would latch this gate closed with no backup action able to clear it.
+        #
+        # An ABSENT state file means two different things, and conflating them is
+        # what latches this gate closed forever:
+        #
+        #   registered destination, no dolt-backup-state.json
+        #       → the backup has never once completed. A real finding: something
+        #         is configured to protect this scope and it is not working.
+        #
+        #   no registration AND no legacy backup_state.json
+        #       → no backup pipeline is configured at all. That is a standing
+        #         operator configuration (backup.enabled=false, say), not an
+        #         anomaly, and NO backup action can produce the missing file —
+        #         so escalating it re-fires every run, forever, with no clearable
+        #         path. doctor draws exactly this line: scanLegacyBackupFreshness
+        #         returns no finding when the legacy file is absent, deliberately
+        #         leaving "no backup at all" to DoltBackupCheck.
+        #
+        # Both still SKIP the prune: this gate is fail-closed on the destructive
+        # operation regardless of why a fresh backup could not be confirmed. Only
+        # the reporting differs — the unconfigured case goes to the run summary
+        # instead of the escalation channel, so the skip stays visible without
+        # burying real escalations in the operator's mailbox.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+        _BACKUP_REGISTERED=0
         if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+            _BACKUP_REGISTERED=1
             _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
             _BACKUP_FIELD="last_sync"
         else
@@ -1311,11 +1338,29 @@ EOF
             [ -n "$best" ] && printf '%s\n' "$best"
             return 0
         }
+        # Whether dolt_backups holds ANY destination for the city database. A
+        # remote-only or empty destination yields no epoch above, but it is
+        # still a configured pipeline — its failure to prove freshness is a
+        # finding, not the "nothing configured" shape.
+        dolt_native_backup_registered() {
+            [ -n "$CITY_DB" ] || return 1
+            command -v dolt_sql >/dev/null 2>&1 || return 1
+            local urls
+            urls=$(dolt_sql -r csv -q "USE \`${CITY_DB}\`; SELECT url FROM dolt_backups;" 2>/dev/null \
+                | tail -n +2 | tr -d '\r' | grep -v '^$') || urls=""
+            [ -n "$urls" ]
+        }
 
         _PRUNE_SKIP=0
         _PRUNE_SKIP_REASON=""
+        # Set when the absent state file means "no backup pipeline configured"
+        # rather than "a configured backup never ran" — see the two-case note
+        # above. Decided AFTER the Dolt-native second opinion below, since a
+        # dolt_backups row is itself a configured pipeline.
+        _PRUNE_UNCONFIGURED=0
         if [ ! -f "$_BACKUP_STATE" ]; then
             _PRUNE_SKIP_REASON="source=$_BACKUP_STATE age=absent"
+            [ "$_BACKUP_REGISTERED" -eq 0 ] && _PRUNE_UNCONFIGURED=1
             _PRUNE_SKIP=1
         else
             _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
@@ -1359,7 +1404,17 @@ EOF
         fi
 
         if [ "$_PRUNE_SKIP" -eq 1 ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+            if [ "$_PRUNE_UNCONFIGURED" -eq 1 ] && ! dolt_native_backup_registered; then
+                # No bd registration, no legacy state file, no dolt_backups row:
+                # nothing is configured to protect this scope, and no backup
+                # action can produce the missing file. Report via the run
+                # summary instead of escalating (gc-zvffx).
+                SESSION_PRUNE_SKIP_REASON="no_backup_pipeline"
+                printf 'reaper: bulk prune skipped for %s — no backup pipeline configured (probed %s; no %s; no dolt_backups row). Not escalated: no backup action can create that file.\n' \
+                    "$SESSION_PRUNE_ANOMALY_SCOPE" "$_BACKUP_STATE" "$CITY_BEADS_DIR/dolt-backup.json" >&2
+            else
+                record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent ($_PRUNE_SKIP_REASON threshold=${_PRUNE_MAX_AGE}s)"
+            fi
         fi
 
         # Pattern-validity gate: SESSION_BEAD_PATTERN is spliced directly
@@ -1509,6 +1564,9 @@ if [ -n "$ANOMALIES" ]; then
 fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+if [ -n "$SESSION_PRUNE_SKIP_REASON" ]; then
+    SUMMARY="$SUMMARY, bulk_prune_skipped:$SESSION_PRUNE_SKIP_REASON"
+fi
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi
