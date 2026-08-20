@@ -506,7 +506,8 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		return 1
 	}
 	if pid := supervisorAlive(); pid != 0 {
-		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
+		state, exePath := classifySupervisorHolder(pid)
+		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor start", pid, state, exePath)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -1002,6 +1003,11 @@ type supervisorServiceData struct {
 	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
 	// so a duplicate install does not crash-loop on the shared port.
 	PortInUseExitCode int
+	// AlreadyRunningExitCode is the exit code the supervisor returns when
+	// another supervisor already holds the city; the systemd unit lists it in
+	// RestartPreventExitStatus alongside PortInUseExitCode so a duplicate does
+	// not crash-loop against a holder it can never displace.
+	AlreadyRunningExitCode int
 }
 
 type supervisorServiceEnvVar struct {
@@ -1022,15 +1028,16 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		xdgRuntimeDir = ""
 	}
 	return &supervisorServiceData{
-		GCPath:            gcPath,
-		LogPath:           supervisorLogPath(),
-		GCHome:            home,
-		XDGRuntimeDir:     xdgRuntimeDir,
-		LaunchdLabel:      supervisorLaunchdLabel(),
-		SafeName:          sanitizeServiceName(filepath.Base(home)),
-		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:          supervisorServiceExtraEnv(),
-		PortInUseExitCode: supervisorExitCodePortInUse,
+		GCPath:                 gcPath,
+		LogPath:                supervisorLogPath(),
+		GCHome:                 home,
+		XDGRuntimeDir:          xdgRuntimeDir,
+		LaunchdLabel:           supervisorLaunchdLabel(),
+		SafeName:               sanitizeServiceName(filepath.Base(home)),
+		Path:                   searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:               supervisorServiceExtraEnv(),
+		PortInUseExitCode:      supervisorExitCodePortInUse,
+		AlreadyRunningExitCode: supervisorExitCodeAlreadyRunning,
 	}, nil
 }
 
@@ -1326,10 +1333,14 @@ func supervisorSystemdServiceName() string {
 // supervisorLaunchdTemplate has no equivalent of systemd's
 // RestartPreventExitStatus: launchd's KeepAlive dict below has no
 // per-exit-code / LastExitStatus key, so a duplicate supervisor that exits
-// with supervisorExitCodePortInUse (see cmd_supervisor.go) is still
+// with either terminal duplicate-instance code — supervisorExitCodePortInUse
+// or supervisorExitCodeAlreadyRunning (see cmd_supervisor.go) — is still
 // "Crashed" (any nonzero exit) and gets restarted regardless of exit code.
 // The port-in-use message is worded accordingly on darwin (see
-// supervisorPortInUseMessage) instead of falsely claiming "without restart".
+// supervisorPortInUseMessage) instead of falsely claiming "without restart";
+// the already-running message avoids the same claim by construction, since
+// its loud form is only reachable behind a procfs read (see
+// supervisorAlreadyRunningMessage).
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1391,9 +1402,11 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
-# A duplicate supervisor that loses the shared API port exits with this code.
-# Restarting it would just crash-loop forever (see ga-ceq), so don't.
-RestartPreventExitStatus={{.PortInUseExitCode}}
+# Terminal duplicate-instance exits. A supervisor that loses the shared API
+# port, or that finds another supervisor already holding the city, can never
+# make progress by restarting — it meets the same holder every time. Both
+# would just crash-loop forever (see ga-ceq, gc-f1081), so don't restart them.
+RestartPreventExitStatus={{.PortInUseExitCode}} {{.AlreadyRunningExitCode}}
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"
