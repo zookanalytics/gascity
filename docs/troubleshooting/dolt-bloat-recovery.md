@@ -206,8 +206,8 @@ should treat these strings as the current vocabulary:
 | `post-flatten row count decreased` | A table lost rows after flatten. |
 | `post-flatten row count probe failed` | The post-flatten row-count query failed or returned a non-number. |
 | `post-flatten table value hash probe failed` | A post-flatten table hash query failed or returned empty. |
-| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed. *(auto-clearable — see below)* |
-| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `post-flatten table value hash changed with row-count increase` | A table gained rows and its value hash changed, and rows were removed across the flatten (or the removal probe failed). *(auto-clearable — see below)* |
+| `post-flatten table value hash changed without row-count increase` | A table's value hash changed without a row-count gain, and rows were removed across the flatten (or the removal probe failed). *(auto-clearable — see below)* |
 | `post-flatten table list changed` | A table appeared or an invalid table name was observed after preflight. |
 | `post-flatten table list probe failed` | The post-flatten `information_schema.tables` query failed. |
 | `post-flatten value hash probe failed` | The database hash query failed after flatten. |
@@ -215,16 +215,36 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
 
-Four of these reasons are known writer-race false positives and are
-**auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
-path re-proves content preservation with a fresh
+Table value-hash drift on its own is **not** a quarantine reason. Against a
+running city both row counts and value hashes drift on every pass from ordinary
+traffic — an append-only event log always gains rows, and an in-place update
+(any `bd update`) shifts a table's hash at an unchanged row count — so neither
+can tell row loss from concurrent writes. Drift is only the trigger. The verdict
+comes from `DOLT_DIFF(<preflight head>, <flatten head>, <table>)` at flatten
+time: the run quarantines only when rows were **removed** (or the diff probe
+itself failed), and defers to the next run when nothing was removed. Added and
+modified rows are expected on a live store, so an ordinary `bd update` never
+writes a marker in the first place.
+
+That verdict decides drift alone. A run that also saw a row-count decrease, a
+table appear or disappear, or any probe fail never reaches the diff and
+quarantines on that reason regardless of what was removed.
+
+Four of these reasons belong to the writer-race class and are
+**auto-clearable** once a marker does exist (the two table-level reasons only
+after the flatten-time removal proof failed closed — typically a probe
+failure). On its next scheduled run, `gc dolt compact`'s flatten path re-proves
+content preservation with a fresh
 `DOLT_DIFF_STAT(<marker flatten_preflight_head>, <current HEAD>)`: every
 drifted table must report `rows_deleted=0` and `rows_modified=0`, and the
-drift must stay confined to that proved set. On success compact removes the
-marker, emits the usual alert and event, and continues through flatten and
-full GC in the same cycle. Any probe failure, deleted or modified row, drift
-outside the proved set, or any other reason keeps the marker and blocks GC.
-You do not need to clear these by hand — check the compactor log first.
+drift must stay confined to that proved set. This second look is deliberately
+stricter than the flatten-time proof — it is clearing a marker that was
+written with evidence in hand, so any modification fails it closed. On success
+compact removes the marker, emits the usual alert and event, and continues
+through flatten and full GC in the same cycle. Any probe failure, deleted or
+modified row, drift outside the proved set, or any other reason keeps the
+marker and blocks GC. You do not need to clear these by hand — check the
+compactor log first.
 
 Quarantine markers also carry structured evidence. New markers include the
 database name, the preflight/flatten/post-verify HEADs, preflight and
