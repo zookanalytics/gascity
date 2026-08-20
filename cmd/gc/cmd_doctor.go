@@ -177,9 +177,13 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
-	Stderr               io.Writer
-	ControllerRunning    bool
-	SupervisorRunning    bool
+	Stderr            io.Writer
+	ControllerRunning bool
+	SupervisorRunning bool
+	// SupervisorPID is the PID of the supervisor holding the city, or 0
+	// when none is running. Checks that inspect the supervisor process
+	// itself (not just its reachability) need the PID, not the bool.
+	SupervisorPID        int
 	SkipCityDoltCheck    bool
 	SkipManagedDoltCheck bool
 	SkipRigDoltChecks    bool
@@ -315,6 +319,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	controllerRunning := opts.ControllerRunning
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
+	register(newSupervisorStaleImageCheck(opts.SupervisorPID))
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
@@ -508,7 +513,8 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		resolveRigPaths(cityPath, cfg.Rigs)
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
-	supervisorRunning := supervisorAliveHook() != 0
+	supervisorPID := supervisorAliveHook()
+	supervisorRunning := supervisorPID != 0
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
 	skipManagedDoltCheck := managedDoltOpsCheckSkip(cityPath, cfg, cfgErr)
@@ -526,6 +532,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		Stderr:               stderr,
 		ControllerRunning:    controllerRunning,
 		SupervisorRunning:    supervisorRunning,
+		SupervisorPID:        supervisorPID,
 		SkipCityDoltCheck:    skipCityDoltCheck,
 		SkipManagedDoltCheck: skipManagedDoltCheck,
 		SkipRigDoltChecks:    skipRigDoltChecks,
