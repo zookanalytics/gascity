@@ -4153,8 +4153,11 @@ func TestRunSupervisorRejectsSupervisorOnFallbackSocket(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := runSupervisor(&stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("runSupervisor code = %d, want 1", code)
+	// Not a bare 1: a duplicate supervisor is terminal, and the systemd unit
+	// lists this code in RestartPreventExitStatus so it stops restarting. A
+	// bare 1 is what let the duplicate crash-loop 83439 times (gc-f1081).
+	if code != supervisorExitCodeAlreadyRunning {
+		t.Fatalf("runSupervisor code = %d, want supervisorExitCodeAlreadyRunning (%d)", code, supervisorExitCodeAlreadyRunning)
 	}
 	if !strings.Contains(stderr.String(), "already running") {
 		t.Fatalf("stderr = %q, want already running message", stderr.String())

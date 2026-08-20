@@ -325,7 +325,8 @@ func supervisorStatusGuidance() string {
 // when all three are silent does start report failure.
 func delegatedSupervisorStart(d systemdDelegation, stdout, stderr io.Writer, jsonOut bool) int {
 	if pid := supervisorAliveHook(); pid != 0 {
-		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
+		state, exePath := classifySupervisorHolder(pid)
+		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor start", pid, state, exePath)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// A bounded systemctl-start timeout is not terminal: the start job can

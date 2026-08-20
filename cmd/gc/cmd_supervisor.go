@@ -320,6 +320,20 @@ const supervisorHardExitCodeRepeatedShutdown = 130
 // with a clear diagnostic instead of crash-looping on the shared port forever.
 const supervisorExitCodePortInUse = 3
 
+// supervisorExitCodeAlreadyRunning is returned when another supervisor already
+// holds the city. Only one supervisor may own the control socket, so a second
+// one can never make progress: it will meet the same holder on every attempt.
+// The generated systemd unit lists this code in RestartPreventExitStatus so
+// the duplicate exits once with a clear diagnostic instead of crash-looping
+// forever — 83439 restarts over five days in gc-f1081, ended only by a host
+// reboot, because a bare exit 1 is not covered by RestartPreventExitStatus and
+// the unit sets no start-limit ceiling.
+//
+// This mirrors the treatment supervisorExitCodePortInUse already gives the
+// duplicate-port collision: a duplicate supervisor is a terminal condition,
+// not a retryable one.
+const supervisorExitCodeAlreadyRunning = 4
+
 // supervisorAddrInUse reports whether err indicates the listen address was
 // already bound (EADDRINUSE) — the signature of a second supervisor competing
 // for the shared API port, as opposed to any other listen failure.
@@ -1256,8 +1270,9 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	configureSupervisorRuntime()
 
 	if pid := supervisorAlive(); pid != 0 {
-		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
-		return 1
+		state, exePath := classifySupervisorHolder(pid)
+		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor", pid, state, exePath)) //nolint:errcheck
+		return supervisorExitCodeAlreadyRunning
 	}
 
 	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked
