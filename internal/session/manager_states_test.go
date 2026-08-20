@@ -334,6 +334,73 @@ func TestConformance_SuspendMidCreateTearsDownRuntime(t *testing.T) {
 	}
 }
 
+func TestConformance_SuspendMidCreateReportsOnlyLiveTeardownFailures(t *testing.T) {
+	// The mid-create branch reports a teardown failure instead of discarding it,
+	// but only when there was something live to tear down. start-pending
+	// routinely has no runtime yet, so a Stop error against a session that was
+	// never running is the ordinary already-gone case and must stay quiet —
+	// otherwise `gc stop` reports a failure for every bead that had not reached
+	// its provider start. A live runtime that refuses to die is the leak the
+	// branch exists to catch, and must surface.
+	stopErr := errors.New("provider refused")
+
+	t.Run("live runtime surfaces the failure", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		m := NewManagerWithOptions(store, sp)
+
+		id := createTestSession(t, m, "dog")
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get bead: %v", err)
+		}
+		sessName := b.Metadata["session_name"]
+
+		if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+			t.Fatalf("seeding runtime: %v", err)
+		}
+		sp.StopErrors[sessName] = stopErr
+		if err := store.SetMetadata(id, "state", string(StateCreating)); err != nil {
+			t.Fatalf("set creating state: %v", err)
+		}
+
+		err = m.Suspend(id)
+		if err == nil {
+			t.Fatal("Suspend(creating) = nil for a live runtime whose Stop failed, want the failure reported")
+		}
+		if !errors.Is(err, stopErr) {
+			t.Errorf("Suspend(creating) = %v, want it to wrap %v", err, stopErr)
+		}
+	})
+
+	t.Run("absent runtime stays quiet", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		m := NewManagerWithOptions(store, sp)
+
+		id := createTestSession(t, m, "dog")
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get bead: %v", err)
+		}
+		sessName := b.Metadata["session_name"]
+
+		// No Start: the provider start was never issued, which is the common
+		// shape of a start-pending bead.
+		if err := sp.Stop(sessName); err != nil {
+			t.Fatalf("clearing any seeded runtime: %v", err)
+		}
+		sp.StopErrors[sessName] = stopErr
+		if err := store.SetMetadata(id, "state", string(StateStartPending)); err != nil {
+			t.Fatalf("set start-pending state: %v", err)
+		}
+
+		if err := m.Suspend(id); err != nil {
+			t.Fatalf("Suspend(start-pending) = %v for a session that was never running, want nil", err)
+		}
+	})
+}
+
 func TestConformance_QuarantineReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

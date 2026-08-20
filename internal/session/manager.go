@@ -1260,9 +1260,23 @@ func (m *Manager) Suspend(id string) error {
 		// running, and the reconciler owns reaping a create that never
 		// completed. Recording "suspended" here would invent a lifecycle the
 		// session never had.
+		//
+		// Unlike failed-create, a teardown failure here is reported rather than
+		// discarded. start-pending routinely has no runtime yet — the provider
+		// start may not have been issued — so a Stop error on a session that was
+		// not running is the normal already-gone case and stays quiet, matching
+		// the active path below. A live runtime that refuses to die is the leak
+		// this branch exists to prevent, and silently reporting success for it
+		// would reproduce the bug one layer up. Reporting does not re-open
+		// #2597: the stop sweep logs a per-target error and moves on, whereas
+		// the illegal-transition rejection failed unconditionally for every
+		// bead in these states.
 		if current == StateStartPending || current == StateCreating {
 			if strings.TrimSpace(sessName) != "" {
-				_ = m.sp.Stop(sessName) // best-effort: tear down any live runtime
+				running := m.sp.IsRunning(sessName)
+				if err := m.sp.Stop(sessName); err != nil && running {
+					return fmt.Errorf("stopping runtime session: %w", err)
+				}
 			}
 			return nil
 		}
