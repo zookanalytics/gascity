@@ -45,6 +45,19 @@ const tokenTelemetryReadLimit = 8 << 20 // 8 MiB
 // genuinely idle session — a converse thread nobody has typed into for an hour —
 // is silent for a benign reason, and the two are not separable from bead state
 // alone. The finding names the session so an operator can tell them apart.
+//
+// That inseparability is also why the result is SeverityAdvisory: it is a
+// reading for an operator, never a gate. Left blocking, it reported an
+// unactionable finding every hour and desensitized its readers to the blocking
+// findings that do need action (gc-w8sxu).
+//
+// The population is awake sessions that invoke a model. A session with no
+// provider resolves no model at all — config.ResolveProvider's start_command
+// escape hatch yields a Command and no provider Name — so it can never record a
+// token sample however long it runs, and counting it would report a permanent,
+// unfixable gap against a process that is behaving correctly. Idleness is not
+// the discriminator: an awake, working session that records nothing is still a
+// real finding and still fires.
 type agentTokenTelemetryCheck struct {
 	cityPath string
 	newStore func(string) (beads.Store, error)
@@ -59,6 +72,14 @@ func newAgentTokenTelemetryCheck(cityPath string, newStore func(string) (beads.S
 
 // Name returns the check's identifier.
 func (c *agentTokenTelemetryCheck) Name() string { return "agent-token-telemetry" }
+
+// advisoryResult marks a result informational, alongside the okCheck/warnCheck
+// factories. Every result this check produces goes through here: it is pure
+// observability and never gates a consumer.
+func advisoryResult(res *doctor.CheckResult) *doctor.CheckResult {
+	res.Severity = doctor.SeverityAdvisory
+	return res
+}
 
 // CanFix reports that this check is detection-only.
 func (c *agentTokenTelemetryCheck) CanFix() bool { return false }
@@ -75,41 +96,46 @@ func (c *agentTokenTelemetryCheck) Fix(_ *doctor.CheckContext) error { return ni
 // and reports any session past the silence threshold with nothing recorded.
 func (c *agentTokenTelemetryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	if c.newStore == nil || strings.TrimSpace(c.cityPath) == "" {
-		return okCheck(c.Name(), "no city bead store to inspect")
+		return advisoryResult(okCheck(c.Name(), "no city bead store to inspect"))
 	}
 	now := c.now().UTC()
 
 	usagePath := filepath.Join(c.cityPath, ".gc", "usage.jsonl")
 	facts, _, err := usage.ReadRecentFacts(usagePath, tokenTelemetryReadLimit)
 	if err != nil {
-		return warnCheck(c.Name(),
+		return advisoryResult(warnCheck(c.Name(),
 			"could not read the usage log to verify agent token telemetry",
 			"fix access to <city>/.gc/usage.jsonl, then rerun gc doctor",
-			[]string{fmt.Sprintf("reading %s: %v", usagePath, err)})
+			[]string{fmt.Sprintf("reading %s: %v", usagePath, err)}))
 	}
 	if len(facts) == 0 {
 		// Either usage recording is off ([usage] provider = "discard") or the
 		// city has never recorded a fact. Neither is evidence of a telemetry
 		// gap, and reporting it would make the check permanently red on a city
 		// that opted out of usage accounting.
-		return okCheck(c.Name(), "no usage facts recorded; agent token telemetry not verifiable")
+		return advisoryResult(okCheck(c.Name(), "no usage facts recorded; agent token telemetry not verifiable"))
 	}
 
 	store, err := c.newStore(c.cityPath)
 	if err != nil {
-		return warnCheck(c.Name(),
+		return advisoryResult(warnCheck(c.Name(),
 			"could not open the city bead store to list awake sessions",
 			"fix bead store access, then rerun gc doctor",
-			[]string{fmt.Sprintf("opening bead store: %v", err)})
+			[]string{fmt.Sprintf("opening bead store: %v", err)}))
 	}
 
 	cutoff := now.Add(-tokenTelemetrySilenceThreshold)
 	lastSampleBySession, newestSample := tokenSampleIndex(facts)
 
-	awake, silent := c.scanAwakeSessions(store, lastSampleBySession, now, cutoff)
+	awake, unmeasured, silent := c.scanAwakeSessions(store, lastSampleBySession, now, cutoff)
 	if len(silent) == 0 {
-		return okCheck(c.Name(),
-			fmt.Sprintf("all %d awake session(s) past the grace period have recent token samples", awake))
+		if awake == 0 {
+			return advisoryResult(okCheck(c.Name(),
+				"no awake model-invoking session(s) past the grace period"+unmeasuredSuffix(unmeasured)))
+		}
+		return advisoryResult(okCheck(c.Name(),
+			fmt.Sprintf("all %d awake session(s) past the grace period have recent token samples%s",
+				awake, unmeasuredSuffix(unmeasured))))
 	}
 	sort.Strings(silent)
 
@@ -126,16 +152,26 @@ func (c *agentTokenTelemetryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 			awake, tokenTelemetrySilenceThreshold, formatSampleAge(newestSample, now))
 		hint = "every awake session going silent together points at the emission path, not at one agent: check the controller's model-usage sweep and the usage sink"
 	}
-	return warnCheck(c.Name(), message, hint, silent)
+	return advisoryResult(warnCheck(c.Name(), message+unmeasuredSuffix(unmeasured), hint, silent))
 }
 
-// scanAwakeSessions returns the number of awake sessions past the grace period
-// and a detail line for each that has recorded no sample since cutoff.
+// scanAwakeSessions returns the number of awake model-invoking sessions past the
+// grace period, how many awake sessions were excluded as non-model, and a detail
+// line for each measured session that has recorded no sample since cutoff.
 //
 // Sessions in a terminal state are out of scope: they cannot be expected to emit.
 // So are sessions with no awake_started_at (never confirmed a start) and those
 // still inside the grace period, which have had no chance to emit yet.
-func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSample map[string]time.Time, now, cutoff time.Time) (awake int, silent []string) {
+//
+// Sessions that invoke no model are out of scope for a stronger reason: they are
+// not agents at all. session.ProviderFamilyFromMetadata is the canonical
+// provider ladder (builtin_ancestor → provider_kind → provider), and it resolves
+// to "" only when a session records no provider on any rung — the on-disk shape
+// of a start_command process such as the control dispatcher's `gc convoy control
+// --serve --follow` loop. Reading the ladder rather than the raw provider keeps a
+// wrapped provider alias in the measured population; deriving the exclusion from
+// the provider (not from a session name or template) keeps role names out of Go.
+func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSample map[string]time.Time, now, cutoff time.Time) (awake, unmeasured int, silent []string) {
 	sessions, err := store.List(beads.ListQuery{
 		Type:      session.BeadType,
 		Label:     session.LabelSession,
@@ -143,7 +179,7 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		AllowScan: true,
 	})
 	if err != nil {
-		return 0, []string{fmt.Sprintf("listing session beads: %v", err)}
+		return 0, 0, []string{fmt.Sprintf("listing session beads: %v", err)}
 	}
 	for _, b := range sessions {
 		if b.Metadata == nil || isComputeTerminalState(b.Metadata["state"]) {
@@ -151,6 +187,10 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		}
 		started, err := time.Parse(time.RFC3339, strings.TrimSpace(b.Metadata["awake_started_at"]))
 		if err != nil || started.After(cutoff) {
+			continue
+		}
+		if session.ProviderFamilyFromMetadata(b.Metadata, "") == "" {
+			unmeasured++
 			continue
 		}
 		awake++
@@ -164,7 +204,19 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		silent = append(silent, fmt.Sprintf("%s (%s): awake %s, last token sample %s",
 			name, b.ID, formatSampleAge(started, now), formatSampleAge(lastSample[b.ID], now)))
 	}
-	return awake, silent
+	return awake, unmeasured, silent
+}
+
+// unmeasuredSuffix states how many awake sessions were left out of the
+// population. The exclusion is reported rather than applied silently: this
+// check exists because an absent telemetry series is indistinguishable from
+// zero spend (gc-kawr5), and an unreported exclusion would rebuild that same
+// blind spot one level up.
+func unmeasuredSuffix(unmeasured int) string {
+	if unmeasured == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (%d awake session(s) invoke no model and are not measured)", unmeasured)
 }
 
 // tokenSampleIndex maps session id to the newest model-usage sample recorded
