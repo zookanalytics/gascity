@@ -181,6 +181,15 @@ func TestManagedDoltScopeWatchdogHelper(t *testing.T) {
 	if interval := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS")); interval != "" {
 		t.Setenv(managedDoltScopeWatchdogIntervalEnv, interval)
 	}
+	// Crash-recovery knobs ride GC_TEST_ control vars for the same reason
+	// the interval does: TestMain scrubs non-GC_TEST_ GC_* keys, so the
+	// helper is what re-exports them for the watchdog it spawns.
+	if budget := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_RESTART_BUDGET")); budget != "" {
+		t.Setenv(managedDoltRestartBudgetEnv, budget)
+	}
+	if delay := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_RESTART_DELAY_MS")); delay != "" {
+		t.Setenv(managedDoltRestartDelayEnv, delay)
+	}
 	statePath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_STATE"))
 	configPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_CONFIG"))
 	logPath := strings.TrimSpace(os.Getenv("GC_TEST_MANAGED_DOLT_HELPER_LOG"))
