@@ -1239,6 +1239,33 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
+		// start-pending and creating are the mid-create states: the provider
+		// start has been issued, so a runtime process may well be live, but the
+		// create never reached creation_complete and there is no active turn to
+		// suspend. Kill already treats both as "a runtime process could
+		// plausibly exist"; suspend must not disagree, because rejecting here
+		// protects nothing — it leaves the live runtime behind and hands the
+		// caller an error it has no other lever to act on.
+		//
+		// The force-shutdown late sweep is the caller that needs this. It
+		// re-lists the fleet after abandoning the async-start wait precisely to
+		// catch sessions created too late for the first stop pass, and those
+		// are exactly the ones whose create commit has not landed yet. Without
+		// this branch, whether that sweep stopped such a session or leaked it
+		// depended on whether the async commit won the race to flip the bead to
+		// active (gc-04375).
+		//
+		// Like the failed-create case above, the bead is left where it is
+		// rather than marked suspended: an in-flight create may still be
+		// running, and the reconciler owns reaping a create that never
+		// completed. Recording "suspended" here would invent a lifecycle the
+		// session never had.
+		if current == StateStartPending || current == StateCreating {
+			if strings.TrimSpace(sessName) != "" {
+				_ = m.sp.Stop(sessName) // best-effort: tear down any live runtime
+			}
+			return nil
+		}
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.

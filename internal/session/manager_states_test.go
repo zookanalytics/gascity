@@ -273,6 +273,67 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	}
 }
 
+func TestConformance_SuspendMidCreateTearsDownRuntime(t *testing.T) {
+	// Sibling of the failed-create carve-out above, and the same argument:
+	// `gc stop` issues suspend on every session bead with no state pre-filter,
+	// so a bead still mid-create when the stop lands takes the suspend path.
+	// start-pending and creating are exactly the states Kill already accepts as
+	// "a runtime process could plausibly exist" — the provider start has been
+	// issued, so the runtime is live even though creation_complete has not
+	// landed yet. Rejecting suspend with an illegal-transition error there does
+	// not protect anything: it leaves the live runtime behind and reports the
+	// failure to a caller that has no other lever to reach it.
+	//
+	// The force-shutdown late sweep is where this bit: it re-lists after
+	// abandoning the async-start wait precisely to catch sessions created too
+	// late for the first pass, and those are the ones whose create commit has
+	// not landed. Whether the sweep stopped them or leaked them came down to
+	// whether the async commit won the race to flip the bead to active, which
+	// is what made TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep
+	// fail under load (gc-04375).
+	for _, state := range []State{StateStartPending, StateCreating} {
+		t.Run(string(state), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+
+			id := createTestSession(t, m, "dog")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			sessName := b.Metadata["session_name"]
+
+			// A live runtime plus a bead that has not reached creation_complete:
+			// the provider start landed, the commit that marks the bead active
+			// has not.
+			if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+				t.Fatalf("seeding runtime: %v", err)
+			}
+			if err := store.SetMetadata(id, "state", string(state)); err != nil {
+				t.Fatalf("set %s state: %v", state, err)
+			}
+
+			if err := m.Suspend(id); err != nil {
+				t.Fatalf("Suspend(%s) = %v, want nil (must not leave the runtime behind)", state, err)
+			}
+			if sp.CountCalls("Stop", sessName) == 0 {
+				t.Errorf("Suspend(%s) did not tear down runtime session %q", state, sessName)
+			}
+			if sp.IsRunning(sessName) {
+				t.Errorf("runtime session %q still running after Suspend(%s)", sessName, state)
+			}
+			// The bead is deliberately left mid-create rather than marked
+			// suspended: the create path may still be in flight, and the
+			// reconciler owns reaping a create that never completed. Claiming
+			// "suspended" here would invent a lifecycle the session never had.
+			if got := getState(t, m, id); got != state {
+				t.Errorf("state = %q after Suspend(%s), want it left at %q for the reconciler", got, state, state)
+			}
+		})
+	}
+}
+
 func TestConformance_QuarantineReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
