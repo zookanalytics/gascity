@@ -3395,7 +3395,56 @@ func stopTargetThroughWorkerBoundary(target stopTarget, store beads.Store, sp ru
 		markCityStopSessionAsAsleep(sessionFrontDoor(store), target.sessionID, nil)
 		return nil
 	}
+	// A bead still mid-create has no lifecycle to suspend. Suspend rejects
+	// start-pending and creating as illegal transitions — correctly, because
+	// the reconciler still reads those states as a start request — so routing
+	// them there leaves whatever runtime the provider start already spawned
+	// alive, with the rejection reported as a stop failure. That is what made
+	// force shutdown's late async sweep miss its target (gc-04375): the sweep
+	// re-lists specifically to catch sessions created too late for the first
+	// pass, and those are exactly the ones whose create commit has not landed.
+	//
+	// Kill is the teardown-only lever for these states: it already accepts
+	// both and stops the runtime without writing a lifecycle the session never
+	// had, leaving the bead mid-create for the reconciler to reap or for an
+	// in-flight create to finish rolling back.
+	if midCreateSessionBead(store, target.sessionID) {
+		// A start-pending bead routinely has no runtime at all — the provider
+		// start was never issued — and `gc stop` reaches every session bead
+		// with no state pre-filter, so a teardown against a session that was
+		// not running must stay quiet or every such bead reports a stop
+		// failure. That is the same already-gone rule Manager.Suspend applies
+		// on its own active path: judge by whether the runtime reported a live
+		// process before the teardown, not by the shape of the error. A
+		// runtime that was live and refused to die still surfaces.
+		wasRunning := sp.IsRunning(target.name)
+		if err := workerKillSessionTargetWithConfig("", store, sp, cfg, targetID); err != nil && wasRunning {
+			return err
+		}
+		return nil
+	}
 	return workerStopSessionTargetWithConfig("", store, sp, cfg, targetID)
+}
+
+// midCreateSessionBead reports whether a session bead is still mid-create: the
+// controller has reserved its identity and intends to start it
+// (start-pending), or the provider Start call is in flight (creating). Either
+// way the create has not reached creation_complete, so the bead has no
+// suspendable lifecycle — only a runtime that may need tearing down.
+func midCreateSessionBead(store beads.Store, sessionID string) bool {
+	if store == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	b, err := store.Get(sessionID)
+	if err != nil {
+		return false
+	}
+	switch sessionpkg.State(strings.TrimSpace(b.Metadata["state"])) {
+	case sessionpkg.StateStartPending, sessionpkg.StateCreating:
+		return true
+	default:
+		return false
+	}
 }
 
 func cityStopSessionMarked(store beads.Store, sessionID string) bool {
