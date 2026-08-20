@@ -179,6 +179,9 @@ TOTAL_EXPIRED_ISSUES_CLOSED=0
 TOTAL_EXPIRED_ISSUES_SKIPPED=0
 TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
+# Why bulk prune was skipped for a non-anomalous reason, if it was. Reported in
+# the run summary rather than escalated — see the Step 6 backup-age gate.
+SESSION_PRUNE_SKIP_REASON=""
 ANOMALIES=""
 
 sanitize_output() {
@@ -1169,9 +1172,33 @@ if [ -d "$CITY_BEADS_DIR" ]; then
         # judged on the legacy embedded-store state. `bd backup sync` writes
         # only dolt-backup-state.json, so reading the legacy file on a migrated
         # scope would latch this gate closed with no backup action able to clear it.
+        #
+        # An ABSENT state file means two different things, and conflating them is
+        # what latches this gate closed forever:
+        #
+        #   registered destination, no dolt-backup-state.json
+        #       → the backup has never once completed. A real finding: something
+        #         is configured to protect this scope and it is not working.
+        #
+        #   no registration AND no legacy backup_state.json
+        #       → no backup pipeline is configured at all. That is a standing
+        #         operator configuration (backup.enabled=false, say), not an
+        #         anomaly, and NO backup action can produce the missing file —
+        #         so escalating it re-fires every run, forever, with no clearable
+        #         path. doctor draws exactly this line: scanLegacyBackupFreshness
+        #         returns no finding when the legacy file is absent, deliberately
+        #         leaving "no backup at all" to DoltBackupCheck.
+        #
+        # Both still SKIP the prune: this gate is fail-closed on the destructive
+        # operation regardless of why a fresh backup could not be confirmed. Only
+        # the reporting differs — the unconfigured case goes to the run summary
+        # instead of the escalation channel, so the skip stays visible without
+        # burying real escalations in the operator's mailbox.
         _PRUNE_MAX_AGE="${GC_REAPER_BACKUP_MAX_AGE:-${GC_BACKUP_MAX_AGE_FOR_BULK_DELETE:-86400}}"
         case "$_PRUNE_MAX_AGE" in ''|*[!0-9]*) _PRUNE_MAX_AGE=86400 ;; esac
+        _BACKUP_REGISTERED=0
         if [ -f "$CITY_BEADS_DIR/dolt-backup.json" ]; then
+            _BACKUP_REGISTERED=1
             _BACKUP_STATE="$CITY_BEADS_DIR/dolt-backup-state.json"
             _BACKUP_FIELD="last_sync"
         else
@@ -1179,8 +1206,13 @@ if [ -d "$CITY_BEADS_DIR" ]; then
             _BACKUP_FIELD="timestamp"
         fi
         _PRUNE_SKIP=0
-        if [ ! -f "$_BACKUP_STATE" ]; then
-            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup stale or absent (source=$_BACKUP_STATE age=absent threshold=${_PRUNE_MAX_AGE}s)"
+        if [ ! -f "$_BACKUP_STATE" ] && [ "$_BACKUP_REGISTERED" -eq 0 ]; then
+            SESSION_PRUNE_SKIP_REASON="no_backup_pipeline"
+            printf 'reaper: bulk prune skipped for %s — no backup pipeline configured (probed %s; no %s). Not escalated: no backup action can create that file.\n' \
+                "$SESSION_PRUNE_ANOMALY_SCOPE" "$_BACKUP_STATE" "$CITY_BEADS_DIR/dolt-backup.json" >&2
+            _PRUNE_SKIP=1
+        elif [ ! -f "$_BACKUP_STATE" ]; then
+            record_anomaly "$SESSION_PRUNE_ANOMALY_SCOPE" "bulk prune skipped: backup registered but never synced (source=$_BACKUP_STATE age=absent threshold=${_PRUNE_MAX_AGE}s)"
             _PRUNE_SKIP=1
         else
             _BACKUP_TS=$(sed -n "s/.*\"$_BACKUP_FIELD\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$_BACKUP_STATE" | head -1)
@@ -1290,6 +1322,9 @@ if [ -n "$ANOMALIES" ]; then
 fi
 
 SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, workflow_roots:$TOTAL_WORKFLOW_ROOTS_CLOSED, skipped_cross_store_workflow_roots:$TOTAL_WORKFLOW_ROOTS_STORE_REF_SKIPPED, skipped_non_city_workflow_issue_roots:$TOTAL_WORKFLOW_ISSUE_ROOTS_SKIPPED, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, expired:$TOTAL_EXPIRED_ISSUES_CLOSED, expired_skipped:$TOTAL_EXPIRED_ISSUES_SKIPPED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
+if [ -n "$SESSION_PRUNE_SKIP_REASON" ]; then
+    SUMMARY="$SUMMARY, bulk_prune_skipped:$SESSION_PRUNE_SKIP_REASON"
+fi
 if [ -n "$DRY_RUN" ]; then
     SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS, would_close_workflow_roots:$TOTAL_WOULD_CLOSE_WORKFLOW_ROOTS, would_expire:$TOTAL_WOULD_EXPIRE (dry run)"
 fi

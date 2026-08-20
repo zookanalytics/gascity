@@ -2,13 +2,20 @@
 # Test: reaper Step 6 bd-prune backup-age guard
 #
 # Acceptance criteria:
-#   1. No backup state present       → bd NOT called, anomaly recorded
+#   1. No backup pipeline at all     → bd NOT called, NO anomaly, skip reason recorded
 #   2. Fresh backup state            → bd IS called, no anomaly
 #   3. Stale backup state            → bd NOT called, anomaly recorded
 #   4. RFC3339Nano fresh timestamp   → bd IS called, no anomaly
 #   5. Dolt registered + fresh sync  → bd IS called even when the legacy file is stale
-#   6. Dolt registered, never synced → bd NOT called even when the legacy file is fresh
+#   6. Dolt registered, never synced → bd NOT called, anomaly recorded, NO skip reason
 #   7. Malformed backup state        → bd NOT called, anomaly recorded
+#   8. Empty legacy backup/ dir      → bd NOT called, NO anomaly (the live incident shape)
+#
+# T1/T6/T8 encode the distinction this guard exists to draw: a scope with NO
+# backup pipeline configured is a standing configuration, not an anomaly, and
+# escalating it every run latches the gate closed with no clearable path. A
+# scope with a REGISTERED destination that has never synced is a real finding.
+# Both skip the prune — the destructive operation stays fail-closed either way.
 
 set -euo pipefail
 
@@ -62,18 +69,19 @@ ts_ago() {
 #               pipeline and does not fall back. "absent" (default) writes none.
 #   frac        optional fractional-seconds suffix for the active state file.
 #
-# Returns: <bd_called>|<anomaly_called>|<exit_status>|<anomaly_msg>
+# Returns: <bd_called>|<anomaly_called>|<exit_status>|<skip_reason>|<anomaly_msg>
 run_prune_scenario() {
     local backup_age="$1"
     local max_age="${2:-86400}"
     local pipeline="${3:-legacy}"
     local legacy_age="${4:-absent}"
     local frac="${5:-}"
-    local tmpdir bd_flag anomaly_flag anomaly_msg_file step6_file run_script
+    local tmpdir bd_flag anomaly_flag anomaly_msg_file reason_file step6_file run_script
     tmpdir=$(mktemp -d)
     bd_flag="$tmpdir/bd_called"
     anomaly_flag="$tmpdir/anomaly_called"
     anomaly_msg_file="$tmpdir/anomaly_msg"
+    reason_file="$tmpdir/skip_reason"
     step6_file="$tmpdir/step6.sh"
     run_script="$tmpdir/run.sh"
 
@@ -91,7 +99,10 @@ run_prune_scenario() {
                 > "$tmpdir/.beads/backup/backup_state.json"
         fi
     else
-        mkdir -p "$tmpdir/.beads/backup"
+        # "legacy" creates the backup/ dir (bd's backupDir() MkdirAll's it even
+        # when no backup is ever written — the live incident shape).
+        # "legacy-nodir" leaves the scope completely uninitialised.
+        [ "$pipeline" = "legacy-nodir" ] || mkdir -p "$tmpdir/.beads/backup"
         state_file="$tmpdir/.beads/backup/backup_state.json"
         state_field="timestamp"
     fi
@@ -126,7 +137,9 @@ TOTAL_SESSIONS_PRUNED=0
 SESSION_PRUNE_ATTEMPTED=0
 CITY_DB='test_db'
 GC_BACKUP_MAX_AGE_FOR_BULK_DELETE='$max_age'
+SESSION_PRUNE_SKIP_REASON=''
 . '$step6_file'
+printf '%s' "\$SESSION_PRUNE_SKIP_REASON" > '$reason_file'
 RUNEOF
 
     # The stubbed Step 6 environment can legitimately exit nonzero, so this is
@@ -134,23 +147,31 @@ RUNEOF
     local rc=0
     bash "$run_script" 2>/dev/null || rc=$?
 
-    local bd_result anomaly_result anomaly_msg_val
+    local bd_result anomaly_result anomaly_msg_val reason_val
     bd_result=$([ -f "$bd_flag" ] && echo yes || echo no)
     anomaly_result=$([ -f "$anomaly_flag" ] && echo yes || echo no)
     anomaly_msg_val=$(cat "$anomaly_msg_file" 2>/dev/null || echo "")
+    reason_val=$(tr '|\n' '  ' < "$reason_file" 2>/dev/null || echo "")
     rm -rf "$tmpdir"
-    printf '%s|%s|%s|%s\n' "$bd_result" "$anomaly_result" "$rc" "$anomaly_msg_val"
+    printf '%s|%s|%s|%s|%s\n' "$bd_result" "$anomaly_result" "$rc" "$reason_val" "$anomaly_msg_val"
 }
 
-# ── T1: no backup_state.json → bd NOT called, anomaly recorded ────────────────
+# ── T1: no backup pipeline at all → bd NOT called, NO anomaly ────────────────
+# This is the live incident shape: .beads/backup/ exists (bd's backupDir()
+# MkdirAll's it) but nothing ever wrote backup_state.json, and no Dolt
+# destination is registered. No backup action can create that file, so
+# escalating here latches the gate closed and re-escalates every run forever.
+# The prune still skips — fail-closed is preserved — but via the summary
+# channel, not an escalation.
 result=$(run_prune_scenario "absent")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
-    pass "T1: absent backup_state.json → bd skipped, anomaly recorded"
+reason=$(printf '%s' "$result" | cut -d'|' -f4)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "no" ] && [ -n "$reason" ]; then
+    pass "T1: no backup pipeline → bd skipped, no anomaly, skip reason recorded"
 else
-    fail "T1: absent backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc"
+    fail "T1: no backup pipeline → expected bd=no anomaly=no reason=non-empty; got bd=$bd_called anomaly=$anomaly_called reason='$reason' rc=$rc"
 fi
 
 # ── T2: fresh backup (60s old, well within 86400s) → bd IS called ────────────
@@ -169,7 +190,7 @@ result=$(run_prune_scenario "90000")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] \
         && printf '%s' "$anomaly_msg" | grep -qi "stale\|backup\|prune"; then
     pass "T3: stale backup (90000s) → bd skipped, anomaly recorded with stale/backup/prune keyword"
@@ -184,7 +205,7 @@ result=$(run_prune_scenario "60" "86400" "legacy" "absent" ".765205448")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
 if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
     pass "T4: fresh RFC3339Nano backup (60s) → bd called, no anomaly"
 else
@@ -200,7 +221,7 @@ result=$(run_prune_scenario "60" "86400" "dolt" "9000000")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
 if [ "$bd_called" = "yes" ] && [ "$anomaly_called" = "no" ]; then
     pass "T5: dolt registered, fresh last_sync, stale legacy file → bd called, no anomaly"
 else
@@ -214,11 +235,12 @@ result=$(run_prune_scenario "absent" "86400" "dolt" "60")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
-if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
-    pass "T6: dolt registered, never synced (fresh legacy present) → bd skipped, anomaly recorded"
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
+reason=$(printf '%s' "$result" | cut -d'|' -f4)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ] && [ -z "$reason" ]; then
+    pass "T6: dolt registered, never synced (fresh legacy present) → bd skipped, anomaly recorded, no skip reason"
 else
-    fail "T6: dolt registered, never synced (fresh legacy present) → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+    fail "T6: dolt registered, never synced (fresh legacy present) → expected bd=no anomaly=yes reason=empty; got bd=$bd_called anomaly=$anomaly_called reason='$reason' rc=$rc msg=$anomaly_msg"
 fi
 
 # ── T7: malformed backup_state.json → bd NOT called, anomaly recorded ────────
@@ -226,11 +248,26 @@ result=$(run_prune_scenario "malformed")
 bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
 anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
 rc=$(printf '%s' "$result" | cut -d'|' -f3)
-anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f4-)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
 if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "yes" ]; then
     pass "T7: malformed backup_state.json → bd skipped, anomaly recorded"
 else
     fail "T7: malformed backup_state.json → expected bd=no anomaly=yes; got bd=$bd_called anomaly=$anomaly_called rc=$rc msg=$anomaly_msg"
+fi
+
+# ── T8: scope never initialised (no backup/ dir at all) → no anomaly ─────────
+# Complement to T1: the gate must key on the state FILE, not on whether the
+# backup directory happens to exist. Both are "no pipeline configured".
+result=$(run_prune_scenario "absent" "86400" "legacy-nodir")
+bd_called=$(printf '%s' "$result" | cut -d'|' -f1)
+anomaly_called=$(printf '%s' "$result" | cut -d'|' -f2)
+rc=$(printf '%s' "$result" | cut -d'|' -f3)
+reason=$(printf '%s' "$result" | cut -d'|' -f4)
+anomaly_msg=$(printf '%s' "$result" | cut -d'|' -f5-)
+if [ "$bd_called" = "no" ] && [ "$anomaly_called" = "no" ] && [ -n "$reason" ]; then
+    pass "T8: uninitialised scope (no backup/ dir) → bd skipped, no anomaly, skip reason recorded"
+else
+    fail "T8: uninitialised scope (no backup/ dir) → expected bd=no anomaly=no reason=non-empty; got bd=$bd_called anomaly=$anomaly_called reason='$reason' rc=$rc msg=$anomaly_msg"
 fi
 
 [ "$FAILED" -eq 0 ] && exit 0 || exit 1
