@@ -1245,32 +1245,24 @@ func (m *Manager) Suspend(id string) error {
 		// suspend. Kill already treats both as "a runtime process could
 		// plausibly exist"; suspend must not disagree, because rejecting here
 		// protects nothing — it leaves the live runtime behind and hands the
-		// caller an error it has no other lever to act on.
+		// caller an error it has no other lever to act on. The force-shutdown
+		// late sweep is what needs this: it re-lists the fleet specifically to
+		// catch sessions created too late for the first stop pass, which are
+		// exactly the ones whose create commit has not landed (gc-04375).
 		//
-		// The force-shutdown late sweep is the caller that needs this. It
-		// re-lists the fleet after abandoning the async-start wait precisely to
-		// catch sessions created too late for the first stop pass, and those
-		// are exactly the ones whose create commit has not landed yet. Without
-		// this branch, whether that sweep stopped such a session or leaked it
-		// depended on whether the async commit won the race to flip the bead to
-		// active (gc-04375).
+		// Like failed-create, the bead is left where it is rather than marked
+		// suspended: an in-flight create may still be running, and the
+		// reconciler owns reaping a create that never completed. Recording
+		// "suspended" would invent a lifecycle the session never had.
 		//
-		// Like the failed-create case above, the bead is left where it is
-		// rather than marked suspended: an in-flight create may still be
-		// running, and the reconciler owns reaping a create that never
-		// completed. Recording "suspended" here would invent a lifecycle the
-		// session never had.
-		//
-		// Unlike failed-create, a teardown failure here is reported rather than
-		// discarded. start-pending routinely has no runtime yet — the provider
-		// start may not have been issued — so a Stop error on a session that was
-		// not running is the normal already-gone case and stays quiet, matching
-		// the active path below. A live runtime that refuses to die is the leak
-		// this branch exists to prevent, and silently reporting success for it
-		// would reproduce the bug one layer up. Reporting does not re-open
-		// #2597: the stop sweep logs a per-target error and moves on, whereas
-		// the illegal-transition rejection failed unconditionally for every
-		// bead in these states.
+		// Unlike failed-create, a teardown failure is reported rather than
+		// discarded, on the active path's terms: a Stop error against a session
+		// that was not running is the ordinary already-gone case (start-pending
+		// routinely has no runtime yet) and stays quiet, while a live runtime
+		// that refuses to die is the leak this branch exists to prevent. That
+		// does not re-open #2597 — the stop sweep logs a per-target error and
+		// moves on, whereas the illegal-transition rejection failed
+		// unconditionally for every bead in these states.
 		if current == StateStartPending || current == StateCreating {
 			if strings.TrimSpace(sessName) != "" {
 				running := m.sp.IsRunning(sessName)
