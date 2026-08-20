@@ -1239,6 +1239,28 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
+		// Mid-create states fall through to the transition check below, which
+		// rejects them. Do not add a carve-out here.
+		//
+		// Suspend promises the caller a durably paused session, and a mid-create
+		// bead cannot honor that. start-pending means the controller has reserved
+		// an identity and still intends to start it, and the reconciler reads raw
+		// start-pending — and pending_create_claim — as a start request
+		// (sessionStartRequestedInfo in cmd/gc/session_reconcile.go), so such a
+		// bead is relaunched on the next tick. Reporting success after only
+		// tearing the runtime down would hand POST /v0/session/{id}/suspend a 200
+		// for a session that is still queued to start. Clearing pending_create_*
+		// here instead is no better: creating means a provider Start call is in
+		// flight, and that create's own commit and rollback belong to the
+		// reconciler.
+		//
+		// Tearing a mid-create runtime down is a real need — force shutdown's
+		// late sweep depends on it (gc-04375) — but it is a teardown, not a
+		// suspension, and Kill is the lever for it: it accepts both states and
+		// leaves the persisted lifecycle alone. The stop path routes mid-create
+		// targets there (stopTargetThroughWorkerBoundary in
+		// cmd/gc/session_lifecycle_parallel.go).
+
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
