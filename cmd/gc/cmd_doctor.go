@@ -177,9 +177,12 @@ func (c *doltTopologyCheck) CanFix() bool { return false }
 func (c *doltTopologyCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 type buildDoctorChecksOpts struct {
-	Stderr                  io.Writer
-	ControllerRunning       bool
-	SupervisorRunning       bool
+	Stderr            io.Writer
+	ControllerRunning bool
+	SupervisorRunning bool
+	// SupervisorPID is the PID of the supervisor holding the city, or 0
+	// when none is running. Checks that inspect the supervisor process
+	// itself (not just its reachability) need the PID, not the bool.
 	SupervisorPID           int
 	SupervisorUnitOwnership doctor.SupervisorUnitOwnership
 	SkipCityDoltCheck       bool
@@ -318,6 +321,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
+	register(newSupervisorStaleImageCheck(opts.SupervisorPID))
 
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
