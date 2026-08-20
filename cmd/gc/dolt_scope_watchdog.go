@@ -171,11 +171,71 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 	}, nil
 }
 
+// managedDoltScopeWatchdogChild is one supervised `dolt sql-server`
+// generation: its PID, the OS start identity captured before anything could
+// reap it, and the channel its wait result arrives on. Crash recovery
+// replaces the whole value on restart, so the PID-reuse guard on the
+// terminate paths always describes the child that is currently running.
+type managedDoltScopeWatchdogChild struct {
+	pid      int
+	ticks    uint64
+	identity string
+	done     chan error
+}
+
+// startManagedDoltScopeWatchdogChild spawns one dolt sql-server generation
+// under the watchdog and begins reaping it.
+//
+// Setpgid: the dolt sql-server leads its own process group, matching the
+// direct production spawn (managedDoltSQLServerSysProcAttr) and the test
+// watchdog's layout, and keeping the server's descendants out of the
+// watchdog's own group. Termination here is leader-only: the guarded
+// terminate below signals just this PID — group-kill (kill(-pgid, ...))
+// exists only in terminateManagedDoltTestPID, the test-registry reaper.
+// Leader-only is accepted on this path because the managed config disables
+// auto_gc/stats helper workers (see cmd_dolt_config.go), so descendant
+// helpers are rare by construction, and a SIGTERM'd dolt winds down its own
+// children; only the SIGKILL escalation of an unresponsive server could
+// strand descendants.
+//
+// The start identity is snapshotted BEFORE the reap goroutine can Wait() the
+// child and free its numeric PID. Snapshotting here — while the caller still
+// holds the un-reaped child — is race-free and mirrors the direct-spawn
+// snapshot in startManagedDoltSQLServer, so neither the parent's
+// startup-failure cleanup guard (terminateManagedDoltStartedProcess) nor this
+// watchdog's own scope-gone and signal-forward termination
+// (terminateManagedDoltScopeWatchdogChild) can ever signal an unrelated
+// process that reused the PID. snapshotManagedDoltStartIdentity reads the ps
+// fallback lazily, so the parent handshake — which the parent reads under a
+// timeout — never blocks on a ps fork when /proc ticks are available.
+func startManagedDoltScopeWatchdogChild(configFile, cityPath string, logFile *os.File) (*managedDoltScopeWatchdogChild, error) {
+	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Env = doltServerEnv(cityPath, os.Environ())
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	pid := cmd.Process.Pid
+	ticks, identity := snapshotManagedDoltStartIdentity(pid)
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	return &managedDoltScopeWatchdogChild{pid: pid, ticks: ticks, identity: identity, done: done}, nil
+}
+
 // runManagedDoltScopeWatchdog is the re-exec'd watchdog process body. It
 // spawns the dolt sql-server as its own process-group leader, prints the
 // server PID on stdout, then supervises: it terminates the server when the
 // scope is gone for managedDoltScopeGoneConfirmations consecutive polls,
-// forwards SIGTERM/SIGINT, and exits when the server exits on its own.
+// forwards SIGTERM/SIGINT, restarts the server on a bounded budget when it
+// crashes on its own, and exits when the server stops for a reason that is
+// not the watchdog's to recover from.
+//
+// Crash recovery — which exits are restarted, why the loop is bounded, and
+// how the runtime records are kept truthful across a restart — is documented
+// in dolt_scope_watchdog_restart.go.
 func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	if len(args) != 3 {
 		fmt.Fprintf(stderr, "usage: %s <config-file> <log-file> <city-path>\n", managedDoltScopeWatchdogArg) //nolint:errcheck
@@ -195,50 +255,21 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 	}
 	defer logFile.Close() //nolint:errcheck
 
-	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Stdin = nil
-	// Setpgid: the dolt sql-server leads its own process group, matching
-	// the direct production spawn (managedDoltSQLServerSysProcAttr) and the
-	// test watchdog's layout, and keeping the server's descendants out of
-	// the watchdog's own group. Termination here is leader-only:
-	// the guarded terminate below signals just this PID — group-kill
-	// (kill(-pgid, ...)) exists only in terminateManagedDoltTestPID, the
-	// test-registry reaper. Leader-only is accepted on this path because
-	// the managed config disables auto_gc/stats helper workers (see
-	// cmd_dolt_config.go), so descendant helpers are rare by construction,
-	// and a SIGTERM'd dolt winds down its own children; only the SIGKILL
-	// escalation of an unresponsive server could strand descendants.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Env = doltServerEnv(cityPath, os.Environ())
-	if err := cmd.Start(); err != nil {
+	child, err := startManagedDoltScopeWatchdogChild(configFile, cityPath, logFile)
+	if err != nil {
 		fmt.Fprintf(stderr, "start dolt sql-server: %v\n", err) //nolint:errcheck
 		return 1
 	}
-	// Report the dolt child's PID and OS start identity to the parent BEFORE the
-	// reap goroutine below can Wait() the child and free its numeric PID.
-	// Snapshotting here — while the watchdog still holds the un-reaped child — is
-	// race-free and mirrors the direct-spawn snapshot in startManagedDoltSQLServer,
-	// so the parent's startup-failure cleanup guard
-	// (terminateManagedDoltStartedProcess) never signals an unrelated process that
-	// reused the PID after this child exited and was reaped. The watchdog also
-	// reuses this snapshot to guard its own scope-gone and signal-forward
-	// termination of the child below (terminateManagedDoltScopeWatchdogChild), so
-	// a reaped-then-reused PID is never signaled on the local reap path either.
-	// snapshotManagedDoltStartIdentity reads the ps fallback lazily, so this
-	// handshake — which the parent reads under a timeout — never blocks on a ps
-	// fork when /proc ticks are available.
-	startPID := cmd.Process.Pid
-	startTicks, startIdentity := snapshotManagedDoltStartIdentity(startPID)
-	fmt.Fprintln(stdout, formatManagedDoltWatchdogStartLine(startPID, startTicks, startIdentity)) //nolint:errcheck
+	// Report the dolt child's PID and OS start identity to the parent. Both
+	// values were captured before the reap goroutine could free the PID, so
+	// the parent's cleanup guard always has a usable identity.
+	fmt.Fprintln(stdout, formatManagedDoltWatchdogStartLine(child.pid, child.ticks, child.identity)) //nolint:errcheck
 
 	interval := managedDoltScopeWatchdogInterval()
-	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s)\n", //nolint:errcheck
-		cmd.Process.Pid, configFile, interval)
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	budget := managedDoltRestartBudget()
+	baseDelay := managedDoltRestartBaseDelay()
+	fmt.Fprintf(logFile, "gc scope watchdog: supervising dolt sql-server pid %d (config %s, poll interval %s, restart budget %d per %s)\n", //nolint:errcheck
+		child.pid, configFile, interval, budget, managedDoltRestartWindow)
 
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -246,14 +277,46 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// restartTimer is non-nil only while a crashed server is waiting out its
+	// backoff. Holding the wait in the select — rather than sleeping — keeps
+	// signal forwarding and scope-gone detection responsive throughout.
+	var restartTimer *time.Timer
+	defer func() {
+		if restartTimer != nil {
+			restartTimer.Stop()
+		}
+	}()
+
 	goneStreak := 0
+	var restarts []time.Time
+	// lastPID survives child being cleared during a backoff: it is the PID
+	// the runtime record still names, and the one the alarm reports.
+	lastPID := child.pid
 	for {
+		// A nil channel blocks forever in select, which is exactly the
+		// behavior wanted for the arms that are not currently armed: no
+		// child during a backoff, no backoff while a child is running.
+		var childDone <-chan error
+		if child != nil {
+			childDone = child.done
+		}
+		var restartDue <-chan time.Time
+		if restartTimer != nil {
+			restartDue = restartTimer.C
+		}
+
 		select {
 		case sig := <-signals:
-			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, cmd.Process.Pid) //nolint:errcheck
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
-			<-done
+			if child == nil {
+				fmt.Fprintf(logFile, "gc scope watchdog: received %v while waiting to restart dolt sql-server; exiting without restarting\n", sig) //nolint:errcheck
+				return 0
+			}
+			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, child.pid) //nolint:errcheck
+			_ = terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
+			<-child.done
 			return 0
+
 		case <-ticker.C:
 			if !managedDoltScopeGone(configFile) {
 				goneStreak = 0
@@ -263,20 +326,117 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			if goneStreak < managedDoltScopeGoneConfirmations {
 				continue
 			}
+			if child == nil {
+				fmt.Fprintf(logFile, "gc scope watchdog: config %s gone for %d consecutive checks; abandoning the pending dolt sql-server restart\n", //nolint:errcheck
+					configFile, goneStreak)
+				return 0
+			}
 			fmt.Fprintf(logFile, "gc scope watchdog: config %s gone for %d consecutive checks; terminating dolt sql-server pid %d\n", //nolint:errcheck
-				configFile, goneStreak, cmd.Process.Pid)
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, cmd.Process.Pid, startTicks, startIdentity)
-			<-done
+				configFile, goneStreak, child.pid)
+			_ = terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
+			<-child.done
 			return 0
-		case err := <-done:
-			if err != nil {
-				fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exited with error: %v\n", cmd.Process.Pid, err) //nolint:errcheck
+
+		case <-restartDue:
+			restartTimer = nil
+			// The scope can disappear during a backoff. Restarting into a
+			// deleted scope would recreate the orphan this watchdog exists
+			// to prevent.
+			if managedDoltScopeGone(configFile) {
+				fmt.Fprintf(logFile, "gc scope watchdog: config %s disappeared during the restart backoff; not restarting dolt sql-server\n", configFile) //nolint:errcheck
+				return 0
+			}
+			// An operator can also take the scope down during a backoff,
+			// leaving the scope itself intact. Their intent is recorded.
+			if managedDoltRuntimeRecordSaysStopped(cityPath) {
+				fmt.Fprintf(logFile, "gc scope watchdog: the managed dolt runtime record says this scope is stopped; not restarting dolt sql-server\n") //nolint:errcheck
+				return 0
+			}
+			next, startErr := startManagedDoltScopeWatchdogChild(configFile, cityPath, logFile)
+			if startErr != nil {
+				fmt.Fprintf(logFile, "gc scope watchdog: restart %d of %d could not spawn dolt sql-server: %v\n", len(restarts), budget, startErr) //nolint:errcheck
+				if timer, ok := scheduleManagedDoltRestart(logFile, &restarts, budget, baseDelay); ok {
+					restartTimer = timer
+					continue
+				}
+				return managedDoltScopeWatchdogGiveUp(logFile, stderr, lastPID, len(restarts), budget)
+			}
+			previousPID := lastPID
+			child = next
+			lastPID = child.pid
+			fmt.Fprintf(logFile, "gc scope watchdog: restarted dolt sql-server as pid %d (restart %d of %d per %s)\n", //nolint:errcheck
+				child.pid, len(restarts), budget, managedDoltRestartWindow)
+			if err := refreshManagedDoltRuntimePIDRecord(cityPath, previousPID, child.pid); err != nil {
+				// The server is up; a stale record degrades discovery, it
+				// does not invalidate the recovery. Say so and keep going.
+				fmt.Fprintf(logFile, "gc scope watchdog: could not repoint the managed dolt runtime records at pid %d: %v\n", child.pid, err) //nolint:errcheck
+			}
+
+		case waitErr := <-childDone:
+			exitedPID := child.pid
+			child = nil
+			switch classifyManagedDoltChildExit(waitErr) {
+			case managedDoltChildExitClean:
+				fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exited cleanly\n", exitedPID) //nolint:errcheck
+				return 0
+			case managedDoltChildExitSignaled:
+				// `gc dolt stop` signals the server directly and never
+				// signals us, so restarting here would make the managed
+				// server unstoppable.
+				fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d was terminated by a signal (%v); an external actor owns this shutdown, not restarting\n", //nolint:errcheck
+					exitedPID, waitErr)
+				return 0
+			case managedDoltChildExitUnknown:
+				fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exit could not be classified (%v); not restarting\n", exitedPID, waitErr) //nolint:errcheck
 				return 1
 			}
-			fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exited cleanly\n", cmd.Process.Pid) //nolint:errcheck
-			return 0
+
+			fmt.Fprintf(logFile, "gc scope watchdog: dolt sql-server pid %d exited with error: %v\n", exitedPID, waitErr) //nolint:errcheck
+			if managedDoltScopeGone(configFile) {
+				fmt.Fprintf(logFile, "gc scope watchdog: config %s is gone; not restarting dolt sql-server\n", configFile) //nolint:errcheck
+				return 1
+			}
+			if timer, ok := scheduleManagedDoltRestart(logFile, &restarts, budget, baseDelay); ok {
+				restartTimer = timer
+				continue
+			}
+			return managedDoltScopeWatchdogGiveUp(logFile, stderr, exitedPID, len(restarts), budget)
 		}
 	}
+}
+
+// scheduleManagedDoltRestart charges one restart against the rolling budget
+// and returns the armed backoff timer. It reports false when the budget for
+// the current window is spent, which is the caller's cue to give up.
+func scheduleManagedDoltRestart(logFile *os.File, restarts *[]time.Time, budget int, baseDelay time.Duration) (*time.Timer, bool) {
+	now := time.Now()
+	*restarts = pruneManagedDoltRestartHistory(*restarts, now, managedDoltRestartWindow)
+	if len(*restarts) >= budget {
+		return nil, false
+	}
+	*restarts = append(*restarts, now)
+	delay := managedDoltRestartDelay(len(*restarts), baseDelay, managedDoltRestartMaxDelay)
+	fmt.Fprintf(logFile, "gc scope watchdog: restarting dolt sql-server in %s (restart %d of %d per %s)\n", //nolint:errcheck
+		delay, len(*restarts), budget, managedDoltRestartWindow)
+	return time.NewTimer(delay), true
+}
+
+// managedDoltScopeWatchdogGiveUp ends supervision when crash recovery cannot
+// make progress, and raises the alarm.
+//
+// The alarm has to work when the data plane does not: mail, nudges and beads
+// are all bead-backed, so on 2026-08-19 every escalation channel was down in
+// exactly the situation that needed one. Both channels used here are plain
+// files — the dolt log and the watchdog's stderr, which the spawning gc points
+// at the same log. The runtime record is deliberately left claiming the server
+// that died; see dolt_scope_watchdog_restart.go for why that is the signal the
+// managed-dolt-server doctor check needs.
+func managedDoltScopeWatchdogGiveUp(logFile, stderr *os.File, pid, restarts, budget int) int {
+	message := fmt.Sprintf("gc scope watchdog: %s — it crashed through its whole restart budget (%d of %d allowed per %s, last pid %d). This scope has no data plane until an operator intervenes; the crash cause is in the log above.",
+		managedDoltRestartGaveUpMarker, restarts, budget, managedDoltRestartWindow, pid)
+	fmt.Fprintln(logFile, message) //nolint:errcheck
+	fmt.Fprintln(stderr, message)  //nolint:errcheck
+	return 1
 }
 
 // terminateManagedDoltScopeWatchdogChild terminates the watchdog's own dolt
