@@ -327,6 +327,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// looks healthy to every other backup check while its recovery point ages
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
+	// Binary freshness: merged fixes that are not executing. `gc start`'s
+	// DetectBinaryDrift catches a supervisor running a different image than the
+	// on-disk binary; it cannot see the case where the two agree and both are
+	// days behind origin/main, which reports clean everywhere else (gc-0qbf5).
+	register(doctor.NewBinaryFreshnessCheckForConfig(cfg, cfgErr))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig

@@ -82,6 +82,7 @@ events-log-size
 bd-backup-size
 bd-backup-state
 bd-backup-freshness
+binary-freshness
 worktree-disk-size
 nested-worktree-prune
 custom-types:city
