@@ -1239,39 +1239,28 @@ func (m *Manager) Suspend(id string) error {
 			}
 			return nil
 		}
-		// start-pending and creating are the mid-create states: the provider
-		// start has been issued, so a runtime process may well be live, but the
-		// create never reached creation_complete and there is no active turn to
-		// suspend. Kill already treats both as "a runtime process could
-		// plausibly exist"; suspend must not disagree, because rejecting here
-		// protects nothing — it leaves the live runtime behind and hands the
-		// caller an error it has no other lever to act on. The force-shutdown
-		// late sweep is what needs this: it re-lists the fleet specifically to
-		// catch sessions created too late for the first stop pass, which are
-		// exactly the ones whose create commit has not landed (gc-04375).
+		// Mid-create states fall through to the transition check below, which
+		// rejects them. Do not add a carve-out here.
 		//
-		// Like failed-create, the bead is left where it is rather than marked
-		// suspended: an in-flight create may still be running, and the
-		// reconciler owns reaping a create that never completed. Recording
-		// "suspended" would invent a lifecycle the session never had.
+		// Suspend promises the caller a durably paused session, and a mid-create
+		// bead cannot honor that. start-pending means the controller has reserved
+		// an identity and still intends to start it, and the reconciler reads raw
+		// start-pending — and pending_create_claim — as a start request
+		// (sessionStartRequestedInfo in cmd/gc/session_reconcile.go), so such a
+		// bead is relaunched on the next tick. Reporting success after only
+		// tearing the runtime down would hand POST /v0/session/{id}/suspend a 200
+		// for a session that is still queued to start. Clearing pending_create_*
+		// here instead is no better: creating means a provider Start call is in
+		// flight, and that create's own commit and rollback belong to the
+		// reconciler.
 		//
-		// Unlike failed-create, a teardown failure is reported rather than
-		// discarded, on the active path's terms: a Stop error against a session
-		// that was not running is the ordinary already-gone case (start-pending
-		// routinely has no runtime yet) and stays quiet, while a live runtime
-		// that refuses to die is the leak this branch exists to prevent. That
-		// does not re-open #2597 — the stop sweep logs a per-target error and
-		// moves on, whereas the illegal-transition rejection failed
-		// unconditionally for every bead in these states.
-		if current == StateStartPending || current == StateCreating {
-			if strings.TrimSpace(sessName) != "" {
-				running := m.sp.IsRunning(sessName)
-				if err := m.sp.Stop(sessName); err != nil && running {
-					return fmt.Errorf("stopping runtime session: %w", err)
-				}
-			}
-			return nil
-		}
+		// Tearing a mid-create runtime down is a real need — force shutdown's
+		// late sweep depends on it (gc-04375) — but it is a teardown, not a
+		// suspension, and Kill is the lever for it: it accepts both states and
+		// leaves the persisted lifecycle alone. The stop path routes mid-create
+		// targets there (stopTargetThroughWorkerBoundary in
+		// cmd/gc/session_lifecycle_parallel.go).
+
 		// Normalize legacy/aliased states (empty and awake both mean active)
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.

@@ -1,6 +1,6 @@
 ---
 name: Root cause of the TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep flake (gc-04375)
-description: The flake was a real product race, not a test defect — Manager.Suspend refused the mid-create states, so a force shutdown's late sweep leaked exactly the sessions it exists to catch. Records the mechanism, why three prior triage rounds could not reach it, and what generalizes.
+description: The flake was a real product race, not a test defect — the stop path sent mid-create sessions to Suspend, which refuses them, so a force shutdown's late sweep leaked exactly the sessions it exists to catch. Records the mechanism, why three prior triage rounds could not reach it, why the first fix was rejected in review, and what generalizes.
 ---
 
 # gc-04375: the flake was a leak, not a test defect
@@ -8,16 +8,19 @@ description: The flake was a real product race, not a test defect — Manager.Su
 ## Verdict
 
 `TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep` was failing
-because the product it tests was wrong. `Manager.Suspend` rejected the
-`start-pending` and `creating` states with an illegal-transition error
-**before** it reached the provider `Stop`, so a force shutdown that
-enumerated a running session whose create had not yet committed left that
-runtime alive. The test asserted the guarantee the late sweep is supposed
-to provide, and the guarantee did not hold.
+because the product it tests was wrong. The stop path sent mid-create
+sessions to `Manager.Suspend`, which rejects `start-pending` and `creating`
+with an illegal-transition error **before** reaching the provider `Stop`, so
+a force shutdown that enumerated a running session whose create had not yet
+committed left that runtime alive. The test asserted the guarantee the late
+sweep is supposed to provide, and the guarantee did not hold.
 
-Fixed by giving `Suspend` the same stance `Kill` already documents — both
-mid-create states mean "a runtime process could plausibly exist" — in
-`internal/session/manager.go`.
+Fixed by sending mid-create stop targets to the teardown-only lever instead
+of the lifecycle one: `stopTargetThroughWorkerBoundary`
+(`cmd/gc/session_lifecycle_parallel.go`) now routes `start-pending` and
+`creating` to `Kill`, which already accepts both states. `Suspend` keeps
+refusing them, and the refusal is now correct rather than merely
+inconvenient — see *Scope of the fix*.
 
 ## The mechanism
 
@@ -37,6 +40,9 @@ came down to a race:
    `Transition(creating, CmdSuspend)`. That pair is absent from the
    transition table, so it returned `IllegalTransitionError` and **never
    reached `sp.Stop`**. The session survived.
+
+Step 2 now has a third branch — mid-create → `Kill` — which is the fix; step
+4 is unreachable for those states. The rest of the mechanism is unchanged.
 
 So if the async start's `commitAsyncStartResultWithContext` won the race to
 flip the bead `creating → active`, the shutdown killed the session and the
@@ -86,33 +92,84 @@ all. It was a four-line unit test at the layer where the refusal happened.
 
 ## Scope of the fix
 
-The transition table is deliberately unchanged: `creating` still does not
-accept `suspend` as a lifecycle transition. `Suspend` short-circuits before
-consulting it and leaves the bead where it is, exactly as the adjacent
-`failed-create` carve-out does — an in-flight create may still be running,
-and the reconciler owns reaping a create that never completed. Marking the
-bead `suspended` would invent a lifecycle the session never had.
+Step 4 of the mechanism above has two sides, and the first attempt fixed the
+wrong one. That version carved `start-pending` and `creating` into
+`Manager.Suspend` on the same pattern as the adjacent `failed-create`
+carve-out: tear the runtime down, leave the bead where it is, return
+success. The pre-open review (`gc-vrou8`) rejected it, correctly.
 
-The carve-out reports a teardown failure when the runtime was live and stays
-quiet when it was not, rather than copying `failed-create`'s unconditional
-discard. Discarding it would reproduce this same bug one layer up: a live
-runtime that refused to die would be reported to the stop sweep as a clean
-teardown.
+`Suspend` is a lifecycle operation. Its contract with the caller is that the
+session is now durably paused, and a mid-create bead cannot honor that.
+`StateStartPending` means the controller has reserved an identity and still
+intends to start it, and the reconciler reads raw `start-pending` — and
+`pending_create_claim` — as a start request
+(`sessionStartRequestedInfo`, `cmd/gc/session_reconcile.go`). A bead left in
+that state is relaunched on the next controller tick. Since
+`POST /v0/session/{id}/suspend` calls `Manager.Suspend` directly, that
+carve-out handed an operator `200 OK` for suspending a session that was
+still queued to start, and the session came back.
+
+Writing a durable cancellation inside `Suspend` instead — clearing
+`pending_create_*` and moving the state — is not available either.
+`creating` means a provider `Start` call is in flight, so clearing the lease
+underneath it races that create's own commit and rollback, both of which the
+reconciler owns.
+
+What force shutdown actually needs from a mid-create session is a teardown,
+not a suspension, and that lever already exists. `Manager.Kill` explicitly
+accepts both mid-create states and stops the runtime without touching the
+persisted lifecycle — which is exactly the "leave the bead for the
+reconciler to reap" property the first attempt wanted, obtained without
+lying to anyone about a lifecycle. So the routing moved rather than the
+semantics:
+
+- The transition table is unchanged: `creating` and `start-pending` still do
+  not accept `suspend`, and `Suspend` still returns `IllegalTransitionError`
+  for them, which the API maps to 409 Conflict. A rejected transition now
+  provably leaves no trace — no `sp.Stop`, no metadata write.
+- `stopTargetThroughWorkerBoundary` gained a mid-create branch ahead of its
+  suspend fallback, routing those targets to `Kill`. The branch keys on the
+  bead's state, not on whether the shutdown was forced. A session can be
+  mid-create during any stop, and the bead's state — not the operator's
+  urgency — is what decides which lever is legal for it; gating on
+  `forceStopRequested` would leave the identical leak on the graceful path
+  and would have to thread that signal through the stop-target layer to do
+  it.
+- That branch tolerates an already-gone runtime, by the same rule
+  `Manager.Suspend` applies on its own active path: judge by whether the
+  provider reported a live process *before* the teardown, not by the shape
+  of the error. A `start-pending` bead routinely has no runtime at all, and
+  `gc stop` reaches every session bead with no state pre-filter; without the
+  tolerance, every session that had not yet reached its provider start would
+  report a stop failure. A runtime that was live and refused to die still
+  surfaces — swallowing that would report a clean teardown to the stop
+  sweep, which then tears the provider server down believing the fleet is
+  drained.
+
+The `failed-create` carve-out inside `Suspend` is untouched. It stays
+because that state is terminal — the create already rolled back, so there is
+no start request left to contradict and nothing in flight to race.
 
 ## Blast radius
 
-`Manager.Suspend` has two non-test callers: `SessionHandle.Stop`
-(`internal/worker/handle_lifecycle.go`) and the
-`POST /v0/session/{id}/suspend` handler
-(`internal/api/huma_handlers_sessions_command.go`). Neither branches on the
-error, so neither changes behavior beyond the intended one: suspending a
-mid-create session now tears its runtime down and reports success instead of
-failing and leaving it alive.
+`workerStopSessionTargetWithConfig` — and therefore `Manager.Suspend` on the
+stop path — has exactly one non-test caller,
+`stopTargetThroughWorkerBoundary`, so every `gc stop`, `gc suspend`,
+supervisor shutdown and restart funnels through the single site that
+changed. Sessions in any other state are unaffected: they take the same
+suspend path as before, pinned by
+`TestStopTargetThroughWorkerBoundaryStillSuspendsActive`.
+
+`Manager.Suspend`'s two non-test callers are `SessionHandle.Stop`
+(`internal/worker/handle_lifecycle.go`, reached only through the funnel
+above) and the `POST /v0/session/{id}/suspend` handler
+(`internal/api/huma_handlers_sessions_command.go`). The API behavior for
+mid-create sessions is unchanged from `origin/main`: still a 409, and still
+the truthful answer.
 
 ## Upstream
 
 The test file blob is identical across the fork's merge-base, `origin/main`
-and `upstream/main`, and so is the defect in `internal/session/manager.go` —
-this is a pure upstream bug on files neither side has diverged on. Fixed
-fork-side first per the standing lens; the bead carries
-`upstream_pr_candidate`.
+and `upstream/main`, and so is the defect — this is a pure upstream bug on
+files neither side has diverged on. Fixed fork-side first per the standing
+lens; the bead carries `upstream_pr_candidate`.
