@@ -2,8 +2,8 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -13,69 +13,66 @@ import (
 	"time"
 )
 
-func TestClassifyManagedDoltChildExit(t *testing.T) {
+// waitStatusExited encodes a normal exit with the given status, and
+// waitStatusSignaled a death by signal, in the POSIX wait(2) layout Go's
+// syscall.WaitStatus wraps: the low 7 bits carry the terminating signal and
+// the next 8 the exit code. Building them directly is what lets the
+// disposition rule be exercised over every status the kernel can report
+// without spawning a process per case.
+func waitStatusExited(code int) syscall.WaitStatus {
+	return syscall.WaitStatus(code << 8)
+}
+
+func waitStatusSignaled(sig syscall.Signal) syscall.WaitStatus {
+	return syscall.WaitStatus(sig)
+}
+
+func TestClassifyManagedDoltWaitStatus(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX wait status required")
 	}
 	tests := []struct {
-		name string
-		run  func(t *testing.T) error
-		want managedDoltChildExit
+		name   string
+		status syscall.WaitStatus
+		want   managedDoltChildExit
 	}{
-		{
-			name: "nil error is a clean exit",
-			run:  func(*testing.T) error { return nil },
-			want: managedDoltChildExitClean,
-		},
-		{
-			name: "non-zero exit is a crash",
-			run:  func(t *testing.T) error { return runExitingProcess(t, "exit 2") },
-			want: managedDoltChildExitCrashed,
-		},
-		{
-			name: "zero exit through ExitError is clean",
-			run:  func(t *testing.T) error { return runExitingProcess(t, "exit 0") },
-			want: managedDoltChildExitClean,
-		},
-		{
-			name: "signal death is external, not a crash",
-			run:  runSignaledProcess,
-			want: managedDoltChildExitSignaled,
-		},
-		{
-			name: "a non-exit wait failure is unclassifiable",
-			run:  func(*testing.T) error { return errors.New("waitid: no child processes") },
-			want: managedDoltChildExitUnknown,
-		},
+		{name: "exit 0 is a clean shutdown", status: waitStatusExited(0), want: managedDoltChildExitClean},
+		{name: "the ENOSPC journal panic's exit 2 is a crash", status: waitStatusExited(2), want: managedDoltChildExitCrashed},
+		{name: "any other non-zero exit is a crash", status: waitStatusExited(137), want: managedDoltChildExitCrashed},
+		// `gc dolt stop` sends SIGTERM and escalates to SIGKILL; both mean
+		// an external actor owns the shutdown.
+		{name: "SIGTERM death is external", status: waitStatusSignaled(syscall.SIGTERM), want: managedDoltChildExitSignaled},
+		{name: "SIGKILL death is external", status: waitStatusSignaled(syscall.SIGKILL), want: managedDoltChildExitSignaled},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyManagedDoltChildExit(tc.run(t)); got != tc.want {
-				t.Fatalf("classifyManagedDoltChildExit = %v, want %v", got, tc.want)
+			// Guard the fixtures: a mis-encoded status would make every
+			// assertion below vacuous.
+			if tc.want == managedDoltChildExitSignaled && !tc.status.Signaled() {
+				t.Fatalf("fixture %#x does not encode a signal death", uint32(tc.status))
+			}
+			if tc.want != managedDoltChildExitSignaled && !tc.status.Exited() {
+				t.Fatalf("fixture %#x does not encode a normal exit", uint32(tc.status))
+			}
+			if got := classifyManagedDoltWaitStatus(tc.status); got != tc.want {
+				t.Fatalf("classifyManagedDoltWaitStatus = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// runExitingProcess runs a shell snippet and returns the *exec.ExitError the
-// real watchdog would observe from cmd.Wait().
-func runExitingProcess(t *testing.T, script string) error {
-	t.Helper()
-	return exec.Command("/bin/sh", "-c", script).Run()
-}
-
-// runSignaledProcess starts a sleeper, kills it, and returns the signaled
-// wait error — the shape `gc dolt stop`'s SIGKILL escalation produces.
-func runSignaledProcess(t *testing.T) error {
-	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", "sleep 30")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start sleeper: %v", err)
+func TestClassifyManagedDoltChildExit(t *testing.T) {
+	if got := classifyManagedDoltChildExit(nil); got != managedDoltChildExitClean {
+		t.Errorf("nil error = %v, want clean", got)
 	}
-	if err := cmd.Process.Signal(syscall.SIGKILL); err != nil {
-		t.Fatalf("signal sleeper: %v", err)
+	// A wait failure with no exit status attached — the shape a reaped or
+	// unwaitable child produces. Absence of evidence is not a crash.
+	if got := classifyManagedDoltChildExit(errors.New("waitid: no child processes")); got != managedDoltChildExitUnknown {
+		t.Errorf("bare error = %v, want unknown", got)
 	}
-	return cmd.Wait()
+	if got := classifyManagedDoltChildExit(fmt.Errorf("wrapped: %w", errors.New("boom"))); got != managedDoltChildExitUnknown {
+		t.Errorf("wrapped bare error = %v, want unknown", got)
+	}
 }
 
 func TestManagedDoltRestartDelayBacksOffAndCaps(t *testing.T) {
@@ -305,32 +302,19 @@ func readFakeDoltPIDs(t *testing.T, stateDir string) []int {
 }
 
 // waitForFakeDoltStarts blocks until the fake dolt has been invoked at least
-// want times, or the deadline passes.
+// want times, or the timeout passes, and returns whatever it saw.
 func waitForFakeDoltStarts(t *testing.T, stateDir string, want int, timeout time.Duration) []int {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		pids := readFakeDoltPIDs(t, stateDir)
-		if len(pids) >= want {
-			return pids
-		}
-		if time.Now().After(deadline) {
-			return pids
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitForManagedDoltScopeCondition(timeout, func() bool {
+		return len(readFakeDoltPIDs(t, stateDir)) >= want
+	})
+	return readFakeDoltPIDs(t, stateDir)
 }
 
+// waitForManagedDoltPIDExit reports whether pid is gone within the timeout.
 func waitForManagedDoltPIDExit(t *testing.T, pid int, timeout time.Duration) bool {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for pidAlive(pid) {
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return true
+	return waitForManagedDoltScopeCondition(timeout, func() bool { return !pidAlive(pid) })
 }
 
 // startScopeWatchdogHelper spawns the shared scope-watchdog helper process
@@ -344,20 +328,14 @@ func startScopeWatchdogHelper(t *testing.T, dir, fakeDoltDir string, extraEnv ..
 	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	env := append(sanitizedBaseEnv(
+	runManagedDoltScopeWatchdogHelper(t, append(sanitizedBaseEnv(
 		"GC_TEST_MANAGED_DOLT_HELPER=scope-watchdog",
 		"GC_TEST_MANAGED_DOLT_HELPER_STATE="+statePath,
 		"GC_TEST_MANAGED_DOLT_HELPER_CONFIG="+configPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_LOG="+logPath,
 		"GC_TEST_MANAGED_DOLT_HELPER_FAKE_DOLT_DIR="+fakeDoltDir,
 		"GC_TEST_MANAGED_DOLT_HELPER_SCOPE_WD_INTERVAL_MS=50",
-	), extraEnv...)
-	cmd := exec.Command(os.Args[0], "-test.run=TestManagedDoltScopeWatchdogHelper", "-test.v")
-	cmd.Env = env
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("helper failed: %v\n%s", err, output)
-	}
+	), extraEnv...))
 	doltPID, watchdogPID := readManagedDoltTestState(t, statePath)
 	return doltPID, watchdogPID, logPath
 }

@@ -148,6 +148,9 @@ func (e managedDoltChildExit) String() string {
 // that decides whether the watchdog restarts the server. Only
 // managedDoltChildExitCrashed restarts; see the file header for why every
 // other disposition is deliberately left as the pre-fix behavior.
+//
+// A wait error that carries no OS wait status at all cannot be classified,
+// and absence of evidence must not read as a crash.
 func classifyManagedDoltChildExit(err error) managedDoltChildExit {
 	if err == nil {
 		return managedDoltChildExitClean
@@ -160,6 +163,14 @@ func classifyManagedDoltChildExit(err error) managedDoltChildExit {
 	if !ok {
 		return managedDoltChildExitUnknown
 	}
+	return classifyManagedDoltWaitStatus(status)
+}
+
+// classifyManagedDoltWaitStatus is the disposition rule itself, over the OS
+// wait status alone. Split from the error-shaped wrapper above so the rule is
+// exercised directly against every status the kernel can report, without
+// spawning a process per case to manufacture one.
+func classifyManagedDoltWaitStatus(status syscall.WaitStatus) managedDoltChildExit {
 	switch {
 	case status.Signaled():
 		return managedDoltChildExitSignaled

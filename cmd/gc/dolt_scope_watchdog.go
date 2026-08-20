@@ -172,12 +172,11 @@ func startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePat
 }
 
 // managedDoltScopeWatchdogChild is one supervised `dolt sql-server`
-// generation: the process, the OS start identity captured before anything
-// could reap it, and the channel its wait result arrives on. Crash recovery
+// generation: its PID, the OS start identity captured before anything could
+// reap it, and the channel its wait result arrives on. Crash recovery
 // replaces the whole value on restart, so the PID-reuse guard on the
 // terminate paths always describes the child that is currently running.
 type managedDoltScopeWatchdogChild struct {
-	cmd      *exec.Cmd
 	pid      int
 	ticks    uint64
 	identity string
@@ -223,7 +222,7 @@ func startManagedDoltScopeWatchdogChild(configFile, cityPath string, logFile *os
 	ticks, identity := snapshotManagedDoltStartIdentity(pid)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
-	return &managedDoltScopeWatchdogChild{cmd: cmd, pid: pid, ticks: ticks, identity: identity, done: done}, nil
+	return &managedDoltScopeWatchdogChild{pid: pid, ticks: ticks, identity: identity, done: done}, nil
 }
 
 // runManagedDoltScopeWatchdog is the re-exec'd watchdog process body. It
