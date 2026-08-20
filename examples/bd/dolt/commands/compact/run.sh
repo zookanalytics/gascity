@@ -22,11 +22,14 @@
 #   2. Soft-reset to the root commit; all data stays staged.
 #   3. Commit everything as a single "compaction: flatten history" commit.
 #   4. Re-check post-flatten row counts, table value hashes, and database
-#      value hash. Row-count increases are treated as concurrent-writer
-#      evidence and allowed to continue only when table and database value
-#      hashes stay stable. Same-count table hash drift, table-list drift,
-#      or row-count decrease without a proven concurrent writer is
-#      quarantined before full GC.
+#      value hash. Counts and hashes are the cheap TRIGGER, not the verdict:
+#      against a live city both drift on every pass from ordinary traffic
+#      (an append-only event log always gains rows; an in-place update
+#      shifts a table hash at an unchanged count), so neither can tell row
+#      loss from concurrent writes. Any table hash drift is therefore
+#      settled by the removal-based proof in step 4b. Table-list drift,
+#      probe failures, and row-count decrease without a proven concurrent
+#      writer are quarantined before full GC.
 #   4a. Local-verify HEAD-stability gate. The pre-flight stability loop cannot
 #      close the residual window between its final HEAD check and the flatten,
 #      nor the window during post-flatten verify, so a normal MVCC writer (the
@@ -45,7 +48,17 @@
 #      flatten's own commit (a writer landed during/after verify). All other
 #      failures — and gain+drift or row-decrease with a stable HEAD — still
 #      quarantine. Probe failure leaves the race unproven and quarantines.
-#   4b. Committed-root drift gate. When per-table verification passed but the
+#   4b. Row-preservation proof. HEAD movement is only a proxy for the property
+#      the check actually wants ("did any pre-flight row stop being
+#      reachable"), and it misses the absorbed-writer race entirely — a
+#      writer whose commit is folded into the flatten moves no HEAD. So any
+#      table value-hash drift, with or without a row-count gain, is settled
+#      by diffing the pre-flight snapshot HEAD against the flatten commit
+#      per drifted table and counting `removed` rows. Zero removals proves
+#      preservation directly and defers to the next run; added and modified
+#      rows are ordinary live-city traffic. Any removed row, or a probe
+#      failure, fails closed to the quarantine.
+#   4c. Committed-root drift gate. When per-table verification passed but the
 #      whole-database hash still drifted, DOLT_DIFF_STAT names the tables that
 #      differ across the flatten. Drift is benign only when every named table
 #      is either already verified or a table the -Am first-committed whose
@@ -1141,8 +1154,9 @@ preflight_counts() {
 # verify_counts — re-count/re-hash and compare against the pre-flight file.
 # Row-count decreases fail. Row-count increases are recorded as concurrent
 # writer evidence only when the table value hash stays stable. Any table hash
-# drift is quarantined before full GC because row-count gain alone cannot prove
-# pre-flight rows remain reachable. Sets category flags plus
+# drift fails here because count and hash alone cannot prove pre-flight rows
+# remain reachable; the caller then decides between quarantine and defer on
+# direct DOLT_DIFF evidence. Sets category flags, the drifted-table list, plus
 # verify_counts_failure_reason and verify_counts_failure_guidance for callers.
 verify_counts() {
   db="$1"
@@ -1150,7 +1164,7 @@ verify_counts() {
   fail=0
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
-  verify_counts_gain_drift_tables=""
+  verify_counts_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
@@ -1233,9 +1247,9 @@ verify_counts() {
     if [ "$actual_hash" != "$expected_hash" ]; then
       if [ "$table_gained_rows" = "1" ]; then
         verify_counts_saw_gain_hash_drift=1
-        verify_counts_gain_drift_tables="$verify_counts_gain_drift_tables $t"
+        verify_counts_drift_tables="$verify_counts_drift_tables $t"
         verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=row_count_gain_hash_drift"
-        printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+        printf 'compact: db=%s table=%s value hash changed with row-count increase before=%s after=%s — pending row-preservation verification\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
         if [ "$fail" -ne 1 ]; then
           fail=1
@@ -1249,8 +1263,9 @@ verify_counts() {
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
       else
         verify_counts_drift_details="${verify_counts_drift_details};table=$t,before_rows=$expected,after_rows=$actual,before_hash=$expected_hash,after_hash=$actual_hash,category=same_row_count_hash_drift"
-        printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — quarantine and investigate before GC\n' \
+        printf 'compact: db=%s table=%s value hash changed after flatten without row-count increase before=%s after=%s — pending row-preservation verification\n' \
           "$db" "$t" "$expected_hash" "$actual_hash" >&2
+        verify_counts_drift_tables="$verify_counts_drift_tables $t"
         verify_counts_saw_same_count_hash_drift=1
         if [ "$fail" -ne 1 ]; then
           fail=1
@@ -2178,7 +2193,7 @@ flatten_database() {
   db="$1"
   verify_counts_saw_gain=0
   verify_counts_saw_gain_hash_drift=0
-  verify_counts_gain_drift_tables=""
+  verify_counts_drift_tables=""
   verify_counts_saw_row_decrease=0
   verify_counts_saw_decrease_hash_drift=0
   verify_counts_saw_same_count_hash_drift=0
@@ -2681,24 +2696,38 @@ flatten_database() {
       rm -f "$preflight_tmp"
       return 0
     fi
-    # Option A (#2846): HEAD movement is only a proxy for "pre-flight rows
-    # remain reachable". When gain+drift is the only failure category but no
-    # concurrent writer was HEAD-proven — the absorbed-writer race, where the
-    # writer's commit was folded into the flatten and left no HEAD fingerprint
-    # — prove preservation directly by diffing the pre-flight snapshot HEAD
-    # against the flatten commit for each gained+drifted table. Purely additive
-    # (no removed/modified rows) proves every pre-flight row survived; defer
-    # exactly as the HEAD-proven path above does. Any removed/modified row, or
-    # a diff-probe failure, fails closed and falls through to the quarantine.
-    if [ "${verify_counts_saw_gain:-0}" = "1" ] && \
-       [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] && \
+    # Row-preservation proof (#2846, generalized in gc-800l/gc-i52hj). HEAD
+    # movement and value-hash equality are both only proxies for the property
+    # that actually matters — "every pre-flight row is still reachable" — and on
+    # a live city neither proxy can answer. An absorbed writer leaves no HEAD
+    # fingerprint, and ordinary traffic drifts the hash on every pass: an
+    # append-only event log gains rows continuously, and a bd update rewrites a
+    # row in place, which drifts the hash at an unchanged row count.
+    # Quarantining those cost a human review per scheduled run and reclaimed
+    # nothing — the same end state as never compacting, plus recurring false
+    # alarms that train the reader to clear markers without reading them.
+    #
+    # So decide on direct evidence instead: diff the pre-flight snapshot HEAD
+    # against the flatten commit for every drifted table and count rows that
+    # stopped being reachable. Zero removals proves the flatten preserved
+    # everything it was asked to preserve, whether the drift came with a row
+    # gain or at an unchanged count; defer exactly as the HEAD-proven path above
+    # does. Any removed row, or a diff-probe failure, fails closed and falls
+    # through to the quarantine.
+    #
+    # Row-count DECREASE stays excluded and keeps its own HEAD-proven arm below:
+    # fewer rows with no removals is a contradiction, so the probe could only
+    # ever fail closed there, and leaving the category out keeps that path's
+    # semantics unchanged. Table-list drift and probe failures are excluded for
+    # the same fail-closed reason as before.
+    if { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
+         [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ]; } && \
        [ "${verify_counts_saw_row_decrease:-0}" != "1" ] && \
-       [ "${verify_counts_saw_same_count_hash_drift:-0}" != "1" ] && \
        [ "${verify_counts_saw_table_list_change:-0}" != "1" ] && \
        [ "${verify_counts_saw_probe_failure:-0}" != "1" ] && \
-       gain_drift_is_additive_only "$db" "$head" "$flatten_head" "$verify_counts_gain_drift_tables"; then
-      printf 'compact: db=%s gain+drift proven additive-only via DOLT_DIFF(%s..%s) for tables [%s] — pre-flight rows preserved (absorbed-writer race), not corruption; deferring, will retry next run\n' \
-        "$db" "$head" "$flatten_head" "${verify_counts_gain_drift_tables# }" >&2
+       drift_preserves_preflight_rows "$db" "$head" "$flatten_head" "$verify_counts_drift_tables"; then
+      printf 'compact: db=%s value-hash drift removed no pre-flight rows, proven via DOLT_DIFF(%s..%s) for tables [%s] — concurrent-writer appends/updates, not corruption; deferring, will retry next run\n' \
+        "$db" "$head" "$flatten_head" "${verify_counts_drift_tables# }" >&2
       if ! defer_writer_race_after_flatten "$db" "$flatten_head" \
         "$remote" "$expected_remote_head" "$expected_remote_head_verified" \
         "${compacted_from_head:-}" "$local_branch" "$remote_branch"; then
@@ -2732,6 +2761,7 @@ flatten_database() {
     fi
     if [ "$writer_race_detected" = "1" ] && \
        { [ "${verify_counts_saw_gain_hash_drift:-0}" = "1" ] || \
+         [ "${verify_counts_saw_same_count_hash_drift:-0}" = "1" ] || \
          [ "${verify_counts_saw_row_decrease:-0}" = "1" ]; }; then
       printf 'compact: db=%s writer race detected during flatten (snapshot_HEAD=%s pre_reset_HEAD=%s flatten_HEAD=%s post_verify_HEAD=%s), but additional integrity failure category prevents defer; quarantine unchanged\n' \
         "$db" "$head" "${head_before_reset:-<empty>}" "$flatten_head" "${post_verify_head:-<empty>}" >&2
