@@ -273,6 +273,190 @@ func TestConformance_SuspendFailedCreateTearsDownRuntime(t *testing.T) {
 	}
 }
 
+func TestConformance_SuspendRejectsMidCreate(t *testing.T) {
+	// Suspend promises the caller a durably paused session, and a mid-create
+	// bead cannot honor that promise. start-pending means the controller has
+	// reserved an identity and still intends to start it, and the reconciler
+	// reads raw start-pending — and pending_create_claim — as a start request
+	// (sessionStartRequestedInfo in cmd/gc/session_reconcile.go), so a bead left
+	// in that state is re-launched on the next tick. Reporting success after
+	// only tearing the runtime down would hand POST /v0/session/{id}/suspend a
+	// 200 for a session that is still queued to start.
+	//
+	// Tearing a mid-create runtime down is a real need — force shutdown's late
+	// sweep depends on it (gc-04375) — but it is a teardown, not a suspension,
+	// and it belongs to Kill. See TestConformance_KillTearsDownMidCreateRuntime
+	// for that half of the contract, and stopTargetThroughWorkerBoundary in
+	// cmd/gc/session_lifecycle_parallel.go for the stop path that routes to it.
+	for _, state := range []State{StateStartPending, StateCreating} {
+		t.Run(string(state), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+
+			id := createTestSession(t, m, "dog")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			sessName := b.Metadata["session_name"]
+
+			// A live runtime plus a bead that has not reached
+			// creation_complete: the provider start landed, the commit that
+			// marks the bead active has not.
+			if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+				t.Fatalf("seeding runtime: %v", err)
+			}
+			if err := store.SetMetadata(id, "state", string(state)); err != nil {
+				t.Fatalf("set %s state: %v", state, err)
+			}
+			if err := store.SetMetadata(id, "pending_create_claim", "true"); err != nil {
+				t.Fatalf("set pending_create_claim: %v", err)
+			}
+
+			err = m.Suspend(id)
+			if err == nil {
+				t.Fatalf("Suspend(%s) = nil, want a conflict: the bead is still queued to start", state)
+			}
+			if !errors.Is(err, ErrIllegalTransition) {
+				t.Errorf("Suspend(%s) = %v, want it to wrap ErrIllegalTransition", state, err)
+			}
+			var ite *IllegalTransitionError
+			if !errors.As(err, &ite) {
+				t.Fatalf("Suspend(%s) should unwrap to *IllegalTransitionError; got %T", state, err)
+			}
+			if ite.From != state {
+				t.Errorf("ite.From = %q, want %q", ite.From, state)
+			}
+			if ite.Command != CmdSuspend {
+				t.Errorf("ite.Command = %q, want %q", ite.Command, CmdSuspend)
+			}
+
+			// A rejected transition must leave no trace. Half-applying it --
+			// tearing the runtime down but leaving the bead queued to start --
+			// is the exact shape this rejection exists to prevent.
+			if got := sp.CountCalls("Stop", sessName); got != 0 {
+				t.Errorf("rejected Suspend(%s) called Stop %d time(s) on %q, want 0", state, got, sessName)
+			}
+			if got := getState(t, m, id); got != state {
+				t.Errorf("state = %q after the rejected Suspend(%s), want it left at %q", got, state, state)
+			}
+			after, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			if got := after.Metadata["pending_create_claim"]; got != "true" {
+				t.Errorf("pending_create_claim = %q after the rejected Suspend(%s), want it left at \"true\" for the reconciler", got, state)
+			}
+			if got, ok := after.Metadata["suspended_at"]; ok && got != "" {
+				t.Errorf("rejected Suspend(%s) wrote suspended_at = %q", state, got)
+			}
+		})
+	}
+}
+
+func TestConformance_KillTearsDownMidCreateRuntime(t *testing.T) {
+	// The teardown half of the mid-create contract, and the lever the stop path
+	// routes these states to once Suspend refuses them
+	// (stopTargetThroughWorkerBoundary in
+	// cmd/gc/session_lifecycle_parallel.go). The runtime dies; the persisted
+	// lifecycle does not move. The bead is deliberately left mid-create: an
+	// in-flight create may still be running, and the reconciler owns reaping a
+	// create that never completed, so recording a suspension here would claim a
+	// lifecycle the session never had.
+	//
+	// Force shutdown's late async sweep is what needs this. It re-lists the
+	// fleet after abandoning the async-start wait, specifically to catch
+	// sessions created too late for the first stop pass — and those are
+	// exactly the ones whose create commit has not landed. Whether the sweep
+	// stopped them or leaked them used to come down to whether the async commit
+	// won the race to flip the bead to active, which is what made
+	// TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep fail under load
+	// (gc-04375).
+	for _, state := range []State{StateStartPending, StateCreating} {
+		t.Run(string(state), func(t *testing.T) {
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			m := NewManagerWithOptions(store, sp)
+
+			id := createTestSession(t, m, "dog")
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			sessName := b.Metadata["session_name"]
+
+			if err := sp.Start(context.Background(), sessName, runtime.Config{}); err != nil {
+				t.Fatalf("seeding runtime: %v", err)
+			}
+			if err := store.SetMetadata(id, "state", string(state)); err != nil {
+				t.Fatalf("set %s state: %v", state, err)
+			}
+			if err := store.SetMetadata(id, "pending_create_claim", "true"); err != nil {
+				t.Fatalf("set pending_create_claim: %v", err)
+			}
+
+			if err := m.Kill(id); err != nil {
+				t.Fatalf("Kill(%s) = %v, want nil (must not leave the runtime behind)", state, err)
+			}
+			if sp.CountCalls("Stop", sessName) == 0 {
+				t.Errorf("Kill(%s) did not tear down runtime session %q", state, sessName)
+			}
+			if sp.IsRunning(sessName) {
+				t.Errorf("runtime session %q still running after Kill(%s)", sessName, state)
+			}
+			if got := getState(t, m, id); got != state {
+				t.Errorf("state = %q after Kill(%s), want it left at %q for the reconciler", got, state, state)
+			}
+			after, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("get bead: %v", err)
+			}
+			if got := after.Metadata["pending_create_claim"]; got != "true" {
+				t.Errorf("pending_create_claim = %q after Kill(%s), want it left at \"true\" for the reconciler", got, state)
+			}
+		})
+	}
+}
+
+func TestConformance_KillMidCreateWithNoRuntimeSucceeds(t *testing.T) {
+	// start-pending routinely has no runtime at all: it means the controller
+	// reserved an identity and intends to start it, with no provider Start call
+	// in flight (see StateStartPending). Killing such a bead must be a quiet
+	// no-op, because `gc stop` reaches every session bead with no state
+	// pre-filter — an error here would report a stop failure for every session
+	// that had not yet reached its provider start.
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	m := NewManagerWithOptions(store, sp)
+
+	id := createTestSession(t, m, "dog")
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	sessName := b.Metadata["session_name"]
+
+	// No Start, and clear anything the helper seeded: the provider start was
+	// never issued, which is the common shape of a start-pending bead.
+	if err := sp.Stop(sessName); err != nil {
+		t.Fatalf("clearing any seeded runtime: %v", err)
+	}
+	if sp.IsRunning(sessName) {
+		t.Fatalf("runtime session %q unexpectedly running before Kill", sessName)
+	}
+	if err := store.SetMetadata(id, "state", string(StateStartPending)); err != nil {
+		t.Fatalf("set start-pending state: %v", err)
+	}
+
+	if err := m.Kill(id); err != nil {
+		t.Fatalf("Kill(start-pending) = %v for a session that was never running, want nil", err)
+	}
+	if got := getState(t, m, id); got != StateStartPending {
+		t.Errorf("state = %q after Kill(start-pending), want it left at %q", got, StateStartPending)
+	}
+}
+
 func TestConformance_QuarantineReactivation(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

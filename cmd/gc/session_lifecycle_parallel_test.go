@@ -7857,3 +7857,197 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 		t.Fatal("empty key probeable = true, want false")
 	}
 }
+
+// TestStopTargetThroughWorkerBoundaryRoutesMidCreateToKill covers the routing
+// decision itself, which TestCityRuntimeForceShutdownStopsMidCreateSession
+// (cmd/gc/city_runtime_server_lifecycle_test.go) can only reach for sessions
+// the provider still lists as running.
+//
+// Suspend is a lifecycle operation and rejects start-pending and creating as
+// illegal transitions, correctly: the reconciler reads raw start-pending — and
+// pending_create_claim — as a start request, so a bead in those states is
+// still queued to start and cannot honestly be reported as paused. Routing
+// mid-create targets to suspend therefore left whatever runtime the provider
+// start had already spawned alive, with the rejection surfacing as a stop
+// failure (gc-04375). They go to the teardown-only kill lever instead.
+//
+// The no-runtime case is start-pending's ordinary shape — the controller has
+// reserved an identity with no provider Start call in flight — and `gc stop`
+// reaches every session bead with no state pre-filter. It has to stay quiet, or
+// every session that had not yet reached its provider start reports a stop
+// failure.
+func TestStopTargetThroughWorkerBoundaryRoutesMidCreateToKill(t *testing.T) {
+	for _, state := range []string{"start-pending", "creating"} {
+		for _, runtimeLive := range []bool{true, false} {
+			name := state
+			if !runtimeLive {
+				name += "/no-runtime"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				session, err := store.Create(beads.Bead{
+					ID:     "gc-worker",
+					Title:  "worker",
+					Type:   sessionBeadType,
+					Labels: []string{sessionBeadLabel},
+					Metadata: map[string]string{
+						"session_name":         "worker",
+						"template":             "worker",
+						"state":                state,
+						"pending_create_claim": "true",
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				sp := runtime.NewFake()
+				if runtimeLive {
+					if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+						t.Fatalf("seeding runtime: %v", err)
+					}
+				}
+				cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+				target := stopTarget{sessionID: session.ID, name: "worker", template: "worker"}
+
+				if err := stopTargetThroughWorkerBoundary(target, store, sp, cfg); err != nil {
+					t.Fatalf("stopTargetThroughWorkerBoundary(%s, runtimeLive=%v) = %v, want nil", state, runtimeLive, err)
+				}
+				if sp.IsRunning("worker") {
+					t.Errorf("%s session left running", state)
+				}
+				if runtimeLive && sp.CountCalls("Stop", "worker") == 0 {
+					t.Errorf("provider was never asked to stop the %s session", state)
+				}
+				// Kill tears the runtime down without touching the persisted
+				// lifecycle: the bead stays mid-create for the reconciler to
+				// reap or for an in-flight create to finish rolling back, and
+				// the start request survives with it.
+				b, err := store.Get(session.ID)
+				if err != nil {
+					t.Fatalf("get bead: %v", err)
+				}
+				if got := b.Metadata["state"]; got != state {
+					t.Errorf("bead state = %q, want it left at %q", got, state)
+				}
+				if got := b.Metadata["pending_create_claim"]; got != "true" {
+					t.Errorf("pending_create_claim = %q, want it left at %q", got, "true")
+				}
+				if _, ok := b.Metadata["suspended_at"]; ok {
+					t.Errorf("suspended_at was written for a %s session", state)
+				}
+			})
+		}
+	}
+}
+
+// TestStopTargetThroughWorkerBoundaryStillSuspendsActive pins the other side of
+// the mid-create route: an ordinary active session keeps taking the suspend
+// path, so the narrow carve-out above cannot quietly turn every `gc stop` into
+// a lifecycle-less kill.
+func TestStopTargetThroughWorkerBoundaryStillSuspendsActive(t *testing.T) {
+	store := beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		ID:     "gc-worker",
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker",
+			"template":     "worker",
+			"state":        string(sessionpkg.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+		t.Fatalf("seeding runtime: %v", err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	target := stopTarget{sessionID: session.ID, name: "worker", template: "worker"}
+
+	if err := stopTargetThroughWorkerBoundary(target, store, sp, cfg); err != nil {
+		t.Fatalf("stopTargetThroughWorkerBoundary(active) = %v, want nil", err)
+	}
+	if sp.IsRunning("worker") {
+		t.Error("active session left running")
+	}
+	b, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get bead: %v", err)
+	}
+	if got := b.Metadata["state"]; got != string(sessionpkg.StateSuspended) {
+		t.Errorf("bead state = %q, want %q — an active stop must still record the suspension", got, sessionpkg.StateSuspended)
+	}
+}
+
+// TestStopTargetThroughWorkerBoundaryMidCreateReportsOnlyLiveTeardownFailures
+// pins the tolerance the mid-create route needs, in both directions.
+//
+// A start-pending bead routinely has no runtime at all, and `gc stop` reaches
+// every session bead with no state pre-filter, so a teardown against a session
+// that was not running has to stay quiet — otherwise every session that had not
+// yet reached its provider start reports a stop failure. A runtime that was
+// live and refused to die is the leak this route exists to prevent, and must
+// surface: swallowing it would report a clean teardown to the stop sweep, which
+// then tears the provider server down believing the fleet is drained.
+func TestStopTargetThroughWorkerBoundaryMidCreateReportsOnlyLiveTeardownFailures(t *testing.T) {
+	stopErr := errors.New("provider refused")
+
+	newMidCreateBead := func(t *testing.T, store *beads.MemStore) beads.Bead {
+		t.Helper()
+		session, err := store.Create(beads.Bead{
+			ID:     "gc-worker",
+			Title:  "worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name": "worker",
+				"template":     "worker",
+				"state":        string(sessionpkg.StateStartPending),
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+
+	t.Run("live runtime surfaces the failure", func(t *testing.T) {
+		store := beads.NewMemStore()
+		session := newMidCreateBead(t, store)
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
+			t.Fatalf("seeding runtime: %v", err)
+		}
+		sp.StopErrors["worker"] = stopErr
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+		err := stopTargetThroughWorkerBoundary(
+			stopTarget{sessionID: session.ID, name: "worker", template: "worker"}, store, sp, cfg)
+		if err == nil {
+			t.Fatal("stopTargetThroughWorkerBoundary = nil for a live runtime whose teardown failed, want the failure reported")
+		}
+		if !errors.Is(err, stopErr) {
+			t.Errorf("stopTargetThroughWorkerBoundary = %v, want it to wrap %v", err, stopErr)
+		}
+	})
+
+	t.Run("absent runtime stays quiet", func(t *testing.T) {
+		store := beads.NewMemStore()
+		session := newMidCreateBead(t, store)
+		sp := runtime.NewFake()
+		// No Start: the provider start was never issued, which is the common
+		// shape of a start-pending bead.
+		sp.StopErrors["worker"] = stopErr
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+
+		if err := stopTargetThroughWorkerBoundary(
+			stopTarget{sessionID: session.ID, name: "worker", template: "worker"}, store, sp, cfg); err != nil {
+			t.Fatalf("stopTargetThroughWorkerBoundary = %v for a session that was never running, want nil", err)
+		}
+	})
+}
