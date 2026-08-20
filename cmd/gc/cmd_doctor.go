@@ -504,6 +504,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// looks healthy to every other backup check while its recovery point ages
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
+	// Binary freshness: merged fixes that are not executing. `gc start`'s
+	// DetectBinaryDrift catches a supervisor running a different image than the
+	// on-disk binary; it cannot see the case where the two agree and both are
+	// days behind origin/main, which reports clean everywhere else (gc-0qbf5).
+	register(doctor.NewBinaryFreshnessCheckForConfig(cfg, cfgErr))
 	// Backup coverage on the proxied default. Every per-scope backup check
 	// goes quiet on a bd-owned proxy root — gc can register nothing there —
 	// so one city-level line asks each proxied scope's bd (`bd backup status`)
