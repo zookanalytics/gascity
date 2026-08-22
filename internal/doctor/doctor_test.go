@@ -756,7 +756,16 @@ func (c *wedgeOnVerifyCheck) WarmupEligible() bool { return false }
 // background), the run returns promptly, and the result reports an unconfirmed
 // remediation while preserving the check's original failing status.
 func TestRunCheckTimeoutBoundsFix(t *testing.T) {
-	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	// This bound has to separate two things: an initial Run that returns
+	// immediately, and a Fix that never returns. Doctor.Run races the check
+	// goroutine's first scheduling against time.After(CheckTimeout), so at 25ms
+	// it separated neither reliably -- a loaded parallel shard can lose that
+	// race, which marks the fast initial failure "timed out", skips the fix
+	// path, and leaves fixCalls at 0 (gc-cr6lj). Seconds of headroom make the
+	// initial Run's classification independent of host load, while the wedged
+	// fix still reaches the timeout because it blocks forever by construction.
+	const checkTimeout = 2 * time.Second
+	d := &Doctor{CheckTimeout: checkTimeout}
 	check := &wedgeOnFixCheck{name: "wedge-on-fix", release: make(chan struct{})}
 	t.Cleanup(func() { close(check.release) }) // release the abandoned fix goroutine
 	d.Register(check)
@@ -764,7 +773,10 @@ func TestRunCheckTimeoutBoundsFix(t *testing.T) {
 	var buf bytes.Buffer
 	start := time.Now()
 	report := d.Run(&CheckContext{}, &buf, true)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
+	// A bounded run costs about checkTimeout (spent abandoning the wedged fix);
+	// an unbounded one never returns at all. This guard only has to catch the
+	// latter, so it is sized well clear of the former rather than close to it.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Fatalf("run took %s; the wedged fix was not bounded", elapsed)
 	}
 

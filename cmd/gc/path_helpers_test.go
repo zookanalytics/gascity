@@ -64,6 +64,39 @@ func shortSocketTempDir(t *testing.T, prefix string) string {
 	return testutil.ShortTempDir(t, prefix)
 }
 
+// shortSocketTempDirWithinLimit returns a test-owned temporary directory whose
+// canonicalized path leaves at least reserve bytes of headroom under
+// controllerSocketPathLimit, so a fixture that must assert "this socket path is
+// under the limit" is actually constructible.
+//
+// shortSocketTempDir guarantees a short root only on macOS; on Linux it takes
+// $TMPDIR verbatim. A long $TMPDIR — the fleet's push gate sets a per-agent,
+// per-run one — then pushes a fixture path past the limit and fails the
+// assertion at 0.00s, measuring $TMPDIR rather than the code under test
+// (gc-8ors6). Fall back to /tmp, the short root that both the macOS branch of
+// testutil.ShortTempDir and the production fallback in controllerSocketPath
+// already use, and skip only when even that cannot fit — which no supported
+// platform hits.
+func shortSocketTempDirWithinLimit(t *testing.T, prefix string, reserve int) string {
+	t.Helper()
+	fits := func(dir string) bool {
+		return len(normalizePathForCompare(dir))+reserve <= controllerSocketPathLimit
+	}
+	if dir := shortSocketTempDir(t, prefix); fits(dir) {
+		return dir
+	}
+	dir, err := os.MkdirTemp("/tmp", prefix)
+	if err != nil {
+		t.Skipf("no short temp root available for a socket-path fixture: MkdirTemp(/tmp, %q): %v", prefix, err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if !fits(dir) {
+		t.Skipf("shortest available temp dir %q leaves under %d bytes of headroom below the %d-byte socket path limit",
+			dir, reserve, controllerSocketPathLimit)
+	}
+	return dir
+}
+
 // cmdGCTmuxSocketRoot returns a tmux socket root under socketParentRoot.
 // TestMain normally supplies /tmp rather than testTempRoot, which can be an
 // arbitrarily long macOS $TMPDIR path that blows Unix socket path limits. It
