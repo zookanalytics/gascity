@@ -1,10 +1,10 @@
 # Release Gate: named-session alias canonical detection
 
-Deploy bead: `ga-rcroz7`  
-Review bead: `ga-d3whdg`  
-Build bead: `ga-89kxkd`  
-Reviewed source: `15285684898d752028a52b36c81a364a2d63898a`  
-Base: `origin/main@187e53828754894096fc295cea4baca909fe9a96`  
+Deploy bead: `ga-rcroz7`
+Review bead: `ga-d3whdg`
+Build bead: `ga-89kxkd`
+Reviewed source: `15285684898d752028a52b36c81a364a2d63898a`
+Base: `origin/main@187e53828754894096fc295cea4baca909fe9a96`
 Gate date: 2026-08-21
 
 `docs/PROJECT_MANIFEST.md` is not present in this worktree. This record uses
