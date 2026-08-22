@@ -145,7 +145,16 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// to the shared server regardless of the vars above. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	//
+	// Both temp dirs race a still-exiting bd/dolt child, so both need the
+	// retrying removal — t.TempDir()'s own RemoveAll reports "directory not
+	// empty" as a test FAILURE, which reddens even a run that correctly
+	// skipped. Only dir was guarded; home is where bd writes ~/.beads, so home
+	// is the one that actually failed (gc-i344n). Cleanups run LIFO, so
+	// registering the retry here — before t.Setenv and before dir exists — puts
+	// it immediately ahead of the TempDir removal it is draining for.
 	home := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, home) })
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
@@ -262,7 +271,15 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
+	// Both temp dirs race a still-exiting bd/dolt child, so both need the
+	// retrying removal — t.TempDir()'s own RemoveAll reports "directory not
+	// empty" as a test FAILURE, which reddens even a run that correctly
+	// skipped. Only dir was guarded; home is where bd writes ~/.beads, so home
+	// is the one that actually failed (gc-i344n). Cleanups run LIFO, so
+	// registering the retry here — before t.Setenv and before dir exists — puts
+	// it immediately ahead of the TempDir removal it is draining for.
 	home := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, home) })
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
