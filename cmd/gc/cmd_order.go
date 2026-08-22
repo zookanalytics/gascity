@@ -1455,6 +1455,24 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
 	}
 
+	// A rig-scoped order is registered once per importing rig, so a bare name
+	// with no --rig names several registrations at once. The API request
+	// carries a single scoped_name, so routing an ambiguous name there answers
+	// for whichever registration findOrder returned first and silently drops
+	// every other rig's runs -- while the response still renders a RIG column,
+	// which makes a one-rig answer indistinguishable from a city-wide one. That
+	// under-report already cost a P1 on the refinery merge cadence (gc-6a6vz).
+	//
+	// The local iterator has no such limit: it walks every matching
+	// registration, merges the runs newest-first and only then applies the
+	// bound, so --limit N means "the N most recent runs in the city". Stay on
+	// it whenever the name resolves to more than one registration. A
+	// rig-qualified read still names exactly one, so it keeps the API route.
+	if matches := countOrderRegistrations(aa, name, rig); matches > 1 {
+		logRoute(stderr, "order history", "fallback", "multi-rig")
+		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
+	}
+
 	var cr api.CachedRead[[]api.OrderHistoryView]
 	return routeRead(c, "order history", nilReason, stderr,
 		func() error {
@@ -1470,6 +1488,24 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 			return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
 		},
 	)
+}
+
+// countOrderRegistrations reports how many loaded order registrations match
+// (name, rig). A rig-scoped order is registered once per importing rig, so an
+// unqualified name matches one registration per rig that imported it; an empty
+// rig therefore means "any rig", matching findOrder's own filter.
+func countOrderRegistrations(aa []orders.Order, name, rig string) int {
+	matches := 0
+	for _, a := range aa {
+		if a.Name != name {
+			continue
+		}
+		if rig != "" && a.Rig != rig {
+			continue
+		}
+		matches++
+	}
+	return matches
 }
 
 // orderScopedName returns the rig-qualified key for the server's
