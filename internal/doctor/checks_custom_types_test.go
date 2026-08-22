@@ -145,6 +145,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// to the shared server regardless of the vars above. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
+	//
 	// Both temp dirs race a still-exiting bd/dolt child, so both need the
 	// retrying removal — t.TempDir()'s own RemoveAll reports "directory not
 	// empty" as a test FAILURE, which reddens even a run that correctly
