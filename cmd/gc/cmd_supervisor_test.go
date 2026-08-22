@@ -4034,7 +4034,16 @@ func TestWaitForSupervisorReadyUsesHookedTimeout(t *testing.T) {
 		}
 		return 4242
 	}
-	supervisorReadyTimeout = 25 * time.Millisecond
+	// waitForSupervisorPID returns the moment the hook reports a pid, so this
+	// deadline is never reached on the path under test and costs nothing for
+	// being generous — the assertions below are that the hook is polled and
+	// that the call succeeds, not that it finishes within any wall-clock bound.
+	// At 25ms it was reached: four 1ms polls need the goroutine scheduled four
+	// times, which a loaded parallel shard does not guarantee inside 25ms, and
+	// the timeout then failed the call (gc-nnl64). The timeout's own behavior
+	// is covered separately by
+	// TestWaitForSupervisorReadySucceedsWhenAlreadyReadyEvenWithZeroTimeout.
+	supervisorReadyTimeout = 30 * time.Second
 	supervisorReadyPollInterval = time.Millisecond
 	t.Cleanup(func() {
 		supervisorAliveHook = oldAlive
