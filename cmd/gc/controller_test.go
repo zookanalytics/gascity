@@ -308,7 +308,16 @@ func TestHandleControllerConnIdentifiesSupervisorHosting(t *testing.T) {
 }
 
 func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
-	base := shortSocketTempDir(t, "gc-controller-alias-")
+	// The canonical socket path asserted below is base + "/city/.gc/controller.sock";
+	// it resolves the symlink away and so never contains aliasName. Growing
+	// aliasName cannot bring it under the limit, which makes base's own length
+	// the whole precondition: the fixture is constructible only when base leaves
+	// room for that suffix. Taking base from an unconstrained $TMPDIR let a long
+	// one (the push gate sets a per-agent, per-run path) push the canonical path
+	// to 102 bytes and fail at 0.00s — an assertion about $TMPDIR, not about the
+	// socket-shortening logic under test (gc-8ors6).
+	base := shortSocketTempDirWithinLimit(t, "gc-controller-alias-",
+		len(filepath.Join("city", ".gc", "controller.sock"))+1)
 	realCityPath := filepath.Join(base, "city")
 	if err := os.MkdirAll(filepath.Join(realCityPath, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
