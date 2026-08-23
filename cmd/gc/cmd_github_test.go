@@ -467,12 +467,34 @@ model = "sonnet"
 // emit path, but this command iterated prov.Warnings directly and so kept
 // emitting it — a reachable command path with the bug the branch removes.
 //
-// Migration warnings the operator must act on are unaffected: this asserts only
-// the always+fresh marker is gone, and the shared filter still passes
-// everything shouldEmitLoadCityConfigWarning approves.
+// The absence assertion is guarded two ways so it cannot pass vacuously. It
+// first proves the fixture still provokes the advisory at config-load time, so
+// a validator that stopped emitting it fails here instead of silently turning
+// this into an empty test. And it classifies stderr with
+// config.IsAlwaysFreshWakeModeWarning — the same exported predicate the fix
+// consults — rather than a copy of the message text, so a reworded advisory
+// cannot slip past. The paired positive assertion (a kept migration warning)
+// distinguishes a filter from a blanket mute.
 func TestGitHubPRBackfillSuppressesAlwaysFreshAdvisory(t *testing.T) {
 	cityPath := writeGitHubMonitorTestCity(t)
 	appendMixedWarningConfig(t, cityPath)
+
+	// The fixture must actually provoke the advisory, or the absence assertion
+	// below proves nothing.
+	_, prov, err := loadConfigCommandCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("load fixture city: %v", err)
+	}
+	advisories := 0
+	for _, w := range prov.Warnings {
+		if config.IsAlwaysFreshWakeModeWarning(w) {
+			advisories++
+		}
+	}
+	if advisories == 0 {
+		t.Fatalf("fixture no longer provokes the always+fresh advisory; warnings = %q", prov.Warnings)
+	}
+
 	oldToken := resolveGitHubTokenForBackfill
 	oldClient := newGitHubPRBackfillClient
 	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
@@ -491,8 +513,10 @@ func TestGitHubPRBackfillSuppressesAlwaysFreshAdvisory(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
 	}
-	if strings.Contains(stderr.String(), "starts a fresh provider session after every drain") {
-		t.Fatalf("always+fresh advisory must stay off non-config command stderr, got %q", stderr.String())
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if config.IsAlwaysFreshWakeModeWarning(line) {
+			t.Fatalf("always+fresh advisory must stay off non-config command stderr, got %q", stderr.String())
+		}
 	}
 	if !strings.Contains(stderr.String(), "both [agent_defaults] and [agents] are present") {
 		t.Fatalf("actionable migration warning must survive the filter, got %q", stderr.String())
