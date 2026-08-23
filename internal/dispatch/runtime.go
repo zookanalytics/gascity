@@ -495,10 +495,12 @@ func closeScopeAsPassed(store beads.Store, snapshot scopeSnapshot, subject beads
 // review.verdict) onto the scope body so diagnostics survive failure auto-close,
 // then close the body with outcome=fail. It returns the number of members
 // skipped. traceID identifies the bead driving the trace and is also the id
-// ignored when skipping open members. As with closeScopeAsPassed, the caller
-// owns closing its own control bead and MUST have closed it before calling
-// this, or the body close is refused as blocked. This is the single
-// implementation shared by processScopeCheck and reconcileTerminalScopedMember.
+// ignored when skipping open members. Other open scope-check controls are
+// closed by the skip pass above, which is what unblocks the body; the one bead
+// named by traceID is exempt from that pass, so the caller owns closing it and
+// MUST have closed it before calling this or the body close is refused as
+// blocked. This is the single implementation shared by processScopeCheck and
+// reconcileTerminalScopedMember.
 func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
 	bodyID := snapshot.body.ID
 	skipped, err := tracePhase(opts, traceID, "skip-open-members", func() (int, error) {
