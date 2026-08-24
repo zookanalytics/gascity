@@ -426,6 +426,7 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 			`/city/pack.toml: both [agent_defaults] and [agents] are present; [agent_defaults] wins on overlapping keys and [agents] only fills gaps`,
 			`/city/city.toml: workspace.global_fragments is deprecated: Use [agent_defaults] append_fragments or explicit template includes instead.`,
 			`gc: warning: attachment-list fields (` + "`skills`, `mcp`, `skills_append`, `mcp_append`, `shared_skills`" + `) are deprecated as of v0.15.1 and ignored.`,
+			`named_session "gastown.mayor": mode "always" with wake_mode "fresh" on template "gastown.mayor" starts a fresh provider session after every drain; use only for a deliberate restart-per-cycle actor`,
 		},
 	})
 
@@ -444,6 +445,9 @@ func TestEmitLoadCityConfigWarningsFiltersNonMigrationWarnings(t *testing.T) {
 	}
 	if !strings.Contains(output, "attachment-list fields") {
 		t.Fatalf("expected attachment deprecation warning, got %q", output)
+	}
+	if strings.Contains(output, "starts a fresh provider session after every drain") {
+		t.Fatalf("always+fresh advisory should stay out of generic command stderr, got %q", output)
 	}
 }
 
