@@ -6,18 +6,26 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
-// TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted proves the always+fresh
-// advisory behaves like a warning on both downstream re-classifiers of config
+// TestAlwaysFreshWakeModeWarningIsNonFatalAndUnprinted proves the always+fresh
+// advisory behaves correctly on both downstream re-classifiers of config
 // warnings: strict mode — on by default for `gc start` — keeps it NON-FATAL,
-// and the agent warning-emit path SURFACES it. The bundled gastown pack trips
-// this warning, so without the config.IsAlwaysFreshWakeModeWarning wiring
-// `gc start --foreground` / `--controller` / `--dry-run` exits 1 on the shipped
-// example city, and `gc agent` drops the advisory silently.
+// and the shared per-command warning-emit path SUPPRESSES it. The bundled
+// gastown pack trips this warning, so without the
+// config.IsAlwaysFreshWakeModeWarning wiring `gc start --foreground` /
+// `--controller` / `--dry-run` exits 1 on the shipped example city.
+//
+// The advisory is a lint about a static property of city.toml: it never
+// changes between invocations, so repeating it on the stderr of every `gc bd
+// show` / `gc bd list` buys nothing. Agent harnesses merge
+// stderr into the tool result, which made this one block 7.3% of all
+// tool-result text city-wide (gc-dqn8l). It stays discoverable on the surfaces
+// whose subject IS the config — `gc start` and `gc config` both print raw
+// prov.Warnings, neither of which consults shouldEmitLoadCityConfigWarning.
 //
 // The warning text is derived from config.ValidateNamedSessions rather than
 // hardcoded so this test cannot pass against a string the validator no longer
 // emits.
-func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
+func TestAlwaysFreshWakeModeWarningIsNonFatalAndUnprinted(t *testing.T) {
 	warnings, err := config.ValidateNamedSessions(&config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents:    []config.Agent{{Name: "watchdog", WakeMode: "fresh"}},
@@ -41,8 +49,8 @@ func TestAlwaysFreshWakeModeWarningIsNonFatalAndEmitted(t *testing.T) {
 	if len(fatal) != 0 || len(nonFatal) != 1 {
 		t.Errorf("strict split: fatal=%v nonFatal=%v, want the always+fresh warning non-fatal", fatal, nonFatal)
 	}
-	if !shouldEmitLoadCityConfigWarning(w) {
-		t.Error("an always+fresh warning must be emitted to the operator, not swallowed")
+	if shouldEmitLoadCityConfigWarning(w) {
+		t.Error("an always+fresh warning must not be repeated on every command's stderr")
 	}
 }
 
