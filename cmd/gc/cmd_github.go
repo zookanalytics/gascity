@@ -161,11 +161,13 @@ func doGitHubPRBackfill(opts githubPRBackfillOptions, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "gc github pr backfill: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if !opts.jsonOutput {
-		for _, warning := range prov.Warnings {
-			fmt.Fprintf(stderr, "gc github pr backfill: warning: %s\n", warning) //nolint:errcheck // best-effort stderr
-		}
-	}
+	// Route through the shared filter rather than printing prov.Warnings raw.
+	// This command's subject is GitHub PR readiness, not the config, so it gets
+	// the same treatment as every other non-config command: actionable
+	// migration guidance prints, static city.toml lints stay quiet, and
+	// repeated warnings are deduped. The explicit config surfaces (gc start,
+	// gc config) still print prov.Warnings unfiltered (gc-dqn8l).
+	emitLoadCityConfigWarnings(configWarnWriter(opts.jsonOutput, stderr), prov)
 
 	monitors, err := selectGitHubPRMonitors(cfg, opts.monitorName)
 	if err != nil {
