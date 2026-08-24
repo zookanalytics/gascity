@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -27,12 +28,6 @@ func (c *countingOrderDispatcher) dispatch(_ context.Context, _ string, _ time.T
 }
 
 func (c *countingOrderDispatcher) drain(context.Context) bool { return true }
-
-func (c *countingOrderDispatcher) count() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.times)
-}
 
 // countSince returns how many dispatches landed at or after mark.
 func (c *countingOrderDispatcher) countSince(mark time.Time) int {
@@ -132,24 +127,21 @@ func TestOrderDispatchCadenceSurvivesABlockedReconcile(t *testing.T) {
 		t.Fatal("reconcile never started; cannot measure dispatch cadence under a blocked reconcile")
 	}
 
+	// Wait for repeated dispatches to land AFTER the reconcile wedged. One would
+	// prove only that a pass had started; several prove the loop keeps its own
+	// clock while the reconciler is stuck. Polling rather than sleeping a fixed
+	// window keeps the assertion on the property instead of on wall-clock, so a
+	// loaded box makes this slower, never flaky.
+	//
+	// Failure here is the pre-fix behaviour exactly: order dispatch coupled to
+	// the reconciler goroutine, so a blocked reconcile silently degrades every
+	// declared order cadence.
 	mark := time.Now()
-	const window = 600 * time.Millisecond
-	time.Sleep(window)
-	got := counter.countSince(mark)
+	const wantAtLeast = 5
+	awaitCond(t, func() bool { return counter.countSince(mark) >= wantAtLeast },
+		fmt.Sprintf("%d order dispatches while a reconcile is blocked", wantAtLeast))
 
 	close(blockReconcile)
 	cancel()
 	awaitClose(t, done, "run returning after cancel")
-
-	// 600ms at a 20ms patrol interval is ~30 dispatch opportunities. Assert a
-	// small fraction of that so the test is not timing-flaky on a loaded box,
-	// while still failing decisively when the answer is "none, the reconciler
-	// is holding the only goroutine that dispatches".
-	const wantAtLeast = 5
-	if got < wantAtLeast {
-		t.Fatalf("order dispatches during a %s blocked reconcile = %d, want >= %d; "+
-			"order dispatch is coupled to the reconciler goroutine, so a slow reconcile "+
-			"silently degrades every declared order cadence (total dispatches: %d)",
-			window, got, wantAtLeast, counter.count())
-	}
 }
