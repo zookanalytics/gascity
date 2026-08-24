@@ -419,3 +419,106 @@ func TestGitHubPRBackfillCommandPropagatesRepairStoreError(t *testing.T) {
 		t.Fatalf("stderr = %q, want store error", stderr.String())
 	}
 }
+
+// appendMixedWarningConfig adds two config shapes to an existing test city, one
+// per side of the shouldEmitLoadCityConfigWarning split:
+//
+//   - a mode="always" named session on a wake_mode="fresh" template, the shape
+//     config.ValidateNamedSessions reports the always+fresh advisory for. The
+//     filter SUPPRESSES it — a static lint about city.toml, unchanged by
+//     whatever the current command did.
+//   - both [agent_defaults] and [agents] tables, whose ambiguity warning the
+//     filter KEEPS — the operator must act on it.
+//
+// A command wired to the filter therefore prints exactly one of the two, which
+// is what distinguishes a real filter from a blanket mute.
+func appendMixedWarningConfig(t *testing.T, cityPath string) {
+	t.Helper()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	existing, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("read city.toml: %v", err)
+	}
+	body := string(existing) + `
+[[agent]]
+name = "watchdog"
+wake_mode = "fresh"
+
+[[named_session]]
+template = "watchdog"
+mode = "always"
+
+[agent_defaults]
+model = "sonnet"
+
+[agents]
+model = "sonnet"
+`
+	if err := os.WriteFile(tomlPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+}
+
+// TestGitHubPRBackfillSuppressesAlwaysFreshAdvisory proves `gc github pr
+// backfill` does not reprint the static always+fresh city.toml advisory on
+// stderr. The command is not a config surface: its subject is GitHub PR
+// readiness, so a lint about a property of city.toml that is identical on every
+// invocation is pure noise there. gc-dqn8l removed that reprint from the shared
+// emit path, but this command iterated prov.Warnings directly and so kept
+// emitting it — a reachable command path with the bug the branch removes.
+//
+// The absence assertion is guarded two ways so it cannot pass vacuously. It
+// first proves the fixture still provokes the advisory at config-load time, so
+// a validator that stopped emitting it fails here instead of silently turning
+// this into an empty test. And it classifies stderr with
+// config.IsAlwaysFreshWakeModeWarning — the same exported predicate the fix
+// consults — rather than a copy of the message text, so a reworded advisory
+// cannot slip past. The paired positive assertion (a kept migration warning)
+// distinguishes a filter from a blanket mute.
+func TestGitHubPRBackfillSuppressesAlwaysFreshAdvisory(t *testing.T) {
+	cityPath := writeGitHubMonitorTestCity(t)
+	appendMixedWarningConfig(t, cityPath)
+
+	// The fixture must actually provoke the advisory, or the absence assertion
+	// below proves nothing.
+	_, prov, err := loadConfigCommandCityConfig(cityPath)
+	if err != nil {
+		t.Fatalf("load fixture city: %v", err)
+	}
+	advisories := 0
+	for _, w := range prov.Warnings {
+		if config.IsAlwaysFreshWakeModeWarning(w) {
+			advisories++
+		}
+	}
+	if advisories == 0 {
+		t.Fatalf("fixture no longer provokes the always+fresh advisory; warnings = %q", prov.Warnings)
+	}
+
+	oldToken := resolveGitHubTokenForBackfill
+	oldClient := newGitHubPRBackfillClient
+	resolveGitHubTokenForBackfill = func(context.Context) (string, error) { return "token", nil }
+	newGitHubPRBackfillClient = func(string) githubPRLister {
+		return fakeGitHubPRLister{prs: []githubmonitor.PullRequest{
+			{Number: 1, BaseRefName: "main", HeadSHA: "abc", MergeStateStatus: "DIRTY"},
+		}}
+	}
+	t.Cleanup(func() {
+		resolveGitHubTokenForBackfill = oldToken
+		newGitHubPRBackfillClient = oldClient
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityPath, "github", "pr", "backfill", "partcl-main"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run code = %d, stdout = %q, stderr = %q", code, stdout.String(), stderr.String())
+	}
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if config.IsAlwaysFreshWakeModeWarning(line) {
+			t.Fatalf("always+fresh advisory must stay off non-config command stderr, got %q", stderr.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "both [agent_defaults] and [agents] are present") {
+		t.Fatalf("actionable migration warning must survive the filter, got %q", stderr.String())
+	}
+}
