@@ -163,8 +163,23 @@ func isNonFatalLoadConfigWarning(warning string) bool {
 	return strings.Contains(warning, `"agent_defaults.`) || strings.Contains(warning, `"agents.`)
 }
 
+// shouldEmitLoadCityConfigWarning reports whether a config-load warning is
+// worth printing on the stderr of an arbitrary command. Migration guidance that
+// a user must act on qualifies; static lints about a property of city.toml do
+// not. The shared loadCityConfigFS path runs on nearly every gc invocation, so
+// anything returning true here is reprinted for the life of the config — and
+// agent harnesses merge stderr into the tool result, which turned the
+// always+fresh advisory alone into 7.3% of all tool-result text city-wide
+// (gc-dqn8l). Suppression here is not concealment: gc start and gc config both
+// print raw prov.Warnings without consulting this filter, and strict mode
+// classifies independently via strictWarningIsNonFatal.
 func shouldEmitLoadCityConfigWarning(warning string) bool {
 	if config.IsLegacyWorkspaceFieldWarning(warning) {
+		return false
+	}
+	// A lint about a static property of city.toml — identical on every
+	// invocation, and unchanged by anything the current command did.
+	if config.IsAlwaysFreshWakeModeWarning(warning) {
 		return false
 	}
 	if strings.Contains(warning, "both [agent_defaults] and [agents] are present") {
