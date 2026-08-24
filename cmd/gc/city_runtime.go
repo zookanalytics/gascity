@@ -221,8 +221,9 @@ type CityRuntime struct {
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
 
-	fsPressureConsecutiveSkips int
-	fsPressureEpisodeLogged    bool
+	// tickFSPressure is the reconciler tick's own shedding episode. The
+	// order-dispatch loop keeps a separate one on its own goroutine.
+	tickFSPressure fsPressureEpisode
 
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
@@ -1566,6 +1567,17 @@ func (cr *CityRuntime) tick(
 // Takes orderMu for the whole pass so it cannot interleave with a reload,
 // rescan or shutdown drain mutating the same dispatcher.
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
+	if ctx.Err() != nil {
+		return
+	}
+	// Managed-Dolt preflight before any store touch. The tick used to do this
+	// immediately before dispatching inline, precisely "so skipped or
+	// endpoint-repair ticks do not add tracking writes first"; now that dispatch
+	// has its own goroutine it can no longer inherit the tick's preflight and
+	// must run its own, or a pass would write tracking beads against an
+	// unpublished endpoint. Taken outside orderMu because it probes an endpoint
+	// and holds no dispatcher state.
+	cr.ensureManagedDoltPublishedForTick()
 	if ctx.Err() != nil {
 		return
 	}

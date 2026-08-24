@@ -36,17 +36,30 @@ func (cr *CityRuntime) orderDispatchLoop(ctx context.Context, cityRoot string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// This loop's own IO-pressure shedding episode. Dispatch sat behind the
+	// tick's pressure gate before it moved here, and a dispatch pass does write
+	// (tracking beads), so it keeps shedding under pressure rather than piling
+	// on. The episode is a local, which is what makes it goroutine-owned: the
+	// reconciler counts its own skips in cr.tickFSPressure and the two must not
+	// force each other's passes.
+	var pressure fsPressureEpisode
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// safeTick keeps a panicking dispatch from taking the loop (and
-			// with it every future order) down, matching how the reconciler
-			// goroutine guards its own tick body.
-			cr.safeTick(func() {
-				cr.dispatchOrders(ctx, cityRoot)
-			}, "order-dispatch")
+			// trace is nil: trace cycles belong to the reconciler tick and are
+			// not safe to open from a second goroutine. The skip/force EVENT is
+			// still recorded, so shedding stays observable.
+			if !cr.shouldSkipForFSPressure(&pressure, nil, "order-dispatch") {
+				// safeTick keeps a panicking dispatch from taking the loop (and
+				// with it every future order) down, matching how the reconciler
+				// goroutine guards its own tick body.
+				cr.safeTick(func() {
+					cr.dispatchOrders(ctx, cityRoot)
+				}, "order-dispatch")
+			}
 
 			// Re-read the cadence each pass so a hot reload of city.toml takes
 			// effect without restarting the controller. Reset (not a new

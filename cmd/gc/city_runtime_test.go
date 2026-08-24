@@ -1084,7 +1084,17 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 	}
 }
 
-func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
+// A dispatch pass must publish managed Dolt before it reads or writes the order
+// store, so a pass on a city whose endpoint is unpublished or mid-repair does
+// not land tracking beads against it first.
+//
+// The tick used to own this ordering: it preflighted, then dispatched inline.
+// Dispatch now runs on its own goroutine (gc-4jard) and cannot inherit the
+// tick's preflight, so dispatchOrders runs its own — and this drives
+// dispatchOrders directly, which is where the invariant now lives. Driving
+// cr.tick here would pass vacuously: the tick preflights and never dispatches,
+// so no order store event would follow to be out of order.
+func TestCityRuntimeDispatchOrdersPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
 
@@ -1127,10 +1137,7 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 
-	dirty := &atomic.Bool{}
-	lastProviderName := ""
-	prevPoolRunning := map[string]bool{}
-	cr.tick(context.Background(), dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
+	cr.dispatchOrders(context.Background(), cr.cityPath)
 
 	preflightIndex := orderEvents.index("preflight")
 	orderListIndex := orderEvents.index("order-list")
@@ -1768,26 +1775,36 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 	}
 }
 
-func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *testing.T) {
+// A tick that loses its context part-way must stop before the expensive
+// reconcile phases rather than run them against a canceled city.
+//
+// This used to cancel from inside order dispatch, which the tick ran inline.
+// Dispatch now has its own goroutine (gc-4jard), so the cancellation is driven
+// from the managed-Dolt preflight instead — the phase that now occupies that
+// position in the tick. The invariant under test is unchanged: cancel before
+// the demand snapshot, and the demand snapshot must not run.
+func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledEarly(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
-	od := &recordingOrderDispatcher{
-		onDispatch: func(context.Context, string, time.Time) {
-			cancel()
-		},
-	}
+	preflighted := false
 	cr := &CityRuntime{
 		cityName:            "test-city",
 		cityPath:            t.TempDir(),
 		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
 		sp:                  runtime.NewFake(),
 		standaloneCityStore: store,
-		od:                  od,
 		stdout:              io.Discard,
 		stderr:              io.Discard,
+		managedDoltHealth: func(string) error {
+			preflighted = true
+			cancel()
+			return nil
+		},
+		managedDoltOwned: func(string) (bool, error) { return true, nil },
+		managedDoltPort:  func(string) string { return "" },
 	}
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		t.Fatal("demand snapshot should not run after order dispatch cancels the city context")
+		t.Fatal("demand snapshot should not run after the city context is canceled")
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
@@ -1796,8 +1813,10 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledDuringOrderDispatch(t *te
 	var prevPoolRunning map[string]bool
 	cr.tick(ctx, &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
 
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
+	// Guard the guard: if the preflight never ran, nothing canceled the context
+	// and the assertion above would have passed for the wrong reason.
+	if !preflighted {
+		t.Fatal("managed-dolt preflight did not run; the cancellation was never triggered")
 	}
 }
 
@@ -5452,12 +5471,18 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 	}
 }
 
-// TestCityRuntimeManualHardReloadRepliesBeforeDispatch pins #3206: a manual
-// hard reload's reply is sent BEFORE dispatchOrders and the session-reconcile
-// phases, so reload-reply latency is independent of order count. (Soft
+// TestCityRuntimeManualHardReloadRepliesBeforeReconcile pins #3206: a manual
+// hard reload's reply is sent BEFORE the session-reconcile phases, so
+// reload-reply latency does not scale with the work behind it. (Soft
 // Applied/NoChange reloads still reply after applySoftReloadAcceptance — see
 // TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange.)
-func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
+//
+// #3206 originally also covered "before dispatchOrders", because order dispatch
+// ran inline in the tick and reply latency scaled with order count. Dispatch
+// moved to its own goroutine (gc-4jard), so the tick cannot dispatch at all and
+// that half is now structural rather than something a test can observe here —
+// TestCityRuntimeTickDoesNotDispatchOrders pins it directly.
+func TestCityRuntimeManualHardReloadRepliesBeforeReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
 	writeCityRuntimeConfig(t, tomlPath, "fake")
@@ -5470,15 +5495,6 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 	sp := runtime.NewFake()
 	var stdout bytes.Buffer
 
-	// recordingOrderDispatcher is a pure in-process fake (no order subprocesses),
-	// so it carries none of the tempdir-cleanup races the real dispatcher would.
-	od := &recordingOrderDispatcher{
-		onDispatch: func(context.Context, string, time.Time) {
-			if len(doneCh) == 0 {
-				t.Error("dispatchOrders ran before the manual hard-reload reply was sent (#3206)")
-			}
-		},
-	}
 	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:    cityPath,
 		CityName:    "test-city",
@@ -5498,16 +5514,12 @@ func TestCityRuntimeManualHardReloadRepliesBeforeDispatch(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: io.Discard,
 	})
-	cr.od = od
 	cr.activeReload = &reloadRequest{doneCh: doneCh} // hard reload (soft=false)
 	lastProviderName := "fake"
 	var prevPoolRunning map[string]bool
 
 	cr.tick(context.Background(), dirty, &lastProviderName, cityPath, &prevPoolRunning, "poke")
 
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
-	}
 	select {
 	case reply := <-doneCh:
 		if reply.Outcome != reloadOutcomeNoChange {
