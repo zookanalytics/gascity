@@ -2,8 +2,8 @@
 
 Bumping the `github.com/steveyegge/beads` pin is a coordinated multi-file
 edit, not a `go get`. The version appears in go.mod, in `deps.env`, in
-Dockerfiles, in a dozen workflow assignments, in checksum pins, and in two
-guards that fail only *after* the obvious edits look complete. Miss one and
+Dockerfiles, in a dozen workflow assignments, and in checksum pins — and two
+size guards then fail on what the new pin drags in behind it. Miss one and
 the board goes red in a place that does not name beads.
 
 This page is the anchor list. It exists because the list has twice been lost:
@@ -80,15 +80,17 @@ guards *native dependency surface*, so the question is whether the new
 modules are real surface or graph noise:
 
 ```bash
-# Which module paths are new, against the pre-bump commit
+# Which module paths are new, against the pre-bump commit. Compare paths, not
+# the raw lines: every version bump would otherwise read as add+remove.
 git worktree add /var/tmp/pre --detach <bump-commit>^
 (cd /var/tmp/pre && go list -m all) | awk '{print $1}' | LC_ALL=C sort -u > /var/tmp/pre.paths
 go list -m all | awk '{print $1}' | LC_ALL=C sort -u > /var/tmp/post.paths
 LC_ALL=C comm -13 /var/tmp/pre.paths /var/tmp/post.paths
+git worktree remove --force /var/tmp/pre
 
 # For each new path: does anything we build actually import it?
-go mod why -m <path>                      # "main module does not need" => graph-only
-go list -deps ./cmd/gc | grep -c '^<path>' # 0 => links nothing into gc
+go mod why -m <path>          # "main module does not need" => graph-only
+go list -deps ./cmd/gc | grep -cE '^<path>(/|$)'   # 0 => links nothing into gc
 ```
 
 A module that is absent from our `go.mod`, reports *"main module does not

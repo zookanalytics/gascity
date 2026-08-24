@@ -23,7 +23,7 @@ description: The shortest path for new contributors to get productive in Gas Cit
   deploy gate — it must cite the CI jobs `ci-required` actually gates on
 - [Beads Version Bump Anchors](beads-version-bump-anchors.md) when moving the
   `github.com/steveyegge/beads` pin — the version lives in a dozen files, and
-  three of them fail in places that never mention beads
+  four of them fail in places that never mention beads
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
