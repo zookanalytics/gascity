@@ -1935,7 +1935,7 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	gotSweep, err := store.Get(sweepTracking.ID)
 	if err != nil {
@@ -1976,7 +1976,7 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(time.Now().Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	closed := 0
 	for _, id := range ids {
@@ -2020,7 +2020,7 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	if got, err := store.Get(sweepTracking.ID); err != nil {
 		t.Fatalf("Get(sweep): %v", err)
@@ -2121,7 +2121,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -2196,7 +2196,7 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -7200,7 +7200,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsWhenIntervalNotElapsed(t *testing.T
 		// Set last to now-1s: interval has not elapsed.
 		orderTrackingRetentionWatchdogLast: now.Add(-time.Second),
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	// Bead skip-00 should still exist (watchdog skipped).
 	if _, err := store.Get("skip-00"); err != nil {
@@ -7233,7 +7233,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads(t *testing.T) {
 		logPrefix:           "gc test",
 		// Zero last: watchdog fires immediately.
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	// 2 oldest beads (prune-00, prune-01) should be deleted.
 	for _, id := range []string{"prune-00", "prune-01"} {
@@ -7275,7 +7275,7 @@ func TestOrderTrackingRetentionWatchdog_LogsPrunedCount(t *testing.T) {
 		stderr:              &stderrBuf,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	got := stderrBuf.String()
 	if !strings.Contains(got, "pruned") {
@@ -7298,7 +7298,7 @@ func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutPanic(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 	// Must not panic.
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 }
 
 func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
@@ -7312,14 +7312,14 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
 	// Second call within the interval must not update the timestamp.
 	later := now.Add(time.Minute)
-	cr.runOrderTrackingRetentionWatchdog(later)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), later)
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
@@ -7374,7 +7374,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsBulkDeleteWhenBackupStale(t *testin
 	// 48h since the last backup, past the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, 48*time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	// Nothing may be deleted while the recovery point is stale.
 	for i := range minClosedOrderTrackingRetained + 2 {
@@ -7398,7 +7398,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
 	// 1h since the last backup, well inside the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(now)
+	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
 
 	if got := stderrBuf.String(); strings.Contains(got, "skipping bulk delete") {
 		t.Fatalf("stderr = %q, want no skip with a fresh backup", got)
