@@ -133,7 +133,7 @@ func TestOrderDispatchCadenceSurvivesABlockedReconcile(t *testing.T) {
 	// window keeps the assertion on the property instead of on wall-clock, so a
 	// loaded box makes this slower, never flaky.
 	//
-	// Failure here is the pre-fix behaviour exactly: order dispatch coupled to
+	// Failure here is the pre-fix behavior exactly: order dispatch coupled to
 	// the reconciler goroutine, so a blocked reconcile silently degrades every
 	// declared order cadence.
 	mark := time.Now()
