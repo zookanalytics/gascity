@@ -132,7 +132,36 @@ rarer than what it replaces.
   reconciler's per-tick trace cycle. Dispatch no longer runs there, and
   emitting cycles from a second goroutine is not safe with the current tracer,
   so that record is gone. `TraceSiteOrderDispatch` is now unreferenced.
-- The `liveness-sweep` `trigger=condition` precheck failure the bead flags as
-  separately-observed is untouched and still wants its own bead. It is not
-  explained by this: a starved dispatch delays a check, it does not make one
-  exit 1.
+
+## The liveness-sweep precheck is not a second bug
+
+The bead asks whether `liveness-sweep`'s `trigger=condition` precheck failing
+with exit 1 shares this root cause, and says it wants its own bead otherwise.
+It shares neither the cause nor, on inspection, the defect — **exit 1 is that
+script's designed idle answer, not a failure.**
+
+`assets/scripts/liveness-sweep-precheck.sh` documents its own contract as
+"exit 0 means run the pass, non-zero means do not". A condition trigger has no
+interval, so the order's 6h cadence is enforced inside the script by a stamp
+file, and the in-cooldown branch (line 330) exits 1 under a comment that says
+so outright:
+
+> Deliberately silent and unlogged: this is the answer on almost every tick,
+> and logging it would bury the passes that matter.
+
+That also explains the asymmetry the bead noticed. The stamp directory is
+city+pack+**rig** scoped; run standalone outside that rig-scoped env the script
+finds no stamp, treats it as "never", and correctly decides RUN — exit 0. The
+two exit codes are the same logic reading two different cooldown states, not a
+discrepancy.
+
+Corroborating: the current doctor run reports
+`gc-toolkit:check-liveness-sweep-wired` as **ok** ("sweep precheck executable
+and gated with room under its check_timeout"), while separately reporting
+`order-firing-current: scheduled orders are overdue` — the symptom this bead
+is about.
+
+No bead filed, because there is no defect to file against the precheck. What
+could still be worth a bead is on the reporting side, if a doctor check is
+reading a healthy condition gate's non-zero exit as a failure; that check is
+reporting ok today, so there is nothing live to reproduce.
