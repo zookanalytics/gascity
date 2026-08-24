@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
-max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-270000000}"
+# Exact ratchet, not headroom: this is the module count of the graph today, so
+# any growth trips the guard and gets reviewed rather than absorbed silently.
+# Raise it in the same commit that causes the growth -- a beads pin bump is the
+# usual cause, and the failure message reports the new count. Full anchor list:
+# engdocs/contributors/beads-version-bump-anchors.md.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
+# Headroom, not a ratchet: unlike the module count, this number is not
+# reproducible across environments -- the same commit built 267,809,008 bytes on
+# CI (go 1.26.5) and 268,260,480 locally (go 1.26.6), so an exact cap would go
+# red on a toolchain bump alone. Keep it a round number a few percent above the
+# real size: big enough to absorb that spread, small enough that sustained
+# growth still has to be reviewed. Today's build is ~270.7M.
+max_binary_bytes="${GC_NATIVE_DEP_MAX_BINARY_BYTES:-280000000}"
 max_aws_modules="${GC_NATIVE_DEP_MAX_AWS_MODULES:-25}"
 max_azure_modules="${GC_NATIVE_DEP_MAX_AZURE_MODULES:-9}"
 max_dolthub_modules="${GC_NATIVE_DEP_MAX_DOLTHUB_MODULES:-15}"
