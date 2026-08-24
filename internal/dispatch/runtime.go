@@ -439,13 +439,18 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 			if err != nil {
 				return ControlResult{}, err
 			}
-			if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
-				return ControlResult{}, err
-			}
+			// Close this control bead BEFORE converging the scope. The body
+			// lists every step's scope-check as a "blocks" dependency, so
+			// while this bead is open the store refuses to close the body
+			// ("cannot close blocked issue"). See the ordering note on
+			// closeScopeAsPassed.
 			if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
 				return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
 			}); err != nil {
 				return ControlResult{}, fmt.Errorf("%s: completing retry-attempt control bead: %w", bead.ID, err)
+			}
+			if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
+				return ControlResult{}, err
 			}
 			return ControlResult{Processed: true, Action: "scope-pass"}, nil
 		}
@@ -471,6 +476,20 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err != nil {
 			return ControlResult{}, err
 		}
+		// The ABORT path deliberately keeps the opposite ordering to the pass
+		// path below: abort first, close this control bead LAST.
+		//
+		// Closing the control first would produce a clean abort with an
+		// identical end state, but it momentarily unblocks every scope member
+		// that blocks on this control — and a member of an aborting scope that
+		// becomes ready can be picked up by the dispatcher before the abort
+		// finishes skipping it (upstream ga-a6zy9). The pass path cannot hit
+		// that race: it closes a scope whose members are already closed.
+		//
+		// The gc-gfoc7 deadlock this file otherwise fixes is a PASS-path
+		// defect — the production trace is phase=close-body under
+		// closeScopeAsPassed — so the fix does not need this branch, and taking
+		// it here would trade a fixed deadlock for a live dispatch race.
 		skipped, err := abortScope(store, snapshot, opts, bead.ID)
 		if err != nil {
 			return ControlResult{}, err
@@ -495,13 +514,15 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 		if err != nil {
 			return ControlResult{}, err
 		}
-		if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
-			return ControlResult{}, err
-		}
+		// Close this control bead BEFORE converging the scope; the body
+		// blocks on it and cannot close while it is open.
 		if err := tracePhaseErr(opts, bead.ID, "close-control", func() error {
 			return setOutcomeAndClose(store, bead.ID, beadmeta.OutcomePass)
 		}); err != nil {
 			return ControlResult{}, fmt.Errorf("%s: completing control bead: %w", bead.ID, err)
+		}
+		if err := closeScopeAsPassed(store, snapshot, subject, opts, bead.ID); err != nil {
+			return ControlResult{}, err
 		}
 		return ControlResult{Processed: true, Action: "scope-pass"}, nil
 	}
@@ -531,9 +552,12 @@ func loadScopeSnapshotForControl(store beads.Store, rootID, scopeRef string, bod
 // onto the scope body, resolve the scope's output_json from subject, then close
 // the body with outcome=pass (unless it is already closed). subject supplies the
 // output_json source and traceID identifies the bead driving the trace. The
-// caller owns closing its own control bead. This is the single implementation
-// shared by both processScopeCheck branches and reconcileTerminalScopedMember,
-// so every convergence observer closes a scope identically.
+// caller owns closing its own control bead, and MUST have closed it already:
+// the scope body carries a "blocks" dependency on every scope-check control in
+// the scope, so a still-open control bead makes the body close below fail with
+// "cannot close blocked issue". This is the single implementation shared by
+// both processScopeCheck branches and reconcileTerminalScopedMember, so every
+// convergence observer closes a scope identically.
 func closeScopeAsPassed(store beads.Store, snapshot scopeSnapshot, subject beads.Bead, opts ProcessOptions, traceID string) error {
 	bodyID := snapshot.body.ID
 	// Propagate non-gc metadata from scope members to the scope body. This
@@ -578,8 +602,11 @@ func closeScopeAsPassed(store beads.Store, snapshot scopeSnapshot, subject beads
 // review.verdict) onto the scope body so diagnostics survive failure auto-close,
 // then close the body with outcome=fail. It returns the number of members
 // skipped. traceID identifies the bead driving the trace and is also the id
-// ignored when skipping open members. The caller owns closing its own control
-// bead. This is the single implementation shared by processScopeCheck and
+// ignored when skipping open members. Other open scope-check controls are
+// closed by the skip pass above, which is what unblocks the body; the one bead
+// named by traceID is exempt from that pass, so the caller owns closing it and
+// MUST have closed it before calling this or the body close is refused as
+// blocked. This is the single implementation shared by processScopeCheck and
 // reconcileTerminalScopedMember.
 func abortScope(store beads.Store, snapshot scopeSnapshot, opts ProcessOptions, traceID string) (int, error) {
 	bodyID := snapshot.body.ID

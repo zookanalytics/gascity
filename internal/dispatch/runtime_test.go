@@ -118,6 +118,111 @@ func TestProcessScopeCheckClosesScopeOnSuccess(t *testing.T) {
 	}
 }
 
+// TestProcessScopeCheckClosesScopeWhenBodyBlocksOnControl pins the ordering
+// that keeps a graph.v2 workflow from deadlocking on its own last step.
+//
+// The scope body carries a "blocks" dependency on every step's scope-check, so
+// the final scope-check is simultaneously the bead that closes the body and the
+// last blocker standing in the body's way. Converging the scope before closing
+// the control bead makes the body close fail with "cannot close blocked issue";
+// the control bead is then left open, the dispatcher retries forever, and
+// cleanup-worktree plus workflow-finalize are never reachable.
+//
+// This is the same graph as TestProcessScopeCheckClosesScopeOnSuccess, run
+// against a store that enforces bd's real blocked-close guard. A plain MemStore
+// closes a blocked bead happily, which is why the deadlock reached production.
+func TestProcessScopeCheckClosesScopeWhenBodyBlocksOnControl(t *testing.T) {
+	t.Parallel()
+
+	store := newStrictCloseStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	body := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "body",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope",
+			"gc.scope_role":   "body",
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.body",
+		},
+	})
+	step := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "submit",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "member",
+			"gc.outcome":      "pass",
+		},
+	})
+	control := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize scope for submit",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "scope-check",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "control",
+		},
+	})
+	control = mustGetBead(t, store, control.ID)
+	cleanup := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "cleanup",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "cleanup",
+			"gc.root_bead_id": workflow.ID,
+			"gc.scope_ref":    "body",
+			"gc.scope_role":   "teardown",
+		},
+	})
+	finalizer := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Finalize workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":         "workflow-finalize",
+			"gc.root_bead_id": workflow.ID,
+		},
+	})
+
+	mustDepAdd(t, store, control.ID, step.ID, "blocks")
+	mustDepAdd(t, store, body.ID, control.ID, "blocks")
+	mustDepAdd(t, store, cleanup.ID, body.ID, "blocks")
+	mustDepAdd(t, store, finalizer.ID, cleanup.ID, "blocks")
+
+	result, err := ProcessControl(store, control, ProcessOptions{})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "scope-pass" {
+		t.Fatalf("scope result = %+v, want processed scope-pass", result)
+	}
+
+	controlAfter := mustGetBead(t, store, control.ID)
+	if controlAfter.Status != "closed" {
+		t.Fatalf("control status = %q, want closed so the body is unblocked", controlAfter.Status)
+	}
+	bodyAfter := mustGetBead(t, store, body.ID)
+	if bodyAfter.Status != "closed" {
+		t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+	}
+	if got := bodyAfter.Metadata["gc.outcome"]; got != "pass" {
+		t.Fatalf("body outcome = %q, want pass", got)
+	}
+	if !mustReadyContains(t, store, cleanup.ID) {
+		t.Fatalf("cleanup %s should be ready after body closes", cleanup.ID)
+	}
+}
+
 func TestProcessScopeCheckSuccessUsesScopedSnapshotQueries(t *testing.T) {
 	t.Parallel()
 
@@ -263,7 +368,19 @@ func TestProcessScopeCheckPassWithRemainingOpenAvoidsClosedSnapshot(t *testing.T
 	}
 }
 
-func TestProcessScopeCheckKeepsControlOpenIfBodyCloseoutFails(t *testing.T) {
+// TestProcessScopeCheckSurfacesBodyCloseoutFailure pins what happens when the
+// scope body cannot be converged: the error is surfaced to the dispatcher
+// rather than swallowed, and the body stays open because it genuinely did not
+// converge.
+//
+// This test used to assert the opposite ordering — that the control bead stays
+// open "so the dispatcher can retry body closeout". That invariant is
+// unsatisfiable in production: the body lists this control bead as a blocker,
+// so holding it open is exactly what makes every retry fail. Retrying under
+// that contract spun ~240k times against one workflow without ever converging.
+// The control bead now closes first (its own work is done and it must stop
+// blocking the body); a body-closeout failure is reported, not retried forever.
+func TestProcessScopeCheckSurfacesBodyCloseoutFailure(t *testing.T) {
 	t.Parallel()
 
 	base := beads.NewMemStore()
@@ -318,8 +435,8 @@ func TestProcessScopeCheckKeepsControlOpenIfBodyCloseoutFails(t *testing.T) {
 	}
 
 	controlAfter := mustGetBead(t, store, control.ID)
-	if controlAfter.Status != "open" {
-		t.Fatalf("control status = %q, want open so dispatcher can retry body closeout", controlAfter.Status)
+	if controlAfter.Status != "closed" {
+		t.Fatalf("control status = %q, want closed so it stops blocking the body", controlAfter.Status)
 	}
 	bodyAfter := mustGetBead(t, store, body.ID)
 	if bodyAfter.Status != "open" {
