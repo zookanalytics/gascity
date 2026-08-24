@@ -1575,7 +1575,20 @@ func (b *blockingOrderDispatcher) drainContextErrors() []error {
 	return append([]error(nil), b.ctxErrs...)
 }
 
-func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
+// The tick must not dispatch orders. It used to, first thing, so that due
+// formulas were "not starved by slow startup/config drift work" — but ordering
+// dispatch ahead of the slow phases inside a tick cannot change how often a
+// tick BEGINS, which is what actually sets the dispatch rate. In production
+// that left every order firing at the reconciler's latency rather than its own
+// declared cadence (gc-4jard).
+//
+// Dispatch now belongs to orderDispatchLoop, on its own goroutine and clock.
+// This pins that: re-adding the inline call would silently re-couple every
+// order's cadence to reconcile latency, and nothing else in the tick would
+// notice. The property that replaced it — dispatch continues at cadence while
+// a reconcile is blocked — is covered by
+// TestOrderDispatchCadenceSurvivesABlockedReconcile.
+func TestCityRuntimeTickDoesNotDispatchOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	od := &recordingOrderDispatcher{}
 	cr := &CityRuntime{
@@ -1588,10 +1601,9 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 		stdout:              io.Discard,
 		stderr:              io.Discard,
 	}
+	built := false
 	cr.buildFnWithSessionBeads = func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
-		if !od.called.Load() {
-			t.Fatal("order dispatch should happen before demand snapshot build")
-		}
+		built = true
 		return DesiredStateResult{State: map[string]TemplateParams{}}
 	}
 
@@ -1600,8 +1612,13 @@ func TestCityRuntimeTickDispatchesOrdersBeforeDemandSnapshot(t *testing.T) {
 	var prevPoolRunning map[string]bool
 	cr.tick(context.Background(), &dirty, &lastProviderName, cr.cityPath, &prevPoolRunning, "patrol")
 
-	if !od.called.Load() {
-		t.Fatal("order dispatcher was not called")
+	// Guard the guard: a tick that never reached the reconcile phases would
+	// also dispatch nothing, and would pass vacuously.
+	if !built {
+		t.Fatal("tick did not reach the desired-state build; the assertion below would be vacuous")
+	}
+	if n := od.calls.Load(); n != 0 {
+		t.Fatalf("tick called the order dispatcher %d time(s), want 0 — order dispatch belongs to orderDispatchLoop, not the tick", n)
 	}
 }
 
