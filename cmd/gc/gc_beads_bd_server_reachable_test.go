@@ -11,7 +11,7 @@ import (
 // TestServerReachableReflectsDoltExit verifies that server_reachable — the
 // guard introduced so a transiently-unreachable managed Dolt server is not
 // mistaken for a missing/unregistered schema (which would trigger a
-// DESTRUCTIVE --force reinit and abort city init) — succeeds exactly when
+// DESTRUCTIVE --reinit-local and abort city init) — succeeds exactly when
 // the dolt client can reach the server and fails when it cannot.
 //
 // Without this guard, a momentary blip (port drift, an exclusive lock held

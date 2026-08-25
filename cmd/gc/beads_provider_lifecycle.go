@@ -524,9 +524,15 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 		// Preserve legacy probe metadata during startup normalization so old
 		// scopes can still boot and migrate deliberately. New init paths still
 		// reject this reserved name when it is not already pinned in metadata.
-		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+			return err
+		}
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
 	}
-	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	// Runs last: the witness decision reads the dolt_mode the writes above
+	// just canonicalized, and must land before the caller invokes bd init.
+	return ensureManagedScopeVersionWitness(fsys.OSFS{}, dir)
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:

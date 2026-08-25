@@ -2498,7 +2498,11 @@ run_bd_init_pinned() {
     local host="$4"
     local force_init="${5:-false}"
     if [ "$force_init" = "true" ]; then
-        run_bd_pinned "$dir" init --force --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
+        # --reinit-local, not --force: bd deprecated --force as an alias for it
+        # and prints a DeprecationWarning on every managed init. Both bypass
+        # only the LOCAL data-safety guard and neither authorizes discarding
+        # remote history. run_bd_doltlite_init already uses the current name.
+        run_bd_pinned "$dir" init --reinit-local --quiet --server -p "$prefix" --database "$dolt_database" --skip-hooks --skip-agents \
             --server-host "$host" --server-port "$DOLT_PORT" "$dir" || die "bd init failed for $dir"
         return 0
     fi
@@ -2641,7 +2645,12 @@ ensure_beads_dir_permissions() {
     chmod 700 "$beads_dir" || die "failed to set $beads_dir permissions to 700"
 }
 
-normalize_scope_after_init() {
+# normalize_scope_canonical_files reconciles a scope's canonical bd files
+# (metadata.json, config.yaml, port mirrors) through gc, which owns their
+# shape. Order-independent: op_init calls it before bd init to establish the
+# shape bd classifies the workspace by, and again afterwards to reconcile what
+# bd wrote.
+normalize_scope_canonical_files() {
     local dir="$1"
     local prefix="$2"
     local dolt_database="$3"
@@ -2777,17 +2786,31 @@ op_init() {
         exit 0
     fi
 
+    # bd classifies a workspace by its ON-DISK config, not by the --server flag
+    # passed below. Since bd 1.2.1 that classification is enforced: a .beads/dolt
+    # directory with no metadata.json naming dolt_mode=server reads as a legacy
+    # embedded workspace and init refuses with "legacy Dolt workspace detected".
+    # The managed server's data root IS .beads/dolt and the server is up before
+    # this runs, so a scope arriving here without canonical metadata is refused
+    # every time. gc's own init path normalizes first and never hits this; a
+    # direct gc-beads-bd invocation did, which made a documented entry point
+    # depend on an invariant it never established. Establish it here so both
+    # callers present bd the same shape.
+    if [ "$(read_metadata_string_field "$metadata_path" dolt_mode)" != "server" ]; then
+        normalize_scope_canonical_files "$dir" "$prefix" "$dolt_database"
+    fi
+
     # If already initialized on disk, ensure the database is also registered
     # with the running server. gc's normalizeCanonicalBdScopeFilesForInit
     # writes metadata.json (dolt_database/dolt_mode) BEFORE invoking us, so a
     # fresh init also reaches this branch — that is intentional. The branch
     # does NOT blindly skip init: it only exits early when the server already
     # has a live bd schema (bd_runtime_schema_ready). Otherwise it sets
-    # bd_init_force="--force" so the fall-through bd init reinitializes over
-    # the gc-pre-seeded metadata stub instead of aborting with bd's "This
+    # bd_init_force="--reinit-local" so the fall-through bd init reinitializes
+    # over the gc-pre-seeded metadata stub instead of aborting with bd's "This
     # workspace is already initialized" guard. Gating this branch on project_id
     # instead breaks fresh init: gc-pre-seeded metadata has no project_id, so
-    # --force is never set and bd init aborts.
+    # --reinit-local is never set and bd init aborts.
     if [ -f "$dir/.beads/metadata.json" ]; then
         # A pre-existing metadata.json means the store may already be
         # initialized. Both checks below run SQL against the managed Dolt
@@ -2795,8 +2818,8 @@ op_init() {
         # exclusive lock held by a stale dolt process, a slow server start)
         # is indistinguishable from "schema missing" / "not registered" —
         # and both of those branches react by forcing a DESTRUCTIVE reinit
-        # (--force), which trips bd's remote-history guard and aborts city
-        # init on an otherwise healthy store. Confirm the server actually
+        # (--reinit-local), which trips bd's remote-history guard and aborts
+        # city init on an otherwise healthy store. Confirm the server actually
         # answers before trusting a negative result; otherwise fail closed
         # so the caller's retry loop waits for the server to come up instead
         # of reinitializing live data.
@@ -2809,17 +2832,17 @@ op_init() {
                 # bridge returns. Keep the backend focused on database registration
                 # and bd-specific bootstrap only.
                 ensure_beads_dir_permissions "$dir"
-                normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+                normalize_scope_canonical_files "$dir" "$prefix" "$dolt_database"
                 ensure_bd_runtime_custom_types "$dolt_database" "$custom_types"
                 ensure_bd_runtime_issue_prefix "$dolt_database" "$prefix"
                 ensure_project_identity "$dir"
                 exit 0
             fi
             echo "warning: database '$dolt_database' missing bd schema; re-initializing" >&2
-            bd_init_force="--force"
+            bd_init_force="--reinit-local"
         else
             echo "warning: database '$dolt_database' not registered; re-initializing" >&2
-            bd_init_force="--force"
+            bd_init_force="--reinit-local"
         fi
     fi
 
@@ -2898,7 +2921,7 @@ op_init() {
         server_sql "DROP DATABASE IF EXISTS \`$orphan_db\`" >/dev/null 2>&1 || true
     fi
 
-    normalize_scope_after_init "$dir" "$prefix" "$dolt_database"
+    normalize_scope_canonical_files "$dir" "$prefix" "$dolt_database"
 }
 
 
