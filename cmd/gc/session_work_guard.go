@@ -46,7 +46,7 @@ func closeSessionBeadIfUnassigned(
 	if isFailedCreateSessionBead(session) {
 		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), session.ID, reason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), session.ID, reason, now, stderr) // residency:allow the gate above (sessionHasOpenAssignedWorkForConfig) walks the resolver's assignedWorkSweepPlan, but this path holds a RAW BEAD and gets back only a bool — there is no walked leg set to release into, so the release takes the whole reachable union the gate covered.
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -80,7 +80,7 @@ func closeSessionInfoIfUnassigned(
 	if isFailedCreateSessionInfo(info) {
 		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, reason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, reason, now, stderr) // residency:allow same shape as closeSessionBeadIfUnassigned: sessionHasOpenAssignedWorkForConfigInfo walks the resolver plan but answers with a bool only, so the release scope is the reachable union rather than the legs the walk visited.
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
