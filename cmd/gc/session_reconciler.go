@@ -4268,6 +4268,12 @@ func sessionHasOpenAssignedWorkForReachableStore(
 // sessionHasOpenAssignedWorkForTier / sessionHasOpenAssignedWispWork are
 // untouched, so the awake-work chain keeps counting the drain step as it always
 // has.
+// residency:allow the []beads.Store result is the scope this function's own
+// resolver walk VISITED, not a hand-built probe list: assignedWorkExistsForSession
+// plans through assignedWorkPlanForSessionInfo and enumerates through
+// storeref.Walk. Handing the legs back is what lets the close release in exactly
+// the scope the gate proved empty (gc-d9qnh); on a negative answer — the only
+// answer a caller releases on — the walk visited every leg.
 func reachableAssignedWorkScope(
 	cityPath string,
 	cfg *config.City,
@@ -4300,6 +4306,12 @@ func reachableAssignedWorkScope(
 // authoritative is "the session holds nothing", and the drain arm acts on it.
 // Every caller already refuses its decision on an error, so the honest report is
 // an error (gc-ft31x: retain rather than reap).
+// residency:allow the []beads.Store result is the resolver's OWN leg set, in plan
+// order: the plan comes from assignedWorkPlanForSessionInfo and the enumeration
+// from storeref.Walk, with assignedWorkScanComplete failing closed on a dark leg.
+// It is returned so a close gate can release in exactly the scope it proved
+// empty, never wider (gc-d9qnh). A positive answer stops the walk early and the
+// slice is then a prefix — no caller uses it in that case.
 func assignedWorkExistsForSession(
 	cityPath string,
 	cfg *config.City,

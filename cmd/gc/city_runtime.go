@@ -734,7 +734,7 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		}
 		// Reap stale session beads from a previous run before building desired
 		// state, so desired state does not reference already-closed beads (#742).
-		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 {
+		if reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) > 0 { // residency:allow release scope, not a lookup: the fork threads the rig store map into the stale reaper so its closeBead releases the reaped session's work in every attached rig (gc-d9qnh). Same accessor the cleanupDeadRuntimeSessionCorpses call above is already handed.
 			sessionBeads = cr.loadSessionBeadSnapshot()
 		}
 		result := cr.buildDesiredState(sessionBeads, startupTrace)
@@ -1330,7 +1330,7 @@ func (cr *CityRuntime) tick(
 	}
 	recordPhase(TraceSiteControllerTickPhase, "sweep_process_table_orphans", phaseStart, map[string]any{"reaped": swept})
 	phaseStart = time.Now()
-	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
+	reaped := reapStaleSessionBeads(cr.sessionsBeadStore().Store, cr.rigBeadStores(), cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr) // residency:allow release scope, not a lookup: the fork threads the rig store map into the stale reaper so its closeBead releases the reaped session's work in every attached rig (gc-d9qnh). Same accessor the cleanupDeadRuntimeSessionCorpses call above is already handed.
 	recordPhase(TraceSiteControllerTickPhase, "reap_stale_session_beads", phaseStart, map[string]any{"reaped": reaped})
 	if reaped > 0 {
 		phaseStart = time.Now()
