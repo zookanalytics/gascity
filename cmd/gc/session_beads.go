@@ -1497,7 +1497,7 @@ func repairStrandedPoolWorkerBead(
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, strandedRepairCloseReason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, strandedRepairCloseReason, now, stderr) // residency:allow no proven scope to release into: this closes because unclaimWorkAssignedToRetiredSessionInfo reported zero failed unassigns, not because a resolver walk found the session's work legs empty. The release therefore spans the whole reachable union.
 }
 
 func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, newSessionID string, now time.Time, stderr io.Writer) {
@@ -2831,7 +2831,7 @@ func reapStaleSessionBeads(
 				continue
 			}
 		}
-		if closeBead(store, workAssignmentStores(store, rigStores), info.ID, "stale-session", now.UTC(), stderr) {
+		if closeBead(store, workAssignmentStores(store, rigStores), info.ID, "stale-session", now.UTC(), stderr) { // residency:allow no proven scope to release into: the reap fires on runtime absence plus the creating-state grace, never on an emptiness gate. Releasing only the sessions store would strand rig-resident work (gc-d9qnh).
 			fmt.Fprintf(stderr, "WARN: reconciler: reaped stuck-creating session bead %s — tmux session %q not found\n", info.ID, sn) //nolint:errcheck
 			reaped++
 		}
@@ -2927,7 +2927,7 @@ func cleanupDeadRuntimeSessionCorpses(
 		// runtime-Stop side effect still runs in test contexts that do not
 		// wire a real store; closeBead is idempotent on already-closed beads.
 		if store != nil {
-			closeBead(store, workAssignmentStores(store, rigStores), info.ID, "dead-runtime", clk.Now().UTC(), stderr)
+			closeBead(store, workAssignmentStores(store, rigStores), info.ID, "dead-runtime", clk.Now().UTC(), stderr) // residency:allow no proven scope to release into: the close is unconditional on a confirmed-dead, already-stopped runtime (see the comment above), so the release spans the whole reachable union rather than a walked plan.
 		}
 		cleaned++
 	}
@@ -3134,7 +3134,7 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 	if isFailedCreateSessionBead(b) {
 		return closeFailedCreateBead(sessionFrontDoor(store), b.ID, now, stderr)
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), b.ID, closeReason, now, stderr)
+	return closeBead(store, workAssignmentStores(store, rigStores), b.ID, closeReason, now, stderr) // residency:allow the gate above is sessionHasOpenAssignedWorkForConfig, which DOES walk the resolver's assignedWorkSweepPlan — but it holds a raw bead, not a session Info, and returns only a bool, so there are no walked legs to hand back as the release scope.
 }
 
 func stopRuntimeBeforeSessionBeadMutation(
@@ -3248,11 +3248,15 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 //
 // The close-GATE path is the opposite case and does not use this: it releases
 // only into the scope reachableAssignedWorkScope proved empty (gc-d9qnh).
-func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store {
+// residency:allow the []beads.Store result is the fork-local RELEASE union, not
+// a resolved lookup: its callers hold a raw bead, so there is no session Info to
+// build a storeref plan from and no walked leg set to hand back. Keeping the
+// union in this one function is what confines the fork delta to a single seam.
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store { // residency:allow this function IS the fork-local release union; why it is not a storeref consumer is the doc comment directly above.
 	if store == nil {
 		return nil
 	}
-	stores := []beads.Store{store}
+	stores := []beads.Store{store} // residency:allow the union's own accumulator, seeded with the leading work store because releaseWorkFromClosedSessionBead requires releaseStores[0] to be it — not a hand-rolled probe list.
 	names := make([]string, 0, len(rigStores))
 	for name, rs := range rigStores {
 		if rs == nil {
