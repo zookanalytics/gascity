@@ -112,6 +112,46 @@ func TestBeadsRoleCheck_Fix_PreservesExistingRole(t *testing.T) {
 	}
 }
 
+func TestBeadsRoleCheck_Fix_NamesEmptyGitConfigGlobal(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	setupFakeGitConfig(t)
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+
+	c := &BeadsRoleCheck{}
+	err := c.Fix(&CheckContext{})
+	if err == nil {
+		t.Fatal("Fix error = nil, want an error naming the empty GIT_CONFIG_GLOBAL")
+	}
+	if !strings.Contains(err.Error(), "GIT_CONFIG_GLOBAL") {
+		t.Fatalf("Fix error = %q, want it to name GIT_CONFIG_GLOBAL as the cause.\n"+
+			"git reports only \"could not write config file :\" here — the empty filename between the colon "+
+			"and the errno is the sole clue, and decoding it cost a full investigation once already (gc-f7wx8).", err)
+	}
+}
+
+func TestBeadsRoleCheck_Fix_UnsetGitConfigGlobalStillWrites(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	setupFakeGitConfig(t)
+	// setupFakeGitConfig registers the cleanup that restores the caller's value;
+	// unsetting here leaves git to resolve the global config from HOME, which is
+	// the CORRECT state — the empty-value guard must not fire on it.
+	if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+		t.Fatalf("unset GIT_CONFIG_GLOBAL: %v", err)
+	}
+
+	c := &BeadsRoleCheck{}
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix returned error: %v (an unset GIT_CONFIG_GLOBAL is the normal state, not the empty-value failure)", err)
+	}
+	if r := c.Run(&CheckContext{}); r.Status != StatusOK {
+		t.Fatalf("after Fix: status = %v, want StatusOK", r.Status)
+	}
+}
+
 func TestBeadsRoleCheck_Fix_PreservesReadFailureContext(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
