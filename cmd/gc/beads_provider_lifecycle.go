@@ -783,13 +783,25 @@ func isBdAlreadyInitializedError(err error) bool {
 // cmd_supervisor, cmd_convoy_dispatch.
 func resolveRigPaths(cityPath string, rigs []config.Rig) {
 	for i := range rigs {
-		if strings.TrimSpace(rigs[i].Path) == "" {
-			continue
-		}
-		if !filepath.IsAbs(rigs[i].Path) {
-			rigs[i].Path = filepath.Join(cityPath, rigs[i].Path)
+		if resolved := resolvedRigPath(cityPath, rigs[i].Path); resolved != "" {
+			rigs[i].Path = resolved
 		}
 	}
+}
+
+// resolvedRigPath returns rigPath resolved against cityPath, or "" when the rig
+// declares no path. It is the form to use from any goroutine that shares its
+// config with another: resolveRigPaths writes through the slice it is handed,
+// so a caller holding a config the reconciler owns must resolve into a local
+// instead.
+func resolvedRigPath(cityPath, rigPath string) string {
+	if strings.TrimSpace(rigPath) == "" {
+		return ""
+	}
+	if filepath.IsAbs(rigPath) {
+		return rigPath
+	}
+	return filepath.Join(cityPath, rigPath)
 }
 
 // ── Low-level provider operations ────────────────────────────────────────

@@ -153,6 +153,16 @@ type CityRuntime struct {
 	nudgeMailSweepWatchdogLast         time.Time
 	wispIndexMigrationApplied          bool
 
+	// orderMu serializes the order-dispatch subsystem between the dispatch
+	// goroutine and the reconciler: od, retiredOrderDispatchers, orderSet,
+	// orderSetSignature, orderRescanLast, the three watchdog stamps just above,
+	// and the config swap that publishes a replacement dispatcher. It is what
+	// keeps drain's guarantee: no dispatch may create a new in-flight signal on
+	// a dispatcher while drain is observing it.
+	//
+	// Held across a full dispatch pass, so a reload waits out at most one pass.
+	orderMu sync.Mutex
+
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
 	svc *workspacesvc.Manager
@@ -204,8 +214,9 @@ type CityRuntime struct {
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
 
-	fsPressureConsecutiveSkips int
-	fsPressureEpisodeLogged    bool
+	// tickFSPressure is the reconciler tick's own shedding episode. The
+	// order-dispatch loop keeps a separate one on its own goroutine.
+	tickFSPressure fsPressureEpisode
 
 	// reapSkips carries worktree-reaper skip history between ticks so an
 	// unchanged skip is reported once instead of on every sweep. Owned by the
@@ -673,6 +684,21 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		cr.dispatchOrders(ctx, cityRoot)
 	}, "startup-orders")
 	logPhaseElapsed("startup-orders", startupOrdersStart)
+
+	// Torn down before cr.shutdown(), which run() defers first and so runs
+	// last: the loop must stop before shutdown drains the dispatchers, or a
+	// dispatch could start after drain observed one idle.
+	orderCtx, orderCancel := context.WithCancel(ctx)
+	orderLoopDone := make(chan struct{})
+	go func() {
+		defer close(orderLoopDone)
+		cr.orderDispatchLoop(orderCtx, cityRoot)
+	}()
+	defer func() {
+		orderCancel()
+		<-orderLoopDone
+	}()
+
 	if ctx.Err() != nil {
 		return
 	}
@@ -1262,13 +1288,10 @@ func (cr *CityRuntime) tick(
 		return
 	}
 
-	// Order dispatch is intentionally before the expensive session reconcile
-	// phases so due formulas are not starved by slow startup/config drift work,
-	// but after the pressure gate and managed-Dolt preflight so skipped or
-	// endpoint-repair ticks do not add tracking writes first.
-	phaseStart = time.Now()
-	cr.dispatchOrders(ctx, cityRoot)
-	recordPhase(TraceSiteOrderDispatch, "dispatch_orders", phaseStart, nil)
+	// Order dispatch does not belong in the tick. Everything below this point
+	// is unbounded, so a tick's latency would set every order's cadence, and
+	// running dispatch first within a tick cannot change how often a tick
+	// begins. orderDispatchLoop owns it, on its own goroutine and clock.
 	if ctx.Err() != nil {
 		return
 	}
@@ -1519,32 +1542,52 @@ func (cr *CityRuntime) tick(
 	tickCompleted = true
 }
 
+// dispatchOrders runs one order-dispatch pass: rescan the order set if due,
+// run the tracking/mail watchdogs, then dispatch every order whose trigger is
+// due. Called from orderDispatchLoop's goroutine and once from run() at
+// startup, before that loop exists.
+//
+// Takes orderMu for the whole pass so it cannot interleave with a reload,
+// rescan or shutdown drain mutating the same dispatcher.
 func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Preflight before any store touch, or a pass writes tracking beads against
+	// an unpublished or mid-repair endpoint. Outside orderMu: it probes an
+	// endpoint and holds no dispatcher state.
+	cr.ensureManagedDoltPublishedForTick()
+	if ctx.Err() != nil {
+		return
+	}
+	cr.orderMu.Lock()
+	defer cr.orderMu.Unlock()
 	now := time.Now()
+	// One snapshot for the whole pass. The reconciler swaps cr.cfg on reload,
+	// so a read off the field here is a race, and re-reading between the
+	// helpers below could straddle a reload and mix two configs into one pass.
+	cfg := cr.serviceConfigSnapshot()
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
 		cr.applyWispQueryIndexes(ctx)
 	}
-	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, now)
-	cr.runOrderTrackingSweepWatchdog(now)
-	cr.runOrderTrackingRetentionWatchdog(now)
-	cr.runNudgeMailSweepWatchdog(now)
+	cr.rescanOrderDispatcherIfDue(ctx, cityRoot, cfg, now)
+	cr.runOrderTrackingSweepWatchdog(cfg, now)
+	cr.runOrderTrackingRetentionWatchdog(cfg, now)
+	cr.runNudgeMailSweepWatchdog(cfg, now)
 	if cr.od != nil {
 		cr.od.dispatch(ctx, cityRoot, now)
 	}
 }
 
-func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, now time.Time) {
+func (cr *CityRuntime) rescanOrderDispatcherIfDue(ctx context.Context, cityRoot string, cfg *config.City, now time.Time) {
 	if !cr.orderRescanEnabled || cr.tomlPath == "" || strings.TrimSpace(cityRoot) == "" {
 		return
 	}
 	if !cr.orderRescanLast.IsZero() && now.Sub(cr.orderRescanLast) < orderRescanInterval {
 		return
 	}
-	if _, _, err := cr.rescanOrderDispatcher(ctx, cityRoot, cr.cfg, "gc patrol: order scan", now); err != nil {
+	if _, _, err := cr.rescanOrderDispatcher(ctx, cityRoot, cfg, "gc patrol: order scan", now); err != nil {
 		cr.orderRescanLast = now
 		logDispatchError(cr.stderr, "%s: order rescan: %v", cr.logPrefix, err)
 	}
@@ -1640,13 +1683,13 @@ func orderSetChangeSummary(oldOrders, newOrders []orders.Order) string {
 	return strings.Join(parts, "; ")
 }
 
-func (cr *CityRuntime) runOrderTrackingSweepWatchdog(now time.Time) {
+func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.Time) {
 	if !cr.orderSweepWatchdogLast.IsZero() && now.Sub(cr.orderSweepWatchdogLast) < orderTrackingSweepWatchdogInterval {
 		return
 	}
 	cr.orderSweepWatchdogLast = now
 
-	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores(cfg)
 	defer closeOpened()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
@@ -1694,7 +1737,7 @@ func bulkDeleteMaxAge(_ *config.City) time.Duration {
 // are past their TTL (defaulting to 7d) and beyond the retain-10 floor, at
 // most once every orderTrackingRetentionWatchdogInterval. It deletes at most
 // orderTrackingRetentionWatchdogDeleteBudget beads per invocation.
-func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
+func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(cfg *config.City, now time.Time) {
 	if !cr.orderTrackingRetentionWatchdogLast.IsZero() &&
 		now.Sub(cr.orderTrackingRetentionWatchdogLast) < orderTrackingRetentionWatchdogInterval {
 		return
@@ -1704,7 +1747,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 	// The cityPath guard is a test affordance: real controllers always set it,
 	// so the backup-age check below always runs in production.
 	if cr.cityPath != "" {
-		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cr.cfg, bulkDeleteMaxAge(cr.cfg), now); !safe {
+		if safe, reason := doctor.BulkDeleteSafe(cr.cityPath, cfg, bulkDeleteMaxAge(cfg), now); !safe {
 			if cr.stderr != nil {
 				fmt.Fprintf(cr.stderr, "%s: order-tracking retention watchdog: skipping bulk delete — %s\n", cr.logPrefix, reason) //nolint:errcheck // best-effort stderr
 			}
@@ -1712,7 +1755,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		}
 	}
 
-	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores()
+	stores, _, closeOpened, storeErr := cr.orderTrackingSweepStores(cfg)
 	defer closeOpened()
 	if len(stores) == 0 {
 		if storeErr != nil && cr.stderr != nil {
@@ -1721,7 +1764,7 @@ func (cr *CityRuntime) runOrderTrackingRetentionWatchdog(now time.Time) {
 		return
 	}
 
-	policy := orderTrackingRetentionPolicyForConfig(cr.cfg)
+	policy := orderTrackingRetentionPolicyForConfig(cfg)
 	deleted, sweepErr := sweepClosedOrderTrackingRetentionAcrossStoresBounded(
 		stores, now, policy, nil, orderTrackingRetentionWatchdogDeleteBudget)
 	if err := errors.Join(storeErr, sweepErr); err != nil && cr.stderr != nil {
@@ -1784,7 +1827,7 @@ func warnIfClosedOrderTrackingBacklogLarge(stores []beads.Store, stderr io.Write
 	fmt.Fprintf(stderr, "gc start: %s closed order-tracking beads detected — retention watchdog will prune automatically (7d TTL default; configure: [beads.policies.order_tracking].delete_after_close). For immediate cleanup: gc order sweep-tracking\n", countStr) //nolint:errcheck // best-effort stderr
 }
 
-func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
+func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time) {
 	if !cr.nudgeMailSweepWatchdogLast.IsZero() && now.Sub(cr.nudgeMailSweepWatchdogLast) < nudgeMailSweepWatchdogInterval {
 		return
 	}
@@ -1793,8 +1836,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	// The nudge phase routes through the typed nudges accessor; the mail phase
 	// through the typed messaging accessor. Both collapse to the city store today,
 	// so the sweep is byte-identical.
-	nudgeStore := cr.nudgesBeadStore()
-	mailStore := cr.mailBeadStore()
+	nudgeStore := cr.nudgesBeadStoreForConfig(cfg)
+	mailStore := cr.mailBeadStoreForConfig(cfg)
 	if nudgeStore.Store == nil || mailStore.Store == nil {
 		return
 	}
@@ -1821,8 +1864,8 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(now time.Time) {
 	}
 }
 
-func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
-	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cr.cfg)
+func (cr *CityRuntime) orderTrackingSweepStores(cfg *config.City) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
+	targets := orderTrackingSweepTargetsForConfig(cr.cityPath, cfg)
 	rigStores := cr.rigBeadStores()
 	var freshlyOpened []beads.Store
 	stores, err := orderTrackingSweepStoresFromTargets(targets, func(sweepTarget orderTrackingSweepTarget) (beads.Store, error) {
@@ -1849,7 +1892,7 @@ func (cr *CityRuntime) orderTrackingSweepStores() ([]beads.Store, []orderTrackin
 	// no watchdog able to see it. The binding comes from the routes this process
 	// opened at boot, never a second resolution, so nothing here is closed by
 	// closeOpened — the runtime owns that handle for its whole life.
-	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStore())
+	stores = appendOrdersSweepStore(stores, cr.relocatedOrdersStoreForConfig(cfg))
 	closeOpened := func() {
 		for _, s := range freshlyOpened {
 			_ = closeBeadStoreHandle(s) //nolint:errcheck // best-effort
@@ -2020,7 +2063,12 @@ func (cr *CityRuntime) reloadConfigTraced(
 		appendWarning(warning)
 	}
 	if cr.configRev != "" && result.Revision == cr.configRev {
+		// orderMu: rescanOrderDispatcher drains and replaces cr.od, which the
+		// order-dispatch goroutine reads. Take the lock for the swap so drain
+		// still observes a dispatcher no one can dispatch on.
+		cr.orderMu.Lock()
 		ordersChanged, orderSummary, orderErr := cr.rescanOrderDispatcher(ctx, cityRoot, result.Cfg, "gc reload: order scan", time.Now())
+		cr.orderMu.Unlock()
 		if orderErr != nil {
 			err := fmt.Errorf("order reload: %w", orderErr)
 			fmt.Fprintf(cr.stderr, "%s: %v (keeping old orders)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -2266,26 +2314,33 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// and drained again during shutdown.
 	// Deriving from ctx (the tick ctx) lets a shutdown racing with reload
 	// short-circuit the drain instead of waiting the full 1s.
+	// The order-set scan is done outside orderMu — it only reads TOML from disk
+	// and can be slow — so a dispatch pass is not blocked behind file I/O.
+	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+	cr.orderMu.Lock()
 	if cr.od != nil {
 		drainCtx, drainCancel := context.WithTimeout(ctx, reloadOrderDrainTimeout)
 		cr.drainOutgoingOrderDispatcher(drainCtx, cr.od)
 		drainCancel()
 	}
-	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
 	orderSummary := orderSetChangeSummary(cr.orderSet, orderSnapshot.Orders)
 	cr.replaceOrderDispatcher(nextOD)
 	cr.orderSet = orderSnapshot.Orders
 	cr.orderSetSignature = orderSnapshot.Signature
 	cr.orderRescanLast = time.Now()
-	if orderSummary != "unchanged" {
-		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
-	}
-
+	// Still under orderMu: a dispatch pass takes that lock and then reads the
+	// config, so publishing nextOD and leaving cr.cfg behind would let a pass
+	// run the new dispatcher against the config it replaced.
 	cr.serviceStateMu.Lock()
 	cr.cfg = nextCfg
 	cr.sp = nextSp
 	cr.dops = nextDops
 	cr.serviceStateMu.Unlock()
+	cr.orderMu.Unlock()
+
+	if orderSummary != "unchanged" {
+		fmt.Fprintf(cr.stderr, "%s: orders reloaded: %s\n", cr.logPrefix, orderSummary) //nolint:errcheck // best-effort stderr
+	}
 	cr.demandSnapshot = nil
 
 	if cr.cs != nil {
@@ -4038,6 +4093,12 @@ func (cr *CityRuntime) shutdown() {
 		if cr.forceStopRequested() {
 			gracefulTimeout = 0
 		}
+		// orderMu: run() stops the order-dispatch goroutine before returning
+		// into this deferred shutdown, so normally nothing can dispatch here.
+		// shutdown() is also reachable directly (cmd_supervisor, controller),
+		// where that ordering does not hold — take the lock so drain's
+		// guarantee survives either path.
+		cr.orderMu.Lock()
 		if cr.od != nil || len(cr.retiredOrderDispatchers) > 0 {
 			drainTimeout := orderShutdownDrainTimeout(total)
 			if cr.forceStopRequested() {
@@ -4047,6 +4108,7 @@ func (cr *CityRuntime) shutdown() {
 			cr.drainOrderDispatchers(drainCtx)
 			drainCancel()
 		}
+		cr.orderMu.Unlock()
 		running, listErr := cr.sp.ListRunning("")
 		if listErr != nil {
 			if runtime.IsPartialListError(listErr) {
