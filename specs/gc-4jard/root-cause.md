@@ -98,18 +98,34 @@ waits out at most one pass.
 
 `cr.cfg` is owned by the reconciler and swapped on reload, so the dispatch path
 no longer reads the field directly: `dispatchOrders` takes one snapshot per
-pass via `currentConfig()` (under `serviceStateMu`) and threads it through the
-rescan and the two tracking watchdogs. That also stops a single pass from
-straddling a reload and mixing two configs.
+pass via `serviceConfigSnapshot()` (under `serviceStateMu`) and threads it
+through the rescan, the two tracking watchdogs, the nudge/mail watchdog, and
+the class-store resolution each of those performs. That also stops a single
+pass from straddling a reload and mixing two configs.
+
+Threading a snapshot is not sufficient on its own, because two of the
+order-store resolvers resolved a relative rig path by writing it back into
+`cfg.Rigs`. A pass that does that is a second *writer* to the reconciler's
+config, and no amount of locking around the pointer read makes the pointed-to
+config safe to mutate. `resolveOrderStoreTarget` and
+`orderTrackingSweepTargetsForConfig` now resolve into locals through
+`resolvedRigPath` rather than calling `resolveRigPaths`.
 
 ## Lock ordering, and what a reload now waits for
 
-There is exactly one edge between the two locks involved: `dispatchOrders`
-holds `orderMu` and then takes `serviceStateMu.RLock` via `currentConfig()`.
-Nothing takes `orderMu` while holding `serviceStateMu` — `reloadConfigTraced`
-releases `orderMu` before its `serviceStateMu.Lock()`, and neither
+There is exactly one edge between the two locks involved, and it always runs
+the same way: `orderMu` first, `serviceStateMu` second. `dispatchOrders` holds
+`orderMu` and then takes `serviceStateMu.RLock` via `serviceConfigSnapshot()`;
+`reloadConfigTraced` holds `orderMu` across its `serviceStateMu.Lock()`.
+Nothing takes `orderMu` while holding `serviceStateMu`, and neither
 `rescanOrderDispatcher` nor `drain` touches `serviceStateMu`. So there is no
 cycle.
+
+The reload publishes the replacement dispatcher and the config it was built
+from inside a single `orderMu` section, deliberately. A pass takes `orderMu`
+and then reads the config, so releasing `orderMu` between the two publications
+would leave a window in which a pass runs the new dispatcher against the config
+it replaced.
 
 A reload can now wait on a dispatch pass that is already running, which the old
 design never did because the two were strictly sequential on one goroutine. The

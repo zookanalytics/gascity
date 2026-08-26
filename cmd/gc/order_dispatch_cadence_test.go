@@ -42,24 +42,12 @@ func (c *countingOrderDispatcher) countSince(mark time.Time) int {
 	return n
 }
 
-// An order declares its own cadence (`every = "60s"`), and the controller is
-// supposed to honor it. It cannot when order dispatch runs inline on the
-// reconciler goroutine: the reconcile phases that follow it in the same tick are
-// unbounded — the runtime's own startup comment concedes "a cold-start reconcile
-// can take minutes" — and time.Ticker silently coalesces every patrol tick that
-// elapses while the loop is busy. The declared cadence then degrades to the
-// reconciler's latency, city-wide and without a signal.
-//
-// Measured on the loomington city (2026-08-24, gc-4jard): every order fired in
-// lockstep batches 2.5-14 minutes apart against a 30s patrol_interval, whatever
-// its declared cadence — dolt-health (30s), order-tracking-sweep (1m),
-// boot-health (2m) and quota-park-nudge (3m) all shared the same fire
-// timestamps. Some wall-clock minutes carried 11-17 dispatches (backlog
-// draining) while many carried none, which also rules out the per-tick dispatch
-// budget as the binding constraint.
-//
-// This pins the property that fixes it: while a reconcile is blocked, order
-// dispatch keeps running at the patrol cadence.
+// An order declares its own cadence (`every = "60s"`), and dispatch has to hold
+// that cadence independently of reconcile latency. The reconcile phases are
+// unbounded, and time.Ticker coalesces every patrol tick that elapses while the
+// loop is busy, so any coupling between the two degrades every declared cadence
+// city-wide and without a signal. This pins what keeps them independent: while
+// a reconcile is blocked, order dispatch keeps running at the patrol cadence.
 func TestOrderDispatchCadenceSurvivesABlockedReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := cityPath + "/city.toml"
@@ -132,10 +120,6 @@ func TestOrderDispatchCadenceSurvivesABlockedReconcile(t *testing.T) {
 	// clock while the reconciler is stuck. Polling rather than sleeping a fixed
 	// window keeps the assertion on the property instead of on wall-clock, so a
 	// loaded box makes this slower, never flaky.
-	//
-	// Failure here is the pre-fix behavior exactly: order dispatch coupled to
-	// the reconciler goroutine, so a blocked reconcile silently degrades every
-	// declared order cadence.
 	mark := time.Now()
 	const wantAtLeast = 5
 	awaitCond(t, func() bool { return counter.countSince(mark) >= wantAtLeast },

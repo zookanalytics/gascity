@@ -1088,12 +1088,9 @@ func TestCityRuntimeTickPreflightsManagedDoltBeforeSessionSnapshot(t *testing.T)
 // store, so a pass on a city whose endpoint is unpublished or mid-repair does
 // not land tracking beads against it first.
 //
-// The tick used to own this ordering: it preflighted, then dispatched inline.
-// Dispatch now runs on its own goroutine (gc-4jard) and cannot inherit the
-// tick's preflight, so dispatchOrders runs its own — and this drives
-// dispatchOrders directly, which is where the invariant now lives. Driving
-// cr.tick here would pass vacuously: the tick preflights and never dispatches,
-// so no order store event would follow to be out of order.
+// This drives dispatchOrders directly, where the invariant lives. Driving
+// cr.tick would pass vacuously: the tick preflights and never dispatches, so no
+// order store event would follow to be out of order.
 func TestCityRuntimeDispatchOrdersPreflightsManagedDoltBeforeDueOrderDispatch(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "bd")
@@ -1582,19 +1579,12 @@ func (b *blockingOrderDispatcher) drainContextErrors() []error {
 	return append([]error(nil), b.ctxErrs...)
 }
 
-// The tick must not dispatch orders. It used to, first thing, so that due
-// formulas were "not starved by slow startup/config drift work" — but ordering
-// dispatch ahead of the slow phases inside a tick cannot change how often a
-// tick BEGINS, which is what actually sets the dispatch rate. In production
-// that left every order firing at the reconciler's latency rather than its own
-// declared cadence (gc-4jard).
-//
-// Dispatch now belongs to orderDispatchLoop, on its own goroutine and clock.
-// This pins that: re-adding the inline call would silently re-couple every
-// order's cadence to reconcile latency, and nothing else in the tick would
-// notice. The property that replaced it — dispatch continues at cadence while
-// a reconcile is blocked — is covered by
-// TestOrderDispatchCadenceSurvivesABlockedReconcile.
+// The tick must not dispatch orders. Running dispatch ahead of the slow phases
+// inside a tick cannot change how often a tick begins, which is what sets the
+// dispatch rate, so an inline call here re-couples every order's cadence to
+// reconcile latency and nothing else in the tick notices. Dispatch belongs to
+// orderDispatchLoop, and TestOrderDispatchCadenceSurvivesABlockedReconcile
+// covers the property that decoupling protects.
 func TestCityRuntimeTickDoesNotDispatchOrders(t *testing.T) {
 	store := beads.NewMemStore()
 	od := &recordingOrderDispatcher{}
@@ -1776,13 +1766,9 @@ func TestCityRuntimeTickReturnsBeforeDemandWhenCanceled(t *testing.T) {
 }
 
 // A tick that loses its context part-way must stop before the expensive
-// reconcile phases rather than run them against a canceled city.
-//
-// This used to cancel from inside order dispatch, which the tick ran inline.
-// Dispatch now has its own goroutine (gc-4jard), so the cancellation is driven
-// from the managed-Dolt preflight instead — the phase that now occupies that
-// position in the tick. The invariant under test is unchanged: cancel before
-// the demand snapshot, and the demand snapshot must not run.
+// reconcile phases rather than run them against a canceled city. The
+// cancellation is driven from the managed-Dolt preflight, the first phase of a
+// tick that can observe it.
 func TestCityRuntimeTickReturnsBeforeDemandWhenCanceledEarly(t *testing.T) {
 	store := beads.NewMemStore()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1971,7 +1957,7 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	gotSweep, err := store.Get(sweepTracking.ID)
 	if err != nil {
@@ -2012,7 +1998,7 @@ func TestOrderTrackingSweepWatchdogUsesCloseBudget(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), time.Now().Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	closed := 0
 	for _, id := range ids {
@@ -2056,7 +2042,7 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), sweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
 
 	if got, err := store.Get(sweepTracking.ID); err != nil {
 		t.Fatalf("Get(sweep): %v", err)
@@ -2157,7 +2143,7 @@ func TestOrderTrackingSweepWatchdogClosesRigStoreSweepTracking(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -2232,7 +2218,7 @@ func TestOrderTrackingSweepWatchdogFallsBackToConfiguredRigStore(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), rigSweepTracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Millisecond))
 
 	gotRig, err := rigStore.Get(rigSweepTracking.ID)
 	if err != nil {
@@ -5476,12 +5462,6 @@ func TestCityRuntimeReloadKeepsRegisteredAliasForEffectiveIdentity(t *testing.T)
 // reload-reply latency does not scale with the work behind it. (Soft
 // Applied/NoChange reloads still reply after applySoftReloadAcceptance — see
 // TestCityRuntimeSoftReloadAcceptsDriftForAppliedAndNoChange.)
-//
-// #3206 originally also covered "before dispatchOrders", because order dispatch
-// ran inline in the tick and reply latency scaled with order count. Dispatch
-// moved to its own goroutine (gc-4jard), so the tick cannot dispatch at all and
-// that half is now structural rather than something a test can observe here —
-// TestCityRuntimeTickDoesNotDispatchOrders pins it directly.
 func TestCityRuntimeManualHardReloadRepliesBeforeReconcile(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -7229,7 +7209,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsWhenIntervalNotElapsed(t *testing.T
 		// Set last to now-1s: interval has not elapsed.
 		orderTrackingRetentionWatchdogLast: now.Add(-time.Second),
 	}
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	// Bead skip-00 should still exist (watchdog skipped).
 	if _, err := store.Get("skip-00"); err != nil {
@@ -7262,7 +7242,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesEligibleBeads(t *testing.T) {
 		logPrefix:           "gc test",
 		// Zero last: watchdog fires immediately.
 	}
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	// 2 oldest beads (prune-00, prune-01) should be deleted.
 	for _, id := range []string{"prune-00", "prune-01"} {
@@ -7304,7 +7284,7 @@ func TestOrderTrackingRetentionWatchdog_LogsPrunedCount(t *testing.T) {
 		stderr:              &stderrBuf,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	got := stderrBuf.String()
 	if !strings.Contains(got, "pruned") {
@@ -7327,7 +7307,7 @@ func TestOrderTrackingRetentionWatchdog_NilCfgSkipsWithoutPanic(t *testing.T) {
 		logPrefix:           "gc test",
 	}
 	// Must not panic.
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 }
 
 func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
@@ -7341,14 +7321,14 @@ func TestOrderTrackingRetentionWatchdog_StampsLastAfterFiring(t *testing.T) {
 		stderr:              io.Discard,
 		logPrefix:           "gc test",
 	}
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
 	// Second call within the interval must not update the timestamp.
 	later := now.Add(time.Minute)
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), later)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), later)
 	if !cr.orderTrackingRetentionWatchdogLast.Equal(now) {
 		t.Fatalf("orderTrackingRetentionWatchdogLast = %v, want unchanged %v", cr.orderTrackingRetentionWatchdogLast, now)
 	}
@@ -7403,7 +7383,7 @@ func TestOrderTrackingRetentionWatchdog_SkipsBulkDeleteWhenBackupStale(t *testin
 	// 48h since the last backup, past the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, 48*time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	// Nothing may be deleted while the recovery point is stale.
 	for i := range minClosedOrderTrackingRetained + 2 {
@@ -7427,7 +7407,7 @@ func TestOrderTrackingRetentionWatchdog_PrunesWhenBackupFresh(t *testing.T) {
 	// 1h since the last backup, well inside the 24h bulkDeleteMaxAge default.
 	cr, store, stderrBuf := seedRetentionWatchdogCity(t, now, time.Hour)
 
-	cr.runOrderTrackingRetentionWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingRetentionWatchdog(cr.serviceConfigSnapshot(), now)
 
 	if got := stderrBuf.String(); strings.Contains(got, "skipping bulk delete") {
 		t.Fatalf("stderr = %q, want no skip with a fresh backup", got)

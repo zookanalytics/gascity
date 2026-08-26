@@ -3,45 +3,29 @@ package main
 import (
 	"context"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/config"
 )
 
 // orderDispatchLoop runs order dispatch on its own goroutine, at its own
 // cadence, for the life of ctx.
 //
-// Order dispatch used to run inline at the top of the reconciler tick. That
-// made every declared order cadence a function of reconciler latency: the
-// phases that follow dispatch in a tick (session sync, desired-state build,
-// reconcile, process-table and worktree sweeps) are unbounded — run()'s own
-// startup comment concedes "a cold-start reconcile can take minutes" — and
-// time.Ticker coalesces every patrol tick that elapses while the loop is busy.
-// An order declaring every = "60s" therefore fired at whatever interval the
-// reconciler happened to leave, with no signal that its cadence had slipped.
+// The loop keeps its own ticker rather than reusing the patrol ticker. Sharing
+// a clock with reconcile work is what ties a declared order cadence to
+// reconciler latency: the reconcile phases are unbounded, and time.Ticker
+// coalesces every tick that elapses while the loop is busy.
 //
-// Placing dispatch first within the tick, which the old code did deliberately,
-// only ordered it ahead of the slow work inside one tick. It could not affect
-// how often a tick began, which is what actually sets the dispatch rate.
-//
-// The loop deliberately keeps its own ticker rather than reusing the patrol
-// ticker: the point is to stop sharing a clock with reconcile work at all.
-//
-// It deliberately does NOT call beads.SetReconcilerTickTrigger. That global is
-// a swap/restore pair the reconciler already drives per tick, documented as
+// It must not call beads.SetReconcilerTickTrigger. That global is a
+// swap/restore pair the reconciler already drives per tick and is documented
 // single-tenant best-effort; a second concurrent swapper would interleave the
-// restores and attribute bd calls to the wrong trigger. Leaving it alone keeps
-// attribution no worse than it was.
+// restores and attribute bd calls to the wrong trigger.
 func (cr *CityRuntime) orderDispatchLoop(ctx context.Context, cityRoot string) {
 	interval := cr.orderDispatchInterval()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// This loop's own IO-pressure shedding episode. Dispatch sat behind the
-	// tick's pressure gate before it moved here, and a dispatch pass does write
-	// (tracking beads), so it keeps shedding under pressure rather than piling
-	// on. The episode is a local, which is what makes it goroutine-owned: the
-	// reconciler counts its own skips in cr.tickFSPressure and the two must not
-	// force each other's passes.
+	// A dispatch pass writes tracking beads, so it sheds under IO pressure the
+	// way the tick does. The episode is a local, which is what makes it
+	// goroutine-owned: the reconciler counts its own skips in cr.tickFSPressure
+	// and neither loop may force the other's pass.
 	var pressure fsPressureEpisode
 
 	for {
@@ -53,9 +37,8 @@ func (cr *CityRuntime) orderDispatchLoop(ctx context.Context, cityRoot string) {
 			// not safe to open from a second goroutine. The skip/force EVENT is
 			// still recorded, so shedding stays observable.
 			if !cr.shouldSkipForFSPressure(&pressure, nil, "order-dispatch") {
-				// safeTick keeps a panicking dispatch from taking the loop (and
-				// with it every future order) down, matching how the reconciler
-				// goroutine guards its own tick body.
+				// safeTick keeps a panicking dispatch from taking the loop, and
+				// with it every future order, down.
 				cr.safeTick(func() {
 					cr.dispatchOrders(ctx, cityRoot)
 				}, "order-dispatch")
@@ -73,24 +56,11 @@ func (cr *CityRuntime) orderDispatchLoop(ctx context.Context, cityRoot string) {
 	}
 }
 
-// currentConfig returns the live city config under the service-state lock.
-//
-// cr.cfg is owned by the reconciler goroutine, which swaps it on reload. Any
-// other goroutine — the order-dispatch loop and everything it calls — must read
-// it through here, not off the field, or the read races that swap.
-func (cr *CityRuntime) currentConfig() *config.City {
-	cr.serviceStateMu.RLock()
-	defer cr.serviceStateMu.RUnlock()
-	return cr.cfg
-}
-
 // orderDispatchInterval is how often the order-dispatch loop evaluates which
-// orders are due. It tracks the patrol interval, because that was the cadence
-// order dispatch nominally ran at before it was given its own goroutine, and
-// because it is already the operator's "how often does the controller look at
-// things" dial.
+// orders are due. It tracks the patrol interval, which is already the
+// operator's "how often does the controller look at things" dial.
 func (cr *CityRuntime) orderDispatchInterval() time.Duration {
-	cfg := cr.currentConfig()
+	cfg := cr.serviceConfigSnapshot()
 	if cfg == nil {
 		return defaultOrderDispatchInterval
 	}
@@ -102,5 +72,5 @@ func (cr *CityRuntime) orderDispatchInterval() time.Duration {
 
 // defaultOrderDispatchInterval backs orderDispatchInterval when config carries
 // no usable patrol interval. It matches the daemon's own patrol-interval
-// default so an unconfigured city dispatches at the rate it always did.
+// default, so an unconfigured city dispatches at the daemon's rate.
 const defaultOrderDispatchInterval = 30 * time.Second

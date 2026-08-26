@@ -442,7 +442,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 	}
 
 	now := stale.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter + time.Millisecond)
-	cr.runOrderTrackingSweepWatchdog(cr.currentConfig(), now)
+	cr.runOrderTrackingSweepWatchdog(cr.serviceConfigSnapshot(), now)
 
 	closed, err := binding.Get(stale.ID)
 	if err != nil {
@@ -457,7 +457,7 @@ func TestOrderTrackingWatchdogsReachTheOrdersBinding(t *testing.T) {
 	// the resolver rather than by running the prune, because the prune's own
 	// gates (backup freshness, the retain-last floor) are policy this change
 	// does not touch.
-	stores, _, closeOpened, err := cr.orderTrackingSweepStores(cr.currentConfig())
+	stores, _, closeOpened, err := cr.orderTrackingSweepStores(cr.serviceConfigSnapshot())
 	defer closeOpened()
 	if err != nil {
 		t.Fatalf("resolving the watchdog sweep stores: %v", err)
