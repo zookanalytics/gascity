@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -41,6 +42,17 @@ func (c *BeadsRoleCheck) Fix(_ *CheckContext) error {
 	out, err := exec.Command("git", "config", "--global", "beads.role").CombinedOutput()
 	if err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
+	}
+	// A set-but-empty GIT_CONFIG_GLOBAL resolves git's global config file to
+	// the empty path. The read above survives it (git treats the empty path as
+	// /dev/null) and so always falls through to the write below, which fails
+	// with "error: could not write config file : <errno>". The empty filename
+	// between the colon and the errno is the only clue to the cause, and the
+	// errno text is not stable across systems — decoding that cost a full
+	// investigation once already (gc-f7wx8). Name the variable instead. An
+	// unset variable is the normal state and must not trip this.
+	if v, ok := os.LookupEnv("GIT_CONFIG_GLOBAL"); ok && v == "" {
+		return fmt.Errorf("setting beads.role: GIT_CONFIG_GLOBAL is set but empty, so git has no global config file to write to; unset it, or point it at a real writable file")
 	}
 	writeOut, writeErr := exec.Command("git", "config", "--global", "beads.role", "maintainer").CombinedOutput()
 	if writeErr != nil {
