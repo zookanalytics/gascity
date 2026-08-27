@@ -10,7 +10,7 @@ package main
 // The controller's demand loop counted any ready, unassigned row whose route
 // normalized to T. The worker's Tier-3 query serves a strictly smaller set: it
 // passes --exclude-type=epic and one --exclude-label per dispatch hold, and it
-// matches the route by EXACT string. So three classes of row were permanent
+// matches the route by EXACT string. So four classes of row were permanent
 // capacity demand that no worker could ever claim:
 //
 //   - a routed EPIC (an unassigned parent has no executable spec — the query
