@@ -35,7 +35,7 @@ func TestSweepDetachedHandoffOrphans_RestoresRoute(t *testing.T) {
 		Title:  "orphaned work",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-abc",
+			beadmeta.BranchMetadataKey:      "polecat/ga-abc",
 			beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
 			// gc.routed_to and assignee left empty by failed done sequence
 		},
@@ -75,7 +75,7 @@ func TestSweepDetachedHandoffOrphans_SkipsAlreadyRouted(t *testing.T) {
 		Title:  "routed work",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-routed",
+			beadmeta.BranchMetadataKey:      "polecat/ga-routed",
 			beadmeta.SessionNameMetadataKey: "some-session",
 			beadmeta.RoutedToMetadataKey:    "gascity/gastown.polecat",
 		},
@@ -111,7 +111,7 @@ func TestSweepDetachedHandoffOrphans_SkipsAssigned(t *testing.T) {
 		Status:   "open",
 		Assignee: "some-session-id",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-assigned",
+			beadmeta.BranchMetadataKey:      "polecat/ga-assigned",
 			beadmeta.SessionNameMetadataKey: "some-session-id",
 		},
 	})
@@ -163,7 +163,7 @@ func TestSweepDetachedHandoffOrphans_SkipsWorkflowKind(t *testing.T) {
 		Title:  "workflow root",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-wf",
+			beadmeta.BranchMetadataKey:      "polecat/ga-wf",
 			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
 			beadmeta.KindMetadataKey:        beadmeta.KindWorkflow,
 		},
@@ -180,7 +180,7 @@ func TestSweepDetachedHandoffOrphans_SkipsWorkflowKind(t *testing.T) {
 		Title:  "plain detached work",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-plain",
+			beadmeta.BranchMetadataKey:      "polecat/ga-plain",
 			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
 		},
 	})
@@ -221,7 +221,7 @@ func TestSweepDetachedHandoffOrphans_SkipsWorkflowKind(t *testing.T) {
 func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	base := func() beads.Bead {
 		return beads.Bead{ID: "K-1", Status: "open", Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-k",
+			beadmeta.BranchMetadataKey:      "polecat/ga-k",
 			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-wf",
 		}}
 	}
@@ -234,6 +234,155 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 		b.Metadata[beadmeta.KindMetadataKey] = kind
 		if isDetachedHandoffOrphanCandidate(b) {
 			t.Errorf("a bead with gc.kind=%q is a detached-orphan candidate; the convergence lane would stamp gc.routed_to on a graph construct in the class binding", kind)
+		}
+	}
+}
+
+// The sweep must not write to a parked merge anchor. This is the store-level
+// half of the merge_result exclusion: the predicate test below pins the rule,
+// this one pins that no gc.routed_to reaches the bead.
+func TestSweepDetachedHandoffOrphans_SkipsMergeCadenceAnchor(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-merge",
+			"template":     "gascity/gastown.polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	anchor, err := store.Create(beads.Bead{
+		Title:  "parked merge anchor",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.BranchMetadataKey:      "polecat/ga-anchor",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+			beadmeta.MergeResultMetadataKey: "pull_request",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create anchor bead: %v", err)
+	}
+
+	// Control: a bead identical but for merge_result IS restored from that same
+	// session bead. Without it, "restored=0" would be satisfied by a route that
+	// simply could not be resolved.
+	plain, err := store.Create(beads.Bead{
+		Title:  "plain detached work",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.BranchMetadataKey:      "polecat/ga-plain",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (the control bead only) — the route must be resolvable or the merge_result exclusion is not what this test measures", n)
+	}
+
+	got, err := store.Get(anchor.ID)
+	if err != nil {
+		t.Fatalf("get anchor: %v", err)
+	}
+	if route := got.Metadata[beadmeta.RoutedToMetadataKey]; route != "" {
+		t.Fatalf("the parked anchor was stamped gc.routed_to=%q; a worker then claims it and the merge cadence, which enumerates open beads, cannot land it for the length of that claim", route)
+	}
+	control, err := store.Get(plain.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	if route := control.Metadata[beadmeta.RoutedToMetadataKey]; route != "gascity/gastown.polecat" {
+		t.Fatalf("control gc.routed_to=%q, want gascity/gastown.polecat — the session route is unresolvable and the assertion above proves nothing", route)
+	}
+}
+
+// A pack's merge cadence parks a finished anchor into this predicate's exact
+// accept signature: it clears assignee and gc.routed_to together so the open
+// bead stops being pool demand, while gc.work_branch and the claim-time session
+// keys stay on it. merge_result is the only field that separates that
+// deliberate park from the failed handoff the sweep exists to repair, so a bead
+// carrying any merge_result is out.
+func TestDetachedHandoffOrphanCandidateRefusesEveryMergeResult(t *testing.T) {
+	base := func() beads.Bead {
+		return beads.Bead{ID: "M-1", Status: "open", Metadata: map[string]string{
+			beadmeta.BranchMetadataKey:      "polecat/ga-m",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+		}}
+	}
+	// Control first: merge_result-less, the shape the sweep exists for.
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the merge_result-less base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	// The value space is pack-authored and open-world, so the rule under test is
+	// "any non-empty merge_result", not a closed set of literals.
+	for _, result := range []string{"pre_open_gate", "pull_request", "merged", "superseded", "rejected", "some-future-pack-verdict"} {
+		b := base()
+		b.Metadata[beadmeta.MergeResultMetadataKey] = result
+		if isDetachedHandoffOrphanCandidate(b) {
+			t.Errorf("a bead with merge_result=%q is a detached-orphan candidate; the lane re-stamps gc.routed_to on a parked anchor and offers it to the pool while its merge is still in flight", result)
+		}
+	}
+}
+
+// The completed-work signal is the pushed-branch record (the "branch" key a
+// pack's workspace-setup writes once a branch is cut), NOT gc.work_branch. The
+// claim path stamps gc.work_branch to the claiming worker's CWD branch on every
+// claimed bead — in a pool that is the shared home worktree's default branch —
+// so gc.work_branch sits on molecule step beads that push nothing and on plain
+// claimed beads that never cut a branch. Gating on it re-routes those parked
+// beads back into pool demand. This pins the predicate to the key that actually
+// evidences a handoff, and excludes molecule step beads categorically: a step
+// is advanced by its formula chain, never by route recovery.
+func TestDetachedHandoffOrphanCandidate_GatesOnPushedBranchNotClaimStamp(t *testing.T) {
+	// A genuine detached handoff: workspace-setup recorded the pushed branch and
+	// the failed done sequence cleared route+assignee. This is the shape the
+	// sweep exists to repair — it carries the branch record, not gc.work_branch.
+	genuine := beads.Bead{ID: "W-1", Status: "open", Metadata: map[string]string{
+		beadmeta.BranchMetadataKey:      "polecat/gc-w1",
+		beadmeta.SessionNameMetadataKey: "gc-toolkit__polecat-th-w1",
+	}}
+	if !isDetachedHandoffOrphanCandidate(genuine) {
+		t.Fatal("a work bead with a pushed-branch record is not a candidate; the sweep can no longer recover a genuine failed handoff")
+	}
+
+	// A claim-time gc.work_branch stamp with no pushed branch is not a handoff: a
+	// plain routed work bead whose deliverable was store work is claimed (so
+	// gc.work_branch is the pool home branch) but cuts no branch.
+	claimStampOnly := beads.Bead{ID: "P-3", Status: "open", Metadata: map[string]string{
+		beadmeta.WorkBranchMetadataKey:  "main",
+		beadmeta.SessionNameMetadataKey: "gc-toolkit__polecat-th-w1",
+	}}
+	if isDetachedHandoffOrphanCandidate(claimStampOnly) {
+		t.Error("a bead carrying only gc.work_branch=main (claim-time CWD stamp, no pushed branch) is a candidate; the lane re-routes a bead that never produced a branch")
+	}
+
+	// Molecule step beads carry the claim stamp too, and are advanced by their
+	// chain — never by route recovery. They must be excluded whether they declare
+	// gc.step_id, gc.step_ref, or both (a live load-context step carried only
+	// gc.step_ref). A branch key is added defensively: even if a future claim
+	// leaked one onto a step (exactly the gc.work_branch bug), the step exclusion
+	// still holds the line.
+	for _, stepKey := range []string{beadmeta.StepIDMetadataKey, beadmeta.StepRefMetadataKey} {
+		step := beads.Bead{ID: "S-" + stepKey, Status: "open", Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "main",
+			beadmeta.BranchMetadataKey:      "polecat/gc-w1",
+			beadmeta.SessionNameMetadataKey: "gc-toolkit__polecat-th-w1",
+			stepKey:                         "mol-polecat-work.load-context",
+		}}
+		if isDetachedHandoffOrphanCandidate(step) {
+			t.Errorf("a molecule step bead carrying %s is a detached-orphan candidate; the lane re-stamps gc.routed_to on a parked step and re-offers a dead chain to the pool", stepKey)
 		}
 	}
 }
@@ -271,7 +420,7 @@ func TestSweepDetachedHandoffOrphans_SkipsNoSessionName(t *testing.T) {
 		Title:  "no-session work",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey: "polecat/ga-nosession",
+			beadmeta.BranchMetadataKey: "polecat/ga-nosession",
 		},
 	})
 	if err != nil {
@@ -296,7 +445,7 @@ func TestSweepDetachedHandoffOrphans_SkipsWhenSessionNotFound(t *testing.T) {
 		Title:  "orphan with missing session",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-gone",
+			beadmeta.BranchMetadataKey:      "polecat/ga-gone",
 			beadmeta.SessionNameMetadataKey: "gastown__polecat-gone",
 		},
 	})
@@ -342,7 +491,7 @@ func TestSweepDetachedHandoffOrphans_SkipsWhenSessionHasNoTemplate(t *testing.T)
 		Title:  "orphan with templateless session",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-notempl",
+			beadmeta.BranchMetadataKey:      "polecat/ga-notempl",
 			beadmeta.SessionNameMetadataKey: "unknown-session",
 		},
 	})
@@ -394,7 +543,7 @@ func TestSweepDetachedHandoffOrphans_RecoverFromClosedSessionBead(t *testing.T) 
 		Title:  "orphaned work (closed session)",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-closed",
+			beadmeta.BranchMetadataKey:      "polecat/ga-closed",
 			beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
 		},
 	})
@@ -440,7 +589,7 @@ func TestSweepDetachedHandoffOrphans_MultipleCandidates(t *testing.T) {
 		if _, err := store.Create(beads.Bead{
 			Status: "open",
 			Metadata: map[string]string{
-				beadmeta.WorkBranchMetadataKey:  "polecat/ga-multi",
+				beadmeta.BranchMetadataKey:      "polecat/ga-multi",
 				beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
 			},
 		}); err != nil {
@@ -496,7 +645,7 @@ func TestSweepDetachedHandoffOrphansAcrossStores_RigOrphanCityStoredSession(t *t
 		Title:  "orphaned rig work",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-xyz",
+			beadmeta.BranchMetadataKey:      "polecat/ga-xyz",
 			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-xyz",
 			// gc.routed_to and assignee left empty by the failed done sequence
 		},
@@ -543,7 +692,7 @@ func TestSweepDetachedHandoffOrphans_SkipsBlockedCollapsedCandidate(t *testing.T
 	// already-consumed (empty) gc.routed_to.
 	live := beads.NewMemStoreFrom(0, []beads.Bead{
 		{ID: "EB-blk", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-blk",
+			beadmeta.BranchMetadataKey:      "polecat/ga-blk",
 			beadmeta.SessionNameMetadataKey: sessionName,
 		}},
 	}, nil)
@@ -551,7 +700,7 @@ func TestSweepDetachedHandoffOrphans_SkipsBlockedCollapsedCandidate(t *testing.T
 		Store: live,
 		cachedSnapshot: []beads.Bead{
 			{ID: "EB-blk", Title: "finalize", Type: "task", Status: "open", Metadata: map[string]string{
-				beadmeta.WorkBranchMetadataKey:  "polecat/ga-blk",
+				beadmeta.BranchMetadataKey:      "polecat/ga-blk",
 				beadmeta.SessionNameMetadataKey: sessionName,
 			}},
 		},
@@ -600,7 +749,7 @@ func TestSweepDetachedHandoffOrphans_SkipsRaceClaimedCandidate(t *testing.T) {
 		{
 			ID: "EB-race", Title: "work", Type: "task", Status: "in_progress",
 			Assignee: "gascity/gastown.polecat/th-race", Metadata: map[string]string{
-				beadmeta.WorkBranchMetadataKey:  "polecat/ga-race",
+				beadmeta.BranchMetadataKey:      "polecat/ga-race",
 				beadmeta.SessionNameMetadataKey: sessionName,
 			},
 		},
@@ -612,7 +761,7 @@ func TestSweepDetachedHandoffOrphans_SkipsRaceClaimedCandidate(t *testing.T) {
 		Store: live,
 		cached: beads.Bead{
 			ID: "EB-race", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
-				beadmeta.WorkBranchMetadataKey:  "polecat/ga-race",
+				beadmeta.BranchMetadataKey:      "polecat/ga-race",
 				beadmeta.SessionNameMetadataKey: sessionName,
 			},
 		},
@@ -651,11 +800,12 @@ func TestSweepDetachedHandoffOrphans_SkipsRaceClaimedCandidate(t *testing.T) {
 	}
 }
 
-// A production claim stamps gc.work_branch, gc.session_id, AND gc.session_name
-// together in one hookClaimIdentityPatch — never a raw "branch" key. This is the
-// exact shape a detached orphan carries in production; before the branch gate read
-// gc.work_branch it was skipped and no route was ever restored. Route recovery
-// resolves through the exact gc.session_id → session-bead ID match. Pins F1.
+// The genuine detached orphan is a work bead whose pack workspace-setup recorded
+// the pushed branch (the "branch" key) and whose failed done sequence then
+// cleared route+assignee. The claim-time gc.work_branch stamp lands on the
+// molecule's step beads, not on this issue anchor, so the anchor carries the
+// branch record and no gc.work_branch. Route recovery resolves through the exact
+// gc.session_id → session-bead ID match, and gc.session_name is present too.
 func TestSweepDetachedHandoffOrphans_ClaimShapedRoute(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -673,10 +823,10 @@ func TestSweepDetachedHandoffOrphans_ClaimShapedRoute(t *testing.T) {
 	}
 
 	work, err := store.Create(beads.Bead{
-		Title:  "claim-shaped orphan",
+		Title:  "detached work anchor",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-claim",
+			beadmeta.BranchMetadataKey:      "polecat/gc-claim",
 			beadmeta.SessionIDMetadataKey:   sessionBead.ID,
 			beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
 		},
@@ -684,9 +834,10 @@ func TestSweepDetachedHandoffOrphans_ClaimShapedRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create work bead: %v", err)
 	}
-	// The regression contract: production never stamps a raw "branch" key.
-	if _, ok := work.Metadata["branch"]; ok {
-		t.Fatalf("fixture must not carry a raw \"branch\" key — production stamps gc.work_branch")
+	// The pushed-branch record evidences the handoff; a claim-time gc.work_branch
+	// stamp does not, and a genuine issue anchor carries none.
+	if _, ok := work.Metadata[beadmeta.WorkBranchMetadataKey]; ok {
+		t.Fatalf("fixture must not carry gc.work_branch — the pushed-branch record is the \"branch\" key")
 	}
 
 	n, err := sweepDetachedHandoffOrphans(store)
@@ -694,7 +845,7 @@ func TestSweepDetachedHandoffOrphans_ClaimShapedRoute(t *testing.T) {
 		t.Fatalf("sweep: %v", err)
 	}
 	if n != 1 {
-		t.Fatalf("restored=%d, want 1 (claim-shaped orphan must be recovered via gc.work_branch)", n)
+		t.Fatalf("restored=%d, want 1 (a detached orphan is recovered via its branch record + gc.session_id)", n)
 	}
 
 	got, err := store.Get(work.ID)
@@ -746,7 +897,7 @@ func TestSweepDetachedHandoffOrphans_DuplicateSessionNamePrefersSessionID(t *tes
 		Title:  "orphan owned by session B",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-dup",
+			beadmeta.BranchMetadataKey:      "polecat/ga-dup",
 			beadmeta.SessionIDMetadataKey:   sessionB.ID,
 			beadmeta.SessionNameMetadataKey: sharedName,
 		},
@@ -798,7 +949,7 @@ func TestSweepDetachedHandoffOrphans_AmbiguousSessionNameWithoutSessionID(t *tes
 		Title:  "orphan with only an ambiguous name",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-ambig",
+			beadmeta.BranchMetadataKey:      "polecat/ga-ambig",
 			beadmeta.SessionNameMetadataKey: sharedName,
 			// no gc.session_id — nothing to disambiguate the shared name
 		},
@@ -850,7 +1001,7 @@ func TestSweepDetachedHandoffOrphans_DuplicateSessionNameAgreeingRouteResolves(t
 		Title:  "orphan with an agreeing duplicated name",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-agree",
+			beadmeta.BranchMetadataKey:      "polecat/ga-agree",
 			beadmeta.SessionNameMetadataKey: sharedName,
 		},
 	})
@@ -904,8 +1055,8 @@ func TestSweepDetachedHandoffOrphans_SessionIDOnlyNoSessionName(t *testing.T) {
 		Title:  "session-id-only orphan",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey: "polecat/ga-idonly",
-			beadmeta.SessionIDMetadataKey:  sessionBead.ID,
+			beadmeta.BranchMetadataKey:    "polecat/ga-idonly",
+			beadmeta.SessionIDMetadataKey: sessionBead.ID,
 			// no gc.session_name — GC_SESSION_NAME was unset at claim time
 		},
 	})
@@ -974,7 +1125,7 @@ func TestSweepDetachedHandoffOrphans_PartialSessionListSkipsNameFallback(t *test
 		Title:  "orphan with an ambiguous name under a partial session list",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-partial",
+			beadmeta.BranchMetadataKey:      "polecat/ga-partial",
 			beadmeta.SessionNameMetadataKey: sharedName,
 			// no gc.session_id — nothing to disambiguate the shared name
 		},
@@ -1032,7 +1183,7 @@ func TestSweepDetachedHandoffOrphans_PartialSessionListStillResolvesByID(t *test
 		Title:  "orphan recoverable by exact id under a partial list",
 		Status: "open",
 		Metadata: map[string]string{
-			beadmeta.WorkBranchMetadataKey:  "polecat/ga-partial-id",
+			beadmeta.BranchMetadataKey:      "polecat/ga-partial-id",
 			beadmeta.SessionIDMetadataKey:   "SB-partial-id",
 			beadmeta.SessionNameMetadataKey: sharedName,
 		},
