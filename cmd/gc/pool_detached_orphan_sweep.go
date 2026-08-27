@@ -177,14 +177,23 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
 // fully-detached handoff orphan: open, unassigned, no pool route (neither
-// gc.routed_to nor a legacy gc.run_target), no gc.kind, branch set (indicating
-// work was done and pushed), and a session back-reference — gc.session_id or
-// gc.session_name — from which the pool route can be recovered. This sweep's
-// novel domain is exactly work that carries *no* self-declared route: a bead
-// that still has gc.run_target is recovered earlier in the same tick by
-// restoreCarriedWorkRoutes from its own declared route, and any non-empty
-// gc.kind is a workflow-root/control/topology bead that carriedPoolRoute
-// deliberately keeps out of pool demand.
+// gc.routed_to nor a legacy gc.run_target), no gc.kind, no merge_result, branch
+// set (indicating work was done and pushed), and a session back-reference —
+// gc.session_id or gc.session_name — from which the pool route can be recovered.
+// This sweep's novel domain is exactly work that carries *no* self-declared
+// route: a bead that still has gc.run_target is recovered earlier in the same
+// tick by restoreCarriedWorkRoutes from its own declared route, and any
+// non-empty gc.kind is a workflow-root/control/topology bead that
+// carriedPoolRoute deliberately keeps out of pool demand.
+//
+// The merge_result exclusion is what separates a FAILED handoff from a
+// SUCCESSFUL park, which are otherwise the same signature. A pack's merge
+// cadence parks a finished anchor by clearing assignee and gc.routed_to
+// together — precisely so the open bead stops being pool demand — while the
+// pushed gc.work_branch and the claim-time session keys stay on the bead. Only
+// the pack-written merge_result distinguishes the two, so without this guard
+// every parked anchor is re-stamped back into pool demand and claimed by a
+// worker while its merge is still in flight (gc-gf1l6).
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if b.Status != "open" {
 		return false
@@ -200,6 +209,9 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
 		return false // any non-empty kind is workflow-root/control/topology work, not fully-detached pool work
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.MergeResultMetadataKey]) != "" {
+		return false // an anchor in a merge cadence; that cadence drives it, not the pool
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
 		return false // no work branch → not a completed-work handoff bead

@@ -238,6 +238,34 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
+// A pack's merge cadence parks a finished anchor into this predicate's exact
+// accept signature: it clears assignee and gc.routed_to together so the open
+// bead stops being pool demand, while gc.work_branch and the claim-time session
+// keys stay on it. merge_result is the only field that separates that
+// deliberate park from the failed handoff the sweep exists to repair, so a bead
+// carrying any merge_result is out.
+func TestDetachedHandoffOrphanCandidateRefusesEveryMergeResult(t *testing.T) {
+	base := func() beads.Bead {
+		return beads.Bead{ID: "M-1", Status: "open", Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/ga-m",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+		}}
+	}
+	// Control first: merge_result-less, the shape the sweep exists for.
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the merge_result-less base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	// The value space is pack-authored and open-world, so the rule under test is
+	// "any non-empty merge_result", not a closed set of literals.
+	for _, result := range []string{"pre_open_gate", "pull_request", "merged", "superseded", "rejected", "some-future-pack-verdict"} {
+		b := base()
+		b.Metadata[beadmeta.MergeResultMetadataKey] = result
+		if isDetachedHandoffOrphanCandidate(b) {
+			t.Errorf("a bead with merge_result=%q is a detached-orphan candidate; the lane re-stamps gc.routed_to on a parked anchor and offers it to the pool while its merge is still in flight", result)
+		}
+	}
+}
+
 // A bead with no branch set is not a completed-work bead and must be skipped.
 func TestSweepDetachedHandoffOrphans_SkipsNoBranch(t *testing.T) {
 	store := beads.NewMemStore()
