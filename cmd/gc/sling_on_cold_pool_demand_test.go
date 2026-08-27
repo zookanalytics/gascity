@@ -244,7 +244,7 @@ func TestOnFormulaGraphV2RawRoutedThenWrappedIsSingleDemand(t *testing.T) {
 		{
 			name: "claimed before the wrap",
 			metadata: map[string]string{
-				beadmeta.WorkBranchMetadataKey:  "polecat/bl-42",
+				beadmeta.BranchMetadataKey:      "polecat/bl-42",
 				beadmeta.SessionIDMetadataKey:   "SS-1",
 				beadmeta.SessionNameMetadataKey: "polecat-1",
 			},
@@ -423,7 +423,7 @@ func TestOnFormulaGraphV2SourceSlungPlainAgainIsRecoveredWhenDetached(t *testing
 	// A done sequence that fails part way: the claim's session back-reference
 	// and work branch stay, the route is gone.
 	if err := store.SetMetadataBatch("BL-42", map[string]string{
-		beadmeta.WorkBranchMetadataKey:  "polecat/bl-42",
+		beadmeta.BranchMetadataKey:      "polecat/bl-42",
 		beadmeta.SessionIDMetadataKey:   "SS-1",
 		beadmeta.SessionNameMetadataKey: "polecat-1",
 		beadmeta.RoutedToMetadataKey:    "",
