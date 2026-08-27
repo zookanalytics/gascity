@@ -27,7 +27,7 @@ const (
 // no route of its own, a pushed branch, and a session back-reference.
 func detachedOrphanWorkBead(id string) beads.Bead {
 	return beads.Bead{ID: id, Title: "orphaned work", Type: "task", Status: "open", Metadata: map[string]string{
-		beadmeta.WorkBranchMetadataKey:  "polecat/" + id,
+		beadmeta.BranchMetadataKey:      "polecat/" + id,
 		beadmeta.SessionNameMetadataKey: detachedOrphanTestSession,
 	}}
 }
@@ -285,9 +285,15 @@ func TestDetachedOrphanObserveKeepsOnlyTheOrphanShape(t *testing.T) {
 	assigned := detachedOrphanWorkBead("A-1")
 	assigned.Assignee = "someone"
 	noBranch := detachedOrphanWorkBead("N-1")
-	delete(noBranch.Metadata, beadmeta.WorkBranchMetadataKey)
+	delete(noBranch.Metadata, beadmeta.BranchMetadataKey)
+	// A molecule step bead carries the claim-time gc.work_branch stamp but no
+	// pushed branch; its formula chain advances it, so the filter must drop it.
+	step := detachedOrphanWorkBead("ST-1")
+	delete(step.Metadata, beadmeta.BranchMetadataKey)
+	step.Metadata[beadmeta.WorkBranchMetadataKey] = "main"
+	step.Metadata[beadmeta.StepRefMetadataKey] = "mol-polecat-work.load-context"
 
-	for _, b := range []beads.Bead{routed, assigned, noBranch} {
+	for _, b := range []beads.Bead{routed, assigned, noBranch, step} {
 		lane.observe(beadCreatedEvent(t, b))
 	}
 	if got := lane.takePending(); len(got) != 0 {
