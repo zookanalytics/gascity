@@ -238,6 +238,76 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
+// The sweep must not write to a parked merge anchor. This is the store-level
+// half of the merge_result exclusion: the predicate test below pins the rule,
+// this one pins that no gc.routed_to reaches the bead.
+func TestSweepDetachedHandoffOrphans_SkipsMergeCadenceAnchor(t *testing.T) {
+	store := beads.NewMemStore()
+
+	if _, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-merge",
+			"template":     "gascity/gastown.polecat",
+		},
+	}); err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	anchor, err := store.Create(beads.Bead{
+		Title:  "parked merge anchor",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/ga-anchor",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+			beadmeta.MergeResultMetadataKey: "pull_request",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create anchor bead: %v", err)
+	}
+
+	// Control: a bead identical but for merge_result IS restored from that same
+	// session bead. Without it, "restored=0" would be satisfied by a route that
+	// simply could not be resolved.
+	plain, err := store.Create(beads.Bead{
+		Title:  "plain detached work",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "polecat/ga-plain",
+			beadmeta.SessionNameMetadataKey: "gastown__polecat-th-merge",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create control bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (the control bead only) — the route must be resolvable or the merge_result exclusion is not what this test measures", n)
+	}
+
+	got, err := store.Get(anchor.ID)
+	if err != nil {
+		t.Fatalf("get anchor: %v", err)
+	}
+	if route := got.Metadata[beadmeta.RoutedToMetadataKey]; route != "" {
+		t.Fatalf("the parked anchor was stamped gc.routed_to=%q; a worker then claims it and the merge cadence, which enumerates open beads, cannot land it for the length of that claim", route)
+	}
+	control, err := store.Get(plain.ID)
+	if err != nil {
+		t.Fatalf("get control bead: %v", err)
+	}
+	if route := control.Metadata[beadmeta.RoutedToMetadataKey]; route != "gascity/gastown.polecat" {
+		t.Fatalf("control gc.routed_to=%q, want gascity/gastown.polecat — the session route is unresolvable and the assertion above proves nothing", route)
+	}
+}
+
 // A pack's merge cadence parks a finished anchor into this predicate's exact
 // accept signature: it clears assignee and gc.routed_to together so the open
 // bead stops being pool demand, while gc.work_branch and the claim-time session

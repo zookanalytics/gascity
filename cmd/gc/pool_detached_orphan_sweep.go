@@ -186,14 +186,14 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 // non-empty gc.kind is a workflow-root/control/topology bead that
 // carriedPoolRoute deliberately keeps out of pool demand.
 //
-// The merge_result exclusion is what separates a FAILED handoff from a
-// SUCCESSFUL park, which are otherwise the same signature. A pack's merge
-// cadence parks a finished anchor by clearing assignee and gc.routed_to
-// together — precisely so the open bead stops being pool demand — while the
-// pushed gc.work_branch and the claim-time session keys stay on the bead. Only
-// the pack-written merge_result distinguishes the two, so without this guard
-// every parked anchor is re-stamped back into pool demand and claimed by a
-// worker while its merge is still in flight (gc-gf1l6).
+// The merge_result exclusion separates a FAILED handoff from a SUCCESSFUL park,
+// which are otherwise the same signature. A pack's merge cadence parks a
+// finished anchor by clearing assignee and gc.routed_to together, precisely so
+// the open bead stops being pool demand. The pushed gc.work_branch and the
+// claim-time session keys stay on it. Only the pack-written merge_result tells
+// the two apart, so without this guard every parked anchor is re-stamped back
+// into pool demand and claimed by a worker while its merge is still in flight
+// (gc-gf1l6).
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if b.Status != "open" {
 		return false
