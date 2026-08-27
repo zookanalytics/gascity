@@ -364,6 +364,16 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// MergeResultMetadataKey records a work bead's disposition inside a pack's merge
+// cadence (values are pack-authored: "pre_open_gate", "pull_request", "merged",
+// ...). The engine never writes it. It reads it only as an exclusion — a bead
+// carrying any merge_result is parked under that cadence and is therefore not
+// unowned work — so the recovery sweeps must not re-route it. Declared here,
+// like the dispatch keys above, so the one pack string the engine reads has a
+// single home; like them it stays out of KnownMetadataKeys, whose drift guard
+// covers only the gc. namespace.
+const MergeResultMetadataKey = "merge_result"
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
