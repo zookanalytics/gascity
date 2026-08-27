@@ -6,7 +6,6 @@ package graphroute
 import (
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -77,7 +76,7 @@ func IsControlDispatcherKind(kind string) bool {
 // Routing never lands on these — they exist to structure the graph, not
 // to be claimed by an agent.
 func IsWorkflowTopologyKind(kind string) bool {
-	return slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
+	return beadmeta.IsWorkflowTopologyKind(kind)
 }
 
 // IsCompiledGraphWorkflow reports whether a compiled recipe is a graph.v2
@@ -584,11 +583,15 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 		}
 		if step.IsRoot {
 			// gc.routed_to is the canonical (and sole) persisted delivery key
-			// every runtime demand/claim/scale reader consults; the workflow root
-			// must carry it to be claimable, exactly like its own child steps and
-			// every legacy bead. Without it a pool-routed root is spawned-for by
-			// scale_check but never claimed by the worker, then idle-reaped
-			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
+			// every runtime demand/claim/scale reader consults, so the root
+			// records the run's route there, exactly like its own child steps
+			// and every legacy bead (fixes #2763; gc.run_target retired as a
+			// wire field — ga-eld2x).
+			//
+			// Recording a route is not the same as being claimable. A root is a
+			// topology bead: readers exclude it by gc.kind, so the route it
+			// carries identifies the run without ever making the root itself
+			// demand a seat is spawned for or work a hook will serve (gc-dz64s).
 			step.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
 			delete(step.Metadata, beadmeta.RunTargetMetadataKey)
 			if rootSessionName != "" {

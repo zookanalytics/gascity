@@ -988,10 +988,11 @@ func workQueryHasReadyWork(output string) bool {
 
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: future defer_until, any open blocking dep in the row's
-// blocked_by array, the row's own is_blocked / status=="blocked" marker, or a
-// canonical dispatch hold label. The work_query is expected to gate these, but
-// defensive filtering here prevents a single broken query from cascading into
-// agent action on a bead it cannot progress.
+// blocked_by array, the row's own is_blocked / status=="blocked" marker, a
+// canonical dispatch hold label, or a workflow-topology gc.kind. The
+// work_query is expected to gate these, but defensive filtering here prevents
+// a single broken query from cascading into agent action on a bead it cannot
+// progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
 func filterUnreadyHookCandidates(output string, now time.Time) string {
 	if output == "" {
@@ -1025,6 +1026,9 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 			continue
 		}
 		if isHeldHookCandidate(obj) {
+			continue
+		}
+		if isWorkflowTopologyHookCandidate(obj) {
 			continue
 		}
 		filtered = append(filtered, obj)
@@ -1203,6 +1207,37 @@ func isHeldHookCandidate(item map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// isWorkflowTopologyHookCandidate reports whether item is a workflow-topology
+// bead (beadmeta.WorkflowTopologyKinds): a graph.v2 workflow root, a scope
+// latch, or a frozen step-spec sidecar. These anchor the shape of a run and
+// carry no executable body; the steps hanging off them are the routable units.
+//
+// The exclusion has to live at the readers, because a topology bead is a ready
+// routed row by design and neither half can be given up. The root carries
+// gc.routed_to as the sole persisted delivery key (#2763), and its
+// workflow-finalize edge is "tracks" rather than "blocks" because the finalizer
+// is the bead that closes the root, so a blocking edge makes it permanently
+// unclosable (ga-a6zy9). This is the seam where a worker can be told no
+// instead (gc-dz64s).
+//
+// Kind is the discriminator, not root-ness: a vapor/root-only wisp root IS the
+// work — the compiler stamps gc.kind=wisp for that reason — and excluding it
+// would break scale-from-zero.
+//
+// A missing or non-string gc.kind fails open as ordinary work, like the
+// projections above it: legacy and hand-created beads carry no kind at all.
+func isWorkflowTopologyHookCandidate(item map[string]any) bool {
+	metadata, ok := item["metadata"].(map[string]any)
+	if !ok {
+		return false
+	}
+	kind, ok := metadata[beadmeta.KindMetadataKey].(string)
+	if !ok {
+		return false
+	}
+	return beadmeta.IsWorkflowTopologyKind(strings.TrimSpace(kind))
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

@@ -118,6 +118,12 @@ var WorkflowTopologyKinds = []string{
 	KindSpec,
 }
 
+// IsWorkflowTopologyKind reports whether kind is a member of
+// WorkflowTopologyKinds.
+func IsWorkflowTopologyKind(kind string) bool {
+	return slices.Contains(WorkflowTopologyKinds, kind)
+}
+
 // GraphContractMetadataKinds lists the gc.kind values that, when HAND-WRITTEN
 // in step metadata, imply graph.v2 semantics and therefore trigger the formula
 // compiler requirement (formula.metadataRequiresGraphContract derives from

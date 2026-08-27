@@ -68,10 +68,29 @@ func agreementRows() []agreementRow {
 		{name: "slot-suffixed route, non-pool agent", bead: routed("a-4", "rig/solo-1"), wantServable: false},
 		{name: "unknown target", bead: routed("a-5", "rig/nobody"), wantServable: false},
 		{
+			// A workflow root is topology, not work, whichever key carries its
+			// route: the steps hanging off it are the routable units and it has
+			// no executable body of its own. Both sides refuse it — the query
+			// still returns it (bd has no "not a workflow root" predicate) and
+			// the hook's filter strips it, so counting it would spawn a seat
+			// per tick for the whole run (gc-dz64s).
 			name: "workflow root routed by run_target only",
 			bead: beads.Bead{ID: "a-6", Status: "open", Type: "task", Metadata: map[string]string{
 				beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			// The executable counterpart, and the reason the exclusion is keyed
+			// on kind rather than on root-ness: a vapor/root-only wisp root IS
+			// the work, and it is what wakes a scaled-to-zero pool. It is on
+			// the canonical key because gc.run_target reaches a reader through
+			// one tier only, and that tier is scoped to gc.kind=workflow.
+			name: "wisp root on the canonical route key",
+			bead: beads.Bead{ID: "a-13", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWisp,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: true,
 		},
@@ -159,6 +178,30 @@ func holdLabelAgreementRows() []agreementRow {
 	return rows
 }
 
+// workflowTopologyAgreementRows is generated from the kind set itself, so a
+// kind added to WorkflowTopologyKinds cannot ship without this property
+// covering it. These carry the CANONICAL route key, which is the shape the
+// field incident took: the root is stamped with gc.routed_to (#2763) and its
+// finalize edge is "tracks" rather than "blocks" (ga-a6zy9), so it stays
+// ready, routed and unassigned from the pour until the run ends.
+func workflowTopologyAgreementRows() []agreementRow {
+	rows := make([]agreementRow, 0, len(beadmeta.WorkflowTopologyKinds))
+	for _, kind := range beadmeta.WorkflowTopologyKinds {
+		rows = append(rows, agreementRow{
+			name: "routed " + kind + " topology bead",
+			bead: beads.Bead{
+				ID: "topology-" + kind, Status: "open", Type: "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:     kind,
+					beadmeta.RoutedToMetadataKey: agreementTemplate,
+				},
+			},
+			wantServable: false,
+		})
+	}
+	return rows
+}
+
 // TestDemandCountsExactlyTheClaimableRows states the demand side's verdict over
 // the corpus and pins the ROUTE half against the claim matcher.
 //
@@ -174,7 +217,7 @@ func TestDemandCountsExactlyTheClaimableRows(t *testing.T) {
 	templates := map[string]struct{}{agreementTemplate: {}}
 	routeTargets := hookClaimRouteTargets(agreementTemplate)
 
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		t.Run(row.name, func(t *testing.T) {
 			// The same-tick pass runs before demand is counted, so the property
 			// is asserted over the POST-rewrite row.
@@ -273,7 +316,7 @@ func TestSlotSuffixCollapseIsPersistedForClaimableFormsOnly(t *testing.T) {
 	var seeded []beads.Bead
 	var stores []beads.Store
 	want := map[string]string{}
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		created, err := store.Create(beads.Bead{
 			Title:    row.name,
 			Type:     row.bead.Type,
@@ -381,7 +424,7 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	legacyOpts, legacyMetaWant := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
 	assertLegacyTierFilterUnchanged(t, query)
 
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		t.Run(row.name, func(t *testing.T) {
 			bead := postCanonicalizeBead(cfg, row.bead)
 

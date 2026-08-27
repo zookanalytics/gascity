@@ -681,8 +681,9 @@ func isDetachedGraphStep(step *Step) bool {
 // refuses to close a blocked issue and the finalizer is the only bead that
 // would ever clear the blocker (ga-a6zy9). Ordering does not need the edge —
 // the finalizer already blocks on every graph sink, so it cannot run early,
-// and the root is a latch that is never routed or dispatched
-// (beadmeta.WorkflowTopologyKinds). The edge is retained as "tracks" so the
+// and the root is a latch no agent may claim, enforced on gc.kind at the
+// readers rather than on readiness here (beadmeta.WorkflowTopologyKinds;
+// gc-dz64s). The edge is retained as "tracks" so the
 // root still reaches its finalizer through the dependency graph for cascade
 // delete and open-descendant traversal, both of which accept that type.
 func addWorkflowRootDeps(rootID string, steps []*Step, idMapping map[string]string, deps *[]RecipeDep) {

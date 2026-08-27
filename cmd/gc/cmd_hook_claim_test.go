@@ -108,10 +108,14 @@ func TestDoHookClaimUsesSelectedStoreContextForMutationAndContinuation(t *testin
 
 	storeDir := "rig-store"
 	storeEnv := []string{"BEADS_DIR=rig-store", "GC_RIG_ROOT=rig-root"}
+	// A routed graph STEP, not the workflow root it hangs off: the subject here
+	// is which store context the mutation and the continuation lookup run in,
+	// so the candidate only has to be one a worker may actually claim
+	// (gc-dz64s).
 	candidates := []beads.Bead{{
 		ID:       "bead-1",
 		Status:   "open",
-		Metadata: map[string]string{"gc.kind": "workflow", "gc.run_target": "route-1", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a"},
+		Metadata: map[string]string{"gc.routed_to": "route-1", "gc.root_bead_id": "root-1", "gc.continuation_group": "group-a"},
 	}}
 	output, err := json.Marshal(candidates)
 	if err != nil {
