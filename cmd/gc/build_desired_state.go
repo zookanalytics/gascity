@@ -1679,10 +1679,10 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 		}
 		for _, b := range ready {
-			// AGREEMENT: count only rows a T-worker's own query would serve it.
-			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
-			// is not capacity demand — it is a seat that spawns, reads empty and
-			// drains, every tick, forever. See demand_serve_predicate.go.
+			// AGREEMENT: count only rows a T-worker's own query would serve.
+			// A row it would not serve is not capacity demand — it is a seat
+			// that spawns, reads empty and drains, every tick, forever. The
+			// excluded classes live in demand_serve_predicate.go.
 			template, servable := demandServableForTemplates(cfg, b, group.templates)
 			if !servable {
 				continue

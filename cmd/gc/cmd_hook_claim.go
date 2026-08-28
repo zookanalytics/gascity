@@ -694,10 +694,9 @@ func mergeHookClaimCandidateMetadata(candidate, claimed beads.Bead) beads.Bead {
 // fresh claim: it has an id, is currently unassigned, carries no
 // workflow-topology kind, and matches one of this session's route targets.
 //
-// The topology test is the last word before the claim CAS. The same exclusion
-// runs earlier, over the JSON, in isWorkflowTopologyHookCandidate; repeating it
-// on the decoded bead is what makes it hold for a candidate that reaches this
-// path by any route the filter does not cover.
+// The topology test repeats the one isWorkflowTopologyHookCandidate applies
+// over the JSON, so it also holds for a candidate that reaches the claim by a
+// route that filter does not cover.
 func hookCandidateClaimable(candidate beads.Bead, routeTargets []string) bool {
 	return strings.TrimSpace(candidate.ID) != "" &&
 		strings.TrimSpace(candidate.Assignee) == "" &&

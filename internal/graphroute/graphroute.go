@@ -582,16 +582,11 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}
 		if step.IsRoot {
-			// gc.routed_to is the canonical (and sole) persisted delivery key
-			// every runtime demand/claim/scale reader consults, so the root
-			// records the run's route there, exactly like its own child steps
-			// and every legacy bead (fixes #2763; gc.run_target retired as a
-			// wire field — ga-eld2x).
-			//
-			// Recording a route is not the same as being claimable. A root is a
-			// topology bead: readers exclude it by gc.kind, so the route it
-			// carries identifies the run without ever making the root itself
-			// demand a seat is spawned for or work a hook will serve (gc-dz64s).
+			// gc.routed_to is the sole persisted delivery key the runtime
+			// readers consult, so the root records the run's route there.
+			// Recording a route is not being claimable: readers exclude a
+			// topology bead by gc.kind, so the root's route names the run
+			// without making the root itself demand or claimable work.
 			step.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
 			delete(step.Metadata, beadmeta.RunTargetMetadataKey)
 			if rootSessionName != "" {

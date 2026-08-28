@@ -68,12 +68,9 @@ func agreementRows() []agreementRow {
 		{name: "slot-suffixed route, non-pool agent", bead: routed("a-4", "rig/solo-1"), wantServable: false},
 		{name: "unknown target", bead: routed("a-5", "rig/nobody"), wantServable: false},
 		{
-			// A workflow root is topology, not work, whichever key carries its
-			// route: the steps hanging off it are the routable units and it has
-			// no executable body of its own. Both sides refuse it — the query
-			// still returns it (bd has no "not a workflow root" predicate) and
-			// the hook's filter strips it, so counting it would spawn a seat
-			// per tick for the whole run (gc-dz64s).
+			// Topology, not work, whichever key carries the route. The query
+			// cannot exclude it (bd has no "not a workflow root" predicate), so
+			// counting it would spawn a seat per tick for the whole run.
 			name: "workflow root routed by run_target only",
 			bead: beads.Bead{ID: "a-6", Status: "open", Type: "task", Metadata: map[string]string{
 				beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
@@ -82,11 +79,9 @@ func agreementRows() []agreementRow {
 			wantServable: false,
 		},
 		{
-			// The executable counterpart, and the reason the exclusion is keyed
-			// on kind rather than on root-ness: a vapor/root-only wisp root IS
-			// the work, and it is what wakes a scaled-to-zero pool. It is on
-			// the canonical key because gc.run_target reaches a reader through
-			// one tier only, and that tier is scoped to gc.kind=workflow.
+			// Why the exclusion is keyed on kind rather than root-ness: a
+			// vapor/root-only wisp root IS the work, and it is what wakes a
+			// scaled-to-zero pool.
 			name: "wisp root on the canonical route key",
 			bead: beads.Bead{ID: "a-13", Status: "open", Type: "task", Metadata: map[string]string{
 				beadmeta.KindMetadataKey:     beadmeta.KindWisp,

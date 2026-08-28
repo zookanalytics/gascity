@@ -11,24 +11,12 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// Regression coverage for gc-dz64s: `gc hook --claim` handed back a graph.v2
-// WORKFLOW ROOT as action=work.
-//
-// A workflow root is a latch, not work: it carries the run's vars and nothing
-// executable. It is nevertheless a ready routed row for the whole life of the
-// run, and both halves of that are load-bearing — it carries gc.routed_to as
-// the canonical delivery key (#2763), and its workflow-finalize edge is
-// "tracks" rather than "blocks" because the finalizer is what closes it
-// (ga-a6zy9). So any worker that frees up mid-run can be handed it.
-//
-// The cost is formula-shaped. Under mol-polecat-work the incumbent holds
-// polecat/<bead> checked out, so a duplicate run fails at `git worktree add`
-// and the loss is one pool slot. A read-only formula has no such backstop: a
-// second run judges the same input and files duplicate output.
-//
-// What these tests pin is the rule beadmeta.WorkflowTopologyKinds already
-// states in words — routing never lands on these, agents must never claim them
-// — enforced where a worker can be told no.
+// A workflow root carries the run's vars and nothing executable, yet stays a
+// ready, routed, unassigned row for the whole run, so any worker that frees up
+// mid-run can be handed one. These tests pin the rule
+// beadmeta.WorkflowTopologyKinds states in words — routing never lands on
+// these, agents must never claim them — at the readers that enforce it: the
+// hook's candidate filter, the fresh-claim gate, and the demand predicate.
 
 const workflowRootTestIdentity = "gastown__polecat-az-wisp-ak1hw"
 
