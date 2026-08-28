@@ -64,11 +64,9 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		// Workflow roots are the only pool-routed persisted beads that need
-		// gc.routed_to backfilled to stay claimable. Control-dispatcher and
-		// topology beads can also carry bare gc.run_target, but they are not
-		// claimed through the pool-demand gc.routed_to path. A targeted metadata
-		// query avoids a full-store scan.
+		// Only gc.kind=workflow roots are backfilled. Scope, spec, and
+		// control-dispatcher beads can carry a bare gc.run_target too, but none
+		// of them is dispatched through the pool-demand gc.routed_to path.
 		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
