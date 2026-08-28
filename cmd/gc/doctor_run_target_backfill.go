@@ -11,17 +11,16 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// runTargetRoutedToBackfillCheck repairs graph.v2 workflow roots created before
-// ga-eld2x, which carry gc.run_target but no gc.routed_to. gc.run_target is
-// being deprecated as a persisted routing field, and a root that records its
-// run's route only there is legible solely through the legacy compatibility
-// tier that exists to be retired (the #2763 failure). --fix backfills
-// gc.routed_to := gc.run_target so the route is recorded on the canonical key.
-// The root itself stays unclaimable either way — readers exclude a topology
-// bead by gc.kind (gc-dz64s) — so this moves where the run's route is read
-// from, not whether the root is served. The check is idempotent: a root that
-// already carries gc.routed_to, and any bead that is not a workflow root, is
-// left untouched.
+// runTargetRoutedToBackfillCheck repairs graph.v2 workflow roots that carry
+// gc.run_target but no gc.routed_to. gc.run_target is being deprecated as a
+// persisted routing field, and a root that records its run's route only there
+// is legible solely through the legacy compatibility tier that exists to be
+// retired. --fix backfills gc.routed_to := gc.run_target so the route is
+// recorded on the canonical key. The root itself stays unclaimable either way —
+// readers exclude a topology bead by gc.kind — so this moves where the run's
+// route is read from, not whether the root is served. The check is idempotent:
+// a root that already carries gc.routed_to, and any bead that is not a workflow
+// root, is left untouched.
 type runTargetRoutedToBackfillCheck struct {
 	cfg      *config.City
 	cityPath string

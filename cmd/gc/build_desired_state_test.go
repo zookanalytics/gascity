@@ -1328,15 +1328,12 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
 	}
 }
 
-// TestDefaultScaleCheckCountsSkipsRunTargetOnlyWorkflowRoot pins the demand
-// half of gc-dz64s on the pre-ga-eld2x root shape.
-//
-// This test previously asserted the root WAS counted, so that the compat query
-// tier which serves it had a demand side to agree with. Both sides now refuse
-// it: a workflow root carries no executable body, so a seat spawned for it
-// reads empty and drains, and the root stays ready for the whole run and is
-// counted again every tick. A graph.v2 run's demand comes from its steps,
-// which are routed and unblocked from the pour.
+// TestDefaultScaleCheckCountsSkipsRunTargetOnlyWorkflowRoot holds the demand
+// side against a root whose route is recorded on gc.run_target alone. A
+// workflow root carries no executable body and stays ready for the whole run,
+// so a seat spawned for it reads empty and drains, and the row is counted again
+// every tick. A graph.v2 run's demand comes from its steps, which are routed
+// and unblocked from the pour.
 func TestDefaultScaleCheckCountsSkipsRunTargetOnlyWorkflowRoot(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
@@ -1406,13 +1403,9 @@ func TestDefaultScaleCheckCountsIgnoresRunTargetOnNonWorkflowDivergentWork(t *te
 	}
 }
 
-// TestDefaultScaleCheckCountsSkipsWorkflowRootOnEitherRouteKey holds the
-// exclusion at the row that used to discriminate between the two route keys.
-//
-// Its former subject was precedence: a root carrying both keys was counted for
-// gc.routed_to and not for a stale divergent gc.run_target. Precedence is moot
-// now — gc.kind decides first, and no route key makes a topology bead demand —
-// so what is worth pinning is that neither key smuggles it back in.
+// TestDefaultScaleCheckCountsSkipsWorkflowRootOnEitherRouteKey holds the same
+// against a root carrying both keys: gc.kind decides before either route key,
+// so such a root is demand for neither target.
 func TestDefaultScaleCheckCountsSkipsWorkflowRootOnEitherRouteKey(t *testing.T) {
 	const (
 		entryTarget = "gascity/controller"

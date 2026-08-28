@@ -175,10 +175,9 @@ func holdLabelAgreementRows() []agreementRow {
 
 // workflowTopologyAgreementRows is generated from the kind set itself, so a
 // kind added to WorkflowTopologyKinds cannot ship without this property
-// covering it. These carry the CANONICAL route key, which is the shape the
-// field incident took: the root is stamped with gc.routed_to (#2763) and its
-// finalize edge is "tracks" rather than "blocks" (ga-a6zy9), so it stays
-// ready, routed and unassigned from the pour until the run ends.
+// covering it. These carry the CANONICAL route key: a root is stamped with
+// gc.routed_to and its finalize edge is "tracks" rather than "blocks", so it
+// stays ready, routed and unassigned from the pour until the run ends.
 func workflowTopologyAgreementRows() []agreementRow {
 	rows := make([]agreementRow, 0, len(beadmeta.WorkflowTopologyKinds))
 	for _, kind := range beadmeta.WorkflowTopologyKinds {

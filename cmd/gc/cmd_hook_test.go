@@ -823,16 +823,10 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	}
 }
 
-// TestDoHookClaimRefusesLegacyRunTargetWorkflowRoot covers the pre-ga-eld2x
-// root, which records its route on gc.run_target alone. It is refused for the
-// same reason as a root on the canonical key: a workflow root is topology, not
-// work (gc-dz64s). The route key it happens to carry does not change what the
-// bead is.
-//
-// This test previously asserted the claim SUCCEEDED. Serving the legacy form
-// was the last thing gc.run_target did for a claimant, so nothing reaches
-// hookClaimMatchesRoute's legacy arm any more; retiring that arm and the
-// compat query tier that feeds it is tracked separately.
+// TestDoHookClaimRefusesLegacyRunTargetWorkflowRoot covers a root that records
+// its route on gc.run_target alone. A workflow root is topology, not work,
+// whichever key records its route: the route key does not change what the bead
+// is.
 func TestDoHookClaimRefusesLegacyRunTargetWorkflowRoot(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return `[{"id":"hw-legacy","status":"open","metadata":{"gc.kind":"workflow","gc.run_target":"worker"}}]`, nil
@@ -1895,16 +1889,10 @@ esac
 	}
 }
 
-// TestCmdHookServesRoutedWorkButNotWorkflowRoots pins both halves of what
-// gc.routed_to means end to end.
-//
-// The #2763 half (writer-side fix; ga-eld2x): gc.routed_to is the sole
-// persisted routing key, and `gc hook <pool>` surfaces what carries it. Before
-// that fix a graph.v2 run stamped only gc.run_target, which the claim query
-// does not read, so the spawned worker idle-reaped with the work orphaned.
-//
-// The gc-dz64s half: the workflow ROOT carries that key too — it is where the
-// run's route is recorded — but it is topology, not work. It is also never
+// TestCmdHookServesRoutedWorkButNotWorkflowRoots covers both halves end to end.
+// gc.routed_to is the sole persisted routing key, and `gc hook <pool>` surfaces
+// what carries it. The workflow root carries that key too — it is where the
+// run's route is recorded — but it is topology, not work, and it is never
 // blocked, so without a kind-keyed exclusion it stays a ready routed row for
 // the whole run and any worker that frees up mid-run is handed a bead with no
 // executable body instead of a step.
@@ -1951,7 +1939,7 @@ esac
 		t.Fatalf("gc hook did not surface the routed_to graph step: stdout=%q", stdout.String())
 	}
 	if strings.Contains(stdout.String(), `"graph-root"`) {
-		t.Fatalf("REGRESSION gc-dz64s: gc hook surfaced the workflow root as work: stdout=%q", stdout.String())
+		t.Fatalf("gc hook surfaced the workflow root as work; a topology bead must never be served: stdout=%q", stdout.String())
 	}
 }
 

@@ -21,7 +21,7 @@ package main
 //     normalizes to <base> and every raw consumer rejects,
 //   - a workflow-topology bead — a graph.v2 root, a scope latch, a step-spec
 //     sidecar — which carries a route but no executable body, and which the
-//     hook's own filter strips before a worker ever sees it (gc-dz64s).
+//     hook's own filter strips before a worker ever sees it.
 //
 // Each one spawns a seat, the seat's hook reads empty, it drains, and the
 // controller counts the row again on the next tick. Forever.

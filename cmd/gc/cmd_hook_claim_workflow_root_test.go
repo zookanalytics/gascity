@@ -36,10 +36,10 @@ func workflowRootTestClaimOptions() hookClaimOptions {
 	}
 }
 
-// TestHookClaimDoesNotServeWorkflowTopologyBead is the primary gc-dz64s
-// regression: a ready, routed, unassigned topology bead must drain, not claim.
-// The cases are generated from the kind set, so a kind added to
-// WorkflowTopologyKinds cannot ship without this coverage.
+// TestHookClaimDoesNotServeWorkflowTopologyBead holds that a ready, routed,
+// unassigned topology bead must drain, not claim. The cases are generated from
+// the kind set, so a kind added to WorkflowTopologyKinds cannot ship without
+// this coverage.
 func TestHookClaimDoesNotServeWorkflowTopologyBead(t *testing.T) {
 	for _, kind := range beadmeta.WorkflowTopologyKinds {
 		t.Run(kind, func(t *testing.T) {
@@ -62,7 +62,7 @@ func TestHookClaimDoesNotServeWorkflowTopologyBead(t *testing.T) {
 				t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
 			}
 			if result.Action == "work" {
-				t.Fatalf("REGRESSION gc-dz64s: hook served %s bead %q as action=work (reason=%q); a topology bead carries no executable body",
+				t.Fatalf("hook served %s bead %q as action=work (reason=%q); a topology bead carries no executable body",
 					kind, result.BeadID, result.Reason)
 			}
 			if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
@@ -73,9 +73,9 @@ func TestHookClaimDoesNotServeWorkflowTopologyBead(t *testing.T) {
 	}
 }
 
-// TestHookClaimSkipsWorkflowRootAndClaimsFrontierStep is the acceptance
-// criterion recorded on gc-dz64s: the root and its own frontier step are ready
-// in the same batch for the whole run, and the worker must take the step.
+// TestHookClaimSkipsWorkflowRootAndClaimsFrontierStep covers the batch a live
+// run presents: the root and its own frontier step are ready together for the
+// whole run, and the worker must take the step.
 func TestHookClaimSkipsWorkflowRootAndClaimsFrontierStep(t *testing.T) {
 	const (
 		rootID = "gc-qubnz"
