@@ -170,6 +170,37 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+// workflowTopologyKindMatchCondsJQ renders the jq boolean expression that tests
+// whether the gc.kind currently in scope (`.`) is one of the
+// beadmeta.WorkflowTopologyKinds values, e.g. `. == "workflow" or . ==
+// "scope"`. Mirrors holdLabelMatchCondsJQ so the kind set is spelled exactly
+// once.
+func workflowTopologyKindMatchCondsJQ() string {
+	conds := make([]string, len(beadmeta.WorkflowTopologyKinds))
+	for i, kind := range beadmeta.WorkflowTopologyKinds {
+		conds[i] = `. == "` + kind + `"`
+	}
+	return strings.Join(conds, " or ")
+}
+
+// excludeWorkflowTopologyKindsJQClause returns a jq select(...) clause dropping
+// beads whose gc.kind anchors workflow topology — a graph.v2 root, a scope
+// latch, a step-spec sidecar. Such a bead carries a route but no executable
+// body, and it stays ready, routed and unassigned for the whole run.
+//
+// bd has no flag half for this dimension the way --exclude-type and
+// --exclude-label carry the epic and hold ones, so the reader returns the row
+// and something after it has to decline. On the worker side that is Go
+// (cmd/gc's isWorkflowTopologyHookCandidate, applied to work_query output
+// before a candidate is offered). The reconciler count-form has no Go reader
+// behind it — its last stage IS the count — so it carries the exclusion here.
+//
+// An absent or empty gc.kind fails open as ordinary work, matching the Go
+// filter: legacy and hand-created beads carry no kind at all.
+func excludeWorkflowTopologyKindsJQClause() string {
+	return ` | select((` + jqMeta(beadmeta.KindMetadataKey) + ` | (` + workflowTopologyKindMatchCondsJQ() + `)) | not)`
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -354,11 +385,27 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
 }
 
+// poolDemandCountFilterJQ renders the count-form's terminal stage: union the
+// tiers, drop duplicate ids, drop workflow topology, and print how many rows
+// are left.
+func poolDemandCountFilterJQ() string {
+	return shellquote.Join([]string{"jq", "-s", `(add // []) | unique_by(.id) | [ .[]` + excludeWorkflowTopologyKindsJQClause() + ` ] | length`})
+}
+
 // poolDemandCountShell emits the reconciler count-form for target: it counts
 // ready, unassigned, routed demand and prints the array length. It shares the
 // canonical and migration predicates with poolDemandFirstRowFunctionScript so
 // the reconciler's spawn decision and the worker's claim decision read the
 // same demand shape.
+//
+// Three tiers feed the count and every one of them can return a
+// workflow-topology bead: the canonical tier because a graph.v2 root carries
+// gc.routed_to, the migration tier because it selects gc.kind=workflow
+// outright, and the ephemeral tier through its own workflow-root disjunct. A
+// worker is never served one — the hook declines it in Go — so the aggregation
+// applies the same exclusion before counting. Counting a row no worker may
+// claim spawns a seat that reads empty and drains, every tick, for the life of
+// the run.
 //
 // Unlike the work_query probe, this form must NOT redirect the reader's stderr
 // or default to zero: a failed ready read has to surface as an error rather than
@@ -373,7 +420,7 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + poolDemandCountFilterJQ()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 

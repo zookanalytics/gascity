@@ -436,6 +436,48 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	}
 }
 
+// TestCountFormDeclinesEveryKindTheHookRefuses closes the third representation.
+//
+// TestGoPredicateAndGeneratedQueryAgreeRowByRow pins the Go demand predicate
+// against the worker's first-row query PLUS the hook's Go post-filter, because
+// that filter is where the topology dimension is decided. The reconciler's
+// count-form has no Go reader behind it — its last stage is the count — so the
+// rule has to be spelled in its own jq, and nothing in either package would
+// notice if it were not. That gap is the claim-path/count-path split: rows the
+// hook refuses, counted as demand, spawning a seat per tick for the life of the
+// run.
+func TestCountFormDeclinesEveryKindTheHookRefuses(t *testing.T) {
+	agent := config.Agent{Name: "worker", Dir: "rig"}
+	countForm := agent.EffectivePoolDemandQueryFor(config.QueryTopology{})
+
+	// The one restatement, in the style legacyWorkflowTierServes uses for the
+	// migration tier: the count-form's exclusion, spelled from the same kind
+	// set. Requiring the whole disjunction rather than each kind separately is
+	// what keeps an unrelated coincidence in another tier from passing for it.
+	conds := make([]string, len(beadmeta.WorkflowTopologyKinds))
+	for i, kind := range beadmeta.WorkflowTopologyKinds {
+		conds[i] = `. == "` + kind + `"`
+	}
+	if want := strings.Join(conds, " or "); !strings.Contains(countForm, want) {
+		t.Fatalf("count-form does not decline workflow topology: want %q in %q", want, countForm)
+	}
+
+	for _, kind := range beadmeta.WorkflowTopologyKinds {
+		t.Run(kind, func(t *testing.T) {
+			row, err := json.Marshal([]map[string]any{{
+				"id":       "topology-" + kind,
+				"metadata": map[string]string{beadmeta.KindMetadataKey: kind},
+			}})
+			if err != nil {
+				t.Fatalf("encoding row: %v", err)
+			}
+			if workQueryHasReadyWork(filterUnreadyHookCandidates(string(row), time.Now())) {
+				t.Fatalf("the hook serves a %s bead, so the count-form exclusion above would be counting rows a worker CAN take", kind)
+			}
+		})
+	}
+}
+
 // legacyWorkflowTierServes evaluates the generated query's LEGACY workflow-root
 // tier: its own reader flags plus the jq post-filter the builder pipes the
 // result through. That filter keeps only rows whose gc.routed_to is empty, which

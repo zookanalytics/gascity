@@ -2648,7 +2648,12 @@ esac
 	}
 }
 
-func TestEffectivePoolDemandQueryCountsRunTargetOnlyRootDuringMigration(t *testing.T) {
+// TestEffectivePoolDemandQueryDoesNotCountRunTargetOnlyRoot pins the migration
+// tier's contribution to the count. The tier still runs — its bd predicate is
+// pinned by TestPoolDemandPredicateSharedWithWorkQuery — but every row it can
+// return is a gc.kind=workflow root, which the hook refuses to serve, so none
+// of them is capacity demand.
+func TestEffectivePoolDemandQueryDoesNotCountRunTargetOnlyRoot(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; count-form exercises a jq pipeline")
 	}
@@ -2661,15 +2666,15 @@ case "$*" in
     ;;
   *"--metadata-field gc.run_target=hello-world/worker"*"--metadata-field gc.kind=workflow"*|\
   *"--metadata-field gc.kind=workflow"*"--metadata-field gc.run_target=hello-world/worker"*)
-    printf '[{"id":"legacy-root"}]'
+    printf '[{"id":"legacy-root","metadata":{"gc.run_target":"hello-world/worker","gc.kind":"workflow"}}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
 `)
-	if strings.TrimSpace(out) != "1" {
-		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 1 (run_target migration demand)", strings.TrimSpace(out))
+	if strings.TrimSpace(out) != "0" {
+		t.Fatalf("EffectivePoolDemandQuery() count = %q, want 0 (a workflow root is not claimable demand)", strings.TrimSpace(out))
 	}
 }
 

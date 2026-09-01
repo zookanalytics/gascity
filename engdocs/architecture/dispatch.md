@@ -165,7 +165,8 @@ empty `gc.routed_to`. That is an intentional routed-queue policy:
 unassigned routed pool work is FIFO before priority, so newer
 high-priority work does not jump ahead of older ready work already queued
 for the same target. The count form unions canonical and migration
-probes and deduplicates by bead ID before piping through `jq 'length'`.
+probes, deduplicates by bead ID, and drops workflow-topology beads
+(`beadmeta.WorkflowTopologyKinds`) before taking the length.
 Targets resolve to `Agent.PoolName` when set and
 `Agent.QualifiedName()` otherwise, so pool instances and pool templates
 land on the same routed queue.
@@ -262,7 +263,12 @@ regressions.
     `gc.routed_to`; only the worker's first-row form adds native
     `bd ready --sort oldest --limit=1` selection to the canonical probe.
     Any pool-demand predicate change to one (added filter, modified target
-    resolution, new state) MUST be reflected in the other. Diverging the two
+    resolution, new state) MUST be reflected in the other. One dimension has
+    no `bd` flag to share: a workflow-topology bead carries a route but no
+    executable body, and `bd ready` has no predicate that excludes it. The
+    worker gets that exclusion from the hook's Go filter over work_query
+    output; the count form has no reader behind it and so spells the same
+    kind set in its own `jq`. Diverging the two
     re-introduces the protocol-mismatch class — the reconciler
     spawning sessions for work the worker can't claim, or the worker idle
     while new demand sits unspawned. The legacy `workflow-control` fallback is
