@@ -3404,7 +3404,7 @@ class it reads the one store, unchanged.
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
-           --sort oldest --limit 20 --json
+           --sort oldest --limit 0 --json
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -4496,9 +4496,12 @@ instantiate a wisp (ephemeral molecule). A v2 formula that references
 &#123;&#123;convoy_id&#125;&#125; or contains a drain step requires a target convoy: route it
 with gc sling &lt;target&gt; &lt;bead&gt; --on &lt;formula&gt;, or attach it with gc formula
 cook --attach. Formula slings to a pool (multi-session) target are rejected
-unless the compiled root is Ready-visible — a v2 workflow root or a
-root-only wisp. See docs/reference/specs/formula-spec-v2.md for the formula
-format and contract details.
+for a v1 molecule container root: convert it to a root-only wisp, whose root
+is itself the claimable work, or to v2, where the routed worker steps are.
+A v2 workflow root is never claimable: readers skip workflow-topology beads
+by gc.kind. A v2 pour is rejected too when no worker step carries a route.
+See docs/reference/specs/formula-spec-v2.md for the formula format and
+contract details.
 
 Examples:
   gc sling my-rig/claude BL-42              # route existing bead

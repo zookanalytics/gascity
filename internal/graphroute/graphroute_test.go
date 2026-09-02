@@ -400,16 +400,13 @@ func TestDecorateGraphWorkflowRecipe_OwningStoreDoesNotRetargetExplicitWorkerSte
 	}
 }
 
-// TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim locks in the
-// #2763 writer-side fix: a graph.v2 workflow root must persist gc.routed_to —
-// the canonical delivery key every runtime demand/claim/scale reader consults —
-// not gc.run_target alone. Before this, the root stamped only gc.run_target, so
-// a root routed to a pool was spawned-for by scale_check (which reads
-// gc.run_target) but never claimed by the worker (whose query reads
-// gc.routed_to); the work sat unclaimed and was idle-reaped silently. As part of
-// deprecating gc.run_target as a persisted routing field (ga-eld2x), the root is
-// brought onto the same key as every other bead — including its own children.
-func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
+// TestDecorateGraphWorkflowRecipe_RootRecordsRouteOnCanonicalKey pins where a
+// run's route is recorded. A graph.v2 workflow root persists gc.routed_to — the
+// canonical delivery key every runtime demand/claim/scale reader consults — not
+// gc.run_target alone, so the root is on the same key as every other bead, its
+// own children included. Carrying the key is not being claimable: the root is a
+// topology bead and the readers exclude it by gc.kind.
+func TestDecorateGraphWorkflowRecipe_RootRecordsRouteOnCanonicalKey(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{
 		{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		{Name: "control-dispatcher", MaxActiveSessions: intPtr(1)},
@@ -429,7 +426,7 @@ func TestDecorateGraphWorkflowRecipe_RootStampsRoutedToForClaim(t *testing.T) {
 	}
 	root := r.Steps[0]
 	if got := root.Metadata["gc.routed_to"]; got != "mayor" {
-		t.Errorf("root gc.routed_to = %q, want mayor (root must be claimable via the canonical routing key; #2763 / ga-eld2x)", got)
+		t.Errorf("root gc.routed_to = %q, want mayor (the run's route is recorded on the canonical routing key)", got)
 	}
 }
 

@@ -823,21 +823,19 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	}
 }
 
-func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
-	var claimedID string
+// TestDoHookClaimRefusesLegacyRunTargetWorkflowRoot covers a root that records
+// its route on gc.run_target alone. A workflow root is topology, not work,
+// whichever key records its route: the route key does not change what the bead
+// is.
+func TestDoHookClaimRefusesLegacyRunTargetWorkflowRoot(t *testing.T) {
 	runner := func(string, string) (string, error) {
 		return `[{"id":"hw-legacy","status":"open","metadata":{"gc.kind":"workflow","gc.run_target":"worker"}}]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
-		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-			claimedID = beadID
-			return beads.Bead{
-				ID:       beadID,
-				Status:   "in_progress",
-				Assignee: assignee,
-				Metadata: map[string]string{"gc.kind": "workflow", "gc.run_target": "worker"},
-			}, true, nil
+		Claim: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, bool, error) {
+			t.Fatalf("store.Claim called for legacy workflow root %q; a topology bead must never reach the claim mutation", beadID)
+			return beads.Bead{}, false, nil
 		},
 	}
 	opts := hookClaimOptions{
@@ -847,20 +845,17 @@ func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 		JSON:               true,
 	}
 
+	// The exit code is the drain contract's, not this test's subject: an idle
+	// hook drains non-zero so the pool slot recycles.
 	var stdout, stderr bytes.Buffer
-	code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("doHookClaim(run_target) = %d, want 0; stderr=%s", code, stderr.String())
-	}
-	if claimedID != "hw-legacy" {
-		t.Fatalf("claimed ID = %q, want hw-legacy", claimedID)
-	}
+	doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr)
 	var result hookClaimJSONResult
 	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
 		t.Fatalf("stdout is not JSON: %v\nraw: %s", err, stdout.String())
 	}
-	if result.BeadID != "hw-legacy" || result.Route != "worker" {
-		t.Fatalf("unexpected claim result: %+v", result)
+	if result.Action != "drain" || result.Reason != hookClaimReasonNoWork {
+		t.Fatalf("want action=drain reason=%s, got action=%q reason=%q bead=%q",
+			hookClaimReasonNoWork, result.Action, result.Reason, result.BeadID)
 	}
 }
 
@@ -1894,13 +1889,14 @@ esac
 	}
 }
 
-// TestCmdHookClaimsRoutedToRoot is the #2763 end-to-end regression (writer-side
-// fix; ga-eld2x): a graph.v2 workflow root routed to a pool stamps gc.routed_to
-// — the sole persisted routing key — and `gc hook <pool>` must surface it via
-// the worker claim query. Before the writer fix the root stamped only
-// gc.run_target, which the claim query does not read, so the routed root was
-// never claimed and the spawned worker idle-reaped with the work orphaned.
-func TestCmdHookClaimsRoutedToRoot(t *testing.T) {
+// TestCmdHookServesRoutedWorkButNotWorkflowRoots covers both halves end to end.
+// gc.routed_to is the sole persisted routing key, and `gc hook <pool>` surfaces
+// what carries it. The workflow root carries that key too — it is where the
+// run's route is recorded — but it is topology, not work, and it is never
+// blocked, so without a kind-keyed exclusion it stays a ready routed row for
+// the whole run and any worker that frees up mid-run is handed a bead with no
+// executable body instead of a step.
+func TestCmdHookServesRoutedWorkButNotWorkflowRoots(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 	clearInheritedCityRoutingEnv(t)
 	cityDir := t.TempDir()
@@ -1917,10 +1913,12 @@ name = "worker"
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Fake bd returns the routed root only for the gc.routed_to predicate.
+	// Fake bd returns both rows of a live graph.v2 run — the workflow root and
+	// its frontier step — for the gc.routed_to predicate, which is the state
+	// the store is in from the pour until the run ends.
 	script := `#!/bin/sh
 case "$*" in
-  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"graph-root","title":"routed work"}]' ;;
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"graph-root","title":"mol-example","metadata":{"gc.kind":"workflow","gc.routed_to":"worker"}},{"id":"graph-step","title":"routed work","metadata":{"gc.routed_to":"worker"}}]' ;;
   *) printf '[]' ;;
 esac
 `
@@ -1937,8 +1935,11 @@ esac
 	if code != 0 {
 		t.Fatalf("cmdHook(worker) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"graph-root"`) {
-		t.Fatalf("gc hook did not surface the routed_to graph root: stdout=%q", stdout.String())
+	if !strings.Contains(stdout.String(), `"graph-step"`) {
+		t.Fatalf("gc hook did not surface the routed_to graph step: stdout=%q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), `"graph-root"`) {
+		t.Fatalf("gc hook surfaced the workflow root as work; a topology bead must never be served: stdout=%q", stdout.String())
 	}
 }
 

@@ -1328,7 +1328,13 @@ func TestDefaultScaleCheckCountsCountsUnassignedRoutedTaskWisp(t *testing.T) {
 	}
 }
 
-func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *testing.T) {
+// TestDefaultScaleCheckCountsSkipsRunTargetOnlyWorkflowRoot holds the demand
+// side against a root whose route is recorded on gc.run_target alone. A
+// workflow root carries no executable body and stays ready for the whole run,
+// so a seat spawned for it reads empty and drains, and the row is counted again
+// every tick. A graph.v2 run's demand comes from its steps, which are routed
+// and unblocked from the pour.
+func TestDefaultScaleCheckCountsSkipsRunTargetOnlyWorkflowRoot(t *testing.T) {
 	const template = "gascity/reviewer"
 	backing := beads.NewMemStore()
 	if _, err := backing.Create(beads.Bead{
@@ -1355,8 +1361,8 @@ func TestDefaultScaleCheckCountsCountsRunTargetOnlyWorkflowDuringMigration(t *te
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
 	}
-	if got := counts[template]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", template, got)
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (a workflow root is topology, not demand)", template, got)
 	}
 }
 
@@ -1397,7 +1403,10 @@ func TestDefaultScaleCheckCountsIgnoresRunTargetOnNonWorkflowDivergentWork(t *te
 	}
 }
 
-func TestDefaultScaleCheckCountsIgnoresRunTargetWhenWorkflowRoutedToPresent(t *testing.T) {
+// TestDefaultScaleCheckCountsSkipsWorkflowRootOnEitherRouteKey holds the same
+// against a root carrying both keys: gc.kind decides before either route key,
+// so such a root is demand for neither target.
+func TestDefaultScaleCheckCountsSkipsWorkflowRootOnEitherRouteKey(t *testing.T) {
 	const (
 		entryTarget = "gascity/controller"
 		staleTarget = "gascity/reviewer"
@@ -1427,11 +1436,11 @@ func TestDefaultScaleCheckCountsIgnoresRunTargetWhenWorkflowRoutedToPresent(t *t
 	if len(errs) != 0 {
 		t.Fatalf("defaultScaleCheckCounts errs = %v", errs)
 	}
-	if got := counts[entryTarget]; got != 1 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 1", entryTarget, got)
+	if got := counts[entryTarget]; got != 0 {
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (gc.routed_to does not make a workflow root demand)", entryTarget, got)
 	}
 	if got := counts[staleTarget]; got != 0 {
-		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0", staleTarget, got)
+		t.Fatalf("defaultScaleCheckCounts[%q] = %d, want 0 (nor does a stale gc.run_target)", staleTarget, got)
 	}
 }
 

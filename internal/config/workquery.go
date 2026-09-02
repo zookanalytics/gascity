@@ -170,6 +170,37 @@ func jqMeta(key string) string {
 	return `(.metadata["` + key + `"] // "")`
 }
 
+// workflowTopologyKindMatchCondsJQ renders the jq boolean expression that tests
+// whether the gc.kind currently in scope (`.`) is one of the
+// beadmeta.WorkflowTopologyKinds values, e.g. `. == "workflow" or . ==
+// "scope"`. Mirrors holdLabelMatchCondsJQ so the kind set is spelled exactly
+// once.
+func workflowTopologyKindMatchCondsJQ() string {
+	conds := make([]string, len(beadmeta.WorkflowTopologyKinds))
+	for i, kind := range beadmeta.WorkflowTopologyKinds {
+		conds[i] = `. == "` + kind + `"`
+	}
+	return strings.Join(conds, " or ")
+}
+
+// excludeWorkflowTopologyKindsJQClause returns a jq select(...) clause dropping
+// beads whose gc.kind anchors workflow topology — a graph.v2 root, a scope
+// latch, a step-spec sidecar. Such a bead carries a route but no executable
+// body, and it stays ready, routed and unassigned for the whole run.
+//
+// bd has no flag half for this dimension the way --exclude-type and
+// --exclude-label carry the epic and hold ones, so the reader returns the row
+// and something after it has to decline. On the worker side that is Go
+// (cmd/gc's isWorkflowTopologyHookCandidate, applied to work_query output
+// before a candidate is offered). The reconciler count-form has no Go reader
+// behind it — its last stage IS the count — so it carries the exclusion here.
+//
+// An absent or empty gc.kind fails open as ordinary work, matching the Go
+// filter: legacy and hand-created beads carry no kind at all.
+func excludeWorkflowTopologyKindsJQClause() string {
+	return ` | select((` + jqMeta(beadmeta.KindMetadataKey) + ` | (` + workflowTopologyKindMatchCondsJQ() + `)) | not)`
+}
+
 // PoolDemandServeRules names, in Go, exactly what the generated Tier-3
 // pool-demand query will and will not serve a worker for a template.
 //
@@ -230,17 +261,23 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
 // graph.v2 workflow roots created before gc.routed_to root stamping shipped.
 // It is scoped to workflow roots so gc.run_target remains an authoring hint
-// everywhere else. Callers must pass its output through
-// poolDemandMigrationFilterJQ so a stale divergent gc.run_target cannot remain
-// visible once a root carries gc.routed_to. This retirement-window fallback
+// everywhere else. Its callers pass the rows through a stage that drops any row
+// whose root has since been stamped with gc.routed_to — the canonical tier's row,
+// not this one's. Every row it can return is a workflow root, so the worker's
+// stage declines all of them and the tier's whole worker-side effect is to fall
+// through to the ephemeral tier behind it. This retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
 func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
 	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
+// poolDemandMigrationFilterJQ renders the count form's migration stage. The
+// worker form uses poolDemandTierFilterJQ instead: it has to decline topology
+// per tier so the tiers behind it stay reachable, while the count form applies
+// that exclusion once over the union of all three (poolDemandCountFilterJQ).
 func poolDemandMigrationFilterJQ(limit int) string {
-	filter := `[.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")]`
+	filter := `[.[] | ` + migrationTierSelectorJQ() + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -328,30 +365,96 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, quiet bool) s
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
 func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
-	fed := topo.FederatedReady
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(fed) + `; ` +
+		poolDemandRoutedTierRead(topo) + `; ` +
+		`r=$(printf "%s" "$routed_candidates" | ` + poolDemandTierFilterJQ("", routedReadyTierWindow) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed) + `; ` +
-		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
+		poolDemandMigrationTierRead(topo) + `; ` +
+		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandTierFilterJQ(migrationTierSelectorJQ(), 1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(20, topo, true) + `); ` +
-		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
+		`legacy_ephemeral_candidates=$(` + legacyEphemeralPoolDemandShell(0, topo, true) + `); ` +
+		`r=$(printf "%s" "$legacy_ephemeral_candidates" | ` + poolDemandTierFilterJQ("", 1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
 		`}; `
 }
 
+// poolDemandRoutedTierRead and poolDemandMigrationTierRead render the worker
+// probe's two `bd ready` reads, each with the stderr sink and failure clause its
+// reader carries. The federated parity guard renormalizes both forms from these
+// builders rather than from pasted bytes, which is what lets a reader's clause
+// change without the guard having to be re-typed alongside it
+// (workquery_parity_test.go's renormalizeFederatedCommand).
+func poolDemandRoutedTierRead(topo QueryTopology) string {
+	return `routed_candidates=$(` + routedReadyTierCommand(topo) + `)` + readyReaderFailurePropagation(topo.FederatedReady)
+}
+
+func poolDemandMigrationTierRead(topo QueryTopology) string {
+	fed := topo.FederatedReady
+	return `legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + readyReaderStderrSink(fed) + `)` + readyReaderFailurePropagation(fed)
+}
+
+// poolDemandTierFilterJQ renders the stage a worker-side pool-demand tier
+// passes its reader's rows through: the tier's own selector, then the workflow
+// topology exclusion, then the window. selector may be empty for a tier whose
+// reader already expresses its whole predicate.
+//
+// The order is the contract. A tier that returns only topology has returned
+// nothing a worker can claim — the hook refuses every such row — but the tier's
+// emptiness test cannot see that, so it short-circuits the tiers behind it and
+// hands the hook a page it must discard. Excluding before the test lets the
+// tier fall through instead.
+//
+// Windowing last is the other half. A window applied by the reader is spent on
+// rows this stage then drops, so a run of routed roots at the head of the queue
+// hides every claimable row behind them: the hook drains while the count form,
+// which reads every row and excludes the same class, keeps reporting demand and
+// spawning seats that drain on the same page. Both sides now read the whole
+// routed queue and decline the same rows, which is what keeps the reconciler's
+// spawn decision and the worker's claim decision on one demand shape.
+func poolDemandTierFilterJQ(selector string, limit int) string {
+	body := `.[]`
+	if selector != "" {
+		body += ` | ` + selector
+	}
+	filter := `[` + body + excludeWorkflowTopologyKindsJQClause() + `]`
+	if limit > 0 {
+		filter += ` | .[:` + strconv.Itoa(limit) + `]`
+	}
+	return shellquote.Join([]string{"jq", "-c", filter})
+}
+
+// migrationTierSelectorJQ is the migration tier's own predicate: a root that has
+// since been stamped with the canonical routing key is the canonical tier's row,
+// not this one's.
+func migrationTierSelectorJQ() string {
+	return `select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "")`
+}
+
+// routedReadyTierWindow is how many candidate rows the worker's canonical
+// routed tier hands the hook. The tier is widened past a single row so a
+// self-blocked head (is_blocked / status==blocked) has Ready routed work behind
+// it to fall through to instead of idle-exiting; the hook layer
+// (filterUnreadyHookCandidates) strips the blocked head from the result.
+const routedReadyTierWindow = 20
+
 func routedReadyTierCommand(topo QueryTopology) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path asks the reader for the oldest
-	// candidates. The tier is widened past a single row (limit=20, not limit=1)
-	// so a self-blocked head (is_blocked / status==blocked) has Ready routed work
-	// behind it to fall through to instead of idle-exiting; the hook layer
-	// (filterUnreadyHookCandidates) strips the blocked head from the result.
-	return bdReadyPoolDemandShell("--sort oldest --limit=20", topo) + readyReaderStderrSink(topo.FederatedReady)
+	// candidates. It asks the reader for all of them and lets
+	// poolDemandTierFilterJQ take the window after the topology exclusion, so a
+	// run of routed roots at the head of the queue cannot spend it. That is the
+	// same unbounded read the count form makes over this predicate.
+	return bdReadyPoolDemandShell("--sort oldest --limit 0", topo) + readyReaderStderrSink(topo.FederatedReady)
+}
+
+// poolDemandCountFilterJQ renders the count-form's terminal stage: union the
+// tiers, drop duplicate ids, drop workflow topology, and print how many rows
+// are left.
+func poolDemandCountFilterJQ() string {
+	return shellquote.Join([]string{"jq", "-s", `(add // []) | unique_by(.id) | [ .[]` + excludeWorkflowTopologyKindsJQClause() + ` ] | length`})
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -359,6 +462,15 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // canonical and migration predicates with poolDemandFirstRowFunctionScript so
 // the reconciler's spawn decision and the worker's claim decision read the
 // same demand shape.
+//
+// Three tiers feed the count and every one of them can return a
+// workflow-topology bead: the canonical tier because a graph.v2 root carries
+// gc.routed_to, the migration tier because it selects gc.kind=workflow
+// outright, and the ephemeral tier through its own workflow-root disjunct. A
+// worker is never served one — the hook declines it in Go — so the aggregation
+// applies the same exclusion before counting. Counting a row no worker may
+// claim spawns a seat that reads empty and drains, every tick, for the life of
+// the run.
 //
 // Unlike the work_query probe, this form must NOT redirect the reader's stderr
 // or default to zero: a failed ready read has to surface as an error rather than
@@ -373,7 +485,7 @@ func poolDemandCountShell(target string, topo QueryTopology) string {
 		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(` + legacyEphemeralPoolDemandShell(0, topo, false) + `); ` +
-		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | jq -s "(add // []) | unique_by(.id) | length"`
+		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + poolDemandCountFilterJQ()
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
 

@@ -55,8 +55,8 @@ each makes a different thing the engine.
 that contains its step beads as parent-child children, so a step that needs
 the root waits for all of them. Right, v2: a workflow root plus independent
 step beads linked only by blocking-dependency edges, ending in a
-workflow-finalize step that the root blocks on — the root goes ready only
-when the whole graph completes.](/diagrams/excalidraw-rendered/formula-v1-vs-v2.svg)
+workflow-finalize step the root only tracks. The root stays ready for the
+whole run, and readers skip it by gc.kind.](/diagrams/excalidraw-rendered/formula-v1-vs-v2.svg)
 
 For new work, choose v2. The opt-in is one table:
 
@@ -122,7 +122,7 @@ The outcome follows from the contract, not from a separate choice:
 |---|---|---|---|
 | Single-bead run | v1, no steps (`phase = "vapor"`) | No — steps stay in the recipe | Yes — the root is the work |
 | v1 run with steps | v1 with steps (a *molecule*: container root + step children) | Yes, as children | No — the root is a container |
-| v2 workflow | v2 | Yes, independently routable | No — the root blocks on finalize |
+| v2 workflow | v2 | Yes, independently routable | No — readers skip the root by `gc.kind` |
 
 <Accordion title="Visibility, routing, and cleanup tradeoffs">
 - **Visibility.** Materialized steps are real beads you can list, show, and
@@ -767,9 +767,11 @@ An order names a formula *or* an `exec` shell command, never both —
 deterministic maintenance belongs in `exec`, judgment work in a formula.
 Triggers are `cooldown`, `cron`, `condition`, `event`, or `manual`. When the
 trigger fires, the orchestrator instantiates the formula and routes it to the
-pool. As with sling, a pool wakes only for Ready-visible roots, so order
-formulas routed to pools should be v2 (the dispatcher warns otherwise). Test
-any order with `gc order run <name>`, which bypasses the trigger.
+pool. As with sling, a pool wakes only for Ready-visible work. For a v2
+workflow that work is the routed steps, never the root, which readers skip by
+`gc.kind`. Order formulas routed to pools should be v2 (the dispatcher warns
+otherwise). Test any order with `gc order run <name>`, which bypasses the
+trigger.
 
 See the [orders tutorial](/tutorials/07-orders) for triggers, layering, and
 overrides.

@@ -109,13 +109,22 @@ var StructuralGraphKinds = []string{
 }
 
 // WorkflowTopologyKinds lists kinds that anchor workflow topology (root
-// workflow, scope latch, formula spec). Routing never lands on these; agents
-// must never claim them. graphroute.IsWorkflowTopologyKind derives from this
-// set.
+// workflow, scope latch, formula spec). A topology bead is never claimable
+// work and never counts as pool demand. Carrying a route is not the same as
+// being claimable: the workflow root records gc.routed_to to name the run,
+// so every reader that serves or counts work excludes these by gc.kind
+// rather than by the absence of a route.
+// graphroute.IsWorkflowTopologyKind derives from this set.
 var WorkflowTopologyKinds = []string{
 	KindWorkflow,
 	KindScope,
 	KindSpec,
+}
+
+// IsWorkflowTopologyKind reports whether kind is a member of
+// WorkflowTopologyKinds.
+func IsWorkflowTopologyKind(kind string) bool {
+	return slices.Contains(WorkflowTopologyKinds, kind)
 }
 
 // GraphContractMetadataKinds lists the gc.kind values that, when HAND-WRITTEN

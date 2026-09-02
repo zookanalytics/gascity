@@ -79,7 +79,7 @@ The execution model is the structural difference from v1:
 | Runtime engine | None. Conditions and loops resolve at cook time; afterwards the molecule is inert data | The orchestrator's control dispatcher executes every control bead — check and retry evaluation, fan-out, drain, scope checks, workflow-finalize |
 | Who advances work | Agents working hooked beads, inside their own sessions | The orchestrator drives orchestration outside any agent session; agents only run plain work beads |
 | Agent fan-out | The molecule is typically worked by the one agent it is slung to; spreading steps across agents is manual routing | Step beads are independently routable; per-step routing intent resolves at dispatch, and `drain` / `on_complete` fan out across agents or pools at runtime |
-| Root visibility | The container root is the molecule's handle | The root blocks on `workflow-finalize` and only becomes Ready when the workflow completes (section 2) |
+| Root visibility | The container root is the molecule's handle | The root tracks `workflow-finalize` on a non-blocking edge, so it stays Ready for the whole run; readers exclude it by `gc.kind`, so it is never served to an agent (section 2) |
 
 A minimal v2 formula:
 
@@ -531,13 +531,21 @@ The v2 compiler must emit a flat, topologically ordered graph:
   terminal. Steps carrying `gc.scope_role = "teardown"` are excluded from
   the sink set: teardown runs after the workflow settles (section 3.5), so
   gating settlement on it would deadlock the run.
-- **The root blocks on the finalize step.** The workflow root bead is made
-  to depend on `workflow-finalize` (or, when a recipe has no finalize step,
-  on every step whose `gc.kind` is not one of the generated `run`, `check`,
-  `retry-run`, `retry-eval`, or `spec` kinds).
-  Consequence: the root is never Ready-visible while the workflow runs and
-  only surfaces when the workflow completes. Step beads — not the root —
-  are the Ready-visible work that wakes agents and pools.
+- **The root tracks the finalize step.** The workflow root bead depends on
+  `workflow-finalize` through an informational `tracks` edge, never a blocking
+  one: `workflow-finalize` is the bead that closes the root, so a blocking edge
+  would leave the root permanently unclosable (section 3, close-ownership
+  invariant). Ordering does not need the edge — the finalize step already
+  blocks on every sink. When a recipe has no finalize step, the root blocks on
+  every step whose `gc.kind` is not one of the generated `run`, `check`,
+  `retry-run`, `retry-eval`, or `spec` kinds.
+  Consequence: a root with a finalize step stays Ready, routed and unassigned
+  for the whole run. It is still never claimable work: a bead whose `gc.kind`
+  is a workflow-topology kind (`workflow`, `scope`, `spec`) is excluded by the
+  readers rather than by its readiness — a worker's hook drops it from its
+  candidates and refuses to claim it, and pool-demand counting skips it — so a
+  root never wakes a pool or reaches an agent. Step beads — not the root — are
+  the Ready-visible work that wakes agents and pools.
 - **Non-blocking `tracks` edges to the root.** Batch instantiation connects
   every non-root node to the root with a `tracks` edge so cascade deletion
   from the root discovers all workflow beads without making the root a

@@ -11,14 +11,15 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// runTargetRoutedToBackfillCheck repairs graph.v2 workflow roots created before
-// ga-eld2x, which carry gc.run_target but no gc.routed_to. gc.run_target is
-// being deprecated as a persisted routing field; once the runtime
-// demand/claim/scale readers consult only gc.routed_to, such a root is
-// spawned-for by scale_check but unclaimable by the worker and silently
-// idle-reaped (the #2763 failure). --fix backfills gc.routed_to := gc.run_target
-// so the root is claimable via the canonical key. The check is idempotent: a
-// root that already carries gc.routed_to, and any bead that is not a workflow
+// runTargetRoutedToBackfillCheck repairs graph.v2 workflow roots that carry
+// gc.run_target but no gc.routed_to. gc.run_target is being deprecated as a
+// persisted routing field, and a root that records its run's route only there
+// is legible solely through the legacy compatibility tier that exists to be
+// retired. --fix backfills gc.routed_to := gc.run_target so the route is
+// recorded on the canonical key. The root itself stays unclaimable either way —
+// readers exclude a topology bead by gc.kind — so this moves where the run's
+// route is read from, not whether the root is served. The check is idempotent:
+// a root that already carries gc.routed_to, and any bead that is not a workflow
 // root, is left untouched.
 type runTargetRoutedToBackfillCheck struct {
 	cfg      *config.City
@@ -63,11 +64,9 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		// Workflow roots are the only pool-routed persisted beads that need
-		// gc.routed_to backfilled to stay claimable. Control-dispatcher and
-		// topology beads can also carry bare gc.run_target, but they are not
-		// claimed through the pool-demand gc.routed_to path. A targeted metadata
-		// query avoids a full-store scan.
+		// Only gc.kind=workflow roots are backfilled. Scope, spec, and
+		// control-dispatcher beads can carry a bare gc.run_target too, but none
+		// of them is dispatched through the pool-demand gc.routed_to path.
 		items, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
