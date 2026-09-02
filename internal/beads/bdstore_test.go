@@ -4313,6 +4313,87 @@ func TestBdStoreDepListBatchKeepsMultiAnchorSpelling(t *testing.T) {
 	}
 }
 
+// TestBdStoreDepListDownUndoesTheRepeatedAnchor holds the cost of the repeat.
+// Only bd 1.2 and later collapse a repeated anchor before answering; the
+// minimum bd this repo admits (cmd/gc init_provider_readiness.go bdMinVersion,
+// deps.env BD_PREV_VERSION) answers `dep list X X` with every edge of X twice.
+// The repeat is a spelling this reader chose, so undoing it is this reader's
+// job — not the caller's, and not a version of bd it may not be talking to.
+func TestBdStoreDepListDownUndoesTheRepeatedAnchor(t *testing.T) {
+	edges := `{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+		`{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[` + edges + `,` + edges + `]`)},
+	})
+	s := beads.NewBdStore("/city", runner)
+	deps, err := s.DepList("bd-42", "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"},
+	}
+	if len(deps) != len(want) {
+		t.Fatalf("DepList = %+v, want each edge once: %+v", deps, want)
+	}
+	for i := range want {
+		if deps[i] != want[i] {
+			t.Errorf("DepList[%d] = %+v, want %+v", i, deps[i], want[i])
+		}
+	}
+}
+
+// TestBdStoreDepListBatchUndoesTheRepeatedAnchor holds the same on the batch
+// reader, which reaches the record shape for a lone anchor the same way.
+func TestBdStoreDepListBatchUndoesTheRepeatedAnchor(t *testing.T) {
+	edge := `{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[` + edge + `,` + edge + `]`)},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["bd-42"]) != 1 {
+		t.Fatalf("DepListBatch[bd-42] = %+v, want the edge once", got["bd-42"])
+	}
+}
+
+// TestBdStoreDepListBatchKeepsDistinctAnchorEdges pins the other side of the
+// de-duplication: it must collapse only the repeat this reader introduced, so
+// two anchors that genuinely share a target keep both edges.
+func TestBdStoreDepListBatchKeepsDistinctAnchorEdges(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-43 --json`: {
+			out: []byte(`[` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+				`{"issue_id":"bd-43","depends_on_id":"bd-41","type":"blocks"}` +
+				`]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42", "bd-43"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"bd-42", "bd-43"} {
+		if len(got[id]) != 1 {
+			t.Errorf("DepListBatch[%s] = %+v, want its own edge to bd-41", id, got[id])
+		}
+	}
+}
+
 func TestExecCommandRunnerWithEnvOverridesInheritedValues(t *testing.T) {
 	t.Setenv("GC_CITY_PATH", "/wrong")
 	t.Setenv("GC_DOLT_PORT", "9999")

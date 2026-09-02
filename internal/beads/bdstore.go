@@ -3133,21 +3133,50 @@ type bdDepRecord struct {
 //
 // A cross-store edge is exactly what the first shape loses, and it loses it in
 // silence: `bd dep add` succeeded, the row is in the dependency table, and the
-// read reports no edge at all. So a lone anchor is spelled twice. bd
-// de-duplicates anchors before answering, so the repeat yields each anchor's
-// edges once and costs nothing; bd's own dropped-edge warning prescribes this
-// same spelling.
-func bdDepListEdgeRecordArgs(ids []string) []string {
-	args := append([]string{"dep", "list"}, ids...)
+// read reports no edge at all. So a lone anchor is spelled twice, which is the
+// spelling bd's own dropped-edge warning prescribes. anchorRepeated reports
+// whether that happened, because the repeat has to be undone on the way back:
+// see dedupeBdDepRecords.
+func bdDepListEdgeRecordArgs(ids []string) (args []string, anchorRepeated bool) {
+	args = append([]string{"dep", "list"}, ids...)
 	if len(ids) == 1 {
 		args = append(args, ids[0])
+		anchorRepeated = true
 	}
-	return append(args, "--json")
+	return append(args, "--json"), anchorRepeated
+}
+
+// dedupeBdDepRecords collapses the duplicate rows a repeated anchor produces.
+//
+// Whether bd collapses a repeated anchor itself varies across the versions this
+// repo supports. Recent bd does. The oldest bd admitted by bdMinVersion in
+// cmd/gc/init_provider_readiness.go and BD_PREV_VERSION in deps.env does not:
+// it answers `dep list X X` with every edge of X twice. A reader that left the
+// collapsing to bd would therefore report every dependency twice against a
+// supported bd, and CachingStore would cache the duplicates.
+//
+// The repeat is a spelling this reader chose, so undoing it is this reader's
+// job. It runs only on the repeated call: a genuine multi-anchor answer holds
+// one row per edge already, and collapsing rows there would be this reader
+// second-guessing the dependency table.
+func dedupeBdDepRecords(records []bdDepRecord) []bdDepRecord {
+	seen := make(map[bdDepRecord]struct{}, len(records))
+	out := make([]bdDepRecord, 0, len(records))
+	for _, rec := range records {
+		if _, dup := seen[rec]; dup {
+			continue
+		}
+		seen[rec] = struct{}{}
+		out = append(out, rec)
+	}
+	return out
 }
 
 // parseBdDepRecords decodes the edge-record shape, defaulting an edge that
-// carries no type to "blocks" the way bd's own schema does.
-func parseBdDepRecords(out []byte) ([]bdDepRecord, error) {
+// carries no type to "blocks" the way bd's own schema does. The type default is
+// applied before any de-duplication, so a typeless row and its defaulted twin
+// compare equal.
+func parseBdDepRecords(out []byte, anchorRepeated bool) ([]bdDepRecord, error) {
 	extracted := extractJSON(out)
 	if len(extracted) == 0 || string(extracted) == "[]" {
 		return nil, nil
@@ -3160,6 +3189,9 @@ func parseBdDepRecords(out []byte) ([]bdDepRecord, error) {
 		if records[i].Type == "" {
 			records[i].Type = "blocks"
 		}
+	}
+	if anchorRepeated {
+		records = dedupeBdDepRecords(records)
 	}
 	return records, nil
 }
@@ -3214,7 +3246,8 @@ func (s *BdStore) depListUp(id string) ([]Dep, error) {
 // reported as the CALLER spelled it — DepList's long-standing contract, which a
 // short id resolved by bd would otherwise silently restate.
 func (s *BdStore) depListDown(id string) ([]Dep, error) {
-	out, err := s.runBDTransientRead(bdDepListEdgeRecordArgs([]string{id})...)
+	args, anchorRepeated := bdDepListEdgeRecordArgs([]string{id})
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -3222,7 +3255,7 @@ func (s *BdStore) depListDown(id string) ([]Dep, error) {
 		}
 		return nil, fmt.Errorf("listing deps for %q: %w", id, err)
 	}
-	records, err := parseBdDepRecords(out)
+	records, err := parseBdDepRecords(out, anchorRepeated)
 	if err != nil {
 		return nil, fmt.Errorf("bd dep list: parsing JSON: %w", err)
 	}
@@ -3247,14 +3280,15 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	out, err := s.runBDTransientRead(bdDepListEdgeRecordArgs(ids)...)
+	args, anchorRepeated := bdDepListEdgeRecordArgs(ids)
+	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)
 	}
-	records, err := parseBdDepRecords(out)
+	records, err := parseBdDepRecords(out, anchorRepeated)
 	if err != nil {
 		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
 	}
