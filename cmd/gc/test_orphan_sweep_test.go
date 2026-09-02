@@ -32,9 +32,11 @@ const (
 	testAliveSentinelName = ".gc-test-alive.lock"
 )
 
-// testOrphanSweepMinAge is the minimum age before a PID-prefixed dir becomes
-// a sweep candidate. It closes the window where a sibling run has created its
-// dir but not yet acquired the alive sentinel.
+// testOrphanSweepMinAge is how long a dir whose liveness cannot be settled
+// from its own contents is left alone. It covers the window where a sibling
+// run has created its dir but not yet acquired the alive sentinel. A dir that
+// carries both the sentinel and the active-root marker is not ambiguous and
+// does not wait this out; see sweepOrphanPIDPrefixedDirs.
 const testOrphanSweepMinAge = time.Hour
 
 // holdAliveSentinel creates <dir>/.gc-test-alive.lock and takes an exclusive
@@ -75,9 +77,15 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 // createActiveTestTempRoot sweeps stale prefix-matching roots under the
 // inherited temp dir (honoring TMPDIR rather than hardcoding /tmp, so gate
 // runners can isolate concurrent runs), creates this process's test temp
-// root there, writes the active-root marker, and acquires the alive sentinel
-// lock. The caller must keep the returned file referenced for the lifetime
+// root there, acquires the alive sentinel lock, and writes the active-root
+// marker. The caller must keep the returned file referenced for the lifetime
 // of the process so the flock is not released by a finalizer.
+//
+// The marker is written last on purpose, and sweepOrphanPIDPrefixedDirs
+// depends on that order: a marker can only exist once the flock was held, so
+// a marker beside a free sentinel proves the owner is gone rather than still
+// starting up. That is what lets the sweep reclaim a dead root immediately
+// instead of waiting out testOrphanSweepMinAge.
 func createActiveTestTempRoot(prefix string) (string, *os.File, error) {
 	parent := os.TempDir()
 	sweepOrphanPIDPrefixedDirs(parent, prefix)
@@ -85,16 +93,24 @@ func createActiveTestTempRoot(prefix string) (string, *os.File, error) {
 	if err != nil {
 		return "", nil, fmt.Errorf("creating test temp root under %q: %w", parent, err)
 	}
-	if err := os.WriteFile(filepath.Join(root, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
-		_ = os.RemoveAll(root)
-		return "", nil, fmt.Errorf("writing active test temp root marker: %w", err)
-	}
 	sentinel, err := holdAliveSentinel(root)
 	if err != nil {
 		_ = os.RemoveAll(root)
 		return "", nil, err
 	}
+	if err := os.WriteFile(filepath.Join(root, testActiveTempRootMarker), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o644); err != nil {
+		_ = sentinel.Close()
+		_ = os.RemoveAll(root)
+		return "", nil, fmt.Errorf("writing active test temp root marker: %w", err)
+	}
 	return root, sentinel, nil
+}
+
+// hasActiveTempRootMarker reports whether dir carries the active-root marker,
+// which createActiveTestTempRoot writes only after taking the alive sentinel.
+func hasActiveTempRootMarker(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, testActiveTempRootMarker))
+	return err == nil
 }
 
 func pidPrefixedTempPattern(prefix string) string {
@@ -138,10 +154,12 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 // Liveness is decided by the alive sentinel flock when present: flock state
 // is visible across PID namespaces, whereas pidAlive reports every host PID
 // as dead from inside a bwrap --unshare-pid sandbox that shares the host
-// /tmp (ga-djbcqt). PID liveness and the active-root marker are only a
-// fallback for legacy dirs without a sentinel. Dirs younger than
-// testOrphanSweepMinAge are never touched, covering the window before a
-// sibling run's sentinel exists.
+// /tmp (ga-djbcqt). A free sentinel next to the active-root marker settles
+// death outright, because createActiveTestTempRoot writes that marker only
+// once the flock is held; such a dir is removed at any age. Every other
+// shape is ambiguous — the owner may be mid-setup — so it must age past
+// testOrphanSweepMinAge first, and a dir with no sentinel at all then falls
+// back to PID liveness and the marker.
 func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -158,35 +176,54 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < testOrphanSweepMinAge {
+		if err != nil {
 			continue
 		}
 		path := filepath.Join(root, e.Name())
 		exists, held := aliveSentinelHeld(path)
-		var reason string
-		switch {
-		case held:
+		if held {
 			// Creator (possibly in another PID namespace) is still alive.
 			continue
+		}
+		aged := now.Sub(info.ModTime()) >= testOrphanSweepMinAge
+		// An empty reason marks a removal that needs no announcement. Only the
+		// shapes whose liveness was inferred get named on stderr, because those
+		// are the ones that could have reaped a live dir.
+		var reason string
+		switch {
+		case exists && hasActiveTempRootMarker(path):
+			// createActiveTestTempRoot takes the flock before writing the
+			// marker, so this pair describes a run that finished starting up
+			// and has since died. No startup race is left to guard, so the
+			// age guard does not apply and the root is reclaimed now. Death is
+			// proven rather than inferred, and this is the shape nearly every
+			// reclaim takes, so it stays silent: a subprocess inherits stderr,
+			// and tests that assert on a child's output read the announcement
+			// as the child's own.
+		case !aged:
+			// Not provably dead and younger than the guard: the owner may
+			// still be between MkdirTemp and its flock.
+			continue
 		case exists:
-			// Sentinel present but unlocked: the creator is gone. Remove
-			// even though the active-root marker is still there — crashed
-			// runs never clear their marker.
-			reason = "free sentinel"
+			// A sentinel with no marker: setup never finished. The age guard
+			// above has cleared the startup window, so the owner is gone.
+			reason = "free sentinel, setup incomplete"
 		default:
 			// Legacy dir without a sentinel: fall back to PID liveness and
 			// the active-root marker.
 			if pidAlive(pid) {
 				continue
 			}
-			if _, err := os.Stat(filepath.Join(path, testActiveTempRootMarker)); err == nil {
+			if hasActiveTempRootMarker(path) {
 				continue
 			}
 			reason = "legacy: pid dead, no active marker"
 		}
-		// Name each removal so a recurrence of ga-djbcqt is attributable
-		// from run logs instead of gate-log forensics.
-		fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
+		if reason != "" {
+			// Name each inferred removal so a recurrence of ga-djbcqt is
+			// attributable from run logs instead of gate-log forensics.
+			fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
+		}
 		_ = os.RemoveAll(path)
 	}
 }
