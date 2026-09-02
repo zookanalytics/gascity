@@ -7,7 +7,8 @@ GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
 BIN_DIR := $(shell go env GOPATH)/bin
-GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
+GOLANGCI_LINT_DEFAULT := $(BIN_DIR)/golangci-lint
+GOLANGCI_LINT := $(GOLANGCI_LINT_DEFAULT)
 OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
@@ -105,6 +106,7 @@ endif
 endif
 endif
 
+.PHONY: golangci-lint-pinned
 .PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
@@ -406,7 +408,7 @@ vet: lint
 lint-affected lint-full: lint
 
 ## lint-golangci: golangci-lint outside Bazel, for hosts nogo does not cover (macOS jobs: darwin-only files)
-lint-golangci: $(GOLANGCI_LINT)
+lint-golangci: golangci-lint-pinned
 	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) ./...
 
 ## vet-go: plain `go vet` outside Bazel, for hosts nogo does not cover (macOS jobs)
@@ -414,15 +416,15 @@ vet-go:
 	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet ./...
 
 ## fmt-check: fail if formatting would change files
-fmt-check: $(GOLANGCI_LINT)
+fmt-check: golangci-lint-pinned
 	$(LINT_ENV) $(GOLANGCI_LINT) fmt --diff ./...
 
 ## fmt-check-changed: fail if formatting would change a regular changed Go file
-fmt-check-changed: $(GOLANGCI_LINT)
+fmt-check-changed: golangci-lint-pinned
 	@$(LINT_ENV) "$(CI_STATIC_SELECT)" fmt-check-changed "$(GOLANGCI_LINT)"
 
 ## fmt: auto-fix formatting
-fmt: $(GOLANGCI_LINT)
+fmt: golangci-lint-pinned
 	GOMEMLIMIT=$(LINT_GOMEMLIMIT) $(GOLANGCI_LINT) fmt ./...
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
@@ -984,11 +986,28 @@ cover: test-cover
 	go tool cover -func=coverage.txt
 
 ## install-tools: install pinned golangci-lint + oapi-codegen + oasdiff
-install-tools: $(GOLANGCI_LINT) install-oapi-codegen install-oasdiff
+install-tools: golangci-lint-pinned install-oapi-codegen install-oasdiff
 
-$(GOLANGCI_LINT):
-	@echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."
-	@attempt=1; max_attempts=5; delay=2; \
+## golangci-lint-pinned: install golangci-lint unless the installed one is the pin
+##
+## Consumers depend on this rather than on $(GOLANGCI_LINT) as a file: a
+## file-existence prerequisite is satisfied by whatever golangci-lint a host
+## already carries, so make never notices version drift and a pin bump is a
+## silent no-op there. Comparing the binary's reported version against the pin
+## also replaces one installed out of band.
+##
+## An explicitly supplied GOLANGCI_LINT is used as given -- only the binary this
+## target installs itself is version-managed.
+golangci-lint-pinned:
+	@if [ "$(GOLANGCI_LINT)" != "$(GOLANGCI_LINT_DEFAULT)" ]; then exit 0; fi; \
+	installed=$$($(GOLANGCI_LINT) version 2>/dev/null | sed -n 's/.*has version \([^ ]*\).*/\1/p'); \
+	if [ "$$installed" = "$(GOLANGCI_LINT_VERSION)" ]; then exit 0; fi; \
+	if [ -n "$$installed" ]; then \
+		echo "golangci-lint $$installed does not match pin v$(GOLANGCI_LINT_VERSION); reinstalling..."; \
+	else \
+		echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."; \
+	fi; \
+	attempt=1; max_attempts=5; delay=2; \
 	while [ $$attempt -le $$max_attempts ]; do \
 		echo "golangci-lint install attempt $$attempt/$$max_attempts"; \
 		if GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
