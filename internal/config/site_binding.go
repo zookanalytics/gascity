@@ -430,13 +430,20 @@ func WriteCityAndRigSiteBindingsForEditRemovingRigs(fs fsys.FS, tomlPath string,
 
 func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, removedRigNames map[string]struct{}) error {
 	cityRoot := filepath.Dir(tomlPath)
-	content, err := cfg.MarshalForWrite()
-	if err != nil {
-		return err
-	}
 	// cityRoot intentionally stays the symlink's directory even when
 	// city.toml links elsewhere: that is where the city's .gc/ state lives.
 	writePath, err := ResolveCityRewritePath(fs, tomlPath)
+	if err != nil {
+		return err
+	}
+	// Splice against what is on disk rather than re-encoding the file. An
+	// edit to one stanza then leaves the operator's commentary in place,
+	// along with any stanza the struct round trip would not carry back.
+	existing, err := fs.ReadFile(writePath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("reading %s before rewrite: %w", writePath, err)
+	}
+	content, err := SpliceCityForWrite(existing, cfg)
 	if err != nil {
 		return err
 	}
