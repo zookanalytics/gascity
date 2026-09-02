@@ -159,9 +159,13 @@ resolution and predicates: `bdReadyPoolDemandShell(limitFlag)` reads the
 canonical `gc.routed_to=<target>` route with `--include-ephemeral`, and
 the temporary migration predicate reads `gc.run_target=<target>` only on
 `gc.kind=workflow` roots that predate root `gc.routed_to` stamping. The
-work-query form appends `--sort oldest --limit=1` to the canonical probe
-and prints the first match, then filters the migration probe to roots with
-empty `gc.routed_to`. That is an intentional routed-queue policy:
+work-query form appends `--sort oldest --limit 0` to the canonical probe,
+drops workflow-topology rows, and prints the leading window of what is left;
+it filters the migration probe to roots with empty `gc.routed_to` and drops
+topology there too. Excluding before windowing is the load-bearing order: a
+window the reader applies is spent on rows the worker then declines, hiding
+the claimable work behind them from the claim side while the count side,
+reading every row, still reports demand. That is an intentional routed-queue policy:
 unassigned routed pool work is FIFO before priority, so newer
 high-priority work does not jump ahead of older ready work already queued
 for the same target. The count form unions canonical and migration
@@ -261,7 +265,9 @@ regressions.
     worker and reconciler must also share the temporary migration predicate
     for `gc.run_target=<target>` on `gc.kind=workflow` roots with empty
     `gc.routed_to`; only the worker's first-row form adds native
-    `bd ready --sort oldest --limit=1` selection to the canonical probe.
+    `bd ready --sort oldest` selection to the canonical probe, and it windows
+    the rows itself after excluding topology rather than asking the reader for
+    a bounded page.
     Any pool-demand predicate change to one (added filter, modified target
     resolution, new state) MUST be reflected in the other. One dimension has
     no `bd` flag to share: a workflow-topology bead carries a route but no

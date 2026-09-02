@@ -480,10 +480,14 @@ func TestCountFormDeclinesEveryKindTheHookRefuses(t *testing.T) {
 
 // legacyWorkflowTierServes evaluates the generated query's LEGACY workflow-root
 // tier: its own reader flags plus the jq post-filter the builder pipes the
-// result through. That filter keeps only rows whose gc.routed_to is empty, which
-// is the same gate the Go side applies in routedToAndLegacyWorkflowCandidates —
-// run_target is consulted only when there is no canonical route. Mirroring one
-// jq clause here is the single restatement in this conformance, and
+// result through. That filter has two clauses and only the first is restated
+// here. It keeps rows whose gc.routed_to is empty, which is the same gate the Go
+// side applies in routedToAndLegacyWorkflowCandidates — run_target is consulted
+// only when there is no canonical route. Its second clause drops workflow
+// topology, and workerIsServed already runs the production filter that decides
+// that (filterUnreadyHookCandidates, over the same beadmeta kind set the clause
+// is rendered from), so restating it would compare a copy against itself. One
+// restatement is the whole of this conformance, and
 // assertLegacyTierFilterUnchanged is what keeps it honest.
 func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
 	if !workerIsServed(bead, opts, metaWant) {
@@ -521,11 +525,12 @@ func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFil
 // restatement in place.
 func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	t.Helper()
-	// The exact filter poolDemandMigrationFilterJQ(1) renders into
-	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
-	// query is compared with the sh -c single-quote escaping undone, so the pin
-	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select((.metadata["gc.routed_to"] // "") == "")] | .[:1]'`
+	// The exact filter poolDemandTierFilterJQ(migrationTierSelectorJQ(), 1)
+	// renders into poolDemandFirstRowFunctionScript, brackets and limit slice
+	// included. The query is compared with the sh -c single-quote escaping undone,
+	// so the pin holds the jq PROGRAM rather than the quoting of the shell wrapper
+	// around it.
+	const wantFilter = `jq -c '[.[] | select((.metadata["gc.routed_to"] // "") == "") | select(((.metadata["gc.kind"] // "") | (. == "workflow" or . == "scope" or . == "spec")) | not)] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}
