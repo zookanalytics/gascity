@@ -2980,6 +2980,252 @@ func TestBdStoreGetNormalizesShowStyleDependencies(t *testing.T) {
 	}
 }
 
+// TestBdStoreGetReportsTheCrossStoreEdgeShowDropped is the wrong-answer case on
+// the show path, and the one a consumer of `gc bd show --json` sees.
+//
+// bd renders show's dependencies by joining each edge to the issues table and
+// skipping every row whose target this database has no row for, so an edge into
+// another rig's store vanishes: `bd dep add` succeeded, the row is in the
+// dependency table, and the read reports one edge where there are two. Its
+// dependency_count is taken from the same tables with no join, so it still says
+// two — and that disagreement is what Get repairs from.
+func TestBdStoreGetReportsTheCrossStoreEdgeShowDropped(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-42`: {
+			out: []byte(`[{
+				"id":"bd-42",
+				"title":"waiting on another rig",
+				"status":"open",
+				"issue_type":"task",
+				"created_at":"2026-03-06T10:00:00Z",
+				"dependency_count":2,
+				"dependencies":[
+					{"id":"bd-41","title":"same store","status":"open","issue_type":"task","dependency_type":"blocks"}
+				]
+			}]`),
+		},
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+				`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}` +
+				`]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-42")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
+	}
+	if len(got.Dependencies) != len(want) {
+		t.Fatalf("Dependencies = %+v, want the resident and the cross-store edge: %+v", got.Dependencies, want)
+	}
+	for i := range want {
+		if got.Dependencies[i] != want[i] {
+			t.Errorf("Dependencies[%d] = %+v, want %+v", i, got.Dependencies[i], want[i])
+		}
+	}
+}
+
+// TestBdStoreGetSpendsNoSecondReadWhenShowRenderedEveryEdge pins the cost of the
+// repair, which is what keeps it out of the hot path: the count agreeing with
+// the rendered edges is proof nothing was dropped, so Get asks bd nothing more.
+// fakeRunner fails any command it was not given, so mapping only `bd show` is
+// the assertion.
+func TestBdStoreGetSpendsNoSecondReadWhenShowRenderedEveryEdge(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-42`: {
+			out: []byte(`[{
+				"id":"bd-42",
+				"title":"all edges resolve",
+				"status":"open",
+				"issue_type":"task",
+				"created_at":"2026-03-06T10:00:00Z",
+				"dependency_count":1,
+				"dependencies":[
+					{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","dependency_type":"blocks"}
+				]
+			}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-42")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := beads.Dep{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"}
+	if len(got.Dependencies) != 1 || got.Dependencies[0] != want {
+		t.Fatalf("Dependencies = %+v, want just %+v", got.Dependencies, want)
+	}
+}
+
+// TestBdStoreGetFailsWhenTheDroppedEdgesCannotBeRead holds the arm that must not
+// go quiet. The count has already proved the rendered set is short, so returning
+// it as though it were whole would be the same silent wrong answer the repair
+// exists to close — one this reader would now be making knowingly.
+func TestBdStoreGetFailsWhenTheDroppedEdgesCannotBeRead(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-42`: {
+			out: []byte(`[{
+				"id":"bd-42",
+				"title":"short",
+				"status":"open",
+				"issue_type":"task",
+				"created_at":"2026-03-06T10:00:00Z",
+				"dependency_count":2,
+				"dependencies":[
+					{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","dependency_type":"blocks"}
+				]
+			}]`),
+		},
+		`bd dep list bd-42 bd-42 --json`: {err: errors.New("connection refused")},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	if _, err := s.Get("bd-42"); err == nil {
+		t.Fatal("Get succeeded with a dependency set it had already measured as short")
+	}
+}
+
+// TestBdStoreGetFailsWhenTheRepairedSetIsStillShort holds the same arm on the
+// path where every read reports success. Edge records carrying only what show
+// already rendered — or none at all — leave the set at the length the count has
+// already contradicted, and a repair that lands there has not repaired anything.
+// Returning it would be the original silent wrong answer, reached without a
+// single error to read.
+func TestBdStoreGetFailsWhenTheRepairedSetIsStillShort(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		records string
+	}{
+		{name: "records hold only the rendered edge", records: `[{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"}]`},
+		{name: "records are empty", records: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd show --json bd-42`: {
+					out: []byte(`[{
+						"id":"bd-42",
+						"title":"short",
+						"status":"open",
+						"issue_type":"task",
+						"created_at":"2026-03-06T10:00:00Z",
+						"dependency_count":2,
+						"dependencies":[
+							{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","dependency_type":"blocks"}
+						]
+					}]`),
+				},
+				`bd dep list bd-42 bd-42 --json`: {out: []byte(tc.records)},
+			})
+			s := beads.NewBdStore("/city", runner)
+
+			if _, err := s.Get("bd-42"); err == nil {
+				t.Fatal("Get succeeded with a dependency set the repair left short of the count")
+			}
+		})
+	}
+}
+
+// TestBdStoreGetKeepsAnEdgeOnlyShowRendered pins the repair as a union. The two
+// readers see different subsets — show's join reaches both dependency planes and
+// drops non-resident targets, the edge records drop nothing but are read from
+// the one plane the anchor lives on — so the repair adds what it found without
+// discarding what the render already had.
+func TestBdStoreGetKeepsAnEdgeOnlyShowRendered(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-42`: {
+			out: []byte(`[{
+				"id":"bd-42",
+				"title":"two planes",
+				"status":"open",
+				"issue_type":"task",
+				"created_at":"2026-03-06T10:00:00Z",
+				"dependency_count":2,
+				"dependencies":[
+					{"id":"bd-wisp","title":"other plane","status":"open","issue_type":"task","dependency_type":"blocks"}
+				]
+			}]`),
+		},
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-42")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-wisp", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
+	}
+	if len(got.Dependencies) != len(want) {
+		t.Fatalf("Dependencies = %+v, want both readers' edges: %+v", got.Dependencies, want)
+	}
+	for i := range want {
+		if got.Dependencies[i] != want[i] {
+			t.Errorf("Dependencies[%d] = %+v, want %+v", i, got.Dependencies[i], want[i])
+		}
+	}
+}
+
+// TestBdStoreGetRecoversTheParentFromARepairedEdge covers the field derived from
+// the dependency set. A bd that does not project the parent column leaves Get to
+// read it off the parent-child edge, so a repair that restores that edge has to
+// restore the parent with it.
+func TestBdStoreGetRecoversTheParentFromARepairedEdge(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd show --json bd-child`: {
+			out: []byte(`[{
+				"id":"bd-child",
+				"title":"child",
+				"status":"open",
+				"issue_type":"task",
+				"created_at":"2026-03-06T10:00:00Z",
+				"dependency_count":1,
+				"dependencies":[]
+			}]`),
+		},
+		`bd dep list bd-child bd-child --json`: {
+			out: []byte(`[{"issue_id":"bd-child","depends_on_id":"gc-parent","type":"parent-child"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+
+	got, err := s.Get("bd-child")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ParentID != "gc-parent" {
+		t.Errorf("ParentID = %q, want the target of the repaired parent-child edge", got.ParentID)
+	}
+}
+
 func TestBdStoreListInfersParentFromParentChildDependency(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
@@ -4240,8 +4486,8 @@ func TestBdStoreDepListDown(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd dep list bd-42 --json`: {
-			out: []byte(`[{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","created_at":"2026-03-06T10:00:00Z","dependency_type":"blocks"}]`),
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks","created_at":"2026-03-06T10:00:00Z"}]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
@@ -4294,7 +4540,7 @@ func TestBdStoreDepListEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd dep list bd-42 --json`: {out: []byte(`[]`)},
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	deps, err := s.DepList("bd-42", "down")
@@ -4303,6 +4549,182 @@ func TestBdStoreDepListEmpty(t *testing.T) {
 	}
 	if len(deps) != 0 {
 		t.Errorf("DepList = %d deps, want 0", len(deps))
+	}
+}
+
+// TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident is the wrong-answer
+// case. bd picks BOTH the shape and the completeness of `dep list` from the
+// number of ids the caller typed: one id is answered by the Relations role,
+// which returns the issues on the far end of each edge and drops every edge
+// whose target this database has no row for.
+//
+// A cross-store blocking edge is exactly that case, and losing it is silent —
+// `bd dep add` succeeded, the row is in the dependency table, and the read
+// reports no edge. So DepList asks for the edge records, and this test pins
+// the argv that gets them.
+func TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks","created_at":"2026-03-06T10:00:00Z"},` +
+				`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks","created_at":"2026-03-06T10:00:00Z"}` +
+				`]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	deps, err := s.DepList("bd-42", "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 2 {
+		t.Fatalf("DepList = %+v, want both the resident and the cross-store edge", deps)
+	}
+	for i, want := range []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
+	} {
+		if deps[i] != want {
+			t.Errorf("DepList[%d] = %+v, want %+v", i, deps[i], want)
+		}
+	}
+}
+
+// TestBdStoreDepListBatchAsksForRecordsWithOneAnchor holds the same argv rule on
+// the batch reader. A batch of one must still reach the edge-record shape:
+// spelled with a lone anchor, bd answers in the ISSUES shape, whose rows carry
+// neither issue_id nor depends_on_id, so the record parse files an edge with
+// empty ids under the empty-string key and the anchor the caller asked about
+// gets no entry — which DependencyBatchLister defines as "not there".
+func TestBdStoreDepListBatchAsksForRecordsWithOneAnchor(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, phantom := got[""]; phantom {
+		t.Errorf("DepListBatch keyed an edge under the empty anchor: %+v", got)
+	}
+	deps := got["bd-42"]
+	if len(deps) != 1 {
+		t.Fatalf("DepListBatch[bd-42] = %+v, want the one cross-store edge", deps)
+	}
+	want := beads.Dep{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"}
+	if deps[0] != want {
+		t.Errorf("DepListBatch[bd-42][0] = %+v, want %+v", deps[0], want)
+	}
+}
+
+// TestBdStoreDepListBatchKeepsMultiAnchorSpelling holds the other half of the
+// argv rule: two or more anchors reach the edge-record shape on their own, so
+// nothing is repeated and each anchor is named once.
+func TestBdStoreDepListBatchKeepsMultiAnchorSpelling(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-43 --json`: {
+			out: []byte(`[{"issue_id":"bd-43","depends_on_id":"bd-41","type":"blocks"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42", "bd-43"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["bd-43"]) != 1 {
+		t.Fatalf("DepListBatch[bd-43] = %+v, want one edge", got["bd-43"])
+	}
+}
+
+// TestBdStoreDepListDownUndoesTheRepeatedAnchor holds the cost of the repeat.
+// Only bd 1.2 and later collapse a repeated anchor before answering; the
+// minimum bd this repo admits (cmd/gc init_provider_readiness.go bdMinVersion,
+// deps.env BD_PREV_VERSION) answers `dep list X X` with every edge of X twice.
+// The repeat is a spelling this reader chose, so undoing it is this reader's
+// job — not the caller's, and not a version of bd it may not be talking to.
+func TestBdStoreDepListDownUndoesTheRepeatedAnchor(t *testing.T) {
+	edges := `{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+		`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[` + edges + `,` + edges + `]`)},
+	})
+	s := beads.NewBdStore("/city", runner)
+	deps, err := s.DepList("bd-42", "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
+	}
+	if len(deps) != len(want) {
+		t.Fatalf("DepList = %+v, want each edge once: %+v", deps, want)
+	}
+	for i := range want {
+		if deps[i] != want[i] {
+			t.Errorf("DepList[%d] = %+v, want %+v", i, deps[i], want[i])
+		}
+	}
+}
+
+// TestBdStoreDepListBatchUndoesTheRepeatedAnchor holds the same on the batch
+// reader, which reaches the record shape for a lone anchor the same way.
+func TestBdStoreDepListBatchUndoesTheRepeatedAnchor(t *testing.T) {
+	edge := `{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}`
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[` + edge + `,` + edge + `]`)},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["bd-42"]) != 1 {
+		t.Fatalf("DepListBatch[bd-42] = %+v, want the edge once", got["bd-42"])
+	}
+}
+
+// TestBdStoreDepListBatchKeepsDistinctAnchorEdges pins the other side of the
+// de-duplication: it must collapse only the repeat this reader introduced, so
+// two anchors that genuinely share a target keep both edges.
+func TestBdStoreDepListBatchKeepsDistinctAnchorEdges(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-43 --json`: {
+			out: []byte(`[` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+				`{"issue_id":"bd-43","depends_on_id":"bd-41","type":"blocks"}` +
+				`]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42", "bd-43"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"bd-42", "bd-43"} {
+		if len(got[id]) != 1 {
+			t.Errorf("DepListBatch[%s] = %+v, want its own edge to bd-41", id, got[id])
+		}
 	}
 }
 

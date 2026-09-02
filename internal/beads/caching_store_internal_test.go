@@ -4188,7 +4188,12 @@ func (r *cachingStoreBdDepRunner) runDep(args ...string) ([]byte, error) {
 	}
 	switch args[0] {
 	case "list":
-		if len(args) > 1 && args[1] == "bd-1" {
+		// bd answers with edge records only when the caller typed two or more
+		// anchors; one anchor gets the issues shape, which drops every edge
+		// whose target this database holds no row for. BdStore repeats a lone
+		// anchor to reach the record shape, so that is the spelling modeled
+		// here — a call that stops repeating it is a regression, not a miss.
+		if len(args) > 2 && args[1] == "bd-1" && args[2] == "bd-1" {
 			return r.depListOutput("bd-1"), nil
 		}
 		r.depScanCalls++
@@ -4246,7 +4251,7 @@ func (r *cachingStoreBdDepRunner) depListOutput(issueID string) []byte {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		fmt.Fprintf(&b, `{"id":%q,"title":"dep","status":"open","issue_type":"task","created_at":"2026-01-01T00:00:00Z","dependency_type":%q}`, dep.DependsOnID, dep.Type)
+		fmt.Fprintf(&b, `{"issue_id":%q,"depends_on_id":%q,"type":%q,"created_at":"2026-01-01T00:00:00Z"}`, dep.IssueID, dep.DependsOnID, dep.Type)
 	}
 	b.WriteByte(']')
 	return []byte(b.String())
