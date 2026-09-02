@@ -3106,20 +3106,83 @@ func (s *BdStore) DepRemove(issueID, dependsOnID string) error {
 	return nil
 }
 
-// bdDepIssue is the JSON shape returned by bd dep list --json.
-// It's a bdIssue with an added dependency_type field.
+// bdDepIssue is the JSON shape `bd dep list` returns from its Relations role:
+// a bdIssue — the issue on the far end of the edge — with an added
+// dependency_type field.
 type bdDepIssue struct {
 	bdIssue
 	DepType string `json:"dependency_type"`
 }
 
-// DepList returns dependencies via bd dep list --json.
-func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
-	args := []string{"dep", "list", id, "--json"}
-	if direction == "up" {
-		args = append(args, "--direction=up")
+// bdDepRecord is one row of the dependency table as `bd dep list` emits it in
+// its edge-record shape: the edge itself, rather than the issue on its far end.
+type bdDepRecord struct {
+	IssueID     string `json:"issue_id"`
+	DependsOnID string `json:"depends_on_id"`
+	Type        string `json:"type"`
+}
+
+// bdDepListEdgeRecordArgs spells the `bd dep list` call that answers with edge
+// records.
+//
+// bd picks BOTH the shape and the completeness of its answer from the number of
+// ids the CALLER TYPED. One id goes to the Relations role, which answers with
+// the issues on the far end of each edge and drops every edge whose target this
+// database holds no row for. Two or more go to the EdgeReader role, which
+// answers with the dependency rows themselves and drops nothing.
+//
+// A cross-store edge is exactly what the first shape loses, and it loses it in
+// silence: `bd dep add` succeeded, the row is in the dependency table, and the
+// read reports no edge at all. So a lone anchor is spelled twice. bd
+// de-duplicates anchors before answering, so the repeat yields each anchor's
+// edges once and costs nothing; bd's own dropped-edge warning prescribes this
+// same spelling.
+func bdDepListEdgeRecordArgs(ids []string) []string {
+	args := append([]string{"dep", "list"}, ids...)
+	if len(ids) == 1 {
+		args = append(args, ids[0])
 	}
-	out, err := s.runBDTransientRead(args...)
+	return append(args, "--json")
+}
+
+// parseBdDepRecords decodes the edge-record shape, defaulting an edge that
+// carries no type to "blocks" the way bd's own schema does.
+func parseBdDepRecords(out []byte) ([]bdDepRecord, error) {
+	extracted := extractJSON(out)
+	if len(extracted) == 0 || string(extracted) == "[]" {
+		return nil, nil
+	}
+	var records []bdDepRecord
+	if err := json.Unmarshal(extracted, &records); err != nil {
+		return nil, err
+	}
+	for i := range records {
+		if records[i].Type == "" {
+			records[i].Type = "blocks"
+		}
+	}
+	return records, nil
+}
+
+// DepList returns dependencies via bd dep list --json.
+//
+// The "down" direction reads edge records so that an edge whose target is not
+// resident in this store is reported rather than dropped; see
+// bdDepListEdgeRecordArgs. "up" keeps the issue shape because bd exposes no
+// inbound edge-record role, so a DEPENDENT that this store holds no row for
+// remains invisible on that axis.
+func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
+	if direction == "up" {
+		return s.depListUp(id)
+	}
+	return s.depListDown(id)
+}
+
+// depListUp answers the "up" axis: the issues that depend on id. bd exposes no
+// inbound edge-record role, so this reads the Relations shape and inherits its
+// gap — a dependent this store holds no row for stays invisible here.
+func (s *BdStore) depListUp(id string) ([]Dep, error) {
+	out, err := s.runBDTransientRead("dep", "list", id, "--json", "--direction=up")
 	if err != nil {
 		// Empty dep list may return error on some bd versions.
 		if isBdNotFound(err) {
@@ -3141,58 +3204,63 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 		if depType == "" {
 			depType = "blocks"
 		}
-		switch direction {
-		case "up":
-			// "up" query on id: returned issues depend on id.
-			result[i] = Dep{IssueID: di.ID, DependsOnID: id, Type: depType}
-		default:
-			// "down" query on id: id depends on returned issues.
-			result[i] = Dep{IssueID: id, DependsOnID: di.ID, Type: depType}
+		result[i] = Dep{IssueID: di.ID, DependsOnID: id, Type: depType}
+	}
+	return result, nil
+}
+
+// depListDown answers the "down" axis from the edge records of the one anchor
+// asked for. Every record bd returns belongs to that anchor, and the anchor is
+// reported as the CALLER spelled it — DepList's long-standing contract, which a
+// short id resolved by bd would otherwise silently restate.
+func (s *BdStore) depListDown(id string) ([]Dep, error) {
+	out, err := s.runBDTransientRead(bdDepListEdgeRecordArgs([]string{id})...)
+	if err != nil {
+		// Empty dep list may return error on some bd versions.
+		if isBdNotFound(err) {
+			return nil, nil
 		}
+		return nil, fmt.Errorf("listing deps for %q: %w", id, err)
+	}
+	records, err := parseBdDepRecords(out)
+	if err != nil {
+		return nil, fmt.Errorf("bd dep list: parsing JSON: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, nil
+	}
+	result := make([]Dep, len(records))
+	for i, rec := range records {
+		result[i] = Dep{IssueID: id, DependsOnID: rec.DependsOnID, Type: rec.Type}
 	}
 	return result, nil
 }
 
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
+//
+// A batch of one is spelled the same way as any other, because the edge-record
+// shape is what this parses: asking bd with a lone anchor would get the issues
+// shape instead, whose rows carry neither issue_id nor depends_on_id, and the
+// anchor would come back holding no edges. See bdDepListEdgeRecordArgs.
 func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"dep", "list"}, ids...)
-	args = append(args, "--json")
-	out, err := s.runBDTransientRead(args...)
+	out, err := s.runBDTransientRead(bdDepListEdgeRecordArgs(ids)...)
 	if err != nil {
 		if isBdNotFound(err) {
 			return make(map[string][]Dep), nil
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)
 	}
-	extracted := extractJSON(out)
-	if len(extracted) == 0 || string(extracted) == "[]" {
-		return make(map[string][]Dep), nil
-	}
-	// Batch bd dep list returns raw dependency records:
-	// [{"issue_id":"ga-1","depends_on_id":"ga-2","type":"blocks"}, ...]
-	var records []struct {
-		IssueID     string `json:"issue_id"`
-		DependsOnID string `json:"depends_on_id"`
-		Type        string `json:"type"`
-	}
-	if err := json.Unmarshal(extracted, &records); err != nil {
+	records, err := parseBdDepRecords(out)
+	if err != nil {
 		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
 	}
 	result := make(map[string][]Dep, len(ids))
 	for _, r := range records {
-		depType := r.Type
-		if depType == "" {
-			depType = "blocks"
-		}
-		result[r.IssueID] = append(result[r.IssueID], Dep{
-			IssueID:     r.IssueID,
-			DependsOnID: r.DependsOnID,
-			Type:        depType,
-		})
+		result[r.IssueID] = append(result[r.IssueID], Dep(r))
 	}
 	return result, nil
 }

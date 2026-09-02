@@ -4152,8 +4152,8 @@ func TestBdStoreDepListDown(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd dep list bd-42 --json`: {
-			out: []byte(`[{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","created_at":"2026-03-06T10:00:00Z","dependency_type":"blocks"}]`),
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks","created_at":"2026-03-06T10:00:00Z"}]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
@@ -4206,7 +4206,7 @@ func TestBdStoreDepListEmpty(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd dep list bd-42 --json`: {out: []byte(`[]`)},
+		`bd dep list bd-42 bd-42 --json`: {out: []byte(`[]`)},
 	})
 	s := beads.NewBdStore("/city", runner)
 	deps, err := s.DepList("bd-42", "down")
@@ -4215,6 +4215,101 @@ func TestBdStoreDepListEmpty(t *testing.T) {
 	}
 	if len(deps) != 0 {
 		t.Errorf("DepList = %d deps, want 0", len(deps))
+	}
+}
+
+// TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident is the wrong-answer
+// case. bd picks BOTH the shape and the completeness of `dep list` from the
+// number of ids the caller typed: one id is answered by the Relations role,
+// which returns the issues on the far end of each edge and drops every edge
+// whose target this database has no row for.
+//
+// A cross-store blocking edge is exactly that case, and losing it is silent —
+// `bd dep add` succeeded, the row is in the dependency table, and the read
+// reports no edge. So DepList asks for the edge records, and this test pins
+// the argv that gets them.
+func TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks","created_at":"2026-03-06T10:00:00Z"},` +
+				`{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks","created_at":"2026-03-06T10:00:00Z"}` +
+				`]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	deps, err := s.DepList("bd-42", "down")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 2 {
+		t.Fatalf("DepList = %+v, want both the resident and the cross-store edge", deps)
+	}
+	for i, want := range []beads.Dep{
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"},
+	} {
+		if deps[i] != want {
+			t.Errorf("DepList[%d] = %+v, want %+v", i, deps[i], want)
+		}
+	}
+}
+
+// TestBdStoreDepListBatchAsksForRecordsWithOneAnchor holds the same argv rule on
+// the batch reader. A batch of one must still reach the edge-record shape:
+// spelled with a lone anchor, bd answers in the ISSUES shape, whose rows carry
+// neither issue_id nor depends_on_id, so the record parse files an edge with
+// empty ids under the empty-string key and the anchor the caller asked about
+// gets no entry — which DependencyBatchLister defines as "not there".
+func TestBdStoreDepListBatchAsksForRecordsWithOneAnchor(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-42 --json`: {
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, phantom := got[""]; phantom {
+		t.Errorf("DepListBatch keyed an edge under the empty anchor: %+v", got)
+	}
+	deps := got["bd-42"]
+	if len(deps) != 1 {
+		t.Fatalf("DepListBatch[bd-42] = %+v, want the one cross-store edge", deps)
+	}
+	want := beads.Dep{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"}
+	if deps[0] != want {
+		t.Errorf("DepListBatch[bd-42][0] = %+v, want %+v", deps[0], want)
+	}
+}
+
+// TestBdStoreDepListBatchKeepsMultiAnchorSpelling holds the other half of the
+// argv rule: two or more anchors reach the edge-record shape on their own, so
+// nothing is repeated and each anchor is named once.
+func TestBdStoreDepListBatchKeepsMultiAnchorSpelling(t *testing.T) {
+	runner := fakeRunner(map[string]struct {
+		out []byte
+		err error
+	}{
+		`bd dep list bd-42 bd-43 --json`: {
+			out: []byte(`[{"issue_id":"bd-43","depends_on_id":"bd-41","type":"blocks"}]`),
+		},
+	})
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.DepListBatch([]string{"bd-42", "bd-43"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got["bd-43"]) != 1 {
+		t.Fatalf("DepListBatch[bd-43] = %+v, want one edge", got["bd-43"])
 	}
 }
 
