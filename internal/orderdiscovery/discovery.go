@@ -19,9 +19,11 @@ import (
 // Returning nil skips that rig and continues scanning remaining rigs.
 type RigScanErrorHandler func(rigName string, err error) error
 
-// OverrideErrorHandler handles a failed [orders.ApplyOverrides] call.
-// Returning nil preserves the scanned orders without applying the invalid
-// override set.
+// OverrideErrorHandler handles an [orders.ApplyOverrides] call that skipped
+// entries. Every entry that matched an order is already applied by the time
+// the handler runs, and the error names the entries that were skipped.
+// Returning nil continues with the scanned orders under the operator's
+// override set minus exactly those entries.
 type OverrideErrorHandler func(err error) error
 
 // ValidateErrorHandler handles an order validation failure after config
@@ -144,13 +146,10 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	// documented workaround for the very bug this guard fixes — it disables the
 	// unbound copy so that copy stops stranding a wisp every cooldown — so it is
 	// already in city.toml wherever the bug was hit. ApplyOverrides treats an
-	// override that matches nothing as an error and returns at the FIRST miss,
-	// so cutting these before it runs would turn that workaround into a hard
-	// scan failure for callers that leave OnOverrideError nil (gc order, the
-	// doctor order-firing check), and would leave every LATER override
-	// unapplied for the ones that log and continue — silently re-enabling
-	// orders the operator had disabled. Matching here consumes such an entry as
-	// the no-op it has now become.
+	// override that matches nothing as an error, so cutting these before it runs
+	// would turn that workaround into a hard scan failure for the callers that
+	// leave OnOverrideError nil (gc order, the doctor order-firing check).
+	// Matching here consumes such an entry as the no-op it has now become.
 	allOrders = append(allOrders, unboundRigScoped...)
 	// Stamp the city-default cron timezone onto orders that don't author
 	// their own tz, so trigger evaluation sees one explicit location without
