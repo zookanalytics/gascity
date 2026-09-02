@@ -293,7 +293,10 @@ func TestBdStoreDepListBatchOneIDReadsTheRawRecords(t *testing.T) {
 		}
 	}
 	store := fake.store()
-	if rows, err := store.DepList(b.ID, "down"); err != nil || len(rows) != 1 {
+	// DepList's own down read asks for the records, so the fixture's one-id
+	// shape is reached through a backend that refuses the records read.
+	rowsOnly := beads.NewBdStore("/fake-bd", refuseBatchDepList(fake.run))
+	if rows, err := rowsOnly.DepList(b.ID, "down"); err != nil || len(rows) != 1 {
 		t.Fatalf("DepList(%s) = (%v, %v); the fixture's one-id dep list must drop the edge to %s, as bd's does", b.ID, rows, err, dangling)
 	}
 	fake.calls = nil

@@ -1698,8 +1698,11 @@ func TestDanglingBlockingEdgesReadsALoneBdRowsRawEdges(t *testing.T) {
 			literal := "discovered-from:" + originID
 			bd.seedBlocks(row.ID, literal)
 			check, store := bdDoctorCity(t, bd)
-			if deps, err := store.DepList(row.ID, "down"); err != nil || len(deps) != 0 {
-				t.Fatalf("bd's one-row dep list = (%v, %v); the double must leave out the edge to %s, as bd does", deps, err, literal)
+			if out, err := bd.run("", "bd", "dep", "list", row.ID, "--json"); err != nil || strings.Contains(string(out), literal) {
+				t.Fatalf("bd's one-row dep list = (%s, %v); the double must leave out the edge to %s, as bd does", out, err, literal)
+			}
+			if deps, err := store.DepList(row.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != literal {
+				t.Fatalf("the store's dep list = (%v, %v); want the raw edge to %s, which it reads from bd's dependency records", deps, err, literal)
 			}
 			edges, skipped := check.collect()
 			if len(skipped) != 0 || len(edges) != 1 || edges[0].rowID != row.ID || edges[0].target != literal || edges[0].action != action {

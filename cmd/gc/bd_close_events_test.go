@@ -286,8 +286,10 @@ func TestGcBdCloseFallsBackWhenTheSpeculativeEdgeReadFails(t *testing.T) {
 			if first {
 				return nil, errors.New("transient")
 			}
-			// A single-id dep list answers with the depended-on beads' rows.
-			return []byte(`[{"id":"demo-root","title":"root","status":"open","issue_type":"task","dependency_type":"parent-child"}]`), nil
+			// The store reads one bead's edges as dependency records (bd dep
+			// list with the anchor given twice), which keep an edge whose
+			// target this store holds no row for (gc-klgt8).
+			return []byte(`[{"issue_id":"demo-abc","depends_on_id":"demo-root","type":"parent-child"}]`), nil
 		}
 		return nil, errors.New("unexpected: " + full)
 	}
