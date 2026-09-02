@@ -37,8 +37,13 @@ const socketParentAliveSentinelName = ".gc-test-alive.lock"
 // creator finished starting up and has since died, which is what lets the sweep
 // reclaim the dir immediately instead of waiting out socketParentSweepMinAge.
 // The name matches the active-root marker cmd/gc writes into its own test temp
-// roots so both sweeps describe a finished setup the same way; the two scan
-// disjoint prefixes, so neither reclaims the other's directories.
+// roots, so both sweeps describe a finished setup the same way. Sharing the
+// name is safe even though both sweeps scan /tmp: cmd/gc's prefix ("gct") is a
+// proper prefix of this package's ("gct-"), so the separation comes from
+// pidFromPrefixedDirName requiring a digit immediately after the prefix, not
+// from the prefixes themselves. That rejects "gct-<pid>-<random>" for cmd/gc's
+// scan and "gct<pid>" for this one, so neither sweep ever reads the other's
+// marker.
 const socketParentSetupCompleteMarkerName = ".gc-test-active-root"
 
 // socketParentSweepMinAge is how long a dir whose liveness cannot be settled
@@ -170,23 +175,35 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 			continue
 		}
 		path := filepath.Join(root, e.Name())
+		// aliveSentinelHeld holds a real LOCK_EX for the length of its probe,
+		// while HoldAliveSentinel takes its own lock LOCK_NB and fails outright
+		// rather than waiting. Probing a young unmarked dir -- the one shape
+		// whose owner may still be between opening its sentinel and locking it
+		// -- would therefore break that owner's NewSocketParentDir. So the
+		// cheap checks gate the probe: a marked dir is past that window by
+		// construction and safe to probe at any age.
+		complete := hasSetupCompleteMarker(path)
+		aged := now.Sub(info.ModTime()) >= socketParentSweepMinAge
+		if !complete && !aged {
+			continue
+		}
 		exists, held := aliveSentinelHeld(path)
 		if held {
 			// Creator (possibly in another PID namespace) is still alive.
 			continue
 		}
-		aged := now.Sub(info.ModTime()) >= socketParentSweepMinAge
 		var reason string
 		switch {
-		case exists && hasSetupCompleteMarker(path):
+		case exists && complete:
 			// NewSocketParentDir takes the flock before writing the marker, so
 			// this pair describes a run that finished starting up and has since
 			// died. No startup race is left to guard, so the age guard does not
 			// apply.
 			reason = "setup complete, owner gone"
 		case !aged:
-			// Not provably dead and younger than the guard: the owner may still
-			// be between MkdirTemp and its flock.
+			// A marker with no sentinel beside it is not the reclaim shape --
+			// only the pair is proof -- so this dir is still ambiguous and the
+			// age guard governs it.
 			continue
 		case exists:
 			// A sentinel with no marker: setup never finished. The age guard

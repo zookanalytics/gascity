@@ -134,3 +134,47 @@ func TestNewSocketParentDirProducesAnImmediatelyReclaimableShape(t *testing.T) {
 		t.Errorf("socket parent %s survived the sweep after its owner died", dead)
 	}
 }
+
+// TestSweepIgnoresCmdGCTempRootsCarryingTheSharedMarker pins the boundary that
+// makes sharing a marker filename with cmd/gc safe. Both sweeps scan /tmp and
+// both now key an immediate reclaim on ".gc-test-active-root", and cmd/gc's
+// prefix ("gct") is a proper prefix of this package's ("gct-"), so nothing
+// about the prefixes alone keeps them apart. What does is
+// pidFromPrefixedDirName requiring a digit straight after the prefix: cmd/gc's
+// "gct<pid>-<random>" roots do not match "gct-" at all.
+//
+// The fixture is the worst case -- a cmd/gc root aged past the guard, its
+// sentinel free, the shared marker present -- which is exactly the shape this
+// sweep reclaims on sight when the name is its own. Reaping one would delete a
+// live cmd/gc test run's temp root, so the name check has to reject it before
+// any of that is consulted.
+func TestSweepIgnoresCmdGCTempRootsCarryingTheSharedMarker(t *testing.T) {
+	root := t.TempDir()
+
+	// "gct<pid>-<random>": cmd/gc's shape, not "gct-<pid>-<random>".
+	cmdGCRoot := filepath.Join(root, "gct"+strconv.Itoa(nonLivePID(t))+"-abc")
+	if err := os.Mkdir(cmdGCRoot, 0o700); err != nil {
+		t.Fatalf("Mkdir(%s): %v", cmdGCRoot, err)
+	}
+	sentinel, err := HoldAliveSentinel(cmdGCRoot)
+	if err != nil {
+		t.Fatalf("HoldAliveSentinel: %v", err)
+	}
+	if err := sentinel.Close(); err != nil {
+		t.Fatalf("close sentinel: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cmdGCRoot, socketParentSetupCompleteMarkerName), []byte("1\n"), 0o644); err != nil {
+		t.Fatalf("writing shared marker: %v", err)
+	}
+	backdatePastSweepAge(t, cmdGCRoot)
+
+	var diagnostics bytes.Buffer
+	SweepOrphanPIDPrefixedDirs(root, SocketParentDirPrefix, &diagnostics)
+
+	if _, err := os.Stat(cmdGCRoot); err != nil {
+		t.Errorf("sweep removed a cmd/gc temp root %s: %v", cmdGCRoot, err)
+	}
+	if got := diagnostics.String(); got != "" {
+		t.Errorf("diagnostics = %q, want empty; sweep should not consider cmd/gc roots at all", got)
+	}
+}
