@@ -518,3 +518,87 @@ ready_delay_ms = 0
 		}
 	})
 }
+
+func TestSpliceCityForWriteKeepsAKeyWrittenInAFormTheEncoderDoesNotEmit(t *testing.T) {
+	// city.toml is hand-authored, so its spacing is the author's. A key an
+	// edit did not change keeps the line it was written on, and the reason
+	// written at the end of that line goes back with it.
+	original := `[workspace]
+name = "loomington"
+prefix="lx" # bead ids read as lx-*; changing it orphans every open bead
+provider = "claude"
+
+[providers]
+[providers.claude-watch]
+base   =   "builtin:claude" # the watch tier tracks the base image on purpose
+ready_delay_ms = 0
+`
+	kept := []string{
+		`prefix="lx" # bead ids read as lx-*; changing it orphans every open bead`,
+		`base   =   "builtin:claude" # the watch tier tracks the base image on purpose`,
+	}
+
+	cfg, err := Parse([]byte(original))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg.Workspace.Provider = "codex"
+
+	got, err := SpliceCityForWrite([]byte(original), cfg)
+	if err != nil {
+		t.Fatalf("SpliceCityForWrite: %v", err)
+	}
+	for _, want := range kept {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("an edit elsewhere in the file rewrote %q:\n%s", want, got)
+		}
+	}
+	after, err := Parse(got)
+	if err != nil {
+		t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+	}
+	if after.Workspace.Provider != "codex" {
+		t.Fatalf("the edit was not applied: %q\n%s", after.Workspace.Provider, got)
+	}
+	if after.Workspace.Prefix != "lx" {
+		t.Fatalf("prefix = %q, want lx:\n%s", after.Workspace.Prefix, got)
+	}
+}
+
+func TestSpliceCityForWriteDoesNotRestoreAMachineLocalRigPath(t *testing.T) {
+	// The checked-in form strips a rig's path, so the encoder states no such
+	// key and the splice has none to put back. What a stanza keeps is decided
+	// by the keys the encoder emits, never by the bytes the file holds.
+	original := `[workspace]
+provider = "claude"
+
+# the rig that runs the toolkit
+[[rigs]]
+name = "gc-toolkit"
+path = "/home/someone/loomington/rigs/gc-toolkit"
+prefix = "tk"
+`
+	cfg, err := Parse([]byte(original))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg.Workspace.Provider = "codex"
+
+	got, err := SpliceCityForWrite([]byte(original), cfg)
+	if err != nil {
+		t.Fatalf("SpliceCityForWrite: %v", err)
+	}
+	if strings.Contains(string(got), "/home/someone/") {
+		t.Fatalf("the splice restored a machine-local rig path:\n%s", got)
+	}
+	if !strings.Contains(string(got), "# the rig that runs the toolkit") {
+		t.Fatalf("a comment about a stanza the edit did not touch was lost:\n%s", got)
+	}
+	after, err := Parse(got)
+	if err != nil {
+		t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+	}
+	if len(after.Rigs) != 1 || after.Rigs[0].Name != "gc-toolkit" || after.Rigs[0].Prefix != "tk" {
+		t.Fatalf("the rig stanza did not survive the edit: %+v\n%s", after.Rigs, got)
+	}
+}

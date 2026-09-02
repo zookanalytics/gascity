@@ -57,19 +57,6 @@ func (b Block) fields() []string {
 	return out
 }
 
-// codeLines returns lines without their comments, so two renderings of one
-// assignment compare by the value they state.
-func codeLines(lines []string) []string {
-	out := make([]string, 0, len(lines))
-	state := scanState{}
-	for _, line := range lines {
-		var code string
-		code, state = state.code(line)
-		out = append(out, code)
-	}
-	return out
-}
-
 // Document is a TOML source split into blocks.
 type Document struct {
 	Blocks []Block
@@ -225,7 +212,10 @@ type assignment struct {
 // want's line and nothing else. baseline and want are both the encoder's
 // rendering, so comparing them by key asks whether the value changed and not
 // how the file happens to write it. For a key whose value stands, original's
-// own line goes back, which keeps any comment written at the end of it.
+// own lines go back in the form they were written in, which keeps any comment
+// written at the end of one and the spacing the author chose. baseline is the
+// encoder's rendering of the config parsed from original, so a key baseline
+// and want state alike is a key original already states the value of.
 func mergeBody(original, baseline, want []string) []string {
 	origHeader, origItems, origTrail := splitBody(original)
 	_, baseItems, _ := splitBody(baseline)
@@ -249,11 +239,7 @@ func mergeBody(original, baseline, want []string) []string {
 			continue
 		}
 		out = append(out, from.lead...)
-		if equalLines(codeLines(from.lines), codeLines(item.lines)) {
-			out = append(out, from.lines...)
-			continue
-		}
-		out = append(out, item.lines...)
+		out = append(out, from.lines...)
 	}
 	return append(out, origTrail...)
 }

@@ -470,6 +470,56 @@ y = 99
 	}
 }
 
+func TestSpliceKeepsAKeyWrittenInAFormTheEncoderDoesNotEmit(t *testing.T) {
+	// How a file writes a value is the author's, not the encoder's. What
+	// decides whether a key's comments still hold is whether the edit
+	// changed that key's value, which baseline and desired state between
+	// them; original's own spacing has no bearing on it.
+	original := `[a]
+x=1 # keep why x is set
+y = 2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	desired := `[a]
+x = 1
+y = 99
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if !strings.Contains(got, "x=1 # keep why x is set") {
+		t.Fatalf("an edit elsewhere in the stanza rewrote a key it did not change:\n%s", got)
+	}
+	if !strings.Contains(got, "y = 99") {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}
+
+func TestSpliceKeepsAStanzaWrittenInAFormTheEncoderDoesNotEmit(t *testing.T) {
+	// The stanza states what the encoder would, written differently. An
+	// edit that changes nothing about it has nothing to re-state, so it
+	// keeps the bytes the author wrote.
+	original := `[a]
+x=1 # keep why x is set
+y  =  2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	got, ok := Splice(original, baseline, baseline)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if got != original {
+		t.Fatalf("an edit that changes nothing rewrote the file:\ngot:\n%s\nwant:\n%s", got, original)
+	}
+}
+
 func TestSpliceDropsAnInlineCommentOnAValueItChanged(t *testing.T) {
 	original := `[a]
 x = 1 # x is 1 because the pool is small
