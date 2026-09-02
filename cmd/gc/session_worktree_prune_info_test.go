@@ -173,27 +173,15 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_UnpushedProbeError(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_HasStashes(t *testing.T) {
+// TestPruneAgentHomeWorktreeIfSafeInfo_PrunesDespiteRepoStash is the
+// session.Info mirror of the raw path's repo-stash case: a stash elsewhere in
+// the rig repo does not hold the worktree back.
+func TestPruneAgentHomeWorktreeIfSafeInfo_PrunesDespiteRepoStash(t *testing.T) {
 	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "builder/ga-ghi789"})
 
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "stashed work") {
-		t.Errorf("expected stashes-reason log; got %q", stderr.String())
-	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
-}
-
-func TestPruneAgentHomeWorktreeIfSafeInfo_StashProbeError(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
-
-	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "stash probe failed") {
-		t.Errorf("expected stash-error log; got %q", stderr.String())
-	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 

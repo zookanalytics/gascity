@@ -35,11 +35,20 @@ type reapDecision struct {
 // the worktrees removed (or, in dry-run, the ones that would be removed);
 // Protected holds worktrees left in place with the reason (too young/quarantined,
 // referenced by a non-terminal bead in another molecule, live process, active
-// session, unsafe git state, or an indeterminate age/liveness/borrow-veto scan).
+// session, unsafe git state, or an indeterminate age/liveness/borrow-veto scan);
+// Errors holds the failures that kept a worktree out of both lists — a rig whose
+// worktrees could not be enumerated at all, and a removal git refused. Those
+// reach the stderr log too, but a caller that renders the report rather than the
+// log would otherwise show a rig-wide scan failure as "nothing to reap".
+// LivenessSource names the mechanism the pass's liveness scan actually used, so
+// a verdict reached on the fallback scanner is distinguishable from one reached
+// on /proc; it is empty when the scan was unavailable.
 type reapReport struct {
-	Reaped    []reapDecision
-	Protected []reapDecision
-	DryRun    bool
+	Reaped         []reapDecision
+	Protected      []reapDecision
+	Errors         []string
+	LivenessSource string
+	DryRun         bool
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
@@ -71,15 +80,20 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no stashes, and no commits that
-//     removing the worktree would orphan — commits reachable from no branch,
-//     tag, or remote-tracking ref (git.HasUnreachableCommitsResult). The test
-//     is deliberately reachability, not push state: `git worktree remove`
-//     deletes the checkout, not refs/heads. Gating on push state instead made
-//     the reaper a no-op for exactly the worktrees it exists to collect,
-//     because a merge queue that deletes the merged branch from origin leaves
-//     every merged bead's HEAD permanently unreached by any remote ref
-//     (gastownhall/gascity ga-uh1m). A failed probe protects the tree.
+//  6. Git state: no uncommitted changes, and no commits that removing the
+//     worktree would orphan — commits reachable from no branch, tag, or
+//     remote-tracking ref (git.HasUnreachableCommitsResult). Both are things
+//     removal destroys. The reachability test is deliberately not push state:
+//     `git worktree remove` deletes the checkout, not refs/heads. Gating on
+//     push state instead made the reaper a no-op for exactly the worktrees it
+//     exists to collect, because a merge queue that deletes the merged branch
+//     from origin leaves every merged bead's HEAD permanently unreached by any
+//     remote ref (gastownhall/gascity ga-uh1m). Stashes are out for the same
+//     reason and one more: refs/stash is a single repository-global ref
+//     carrying no worktree identity, so `git stash list` answers identically
+//     in every worktree of the repo, and gating on it protects every worktree
+//     in a rig for as long as one stash exists anywhere in it. A failed probe
+//     protects the tree.
 //
 // When dryRun is true the reaper performs all discovery and classification and
 // emits bead.worktree.reap_skipped events describing what it would reap and
@@ -127,6 +141,7 @@ func reapClosedBeadWorktrees(
 	// Authoritative liveness signal, gathered once for the whole pass. When the
 	// scan is indeterminate the reaper protects every candidate (fail closed).
 	live := collectLiveWorktreeStateFn()
+	report.LivenessSource = live.source
 	if live.scanned && live.source != "" && live.source != liveScanSourceProc {
 		// Name the mechanism when it is not the primary one, so a reap decision
 		// made on a fallback scan is not indistinguishable from one made on
@@ -158,6 +173,7 @@ func reapClosedBeadWorktrees(
 		worktreeLivenessResults, err := discoverWorktreeLiveness(rigRoot, live, liveSessionDirs)
 		if err != nil {
 			fmt.Fprintf(stderr, "reapClosedBeadWorktrees: listing worktrees for rig %s (%s): %v\n", rigName, rigRoot, err) //nolint:errcheck
+			report.Errors = append(report.Errors, fmt.Sprintf("listing worktrees for rig %s (%s): %v", rigName, rigRoot, err))
 			continue
 		}
 		livenessByPath := make(map[string]worktreeLiveness, len(worktreeLivenessResults))
@@ -301,14 +317,11 @@ func reapClosedBeadWorktrees(
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnreachable, unreachableErr := wg.HasUnreachableCommitsResult()
-				hasStashes, stashErr := wg.HasStashesResult()
 				switch {
 				case unreachableErr != nil:
 					reason = fmt.Sprintf("git probe failed (failing closed): %v", unreachableErr)
-				case stashErr != nil:
-					reason = fmt.Sprintf("git probe failed (failing closed): %v", stashErr)
-				case hasUncommitted || hasUnreachable || hasStashes:
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v stashes=%v", hasUncommitted, hasUnreachable, hasStashes)
+				case hasUncommitted || hasUnreachable:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v", hasUncommitted, hasUnreachable)
 				}
 			}
 
@@ -348,6 +361,7 @@ func reapClosedBeadWorktrees(
 			// worktree being removed.
 			if err := git.New(rigRoot).WorktreeRemove(worktreePath, false); err != nil {
 				fmt.Fprintf(stderr, "reapClosedBeadWorktrees: removing %s: %v\n", worktreePath, err) //nolint:errcheck
+				report.Errors = append(report.Errors, fmt.Sprintf("removing %s (bead %s): %v", worktreePath, beadID, err))
 				continue
 			}
 			fmt.Fprintf(stderr, //nolint:errcheck

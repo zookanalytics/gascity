@@ -5,7 +5,12 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
+	"text/tabwriter"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -36,8 +41,8 @@ type worktreeCmdOpts struct {
 func newWorktreeCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "worktree",
-		Short: "Ensure or verify agent workspace worktrees",
-		Long: `Ensure or verify agent workspace worktrees.
+		Short: "Ensure, verify, and reclaim agent workspace worktrees",
+		Long: `Ensure, verify, and reclaim agent workspace worktrees.
 
 gc worktree is the single transactional owner for workspace provisioning.
 Postconditions: the path is a direct child of the configured per-rig root and
@@ -46,11 +51,16 @@ branch checked out on an attached HEAD (never detached). Durable provenance is
 stored in the worktree's private git directory and returned as JSON so callers
 can atomically publish the same evidence on the bead. A new branch is created
 from --base, resolved verbatim against the local repository. Failed creation
-rolls back everything it created; --dry-run plans without mutating anything.`,
+rolls back everything it created; --dry-run plans without mutating anything.
+
+ensure, verify and cleanup each act on one named worktree. reap is the bulk
+counterpart: it classifies every per-bead worktree in the city against its work
+bead and removes the finished ones.`,
 	}
 	cmd.AddCommand(newWorktreeEnsureCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeVerifyCmd(stdout, stderr))
 	cmd.AddCommand(newWorktreeCleanupCmd(stdout, stderr))
+	cmd.AddCommand(newWorktreeReapCmd(stdout, stderr))
 	return cmd
 }
 
@@ -299,4 +309,259 @@ func writeWorktreeCleanupReport(rep worktree.CleanupReport, opts worktreeCmdOpts
 		fmt.Fprintf(stdout, "worktree %s required no cleanup\n", rep.Path) //nolint:errcheck
 	}
 	return 0
+}
+
+const worktreeReapCmdName = "gc worktree reap"
+
+func newWorktreeReapCmd(stdout, stderr io.Writer) *cobra.Command {
+	var (
+		apply   bool
+		jsonOut bool
+	)
+	cmd := &cobra.Command{
+		Use:   "reap",
+		Short: "Remove per-bead worktrees whose work bead is closed",
+		Long: `Classify every per-bead worktree under .gc/worktrees/<rig>/ and remove the
+ones whose work bead is closed and that pass every safety gate: past the
+configured freshness quarantine, unreferenced by any non-terminal bead, no live
+process or open session working in the tree, and a clean git state that removal
+would not orphan commits from. Every gate fails closed — an indeterminate answer
+protects the tree.
+
+This is the same classification the reconciler patrol runs when
+[daemon] auto_reap_closed_bead_worktrees is enabled, on demand and without
+changing the city's configuration. It reports what it would remove and removes
+nothing until --apply is passed.`,
+		Example: `  gc worktree reap
+  gc worktree reap --apply
+  gc worktree reap --json`,
+		Args:         cobra.NoArgs,
+		SilenceUsage: true,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return exitForCode(cmdWorktreeReap(apply, jsonOut, stdout, stderr))
+		},
+	}
+	cmd.Flags().BoolVar(&apply, "apply", false, "remove the eligible worktrees (default: report only)")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit machine-readable JSON")
+	return cmd
+}
+
+// worktreeReapScope is the resolved city state one reap pass acts on. It is a
+// struct rather than four parameters so the command's resolution step and its
+// rendering step can be tested apart from each other.
+type worktreeReapScope struct {
+	cityPath        string
+	cfg             *config.City
+	rigStores       map[string]beads.Store
+	liveSessionDirs []string
+}
+
+// worktreeReapEntryJSON is one worktree's verdict in the --json report. Reason
+// is set on protected entries and empty on reaped ones.
+type worktreeReapEntryJSON struct {
+	BeadID string `json:"bead_id"`
+	Rig    string `json:"rig"`
+	Path   string `json:"path"`
+	Branch string `json:"branch,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// worktreeReapJSON is the machine-readable form of one reap pass. DryRun true
+// means Reaped lists what --apply would have removed.
+type worktreeReapJSON struct {
+	DryRun         bool                    `json:"dry_run"`
+	LivenessSource string                  `json:"liveness_source,omitempty"`
+	Reaped         []worktreeReapEntryJSON `json:"reaped"`
+	Protected      []worktreeReapEntryJSON `json:"protected"`
+	Errors         []string                `json:"errors,omitempty"`
+}
+
+func cmdWorktreeReap(apply, jsonOut bool, stdout, stderr io.Writer) int {
+	scope, code := resolveWorktreeReapScope(stderr)
+	if code != 0 {
+		return code
+	}
+	// Removals are recorded to the city event log so a manual reclaim is
+	// visible to `gc events` alongside the patrol's. A dry run is a read-only
+	// question and records nothing: its would-reap and protected verdicts are
+	// the same edge-triggered chatter the patrol suppresses, and an operator
+	// asking what is reclaimable should not write to the log to find out.
+	rec := events.Discard
+	if apply {
+		if ep, _ := openCityEventEmitProvider(stderr, worktreeReapCmdName); ep != nil {
+			defer ep.Close() //nolint:errcheck // best-effort flush
+			rec = ep
+		}
+	}
+	return runWorktreeReap(scope, apply, jsonOut, rec, stdout, stderr)
+}
+
+// resolveWorktreeReapScope locates the city, loads its configuration with full
+// pack expansion (the reaper reads cfg.Agents to guard agent-home directories),
+// and opens the work store of every bound rig. A rig whose store will not open
+// is fatal rather than skipped: a missing store makes every worktree in that rig
+// unresolvable, which would read as "nothing to reap" for the rig that most
+// needs looking at.
+func resolveWorktreeReapScope(stderr io.Writer) (worktreeReapScope, int) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", worktreeReapCmdName, err) //nolint:errcheck // best-effort stderr
+		return worktreeReapScope{}, 2
+	}
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", worktreeReapCmdName, err) //nolint:errcheck // best-effort stderr
+		return worktreeReapScope{}, 1
+	}
+	stores, failures := openStandaloneRigStores(cfg, cityPath)
+	if len(failures) > 0 {
+		for _, f := range failures {
+			fmt.Fprintf(stderr, "%s: rig %q store: %v\n", worktreeReapCmdName, f.rig, f.err) //nolint:errcheck // best-effort stderr
+		}
+		return worktreeReapScope{}, 1
+	}
+	scope := worktreeReapScope{cityPath: cityPath, cfg: cfg, rigStores: stores}
+	// The liveness gate's authoritative signal is the /proc cwd scan the reaper
+	// runs itself; the open-session working directories are the second, weaker
+	// signal it cross-checks against. A store that will not open costs the
+	// cross-check, not the gate, so it warns rather than failing the command.
+	if store, err := openCityStoreAt(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: warning: open sessions not cross-checked: %v\n", worktreeReapCmdName, err) //nolint:errcheck // best-effort stderr
+	} else if snapshot, err := loadSessionBeadSnapshot(store); err != nil {
+		fmt.Fprintf(stderr, "%s: warning: open sessions not cross-checked: %v\n", worktreeReapCmdName, err) //nolint:errcheck // best-effort stderr
+	} else {
+		scope.liveSessionDirs = liveSessionWorktreeDirs(snapshot)
+	}
+	return scope, 0
+}
+
+// runWorktreeReap classifies the scope's worktrees and, when apply is set,
+// removes the eligible ones, then renders the outcome. It returns 1 when the
+// pass could not scan a rig or could not complete a removal, so a scripted
+// caller does not read a partial pass as a clean one.
+//
+// The reaper's own stderr log is discarded: reapReport carries every verdict
+// and every failure the log names, so forwarding it would print the answer
+// twice on an operator's terminal.
+func runWorktreeReap(scope worktreeReapScope, apply, jsonOut bool, rec events.Recorder, stdout, stderr io.Writer) int {
+	if len(scope.rigStores) == 0 {
+		if jsonOut {
+			return writeWorktreeReapJSON(stdout, stderr, worktreeReapJSON{DryRun: !apply, Reaped: []worktreeReapEntryJSON{}, Protected: []worktreeReapEntryJSON{}})
+		}
+		fmt.Fprintln(stdout, "No worktrees to classify: the city has no bound rigs.") //nolint:errcheck // best-effort stdout
+		return 0
+	}
+
+	report := reapClosedBeadWorktrees(scope.cityPath, scope.cfg, scope.rigStores, scope.liveSessionDirs, !apply, rec, nil, io.Discard)
+
+	if report.LivenessSource != "" && report.LivenessSource != liveScanSourceProc {
+		fmt.Fprintf(stderr, "%s: liveness scanned via %s (/proc unavailable)\n", worktreeReapCmdName, report.LivenessSource) //nolint:errcheck // best-effort stderr
+	}
+
+	code := 0
+	for _, msg := range report.Errors {
+		fmt.Fprintf(stderr, "%s: %s\n", worktreeReapCmdName, msg) //nolint:errcheck // best-effort stderr
+		code = 1
+	}
+
+	if jsonOut {
+		if jsonCode := writeWorktreeReapJSON(stdout, stderr, worktreeReapJSON{
+			DryRun:         report.DryRun,
+			LivenessSource: report.LivenessSource,
+			Reaped:         worktreeReapEntries(report.Reaped),
+			Protected:      worktreeReapEntries(report.Protected),
+			Errors:         report.Errors,
+		}); jsonCode != 0 {
+			return jsonCode
+		}
+		return code
+	}
+	renderWorktreeReapText(report, stdout)
+	return code
+}
+
+// worktreeReapEntries projects the reaper's decisions onto the JSON shape,
+// returning an empty (not nil) slice so the encoded report always carries both
+// arrays. Entries are ordered by rig then path — see sortReapDecisions.
+func worktreeReapEntries(decisions []reapDecision) []worktreeReapEntryJSON {
+	entries := make([]worktreeReapEntryJSON, 0, len(decisions))
+	for _, d := range sortReapDecisions(decisions) {
+		entries = append(entries, worktreeReapEntryJSON{
+			BeadID: d.BeadID,
+			Rig:    d.Rig,
+			Path:   d.Path,
+			Branch: d.Branch,
+			Reason: d.Reason,
+		})
+	}
+	return entries
+}
+
+// sortReapDecisions returns decisions ordered by rig then path, in a fresh
+// slice so the caller's report is left as the reaper produced it.
+//
+// The reaper walks rigs in Go map order, which is randomized per run, so the
+// same city reports its rigs in a different order every time. The natural way
+// to read this command is to run it, act, and run it again — diffing the two
+// answers — and shuffled rig blocks make that diff unreadable.
+func sortReapDecisions(decisions []reapDecision) []reapDecision {
+	sorted := make([]reapDecision, len(decisions))
+	copy(sorted, decisions)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Rig != sorted[j].Rig {
+			return sorted[i].Rig < sorted[j].Rig
+		}
+		return sorted[i].Path < sorted[j].Path
+	})
+	return sorted
+}
+
+func writeWorktreeReapJSON(stdout, stderr io.Writer, payload worktreeReapJSON) int {
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(payload); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", worktreeReapCmdName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return 0
+}
+
+// renderWorktreeReapText writes the human report: one line per worktree with
+// its verdict, then a summary. The verdict column reads "would reap" in a dry
+// run and "reaped" once the removal happened, so the two passes are never
+// mistaken for each other in a scrollback.
+func renderWorktreeReapText(report reapReport, stdout io.Writer) {
+	verdict := "reaped"
+	if report.DryRun {
+		verdict = "would reap"
+	}
+	if len(report.Reaped) == 0 && len(report.Protected) == 0 {
+		fmt.Fprintln(stdout, "No closed-bead worktrees found.") //nolint:errcheck // best-effort stdout
+		return
+	}
+	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
+	for _, d := range sortReapDecisions(report.Reaped) {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", verdict, d.Rig, d.BeadID, d.Path) //nolint:errcheck // best-effort stdout
+	}
+	for _, d := range sortReapDecisions(report.Protected) {
+		fmt.Fprintf(tw, "protected\t%s\t%s\t%s\t%s\n", d.Rig, d.BeadID, d.Path, d.Reason) //nolint:errcheck // best-effort stdout
+	}
+	_ = tw.Flush()
+	fmt.Fprintln(stdout, worktreeReapSummary(report)) //nolint:errcheck // best-effort stdout
+}
+
+// worktreeReapSummary is the closing line of the text report: what the pass did
+// or would do, and — in a dry run that found something — how to act on it.
+func worktreeReapSummary(report reapReport) string {
+	protected := ""
+	if len(report.Protected) > 0 {
+		protected = fmt.Sprintf(", %d protected", len(report.Protected))
+	}
+	if len(report.Reaped) == 0 {
+		return fmt.Sprintf("No closed-bead worktrees are eligible for reaping%s.", protected)
+	}
+	if report.DryRun {
+		return fmt.Sprintf("%d reclaimable%s. Nothing removed — re-run with --apply to reclaim.", len(report.Reaped), protected)
+	}
+	return fmt.Sprintf("Reaped %d worktree(s)%s.", len(report.Reaped), protected)
 }

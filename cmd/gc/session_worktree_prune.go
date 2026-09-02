@@ -23,7 +23,6 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
-	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -62,8 +61,15 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
-//   - the worktree has uncommitted changes, unpushed commits, or stashes
+//   - the worktree has uncommitted changes or unpushed commits
 //   - the rig that owns the session cannot be resolved to a filesystem path
+//
+// Stashed work is not a gate. refs/stash is a single repository-global ref
+// carrying no worktree identity, so `git stash list` answers identically in
+// every worktree of the repo, and gating on it stops the prune for every pool
+// worktree in a rig for as long as one stash exists anywhere in it. Removal
+// cannot lose it either: `git worktree remove` deletes the checkout, not
+// refs/stash.
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
 // still shows up via `gc doctor` later, which is the operator's existing
@@ -107,16 +113,6 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	if hasUnpushed {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
-		return false
-	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return false
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
 		return false
 	}
 
@@ -182,16 +178,6 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	if hasUnpushed {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
-		return
-	}
-	hasStashes, err := gp.HasStashesResult()
-	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
-		return
-	}
-	if hasStashes {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
-		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
 		return
 	}
 

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 208,
+  "next_id": 209,
   "permanent_ids": [
     {
       "name": "help",
@@ -4639,6 +4639,21 @@
       "classification": "worktree-ensure",
       "owner": "immediate",
       "id": 204
+    },
+    {
+      "path": "gc worktree reap",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "worktree-reap",
+      "owner": "immediate",
+      "id": 208
     },
     {
       "path": "gc worktree verify",

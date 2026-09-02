@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	gitpkg "github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -276,5 +277,66 @@ func TestReapClosedBeadWorktrees_SkipsOpenBead(t *testing.T) {
 	}
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("worktree for open bead %s was removed: %v", wt, err)
+	}
+}
+
+// TestReapClosedBeadWorktrees_ReportsUnscannableRig proves a rig the reaper
+// could not enumerate reaches the caller through the report, not only through
+// the stderr log. A caller that renders the report — `gc worktree reap` — would
+// otherwise present a rig-wide scan failure as "nothing to reap".
+func TestReapClosedBeadWorktrees_ReportsUnscannableRig(t *testing.T) {
+	cityPath, _ := initReapRig(t)
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store := beads.NewMemStoreFrom(1, nil, nil)
+	cfg := reapTestConfig(notARepo)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+
+	if len(report.Errors) != 1 {
+		t.Fatalf("report.Errors = %+v, want exactly one entry for the unscannable rig", report.Errors)
+	}
+	if !strings.Contains(report.Errors[0], reapTestRigName) {
+		t.Errorf("report.Errors[0] = %q, want the rig named", report.Errors[0])
+	}
+}
+
+// TestReapClosedBeadWorktrees_ReapsDespiteRepoStash pins the scope of the
+// git-safety gate. `refs/stash` is a single repository-global ref: one stash
+// made anywhere — the rig's main checkout, a sibling worktree — is reported by
+// `git stash list` from every worktree of that repo, and git records no
+// worktree identity on a stash entry. Gating on it protected every worktree in
+// the rig for as long as any stash existed, which is how a city accumulates
+// finished trees without bound. Removal cannot lose the stash either: `git
+// worktree remove` deletes the checkout, not refs/stash.
+func TestReapClosedBeadWorktrees_ReapsDespiteRepoStash(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-stash01")
+	// Stash in the rig's own checkout — a different working tree from the one
+	// under consideration, which never sees this work.
+	if err := os.WriteFile(filepath.Join(rigRoot, "README.md"), []byte("elsewhere\n"), 0o644); err != nil {
+		t.Fatalf("dirty the rig checkout: %v", err)
+	}
+	mustGit(t, rigRoot, "stash", "push", "-m", "unrelated")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-stash01", Status: "closed"}}, nil)
+	cfg := reapTestConfig(rigRoot)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{reapTestRigName: store}, nil, false, events.Discard, nil, &stderr)
+
+	if len(report.Reaped) != 1 || report.Reaped[0].BeadID != "ga-stash01" {
+		t.Fatalf("Reaped = %+v (Protected = %+v), want ga-stash01 reaped despite an unrelated repo stash\nstderr:\n%s", report.Reaped, report.Protected, stderr.String())
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still present after reap (stat err=%v)", wt, err)
+	}
+	// The stash the gate used to protect is untouched by the removal.
+	if !gitpkg.New(rigRoot).HasStashes() {
+		t.Fatal("the rig's stash was lost across the reap; git worktree remove must not touch refs/stash")
 	}
 }

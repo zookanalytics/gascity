@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
@@ -298,5 +303,215 @@ func TestCmdWorktreeEnsureDryRunJSONContract(t *testing.T) {
 			t.Errorf("dry-run provenance carries %q = %v, want it omitted until the worktree exists",
 				absent, result.Provenance[absent])
 		}
+	}
+}
+
+// reapScopeFor builds the resolved scope a `gc worktree reap` invocation acts
+// on from the shared reaper fixtures, so these tests exercise the same rig
+// layout and safety gates the controller patrol does. liveSessionDirs is left
+// unset: the open-session cross-check is the reaper's own gate, covered at that
+// level, and a test that needs it assigns the field on the returned scope.
+func reapScopeFor(cityPath, rigRoot string, store beads.Store) worktreeReapScope {
+	return worktreeReapScope{
+		cityPath:  cityPath,
+		cfg:       reapTestConfig(rigRoot),
+		rigStores: map[string]beads.Store{reapTestRigName: store},
+	}
+}
+
+func TestRunWorktreeReapDryRunListsCandidatesAndRemovesNothing(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-dryrun1")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-dryrun1", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, rigRoot, store), false, false, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "would reap") || !strings.Contains(out, "ga-dryrun1") {
+		t.Fatalf("stdout = %q, want a would-reap line naming ga-dryrun1", out)
+	}
+	if !strings.Contains(out, "--apply") {
+		t.Fatalf("stdout = %q, want the summary to name --apply", out)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("dry run removed or broke worktree %s: %v", wt, err)
+	}
+}
+
+func TestRunWorktreeReapApplyRemovesEligibleWorktree(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-apply01")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-apply01", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, rigRoot, store), true, false, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "reaped") || !strings.Contains(out, "ga-apply01") {
+		t.Fatalf("stdout = %q, want a reaped line naming ga-apply01", out)
+	}
+	if strings.Contains(out, "--apply") {
+		t.Fatalf("stdout = %q, want no --apply hint once the removal happened", out)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Fatalf("worktree %s still present after --apply (stat err=%v)", wt, err)
+	}
+}
+
+func TestRunWorktreeReapProtectedWorktreeIsReportedWithReason(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	wt := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-live001")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "ga-live001", Status: "closed"}}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(wt)}})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, rigRoot, store), true, false, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "protected") || !strings.Contains(out, "ga-live001") {
+		t.Fatalf("stdout = %q, want a protected line naming ga-live001", out)
+	}
+	if !strings.Contains(out, "live") {
+		t.Fatalf("stdout = %q, want the live-process reason rendered", out)
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Fatalf("live worktree %s was removed: %v", wt, err)
+	}
+}
+
+func TestRunWorktreeReapJSONCarriesVerdicts(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	reapable := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-json001")
+	held := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-json002")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "ga-json001", Status: "closed"},
+		{ID: "ga-json002", Status: "closed"},
+	}, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(held)}})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, rigRoot, store), false, true, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr.String())
+	}
+	var got worktreeReapJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decoding stdout %q: %v", stdout.String(), err)
+	}
+	if !got.DryRun {
+		t.Error("dry_run = false, want true without --apply")
+	}
+	if len(got.Reaped) != 1 || got.Reaped[0].BeadID != "ga-json001" {
+		t.Fatalf("reaped = %+v, want exactly ga-json001", got.Reaped)
+	}
+	if got.Reaped[0].Rig != reapTestRigName || got.Reaped[0].Path != reapable {
+		t.Errorf("reaped entry = %+v, want rig %q path %q", got.Reaped[0], reapTestRigName, reapable)
+	}
+	if len(got.Protected) != 1 || got.Protected[0].BeadID != "ga-json002" {
+		t.Fatalf("protected = %+v, want exactly ga-json002", got.Protected)
+	}
+	if !strings.Contains(got.Protected[0].Reason, "live") {
+		t.Errorf("protected reason = %q, want the live-process reason", got.Protected[0].Reason)
+	}
+}
+
+func TestRunWorktreeReapNoCandidatesReportsNothingEligible(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	store := beads.NewMemStoreFrom(1, nil, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, rigRoot, store), false, false, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0\nstderr:\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No closed-bead worktrees") {
+		t.Fatalf("stdout = %q, want a nothing-eligible summary", stdout.String())
+	}
+}
+
+func TestRunWorktreeReapReportsRigFailureAndExitsNonZero(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store := beads.NewMemStoreFrom(1, nil, nil)
+	scope := reapScopeFor(cityPath, rigRoot, store)
+	scope.cfg.Rigs = []config.Rig{{Name: reapTestRigName, Path: notARepo}}
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(scope, false, false, events.Discard, &stdout, &stderr)
+
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1 when a rig could not be scanned\nstderr:\n%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), reapTestRigName) {
+		t.Fatalf("stderr = %q, want the unscannable rig named", stderr.String())
+	}
+}
+
+func TestRunWorktreeReapEmptyScopeReportsNoBoundRigs(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	scope := worktreeReapScope{cityPath: t.TempDir(), cfg: &config.City{}}
+	code := runWorktreeReap(scope, false, false, events.Discard, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 for a city with no bound rigs", code)
+	}
+	if !strings.Contains(stdout.String(), "no bound rigs") {
+		t.Fatalf("stdout = %q, want a no-bound-rigs summary", stdout.String())
+	}
+}
+
+// TestSortReapDecisionsOrdersByRigThenPath pins the report's ordering. The
+// reaper walks rigs in Go map order, which is randomized per run, so without
+// this the same city lists its rigs differently every invocation and two runs
+// of the command cannot be diffed against each other.
+func TestSortReapDecisionsOrdersByRigThenPath(t *testing.T) {
+	in := []reapDecision{
+		{Rig: "zeta", Path: "/wt/b", BeadID: "ga-4"},
+		{Rig: "alpha", Path: "/wt/z", BeadID: "ga-2"},
+		{Rig: "zeta", Path: "/wt/a", BeadID: "ga-3"},
+		{Rig: "alpha", Path: "/wt/a", BeadID: "ga-1"},
+	}
+	got := sortReapDecisions(in)
+
+	var order []string
+	for _, d := range got {
+		order = append(order, d.BeadID)
+	}
+	want := []string{"ga-1", "ga-2", "ga-3", "ga-4"}
+	if !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	if in[0].BeadID != "ga-4" {
+		t.Errorf("input was reordered in place (in[0] = %q); the caller's report must be left alone", in[0].BeadID)
+	}
+}
+
+func TestNewWorktreeReapCmdDefaultsToDryRun(t *testing.T) {
+	cmd := newWorktreeReapCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	apply, err := cmd.Flags().GetBool("apply")
+	if err != nil {
+		t.Fatalf("--apply flag missing: %v", err)
+	}
+	if apply {
+		t.Error("--apply defaults to true, want false so the command never deletes unasked")
 	}
 }
