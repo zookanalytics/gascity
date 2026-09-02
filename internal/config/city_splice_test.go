@@ -368,3 +368,87 @@ func TestSpliceCityForWriteMeansWhatThePlainRewriteMeans(t *testing.T) {
 		})
 	}
 }
+
+func TestSpliceCityForWriteKeepsCommentsAboveRootLevelKeys(t *testing.T) {
+	// include is stated ahead of the first table header, in the region of
+	// the file that has no header of its own. `gc import` edits it through
+	// this writer, so the reasons an operator wrote above it have to survive
+	// that edit the same as the ones written inside a table do.
+	original := `# fragments merge in order; the last one to state a key wins.
+# TO REVERT the spend controls: drop the second entry.
+include = ["fragments/base.toml", "fragments/spend.toml"]
+
+[workspace]
+provider = "claude"
+
+# claude-watch is the monitoring tier for patrol agents.
+[providers]
+[providers.claude-watch]
+base = "builtin:claude"
+`
+	cfg, err := Parse([]byte(original))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg.Include = append(cfg.Include, "fragments/audit.toml")
+
+	got, err := SpliceCityForWrite([]byte(original), cfg)
+	if err != nil {
+		t.Fatalf("SpliceCityForWrite: %v", err)
+	}
+	for _, want := range []string{
+		"# fragments merge in order; the last one to state a key wins.",
+		"# TO REVERT the spend controls: drop the second entry.",
+		"# claude-watch is the monitoring tier for patrol agents.",
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	after, err := Parse(got)
+	if err != nil {
+		t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+	}
+	if len(after.Include) != 3 {
+		t.Fatalf("include = %v, want 3 entries:\n%s", after.Include, got)
+	}
+}
+
+func TestSpliceCityForWriteKeepsRootCommentsWhenTheEditIsElsewhere(t *testing.T) {
+	// A stanza is re-encoded whenever its bytes are not already the form the
+	// encoder emits, and an include list written across several lines is one
+	// such form. That re-encoding is reached by any edit to the file, so the
+	// comments above the first root key have to survive an edit that never
+	// names it.
+	original := `# fragments merge in order; the last one to state a key wins.
+include = [
+  "fragments/base.toml",
+]
+
+[workspace]
+provider = "claude"
+`
+	cfg, err := Parse([]byte(original))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	cfg.Workspace.Provider = "codex"
+
+	got, err := SpliceCityForWrite([]byte(original), cfg)
+	if err != nil {
+		t.Fatalf("SpliceCityForWrite: %v", err)
+	}
+	if !strings.Contains(string(got), "# fragments merge in order; the last one to state a key wins.") {
+		t.Fatalf("an edit elsewhere in the file dropped the commentary above include:\n%s", got)
+	}
+	after, err := Parse(got)
+	if err != nil {
+		t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+	}
+	if len(after.Include) != 1 || after.Include[0] != "fragments/base.toml" {
+		t.Fatalf("include = %v, want [fragments/base.toml]:\n%s", after.Include, got)
+	}
+	if after.Workspace.Provider != "codex" {
+		t.Fatalf("the edit was not applied: %q\n%s", after.Workspace.Provider, got)
+	}
+}

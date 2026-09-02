@@ -350,3 +350,66 @@ func TestSpliceHandlesDocumentsWithNoTables(t *testing.T) {
 		t.Fatalf("Splice of empty documents = %q, want empty", got)
 	}
 }
+
+func TestSpliceKeepsCommentsAboveEditedRootLevelKeys(t *testing.T) {
+	// Root assignments sit ahead of the first table header, in the one block
+	// that has no header line of its own. An edit to one of them keeps the
+	// commentary written above it the same way an edit inside a table does.
+	original := `# why the city is named this
+name = "loomington"
+# fragments merge in order; the last to state a key wins
+include = ["fragments/base.toml"]
+
+[workspace]
+provider = "claude"
+`
+	baseline := `name = "loomington"
+include = ["fragments/base.toml"]
+
+[workspace]
+provider = "claude"
+`
+	desired := `name = "loomington"
+include = ["fragments/base.toml", "fragments/spend.toml"]
+
+[workspace]
+provider = "claude"
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	for _, want := range []string{
+		"# why the city is named this",
+		"# fragments merge in order; the last to state a key wins",
+		`include = ["fragments/base.toml", "fragments/spend.toml"]`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Count(got, `name = "loomington"`) != 1 {
+		t.Fatalf("root assignment was duplicated or lost:\n%s", got)
+	}
+}
+
+func TestSpliceKeepsCommentsInADocumentWithNoTables(t *testing.T) {
+	// With no header anywhere, the whole document is the header-less block.
+	original := `# fragments merge in order
+include = ["fragments/base.toml"]
+`
+	baseline := `include = ["fragments/base.toml"]
+`
+	desired := `include = ["fragments/base.toml", "fragments/spend.toml"]
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if !strings.Contains(got, "# fragments merge in order") {
+		t.Fatalf("comment above the only key was lost:\n%s", got)
+	}
+	if !strings.Contains(got, `"fragments/spend.toml"`) {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}

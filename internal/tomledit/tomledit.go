@@ -214,16 +214,23 @@ func mergeBody(original, want []string) []string {
 	return append(out, origTrail...)
 }
 
-// splitBody separates a block's body into its header line, the assignments
-// beneath it, and any comment lines trailing the last one.
+// splitBody separates a block's body into its table header line, the
+// assignments beneath it, and any comment lines trailing the last one.
+//
+// Only the region ahead of the first header lacks a header line of its own.
+// Its body opens with an assignment, or with the comments written above one,
+// so header is empty there and every line is read as an item or an item's
+// lead, the same way the lines inside a table are.
 func splitBody(body []string) (header string, items []assignment, trail []string) {
-	if len(body) == 0 {
-		return "", nil, nil
+	if len(body) > 0 {
+		if _, _, ok := tableHeader(body[0]); ok {
+			header = body[0]
+			body = body[1:]
+		}
 	}
-	header = body[0]
 	var pending []string
 	state := scanState{}
-	for _, line := range body[1:] {
+	for _, line := range body {
 		switch {
 		case state.atTopLevel() && isTrivia(line):
 			pending = append(pending, line)
