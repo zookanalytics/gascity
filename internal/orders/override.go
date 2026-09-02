@@ -45,13 +45,17 @@ type Override struct {
 //     regardless of rig.
 //   - otherwise:     matches only the order with that exact rig.
 //
-// Returns an error if an override targets a nonexistent order (following
-// the agent override pattern where unmatched targets are errors, not
-// silent no-ops).
+// An entry that matches no order is skipped; every other entry still applies.
+// The returned error names every skipped entry (following the agent override
+// pattern where unmatched targets are errors, not silent no-ops), so a caller
+// that logs the error and keeps the orders is running the operator's override
+// set minus exactly the entries that log line names.
 func ApplyOverrides(aa []Order, overrides []Override) error {
+	var skipped []error
 	for i, ov := range overrides {
 		if ov.Name == "" {
-			return fmt.Errorf("orders.overrides[%d]: name is required", i)
+			skipped = append(skipped, fmt.Errorf("orders.overrides[%d]: name is required", i))
+			continue
 		}
 		found := false
 		for j := range aa {
@@ -65,10 +69,27 @@ func ApplyOverrides(aa []Order, overrides []Override) error {
 			found = true
 		}
 		if !found {
-			return notFoundError(i, ov, aa)
+			skipped = append(skipped, notFoundError(i, ov, aa))
 		}
 	}
+	if len(skipped) > 0 {
+		return skippedError(skipped, len(overrides))
+	}
 	return nil
+}
+
+// skippedError renders the skipped entries as one line: callers that log and
+// continue print the error through a single Printf, where a multi-line error
+// would split the warning across records that no longer carry the log prefix.
+// The counts lead so the operator reads how much of the block is in force
+// before reading which entries are not.
+func skippedError(skipped []error, total int) error {
+	msgs := make([]string, len(skipped))
+	for i, err := range skipped {
+		msgs[i] = err.Error()
+	}
+	return fmt.Errorf("orders.overrides: %d of %d entries skipped (%d applied): %s",
+		len(skipped), total, total-len(skipped), strings.Join(msgs, "; "))
 }
 
 func rigMatches(ovRig, orderRig string) bool {
