@@ -338,19 +338,43 @@ func (g *doltLeakGuardedTestingM) waitForFinalScanToClear(
 	return leaked, nil
 }
 
+// doltLeakGuardTerminationSignals are the signals whose default action ends
+// the process and which therefore have to run this run's cleanup first.
+//
+// SIGQUIT belongs here because scripts/lib/harness-reap.sh's watchdog sends it
+// ahead of SIGKILL to make the Go runtime dump goroutine stacks and name a
+// wedged test. Dumping is also how the runtime dies, so leaving SIGQUIT to its
+// default action abandons the test temp root — which holds a copy of the test
+// binary per testscript command. Handling it keeps the dump: the handler
+// restores the default action and re-raises, so every stack still gets
+// printed on the way out.
+var doltLeakGuardTerminationSignals = []syscall.Signal{
+	syscall.SIGINT,
+	syscall.SIGTERM,
+	syscall.SIGQUIT,
+}
+
+// handleTerminationSignal runs the cleanup owed to a signal that is about to
+// end the process: reap this run's dolt servers, then remove every temporary
+// path it created.
+func (g *doltLeakGuardedTestingM) handleTerminationSignal(sig os.Signal) {
+	fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: received %s; sweeping test dolt processes before exit\n", sig) //nolint:errcheck
+	_ = g.reapDoltProcessesUnderRoot("signal")
+	g.cleanupTemporaryPaths()
+}
+
 func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 	signals := make(chan os.Signal, 2)
 	done := make(chan struct{})
-	// SIGQUIT is what `go test -timeout` raises on a hung shard (see
-	// dolttest.Guard, which handles it for the same reason): without it the
-	// binary dies before reaping and every managed dolt server leaks.
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	notify := make([]os.Signal, 0, len(doltLeakGuardTerminationSignals))
+	for _, sig := range doltLeakGuardTerminationSignals {
+		notify = append(notify, sig)
+	}
+	signal.Notify(signals, notify...)
 	go func() {
 		select {
 		case sig := <-signals:
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: received %s; sweeping test dolt processes before exit\n", sig) //nolint:errcheck
-			_ = g.reapDoltProcessesUnderRoot("signal")
-			g.cleanupTemporaryPaths()
+			g.handleTerminationSignal(sig)
 			signal.Stop(signals)
 			if s, ok := sig.(syscall.Signal); ok {
 				signal.Reset(s)

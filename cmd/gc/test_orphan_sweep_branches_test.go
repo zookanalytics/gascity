@@ -522,9 +522,11 @@ func captureSweepStderr(t *testing.T, fn func()) string {
 	return string(out)
 }
 
-// TestSweepOrphanLogsRemovalReason verifies every removal emits one stderr
-// line naming the removed path and the branch that justified it, so a future
-// recurrence of ga-djbcqt is attributable without gate-log forensics.
+// TestSweepOrphanLogsRemovalReason verifies a removal whose liveness was
+// inferred emits one stderr line naming the removed path and the branch that
+// justified it, so a future recurrence of ga-djbcqt is attributable without
+// gate-log forensics. A removal backed by the active-root marker proves death
+// outright and is silent; TestSweepIsSilentWhenDeathIsProven covers that.
 func TestSweepOrphanLogsRemovalReason(t *testing.T) {
 	tests := []struct {
 		name       string
