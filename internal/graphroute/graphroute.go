@@ -73,8 +73,9 @@ func IsControlDispatcherKind(kind string) bool {
 
 // IsWorkflowTopologyKind reports whether a gc.kind value identifies a
 // workflow-topology step (root workflow, scope latch, or formula spec).
-// Routing never lands on these — they exist to structure the graph, not
-// to be claimed by an agent.
+// These structure the graph rather than carry work: no agent may claim one
+// and no reader counts one as demand. The root still records gc.routed_to
+// to name the run, so the exclusion keys on gc.kind, not on routing.
 func IsWorkflowTopologyKind(kind string) bool {
 	return beadmeta.IsWorkflowTopologyKind(kind)
 }
