@@ -90,7 +90,7 @@ func TestSweepOrphanPIDPrefixedDirsRemovesFreeSentinel(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("dir with free sentinel survived sweep: %s", dir)
 	}
-	wantDiagnostics := fmt.Sprintf("tmuxtest: removing orphaned socket parent %s (free sentinel)\n", dir)
+	wantDiagnostics := fmt.Sprintf("tmuxtest: removing orphaned socket parent %s (free sentinel, setup incomplete)\n", dir)
 	if got := diagnostics.String(); got != wantDiagnostics {
 		t.Errorf("diagnostics = %q, want %q", got, wantDiagnostics)
 	}
