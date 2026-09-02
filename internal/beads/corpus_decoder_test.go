@@ -132,11 +132,10 @@ func TestCorpusFieldsAreModeledOrExplicitlyIgnored(t *testing.T) {
 	// bd-emitted fields gascity intentionally does not model. Each carries the
 	// reason so a future reader knows the omission is deliberate.
 	ignored := map[string]string{
-		"comment_count":    "display-only count; gc reads comments via a separate path",
-		"created_by":       "provenance; gc does not consume the creator identity",
-		"owner":            "bd-internal ownership; gc uses assignee instead",
-		"dependency_count": "derivable from dependencies; gc recomputes",
-		"dependent_count":  "reverse-dependency count; gc does not consume it",
+		"comment_count":   "display-only count; gc reads comments via a separate path",
+		"created_by":      "provenance; gc does not consume the creator identity",
+		"owner":           "bd-internal ownership; gc uses assignee instead",
+		"dependent_count": "reverse-dependency count; gc does not consume it",
 	}
 	known := bdIssueJSONTags(t)
 
