@@ -304,3 +304,90 @@ func TestApplyOverrides_PreservesNotFoundSubstring(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyOverridesUnmatchedEntryDoesNotBlockLaterEntries pins the property a
+// deployment depends on: an entry naming an order that no longer exists costs
+// that entry alone. Were an unmatched entry to stop the loop, one stale name at
+// the top of the array would silently re-enable every order the operator
+// disabled below it.
+func TestApplyOverridesUnmatchedEntryDoesNotBlockLaterEntries(t *testing.T) {
+	t.Parallel()
+
+	disabled := boolPtr(false)
+	aa := []Order{
+		{Name: "liveness-sweep", Rig: "demo", Interval: "6h"},
+		{Name: "feedback-distiller", Rig: "demo"},
+	}
+	err := ApplyOverrides(aa, []Override{
+		{Name: "doc-keeper-drift-audit", Rig: "signal-loom", Enabled: disabled},
+		{Name: "liveness-sweep", Rig: "demo", Interval: strPtr("24h")},
+		{Name: "feedback-distiller", Rig: "demo", Enabled: disabled},
+	})
+	if err == nil {
+		t.Fatal("ApplyOverrides succeeded; want the unmatched entry reported")
+	}
+	for _, sub := range []string{"orders.overrides[0]", `"doc-keeper-drift-audit"`, "not found"} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q missing substring %q", err.Error(), sub)
+		}
+	}
+	if aa[0].Interval != "24h" {
+		t.Errorf("liveness-sweep interval = %q, want the later override applied (%q)", aa[0].Interval, "24h")
+	}
+	if aa[1].Enabled == nil || *aa[1].Enabled {
+		t.Errorf("feedback-distiller enabled = %v, want the later override applied (disabled)", aa[1].Enabled)
+	}
+}
+
+// TestApplyOverridesReportsEveryUnmatchedEntry checks the diagnostic names
+// every skipped entry: that list is how an operator learns which parts of the
+// override block are inert, and one name would understate it.
+func TestApplyOverridesReportsEveryUnmatchedEntry(t *testing.T) {
+	t.Parallel()
+
+	disabled := boolPtr(false)
+	aa := []Order{{Name: "patrol", Rig: "demo"}}
+	err := ApplyOverrides(aa, []Override{
+		{Name: "ghost-city", Enabled: disabled},
+		{Name: "patrol", Rig: "demo", Enabled: disabled},
+		{Name: "ghost-rig", Rig: "demo", Enabled: disabled},
+		{Name: "", Enabled: disabled},
+	})
+	if err == nil {
+		t.Fatal("ApplyOverrides succeeded; want every unmatched entry reported")
+	}
+	for _, sub := range []string{
+		"orders.overrides[0]", `"ghost-city"`,
+		"orders.overrides[2]", `"ghost-rig"`,
+		"orders.overrides[3]", "name is required",
+	} {
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error %q missing substring %q", err.Error(), sub)
+		}
+	}
+	if strings.Contains(err.Error(), "orders.overrides[1]") {
+		t.Errorf("error %q names the entry that matched", err.Error())
+	}
+	if aa[0].Enabled == nil || *aa[0].Enabled {
+		t.Errorf("patrol enabled = %v, want the matching override applied (disabled)", aa[0].Enabled)
+	}
+}
+
+// TestApplyOverridesErrorIsSingleLine keeps the diagnostic on one line: the
+// callers that log and continue render it through a single Printf, and a
+// multi-line error would split the operator-facing warning across records that
+// no longer carry the log prefix.
+func TestApplyOverridesErrorIsSingleLine(t *testing.T) {
+	t.Parallel()
+
+	err := ApplyOverrides([]Order{{Name: "patrol"}}, []Override{
+		{Name: "ghost-one"},
+		{Name: "ghost-two"},
+	})
+	if err == nil {
+		t.Fatal("ApplyOverrides succeeded; want both unmatched entries reported")
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Errorf("error %q spans multiple lines", err.Error())
+	}
+}
