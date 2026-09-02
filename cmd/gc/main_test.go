@@ -187,21 +187,6 @@ var testTempRootAliveSentinel *os.File
 // lifetime, for the same reason as testTempRootAliveSentinel above.
 var tmuxSocketAliveSentinel *os.File
 
-type cleanupTestingM struct {
-	m     testscript.TestingM
-	paths []string
-}
-
-func (m cleanupTestingM) Run() int {
-	code := m.m.Run()
-	for _, path := range m.paths {
-		if path != "" {
-			_ = os.RemoveAll(path)
-		}
-	}
-	return code
-}
-
 func TestMain(m *testing.M) {
 	maybeRunProductMetricsDirectChildEnvSpy()
 
@@ -253,12 +238,12 @@ func TestMain(m *testing.M) {
 	}
 	tmuxSocketAliveSentinel = tmuxSentinel
 	// testscript.Main below exits via os.Exit, which skips defers, so the
-	// normal path removes the tmux socket parent through cleanupTestingM. A
-	// setup panic before testscript.Main is reached still unwinds through
-	// defers, so cover that window here or it leaks /tmp/gct-<pid>-* until a
-	// later aged sweep. cmdGCTmuxSocketRoot returns an empty cleanup root when
-	// it fell back to a dir under TMPDIR (swept separately), so only the real
-	// /tmp parent is removed here.
+	// normal path removes the tmux socket parent through the leak guard's
+	// cleanup paths. A setup panic before testscript.Main is reached still
+	// unwinds through defers, so cover that window here or it leaks
+	// /tmp/gct-<pid>-* until a later aged sweep. cmdGCTmuxSocketRoot returns
+	// an empty cleanup root when it fell back to a dir under TMPDIR (swept
+	// separately), so only the real /tmp parent is removed here.
 	defer func() {
 		if tmuxSocketCleanupRoot != "" {
 			_ = os.RemoveAll(tmuxSocketCleanupRoot)
@@ -302,10 +287,14 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
-	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// The tmux socket parent belongs in the leak guard's own cleanup paths, not
+	// in a wrapper around it: a wrapper only runs once the guard's Run returns,
+	// which a termination signal never lets happen.
+	cleanupPaths := []string{testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot}
 	if tmuxSocketCleanupRoot != "" {
-		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
+		cleanupPaths = append(cleanupPaths, tmuxSocketCleanupRoot)
 	}
+	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, cleanupPaths...)
 	testscript.Main(testRunner, map[string]func(){
 		"gc": func() {
 			configureTestscriptEnvDefaults()
