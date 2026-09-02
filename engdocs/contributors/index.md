@@ -27,6 +27,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Contributor Response and Attribution Conventions](contributor-response-conventions.md)
   when replying to, superseding, adopting, or closing someone else's issue or
   PR — what the contributor is owed and how credit is recorded
+- [Beads Version Bump Anchors](beads-version-bump-anchors.md) when moving the
+  `github.com/steveyegge/beads` pin — the version lives in a dozen files, and
+  four of them fail in places that never mention beads
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
