@@ -369,11 +369,12 @@ func TestSpliceCityForWriteMeansWhatThePlainRewriteMeans(t *testing.T) {
 	}
 }
 
-func TestSpliceCityForWriteKeepsCommentsAboveRootLevelKeys(t *testing.T) {
-	// include is stated ahead of the first table header, in the region of
-	// the file that has no header of its own. `gc import` edits it through
-	// this writer, so the reasons an operator wrote above it have to survive
-	// that edit the same as the ones written inside a table do.
+func TestSpliceCityForWriteDropsTheCommentAboveARootKeyItChanged(t *testing.T) {
+	// include is stated ahead of the first table header, in the region of the
+	// file that has no header of its own, and `gc import` edits it through
+	// this writer. A comment above a key describes the value written under
+	// it, so an edit that changes that value leaves the comment behind; every
+	// other comment in the file is untouched by it.
 	original := `# fragments merge in order; the last one to state a key wins.
 # TO REVERT the spend controls: drop the second entry.
 include = ["fragments/base.toml", "fragments/spend.toml"]
@@ -396,13 +397,15 @@ base = "builtin:claude"
 	if err != nil {
 		t.Fatalf("SpliceCityForWrite: %v", err)
 	}
-	for _, want := range []string{
+	if !strings.Contains(string(got), "# claude-watch is the monitoring tier for patrol agents.") {
+		t.Fatalf("an edit to include dropped a comment written elsewhere in the file:\n%s", got)
+	}
+	for _, gone := range []string{
 		"# fragments merge in order; the last one to state a key wins.",
 		"# TO REVERT the spend controls: drop the second entry.",
-		"# claude-watch is the monitoring tier for patrol agents.",
 	} {
-		if !strings.Contains(string(got), want) {
-			t.Fatalf("missing %q in:\n%s", want, got)
+		if strings.Contains(string(got), gone) {
+			t.Fatalf("a comment describing the old include list survived onto the new one: %q\n%s", gone, got)
 		}
 	}
 	after, err := Parse(got)
@@ -451,4 +454,67 @@ provider = "claude"
 	if after.Workspace.Provider != "codex" {
 		t.Fatalf("the edit was not applied: %q\n%s", after.Workspace.Provider, got)
 	}
+}
+
+func TestSpliceCityForWriteKeepsInlineComments(t *testing.T) {
+	// A reason written at the end of an assignment is as much a record of an
+	// operator decision as one written above it, and city.toml is edited by
+	// commands that name neither.
+	original := `[workspace]
+name = "loomington"
+prefix = "lx" # bead ids read as lx-*; changing it orphans every open bead
+provider = "claude"
+
+# claude-watch is the monitoring tier for patrol agents.
+[providers]
+[providers.claude-watch]
+base = "builtin:claude" # the watch tier tracks the base image on purpose
+ready_delay_ms = 0
+`
+	inline := []string{
+		`prefix = "lx" # bead ids read as lx-*; changing it orphans every open bead`,
+		`base = "builtin:claude" # the watch tier tracks the base image on purpose`,
+	}
+
+	t.Run("an edit that changes nothing", func(t *testing.T) {
+		cfg, err := Parse([]byte(original))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		got, err := SpliceCityForWrite([]byte(original), cfg)
+		if err != nil {
+			t.Fatalf("SpliceCityForWrite: %v", err)
+		}
+		if string(got) != original {
+			t.Fatalf("an edit that changes nothing rewrote the file:\ngot:\n%s\nwant:\n%s", got, original)
+		}
+	})
+
+	t.Run("an edit elsewhere", func(t *testing.T) {
+		cfg, err := Parse([]byte(original))
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		cfg.Workspace.Provider = "codex"
+
+		got, err := SpliceCityForWrite([]byte(original), cfg)
+		if err != nil {
+			t.Fatalf("SpliceCityForWrite: %v", err)
+		}
+		for _, want := range inline {
+			if !strings.Contains(string(got), want) {
+				t.Fatalf("an edit elsewhere in the file dropped %q:\n%s", want, got)
+			}
+		}
+		after, err := Parse(got)
+		if err != nil {
+			t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+		}
+		if after.Workspace.Provider != "codex" {
+			t.Fatalf("the edit was not applied: %q\n%s", after.Workspace.Provider, got)
+		}
+		if after.Workspace.Prefix != "lx" {
+			t.Fatalf("prefix = %q, want lx:\n%s", after.Workspace.Prefix, got)
+		}
+	})
 }

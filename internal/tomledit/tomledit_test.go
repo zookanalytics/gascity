@@ -257,10 +257,13 @@ y = 2
 	if !ok {
 		t.Fatal("Splice refused a document whose layout matches its baseline")
 	}
-	for _, want := range []string{"# why x is 1", "# why y is 2, which the edit does not touch", "x = 99"} {
+	for _, want := range []string{"# why y is 2, which the edit does not touch", "x = 99"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "# why x is 1") {
+		t.Fatalf("a comment stating why x was 1 survived onto its new value:\n%s", got)
 	}
 }
 
@@ -351,10 +354,11 @@ func TestSpliceHandlesDocumentsWithNoTables(t *testing.T) {
 	}
 }
 
-func TestSpliceKeepsCommentsAboveEditedRootLevelKeys(t *testing.T) {
+func TestSpliceKeepsTheCommentsOfRootLevelKeysAnEditDidNotTouch(t *testing.T) {
 	// Root assignments sit ahead of the first table header, in the one block
-	// that has no header line of its own. An edit to one of them keeps the
-	// commentary written above it the same way an edit inside a table does.
+	// that has no header line of its own. Their comments attach to them the
+	// same way the comments inside a table attach to its keys, and survive an
+	// edit to a neighboring key the same way.
 	original := `# why the city is named this
 name = "loomington"
 # fragments merge in order; the last to state a key wins
@@ -381,12 +385,14 @@ provider = "claude"
 	}
 	for _, want := range []string{
 		"# why the city is named this",
-		"# fragments merge in order; the last to state a key wins",
 		`include = ["fragments/base.toml", "fragments/spend.toml"]`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Contains(got, "# fragments merge in order; the last to state a key wins") {
+		t.Fatalf("a comment describing the old include list survived onto the new one:\n%s", got)
 	}
 	if strings.Count(got, `name = "loomington"`) != 1 {
 		t.Fatalf("root assignment was duplicated or lost:\n%s", got)
@@ -395,21 +401,179 @@ provider = "claude"
 
 func TestSpliceKeepsCommentsInADocumentWithNoTables(t *testing.T) {
 	// With no header anywhere, the whole document is the header-less block.
-	original := `# fragments merge in order
+	original := `# why the city is named this
+name = "loomington"
+# fragments merge in order
 include = ["fragments/base.toml"]
 `
-	baseline := `include = ["fragments/base.toml"]
+	baseline := `name = "loomington"
+include = ["fragments/base.toml"]
 `
-	desired := `include = ["fragments/base.toml", "fragments/spend.toml"]
+	desired := `name = "loomington"
+include = ["fragments/base.toml", "fragments/spend.toml"]
 `
 	got, ok := Splice(original, baseline, desired)
 	if !ok {
 		t.Fatal("Splice refused a document whose layout matches its baseline")
 	}
-	if !strings.Contains(got, "# fragments merge in order") {
-		t.Fatalf("comment above the only key was lost:\n%s", got)
+	if !strings.Contains(got, "# why the city is named this") {
+		t.Fatalf("comment above a key the edit did not touch was lost:\n%s", got)
 	}
 	if !strings.Contains(got, `"fragments/spend.toml"`) {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}
+
+func TestSpliceKeepsInlineCommentsOnAStanzaTheEditDidNotTouch(t *testing.T) {
+	// A comment written at the end of an assignment is a comment like any
+	// other. What proves a stanza untouched is the values it states, so
+	// commentary beside a value does not make the stanza look edited.
+	original := `[a]
+x = 1 # keep why x is set
+y = 2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	got, ok := Splice(original, baseline, baseline)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if got != original {
+		t.Fatalf("an edit that changes nothing rewrote the file:\ngot:\n%s\nwant:\n%s", got, original)
+	}
+}
+
+func TestSpliceKeepsInlineCommentsOfKeysAnEditDidNotTouch(t *testing.T) {
+	original := `[a]
+x = 1 # keep why x is set
+y = 2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	desired := `[a]
+x = 1
+y = 99
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if !strings.Contains(got, "x = 1 # keep why x is set") {
+		t.Fatalf("an edit elsewhere in the stanza dropped an inline comment:\n%s", got)
+	}
+	if !strings.Contains(got, "y = 99") {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}
+
+func TestSpliceDropsAnInlineCommentOnAValueItChanged(t *testing.T) {
+	original := `[a]
+x = 1 # x is 1 because the pool is small
+y = 2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	desired := `[a]
+x = 99
+y = 2
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if strings.Contains(got, "x is 1 because the pool is small") {
+		t.Fatalf("a comment stating why x was 1 survived onto its new value:\n%s", got)
+	}
+	if !strings.Contains(got, "x = 99") {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}
+
+func TestSpliceDropsACommentTheNewValueContradicts(t *testing.T) {
+	original := `[[orders.overrides]]
+name = "feedback-distiller"
+# the distiller is off on purpose: the promotion PR is city-wide, so four
+# of them would race each other.
+enabled = false
+`
+	baseline := `[[orders.overrides]]
+name = "feedback-distiller"
+enabled = false
+`
+	desired := `[[orders.overrides]]
+name = "feedback-distiller"
+enabled = true
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if strings.Contains(got, "the distiller is off on purpose") {
+		t.Fatalf("a comment the new value contradicts survived the edit:\n%s", got)
+	}
+	if !strings.Contains(got, "enabled = true") {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+	if !strings.Contains(got, `name = "feedback-distiller"`) {
+		t.Fatalf("a key the edit did not touch was lost:\n%s", got)
+	}
+}
+
+func TestSpliceAppliesAnEditInsideAStringStatingAHash(t *testing.T) {
+	// A "#" inside a string opens no comment, so what stands after it is
+	// part of the value. Reading it as a comment would make an edited value
+	// compare equal to the old one and the edit would be dropped.
+	original := `[a]
+note = "before # after"
+x = 1
+`
+	baseline := `[a]
+note = "before # after"
+x = 1
+`
+	desired := `[a]
+note = "before # changed"
+x = 1
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if !strings.Contains(got, `note = "before # changed"`) {
+		t.Fatalf("edit was not applied:\n%s", got)
+	}
+	if strings.Contains(got, `note = "before # after"`) {
+		t.Fatalf("old value survived the edit:\n%s", got)
+	}
+}
+
+func TestSpliceKeepsACommentWrittenOnTheHeaderOfAnEditedStanza(t *testing.T) {
+	original := `[a] # the tier polecats read
+x = 1
+y = 2
+`
+	baseline := `[a]
+x = 1
+y = 2
+`
+	desired := `[a]
+x = 1
+y = 99
+`
+	got, ok := Splice(original, baseline, desired)
+	if !ok {
+		t.Fatal("Splice refused a document whose layout matches its baseline")
+	}
+	if !strings.Contains(got, "[a] # the tier polecats read") {
+		t.Fatalf("an edit inside the stanza dropped the comment on its header:\n%s", got)
+	}
+	if !strings.Contains(got, "y = 99") {
 		t.Fatalf("edit was not applied:\n%s", got)
 	}
 }

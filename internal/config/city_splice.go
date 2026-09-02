@@ -12,7 +12,7 @@ import (
 //
 // city.toml records operator decisions and how to revert them, and it
 // hot-reloads. Re-encoding the whole file would drop the commentary holding
-// those reasons, and would change live behaviour for any stanza the struct
+// those reasons, and would change live behavior for any stanza the struct
 // round trip does not carry back.
 //
 // original is the file's current content. It is compared against its own
@@ -24,7 +24,9 @@ import (
 //
 // Copying a stanza through does not preserve what the checked-in form
 // deliberately drops. A stanza carrying a machine-local rig path is
-// re-encoded without it, the same as a full rewrite would.
+// re-encoded without it, the same as a full rewrite would. A comment about a
+// key whose value the edit changed is dropped too: it states why that key
+// held its old value, and city.toml is read for what is true now.
 func SpliceCityForWrite(original []byte, cfg *City) ([]byte, error) {
 	desired, err := cfg.MarshalForWrite()
 	if err != nil {

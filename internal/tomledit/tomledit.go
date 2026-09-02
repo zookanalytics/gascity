@@ -39,16 +39,33 @@ func (b Block) Key() string {
 	return "[" + b.Header + "]"
 }
 
-// fields returns Body without its comment and blank lines, so two
-// renderings of one stanza compare equal whatever commentary surrounds
-// them.
+// fields returns Body without its comments and blank lines, so two
+// renderings of one stanza compare equal whatever commentary surrounds them.
+// A comment written at the end of a line is a comment like any other, so it
+// goes the same way a whole comment line does.
 func (b Block) fields() []string {
 	out := make([]string, 0, len(b.Body))
+	state := scanState{}
 	for _, line := range b.Body {
-		if isTrivia(line) {
+		if state.atTopLevel() && isTrivia(line) {
 			continue
 		}
-		out = append(out, line)
+		var code string
+		code, state = state.code(line)
+		out = append(out, code)
+	}
+	return out
+}
+
+// codeLines returns lines without their comments, so two renderings of one
+// assignment compare by the value they state.
+func codeLines(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	state := scanState{}
+	for _, line := range lines {
+		var code string
+		code, state = state.code(line)
+		out = append(out, code)
 	}
 	return out
 }
@@ -130,6 +147,12 @@ func Split(source string) Document {
 // and comparing original against its own rendering is what proves its bytes
 // still say the same thing the encoder would.
 //
+// Inside a stanza the edit did change, a key keeps the comments written about
+// it only while its value stands. A comment states why the value under or
+// beside it is what it is, so an edit that changes that value leaves the
+// comment behind rather than carrying it onto something it no longer
+// describes.
+//
 // ok is false unless all three documents state the same tables in the same
 // order, which restricts the splice to edits that only change values. Two
 // cases are turned away. A file that states a table in a form the encoder
@@ -160,7 +183,7 @@ func Splice(original, baseline, desired string) (string, bool) {
 			out = append(out, block.Body...)
 			continue
 		}
-		out = append(out, mergeBody(block.Body, wantDoc.Blocks[i].Body)...)
+		out = append(out, mergeBody(block.Body, baseDoc.Blocks[i].Body, wantDoc.Blocks[i].Body)...)
 	}
 	out = append(out, origDoc.Blocks[len(origDoc.Blocks)-1].Trail...)
 
@@ -193,25 +216,55 @@ type assignment struct {
 	lines []string
 }
 
-// mergeBody re-states want's values under the comments original wrote above
-// each key, so a stanza the edit touched keeps the operator's reasons for
-// the keys it left alone.
-func mergeBody(original, want []string) []string {
-	_, origItems, origTrail := splitBody(original)
+// mergeBody re-states want's values under the comments original wrote about
+// each key, so a stanza the edit touched keeps the operator's reasons for the
+// keys it left alone.
+//
+// A key's comments state why its value is what it is, so they only survive an
+// edit that left that value alone; a key whose value changed is written with
+// want's line and nothing else. baseline and want are both the encoder's
+// rendering, so comparing them by key asks whether the value changed and not
+// how the file happens to write it. For a key whose value stands, original's
+// own line goes back, which keeps any comment written at the end of it.
+func mergeBody(original, baseline, want []string) []string {
+	origHeader, origItems, origTrail := splitBody(original)
+	_, baseItems, _ := splitBody(baseline)
 	header, wantItems, _ := splitBody(want)
-	lead := make(map[string][]string, len(origItems))
-	for _, item := range origItems {
-		lead[item.key] = item.lead
+	orig := itemsByKey(origItems)
+	base := itemsByKey(baseItems)
+	if origHeader != "" {
+		// Both declare the same table, so original's line declares it with
+		// whatever comment was written at the end of it.
+		header = origHeader
 	}
+
 	out := make([]string, 0, len(want)+len(original))
 	if header != "" {
 		out = append(out, header)
 	}
 	for _, item := range wantItems {
-		out = append(out, lead[item.key]...)
+		from, stated := orig[item.key]
+		if !stated || !equalLines(base[item.key].lines, item.lines) {
+			out = append(out, item.lines...)
+			continue
+		}
+		out = append(out, from.lead...)
+		if equalLines(codeLines(from.lines), codeLines(item.lines)) {
+			out = append(out, from.lines...)
+			continue
+		}
 		out = append(out, item.lines...)
 	}
 	return append(out, origTrail...)
+}
+
+// itemsByKey indexes a body's assignments by the key each one states.
+func itemsByKey(items []assignment) map[string]assignment {
+	out := make(map[string]assignment, len(items))
+	for _, item := range items {
+		out[item.key] = item
+	}
+	return out
 }
 
 // splitBody separates a block's body into its table header line, the
@@ -339,6 +392,25 @@ func (s scanState) atTopLevel() bool {
 
 // update returns the state left after reading line.
 func (s scanState) update(line string) scanState {
+	_, out := s.scan(line)
+	return out
+}
+
+// code returns line without the comment written at its end, together with the
+// state left after reading it.
+func (s scanState) code(line string) (string, scanState) {
+	comment, out := s.scan(line)
+	if comment < 0 {
+		return line, out
+	}
+	return strings.TrimRight(line[:comment], " \t"), out
+}
+
+// scan reads line and returns the offset of the "#" that opens a comment on
+// it, or -1 when it opens none, together with the state left after the line.
+// A "#" inside a string opens no comment, so the scan tracks the same lexical
+// context Split does.
+func (s scanState) scan(line string) (comment int, out scanState) {
 	for i := 0; i < len(line); {
 		if s.inBasic || s.inLiteral {
 			delim := `"""`
@@ -347,7 +419,7 @@ func (s scanState) update(line string) scanState {
 			}
 			idx := strings.Index(line[i:], delim)
 			if idx < 0 {
-				return s
+				return -1, s
 			}
 			s.inBasic = false
 			s.inLiteral = false
@@ -356,7 +428,7 @@ func (s scanState) update(line string) scanState {
 		}
 		switch {
 		case line[i] == '#':
-			return s
+			return i, s
 		case strings.HasPrefix(line[i:], `"""`):
 			s.inBasic = true
 			i += 3
@@ -379,7 +451,7 @@ func (s scanState) update(line string) scanState {
 			i++
 		}
 	}
-	return s
+	return -1, s
 }
 
 // basicStringLen returns the length of the quoted string opening at s[0],
