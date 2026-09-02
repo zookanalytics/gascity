@@ -1361,19 +1361,27 @@ func (s *BdStore) Get(id string) (Bead, error) {
 // resolve — every bead in a city that spans one store — costs no extra
 // subprocess, and only a bead that provably lost an edge pays for one.
 //
-// A repair that cannot be completed is an error rather than a short list. Once
-// the count has been read this reader KNOWS the set is short, and handing it
-// back as though it were whole is the silence the whole path exists to close.
+// A repair that does not reach the count is an error rather than a short list,
+// whether the edge records could not be read at all or came back still short of
+// it. Once the count has been read this reader KNOWS the set is incomplete, and
+// handing it back as though it were whole is the silence the whole path exists
+// to close.
 func (s *BdStore) completeShownDependencies(bead *Bead, row *bdIssue) error {
 	if row.DependencyCount == nil || *row.DependencyCount <= len(bead.Dependencies) {
 		return nil
 	}
+	rendered := len(bead.Dependencies)
 	records, err := s.DepList(bead.ID, "down")
 	if err != nil {
 		return fmt.Errorf("getting bead %q: bd show rendered %d of its %d dependency edges and the edge records could not be read: %w",
-			bead.ID, len(bead.Dependencies), *row.DependencyCount, err)
+			bead.ID, rendered, *row.DependencyCount, err)
 	}
-	bead.Dependencies = unionDeps(bead.Dependencies, records)
+	repaired := unionDeps(bead.Dependencies, records)
+	if len(repaired) < *row.DependencyCount {
+		return fmt.Errorf("getting bead %q: bd show rendered %d of its %d dependency edges and the edge records brought the set to only %d",
+			bead.ID, rendered, *row.DependencyCount, len(repaired))
+	}
+	bead.Dependencies = repaired
 	if bead.ParentID == "" {
 		bead.ParentID = parentIDFromDeps(bead.ID, bead.Dependencies)
 	}

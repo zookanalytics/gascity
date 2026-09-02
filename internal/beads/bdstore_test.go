@@ -2994,35 +2994,35 @@ func TestBdStoreGetReportsTheCrossStoreEdgeShowDropped(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd show --json tk-4gzw7o`: {
+		`bd show --json bd-42`: {
 			out: []byte(`[{
-				"id":"tk-4gzw7o",
+				"id":"bd-42",
 				"title":"waiting on another rig",
 				"status":"open",
 				"issue_type":"task",
-				"created_at":"2026-09-01T21:54:19Z",
+				"created_at":"2026-03-06T10:00:00Z",
 				"dependency_count":2,
 				"dependencies":[
-					{"id":"tk-pho0a8","title":"same store","status":"open","issue_type":"task","dependency_type":"blocks"}
+					{"id":"bd-41","title":"same store","status":"open","issue_type":"task","dependency_type":"blocks"}
 				]
 			}]`),
 		},
-		`bd dep list tk-4gzw7o tk-4gzw7o --json`: {
+		`bd dep list bd-42 bd-42 --json`: {
 			out: []byte(`[` +
-				`{"issue_id":"tk-4gzw7o","depends_on_id":"tk-pho0a8","type":"blocks"},` +
-				`{"issue_id":"tk-4gzw7o","depends_on_id":"gc-4c0a7","type":"blocks"}` +
+				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
+				`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}` +
 				`]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
 
-	got, err := s.Get("tk-4gzw7o")
+	got, err := s.Get("bd-42")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	want := []beads.Dep{
-		{IssueID: "tk-4gzw7o", DependsOnID: "tk-pho0a8", Type: "blocks"},
-		{IssueID: "tk-4gzw7o", DependsOnID: "gc-4c0a7", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
 	}
 	if len(got.Dependencies) != len(want) {
 		t.Fatalf("Dependencies = %+v, want the resident and the cross-store edge: %+v", got.Dependencies, want)
@@ -3101,6 +3101,49 @@ func TestBdStoreGetFailsWhenTheDroppedEdgesCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestBdStoreGetFailsWhenTheRepairedSetIsStillShort holds the same arm on the
+// path where every read reports success. Edge records carrying only what show
+// already rendered — or none at all — leave the set at the length the count has
+// already contradicted, and a repair that lands there has not repaired anything.
+// Returning it would be the original silent wrong answer, reached without a
+// single error to read.
+func TestBdStoreGetFailsWhenTheRepairedSetIsStillShort(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		records string
+	}{
+		{name: "records hold only the rendered edge", records: `[{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"}]`},
+		{name: "records are empty", records: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fakeRunner(map[string]struct {
+				out []byte
+				err error
+			}{
+				`bd show --json bd-42`: {
+					out: []byte(`[{
+						"id":"bd-42",
+						"title":"short",
+						"status":"open",
+						"issue_type":"task",
+						"created_at":"2026-03-06T10:00:00Z",
+						"dependency_count":2,
+						"dependencies":[
+							{"id":"bd-41","title":"blocker","status":"open","issue_type":"task","dependency_type":"blocks"}
+						]
+					}]`),
+				},
+				`bd dep list bd-42 bd-42 --json`: {out: []byte(tc.records)},
+			})
+			s := beads.NewBdStore("/city", runner)
+
+			if _, err := s.Get("bd-42"); err == nil {
+				t.Fatal("Get succeeded with a dependency set the repair left short of the count")
+			}
+		})
+	}
+}
+
 // TestBdStoreGetKeepsAnEdgeOnlyShowRendered pins the repair as a union. The two
 // readers see different subsets — show's join reaches both dependency planes and
 // drops non-resident targets, the edge records drop nothing but are read from
@@ -3125,7 +3168,7 @@ func TestBdStoreGetKeepsAnEdgeOnlyShowRendered(t *testing.T) {
 			}]`),
 		},
 		`bd dep list bd-42 bd-42 --json`: {
-			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}]`),
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
@@ -3136,7 +3179,7 @@ func TestBdStoreGetKeepsAnEdgeOnlyShowRendered(t *testing.T) {
 	}
 	want := []beads.Dep{
 		{IssueID: "bd-42", DependsOnID: "bd-wisp", Type: "blocks"},
-		{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
 	}
 	if len(got.Dependencies) != len(want) {
 		t.Fatalf("Dependencies = %+v, want both readers' edges: %+v", got.Dependencies, want)
@@ -4439,7 +4482,7 @@ func TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident(t *testing.T) {
 		`bd dep list bd-42 bd-42 --json`: {
 			out: []byte(`[` +
 				`{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks","created_at":"2026-03-06T10:00:00Z"},` +
-				`{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks","created_at":"2026-03-06T10:00:00Z"}` +
+				`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks","created_at":"2026-03-06T10:00:00Z"}` +
 				`]`),
 		},
 	})
@@ -4453,7 +4496,7 @@ func TestBdStoreDepListDownKeepsEdgesWhoseTargetIsNotResident(t *testing.T) {
 	}
 	for i, want := range []beads.Dep{
 		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
-		{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
 	} {
 		if deps[i] != want {
 			t.Errorf("DepList[%d] = %+v, want %+v", i, deps[i], want)
@@ -4473,7 +4516,7 @@ func TestBdStoreDepListBatchAsksForRecordsWithOneAnchor(t *testing.T) {
 		err error
 	}{
 		`bd dep list bd-42 bd-42 --json`: {
-			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}]`),
+			out: []byte(`[{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}]`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
@@ -4488,7 +4531,7 @@ func TestBdStoreDepListBatchAsksForRecordsWithOneAnchor(t *testing.T) {
 	if len(deps) != 1 {
 		t.Fatalf("DepListBatch[bd-42] = %+v, want the one cross-store edge", deps)
 	}
-	want := beads.Dep{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"}
+	want := beads.Dep{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"}
 	if deps[0] != want {
 		t.Errorf("DepListBatch[bd-42][0] = %+v, want %+v", deps[0], want)
 	}
@@ -4524,7 +4567,7 @@ func TestBdStoreDepListBatchKeepsMultiAnchorSpelling(t *testing.T) {
 // job — not the caller's, and not a version of bd it may not be talking to.
 func TestBdStoreDepListDownUndoesTheRepeatedAnchor(t *testing.T) {
 	edges := `{"issue_id":"bd-42","depends_on_id":"bd-41","type":"blocks"},` +
-		`{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}`
+		`{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}`
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
@@ -4538,7 +4581,7 @@ func TestBdStoreDepListDownUndoesTheRepeatedAnchor(t *testing.T) {
 	}
 	want := []beads.Dep{
 		{IssueID: "bd-42", DependsOnID: "bd-41", Type: "blocks"},
-		{IssueID: "bd-42", DependsOnID: "gc-4c0a7", Type: "blocks"},
+		{IssueID: "bd-42", DependsOnID: "gc-other", Type: "blocks"},
 	}
 	if len(deps) != len(want) {
 		t.Fatalf("DepList = %+v, want each edge once: %+v", deps, want)
@@ -4553,7 +4596,7 @@ func TestBdStoreDepListDownUndoesTheRepeatedAnchor(t *testing.T) {
 // TestBdStoreDepListBatchUndoesTheRepeatedAnchor holds the same on the batch
 // reader, which reaches the record shape for a lone anchor the same way.
 func TestBdStoreDepListBatchUndoesTheRepeatedAnchor(t *testing.T) {
-	edge := `{"issue_id":"bd-42","depends_on_id":"gc-4c0a7","type":"blocks"}`
+	edge := `{"issue_id":"bd-42","depends_on_id":"gc-other","type":"blocks"}`
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
