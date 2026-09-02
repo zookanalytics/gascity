@@ -87,11 +87,9 @@ func (d Document) String() string {
 // opens with one.
 func Split(source string) Document {
 	doc := Document{FinalNewline: strings.HasSuffix(source, "\n")}
-	if source == "" {
-		return doc
-	}
 	trimmed := strings.TrimSuffix(source, "\n")
 	if trimmed == "" {
+		doc.Blocks = []Block{{}}
 		return doc
 	}
 
@@ -124,125 +122,45 @@ func Split(source string) Document {
 }
 
 // Splice renders desired while keeping original's exact bytes for every
-// block the edit left alone.
+// stanza the edit left alone.
 //
 // baseline must be the canonical rendering of original: the encoder that
-// produced desired, run over the config parsed from original. A block whose
-// baseline text still appears in desired is therefore provably untouched,
-// and original's bytes for it are carried through verbatim. A block whose
-// text changed is re-encoded under the comments written above it.
+// produced desired, run over the config parsed from original. Comparing the
+// two canonical renderings is what identifies the stanzas an edit touched,
+// and comparing original against its own rendering is what proves its bytes
+// still say the same thing the encoder would.
 //
-// ok is false when original's blocks do not correspond one for one with
-// baseline's, which happens when the file states a table in a form the
-// encoder does not emit, such as an inline table or a dotted key. The
-// caller must then write desired unchanged: splicing a layout that cannot
-// be accounted for risks emitting a stanza twice.
+// ok is false unless all three documents state the same tables in the same
+// order, which restricts the splice to edits that only change values. Two
+// cases are turned away. A file that states a table in a form the encoder
+// never emits, an inline table or a dotted key, has no block to compare
+// against. An edit that adds or removes a stanza moves the ones after it,
+// and a table header inserted between an array element and the sub-tables
+// beneath it re-parents them onto the wrong element. The caller writes
+// desired unchanged in both cases, which is what it did before the splice
+// existed.
 func Splice(original, baseline, desired string) (string, bool) {
 	origDoc := Split(original)
 	baseDoc := Split(baseline)
 	wantDoc := Split(desired)
-
-	origByKey := indexByKey(origDoc.Blocks)
-	baseByKey := indexByKey(baseDoc.Blocks)
-	wantByKey := indexByKey(wantDoc.Blocks)
-	if !sameShape(origByKey, baseByKey) {
+	if !sameSequence(origDoc.Blocks, baseDoc.Blocks) || !sameSequence(baseDoc.Blocks, wantDoc.Blocks) {
 		return "", false
-	}
-
-	// replacement[i] is the desired block that supersedes original block i;
-	// -1 marks a stanza the edit removed. verbatim[i] additionally reports
-	// that original's own bytes still state exactly what the encoder would,
-	// which is what makes copying them through safe. added[i] lists desired
-	// blocks to emit after original block i, which is how a new array
-	// element lands beside its siblings instead of at the end of the file.
-	replacement := make([]int, len(origDoc.Blocks))
-	verbatim := make([]bool, len(origDoc.Blocks))
-	added := make([][]int, len(origDoc.Blocks))
-	for i := range replacement {
-		replacement[i] = -1
-	}
-
-	claimed := make(map[int]bool, len(wantDoc.Blocks))
-	for key, origPos := range origByKey {
-		basePos := baseByKey[key]
-		wantPos := wantByKey[key]
-		taken := make([]bool, len(wantPos))
-
-		// An element whose canonical text still appears in desired is
-		// untouched, wherever the edit moved it to.
-		for i, base := range basePos {
-			for j, want := range wantPos {
-				if taken[j] || !equalLines(baseDoc.Blocks[base].fields(), wantDoc.Blocks[want].fields()) {
-					continue
-				}
-				replacement[origPos[i]] = want
-				// Copying original's bytes is only equivalent when they
-				// state the same keys the encoder does. A file carrying
-				// something the canonical form strips, such as a
-				// machine-local rig path, states more, and emitting those
-				// bytes verbatim would put it back.
-				verbatim[origPos[i]] = equalLines(
-					origDoc.Blocks[origPos[i]].fields(),
-					baseDoc.Blocks[base].fields(),
-				)
-				taken[j] = true
-				claimed[want] = true
-				break
-			}
-		}
-		// Whatever is left pairs in order: an edit that rewrites one field
-		// of one stanza leaves exactly that stanza on both sides.
-		next := 0
-		for i := range basePos {
-			if replacement[origPos[i]] >= 0 {
-				continue
-			}
-			for next < len(wantPos) && taken[next] {
-				next++
-			}
-			if next == len(wantPos) {
-				break
-			}
-			replacement[origPos[i]] = wantPos[next]
-			taken[next] = true
-			claimed[wantPos[next]] = true
-		}
-		// Elements desired gained follow the key's last existing stanza.
-		last := origPos[len(origPos)-1]
-		for j, want := range wantPos {
-			if taken[j] {
-				continue
-			}
-			added[last] = append(added[last], want)
-			claimed[want] = true
-		}
 	}
 
 	var out []string
 	for i, block := range origDoc.Blocks {
-		switch {
-		case replacement[i] < 0:
-			// The edit removed this stanza, and its commentary with it.
-		case verbatim[i]:
-			out = append(out, block.Lead...)
+		out = append(out, block.Lead...)
+		untouched := equalLines(baseDoc.Blocks[i].fields(), wantDoc.Blocks[i].fields())
+		// Carrying bytes through is only equivalent when they state the
+		// same keys the encoder does. A file holding something the
+		// canonical form strips, such as a machine-local rig path, states
+		// more, and copying those bytes would put it back.
+		canonical := equalLines(block.fields(), baseDoc.Blocks[i].fields())
+		if untouched && canonical {
 			out = append(out, block.Body...)
-		default:
-			out = append(out, block.Lead...)
-			out = append(out, mergeBody(block.Body, wantDoc.Blocks[replacement[i]].Body)...)
-		}
-		for _, want := range added[i] {
-			out = append(out, wantDoc.Blocks[want].Lead...)
-			out = append(out, wantDoc.Blocks[want].Body...)
-		}
-	}
-	// Tables desired introduces that the file never had go at the end, in
-	// the order the encoder emits them.
-	for i, block := range wantDoc.Blocks {
-		if claimed[i] {
 			continue
 		}
-		out = append(out, block.Lead...)
-		out = append(out, block.Body...)
+		out = append(out, mergeBody(block.Body, wantDoc.Blocks[i].Body)...)
 	}
 	out = append(out, origDoc.Blocks[len(origDoc.Blocks)-1].Trail...)
 
@@ -251,6 +169,20 @@ func Splice(original, baseline, desired string) (string, bool) {
 		rendered += "\n"
 	}
 	return rendered, true
+}
+
+// sameSequence reports whether two documents declare the same tables in the
+// same order, which is what lets their blocks be compared pairwise.
+func sameSequence(a, b []Block) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Key() != b[i].Key() {
+			return false
+		}
+	}
+	return true
 }
 
 // assignment is one key together with the lines stating its value, which is
@@ -324,30 +256,6 @@ func assignmentKey(line string) string {
 		}
 	}
 	return ""
-}
-
-// indexByKey groups block positions by the table each declares, keeping the
-// order they appear in.
-func indexByKey(blocks []Block) map[string][]int {
-	byKey := make(map[string][]int, len(blocks))
-	for i, block := range blocks {
-		byKey[block.Key()] = append(byKey[block.Key()], i)
-	}
-	return byKey
-}
-
-// sameShape reports whether two documents declare the same tables the same
-// number of times, which is what makes their blocks pairwise comparable.
-func sameShape(a, b map[string][]int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for key, positions := range a {
-		if len(b[key]) != len(positions) {
-			return false
-		}
-	}
-	return true
 }
 
 func equalLines(a, b []string) bool {

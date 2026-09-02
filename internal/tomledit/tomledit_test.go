@@ -152,7 +152,7 @@ y = 2
 	}
 }
 
-func TestSpliceDropsAStanzaTheEditRemoved(t *testing.T) {
+func TestSpliceRefusesAnEditThatRemovesAStanza(t *testing.T) {
 	original := `# note about a
 [[item]]
 name = "a"
@@ -170,50 +170,44 @@ name = "b"
 	desired := `[[item]]
 name = "b"
 `
-	got, ok := Splice(original, baseline, desired)
-	if !ok {
-		t.Fatal("Splice refused a document whose layout matches its baseline")
-	}
-	if strings.Contains(got, `name = "a"`) || strings.Contains(got, "# note about a") {
-		t.Fatalf("removed stanza survived with its comment:\n%s", got)
-	}
-	if !strings.Contains(got, "# note about b") {
-		t.Fatalf("kept stanza lost its comment:\n%s", got)
+	if _, ok := Splice(original, baseline, desired); ok {
+		t.Fatal("Splice accepted an edit that removes a stanza; removals move every stanza after them")
 	}
 }
 
-func TestSpliceAddsANewStanzaBesideItsSiblings(t *testing.T) {
-	original := `[[item]]
+func TestSpliceRefusesAnEditThatAddsAStanzaAboveDependentSubTables(t *testing.T) {
+	// The last [[rigs]] element owns the [rigs.imports] block beneath it.
+	// A third rig spliced in after the last [[rigs]] header would land
+	// between them and take that sub-table for itself.
+	original := `[[rigs]]
 name = "a"
 
-# tail table
-[z]
-k = 1
-`
-	baseline := `[[item]]
-name = "a"
-
-[z]
-k = 1
-`
-	desired := `[[item]]
-name = "a"
-
-[[item]]
+[[rigs]]
 name = "b"
-
-[z]
-k = 1
+[rigs.imports]
+source = "rigs/b"
 `
-	got, ok := Splice(original, baseline, desired)
-	if !ok {
-		t.Fatal("Splice refused a document whose layout matches its baseline")
-	}
-	if !strings.Contains(got, `name = "b"`) {
-		t.Fatalf("added stanza is missing:\n%s", got)
-	}
-	if strings.Index(got, `name = "b"`) > strings.Index(got, "# tail table") {
-		t.Fatalf("added stanza must land beside its siblings, not after the rest of the file:\n%s", got)
+	baseline := `[[rigs]]
+name = "a"
+
+[[rigs]]
+name = "b"
+[rigs.imports]
+source = "rigs/b"
+`
+	desired := `[[rigs]]
+name = "a"
+
+[[rigs]]
+name = "b"
+[rigs.imports]
+source = "rigs/b"
+
+[[rigs]]
+name = "c"
+`
+	if _, ok := Splice(original, baseline, desired); ok {
+		t.Fatal("Splice accepted an added stanza; inserting one can re-parent the sub-tables that follow it")
 	}
 }
 
@@ -335,5 +329,24 @@ prefix = "tk"
 	}
 	if !strings.Contains(got, `prefix = "tk"`) {
 		t.Fatalf("edit was not applied:\n%s", got)
+	}
+}
+
+func TestSpliceHandlesDocumentsWithNoTables(t *testing.T) {
+	// Split promises a block for the region ahead of the first header, and
+	// Splice reads the last block's trail unconditionally. A source with
+	// nothing in it must still produce that block, or the read runs off the
+	// front of the slice.
+	for _, source := range []string{"", "\n", "   \n"} {
+		if len(Split(source).Blocks) == 0 {
+			t.Fatalf("Split(%q) returned no blocks", source)
+		}
+	}
+	got, ok := Splice("", "", "")
+	if !ok {
+		t.Fatal("Splice refused a document with nothing in it")
+	}
+	if got != "" {
+		t.Fatalf("Splice of empty documents = %q, want empty", got)
 	}
 }

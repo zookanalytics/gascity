@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -188,7 +189,13 @@ func spliceUnchanged(t *testing.T, city []byte) []byte {
 	return got
 }
 
-func TestSpliceCityForWriteDropsAStanzaTheEditRemoved(t *testing.T) {
+func TestSpliceCityForWriteFallsBackWhenTheEditRemovesAStanza(t *testing.T) {
+	// Removing a stanza moves every stanza below it, and a [[rigs]] element
+	// dropped from above its [rigs.imports] sub-tables would re-parent them
+	// onto the element before it. Rather than guess where the survivors
+	// belong, the splice steps aside and the file is rewritten plainly: the
+	// edit lands, and the commentary goes the way it did before the splice
+	// existed.
 	original := commentedCityFixture()
 	cfg, err := Parse([]byte(original))
 	if err != nil {
@@ -207,8 +214,12 @@ func TestSpliceCityForWriteDropsAStanzaTheEditRemoved(t *testing.T) {
 	if len(after.Orders.Overrides) != 21 {
 		t.Fatalf("order overrides = %d, want 21:\n%s", len(after.Orders.Overrides), got)
 	}
-	if !strings.Contains(string(got), "# Tooling-spend controls (operator decision 2026-08-15).") {
-		t.Fatalf("removing one stanza must not take the surrounding commentary with it:\n%s", got)
+	plain, err := cfg.MarshalForWrite()
+	if err != nil {
+		t.Fatalf("MarshalForWrite: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("a removal must fall back to the plain rewrite:\n%s", got)
 	}
 }
 
@@ -303,5 +314,57 @@ func TestWriteCityAndRigSiteBindingsForEditKeepsComments(t *testing.T) {
 	}
 	if after.AgentDefaults.DefaultSlingFormula != "mol-review" {
 		t.Fatalf("the edit was not written: %q", after.AgentDefaults.DefaultSlingFormula)
+	}
+}
+
+func TestSpliceCityForWriteMeansWhatThePlainRewriteMeans(t *testing.T) {
+	// The splice exists to change bytes, so the property that keeps it safe
+	// is that it never changes meaning: whatever it writes must parse to the
+	// same config a full rewrite would have produced. city.toml hot-reloads,
+	// so a divergence here is a live behavior change nobody asked for --
+	// the failure this whole change is about.
+	original := commentedCityFixture()
+	fresh := "fresh"
+	on := true
+	for _, tc := range []struct {
+		name string
+		edit func(*City)
+	}{
+		{"no edit at all", func(*City) {}},
+		{"a value already stated", func(c *City) { c.AgentDefaults.WakeMode = fresh }},
+		{"a key the file omits", func(c *City) { c.Orders.Overrides[0].Enabled = &on }},
+		{"a stanza removed", func(c *City) { c.Orders.Overrides = c.Orders.Overrides[1:] }},
+		{"a stanza added", func(c *City) {
+			c.Orders.Overrides = append(c.Orders.Overrides, c.Orders.Overrides[0])
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(original))
+			if err != nil {
+				t.Fatalf("Parse fixture: %v", err)
+			}
+			tc.edit(cfg)
+
+			got, err := SpliceCityForWrite([]byte(original), cfg)
+			if err != nil {
+				t.Fatalf("SpliceCityForWrite: %v", err)
+			}
+			spliced, err := Parse(got)
+			if err != nil {
+				t.Fatalf("spliced output does not parse: %v\n%s", err, got)
+			}
+
+			plainBytes, err := cfg.MarshalForWrite()
+			if err != nil {
+				t.Fatalf("MarshalForWrite: %v", err)
+			}
+			plain, err := Parse(plainBytes)
+			if err != nil {
+				t.Fatalf("plain rewrite does not parse: %v", err)
+			}
+			if !reflect.DeepEqual(spliced, plain) {
+				t.Fatalf("spliced config differs from the plain rewrite:\n%s", got)
+			}
+		})
 	}
 }
