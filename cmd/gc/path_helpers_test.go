@@ -389,10 +389,17 @@ func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 	}
 }
 
+// cleanupTemporaryPaths removes every temporary path this run created. It is
+// the run's last reclaim, on the normal exit path and on the signal handler's
+// alike, so a path it cannot remove is named on stderr rather than discarded.
+// A stranded root is invisible otherwise, and outlives the process.
 func (g *doltLeakGuardedTestingM) cleanupTemporaryPaths() {
 	for _, path := range g.cleanupPaths {
-		if path != "" {
-			_ = os.RemoveAll(path)
+		if path == "" {
+			continue
+		}
+		if err := forceRemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "cmd/gc test cleanup: removing %s: %v\n", path, err) //nolint:errcheck
 		}
 	}
 }

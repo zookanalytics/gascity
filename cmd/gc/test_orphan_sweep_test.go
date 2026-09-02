@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -147,9 +149,10 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 }
 
 // sweepOrphanPIDPrefixedDirs removes <root>/<prefix><PID> dirs whose creator
-// is gone, including MkdirTemp names such as <prefix><PID>-<random>.
-// Best-effort; ignores errors. Used by test setup to clean leftover test
-// fixtures from prior crashed/SIGKILL'd runs.
+// is gone, including MkdirTemp names such as <prefix><PID>-<random>. Used by
+// test setup to clean leftover test fixtures from prior crashed/SIGKILL'd
+// runs. A dir that survives its removal is named on stderr and left in place;
+// the sweep continues, because no later step depends on any single removal.
 //
 // Liveness is decided by the alive sentinel flock when present: flock state
 // is visible across PID namespaces, whereas pidAlive reports every host PID
@@ -224,6 +227,63 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			// attributable from run logs instead of gate-log forensics.
 			fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
 		}
-		_ = os.RemoveAll(path)
+		if err := forceRemoveAll(path); err != nil {
+			fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s: %v\n", path, err)
+		}
 	}
+}
+
+// forceRemoveAll removes path, retrying once with owner traversal restored on
+// every directory underneath it. os.RemoveAll cannot unlink an entry whose
+// parent directory denies writes, which is what a test that chmods a fixture
+// read-only leaves behind when its process dies before t.Cleanup restores the
+// mode. The first removal strips the rest of the tree, and the remnant then
+// fails every later removal for the same reason it failed the first time.
+// Widening the mode is safe: these trees are test fixtures created by this
+// process or by a dead predecessor of it. The returned error is what still
+// stands after the retry.
+func forceRemoveAll(path string) error {
+	if err := os.RemoveAll(path); err == nil {
+		return nil
+	}
+	chmodErr := grantOwnerTraversal(path)
+	if err := os.RemoveAll(path); err != nil {
+		return errors.Join(err, chmodErr)
+	}
+	return nil
+}
+
+// grantOwnerTraversal adds owner read, write, and execute to path and to every
+// directory beneath it, which is what unlinking their entries requires. Each
+// directory is widened before the walk descends into it, so a mode that denies
+// search does not hide the subtree under it. Symlinks are not followed, so the
+// walk cannot widen a directory outside path. Errors are collected rather than
+// raised: a mode this process cannot change is only worth reporting if the
+// removal it was meant to unblock still fails.
+func grantOwnerTraversal(path string) error {
+	var errs []error
+	walkErr := filepath.WalkDir(path, func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			errs = append(errs, err)
+			return nil
+		}
+		if mode := info.Mode().Perm(); mode&0o700 != 0o700 {
+			if err := os.Chmod(name, mode|0o700); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		errs = append(errs, walkErr)
+	}
+	return errors.Join(errs...)
 }

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -586,5 +588,134 @@ func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
 
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
 		t.Fatalf("stale cmd/gc temp root still exists after sweep: %v", err)
+	}
+}
+
+// readOnlyFixtureTree builds <dir>/locked holding a file, then denies writes
+// on the locked directory. That is the shape a test leaves behind when it
+// chmods a fixture read-only and the process dies before its own t.Cleanup
+// restores the mode: os.RemoveAll strips the rest of the tree and cannot
+// unlink the file under the locked directory. The restore is registered here
+// so the enclosing t.TempDir can be removed even when the assertion fails.
+func readOnlyFixtureTree(t *testing.T, dir string) {
+	t.Helper()
+	locked := filepath.Join(dir, "locked")
+	if err := os.MkdirAll(locked, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", locked, err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "payload.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("writing payload under %s: %v", locked, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	if err := os.Chmod(locked, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", locked, err)
+	}
+}
+
+// unremovableFixtureDir returns a directory whose parent denies writes, so no
+// mode change under the returned path can make unlinking it succeed. It is
+// the failure a reclaim must report rather than discard.
+func unremovableFixtureDir(t *testing.T, parent string) string {
+	t.Helper()
+	target := filepath.Join(parent, "target")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", target, err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", parent, err)
+	}
+	return target
+}
+
+// TestForceRemoveAllReclaimsReadOnlyFixtureTree pins the reclaim that keeps a
+// husk from surviving forever. The tree os.RemoveAll cannot finish is the one
+// every later sweep also fails on, for the same reason, so the reclaim has to
+// widen the mode itself.
+func TestForceRemoveAllReclaimsReadOnlyFixtureTree(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	root := filepath.Join(t.TempDir(), "root")
+	readOnlyFixtureTree(t, root)
+
+	if err := os.RemoveAll(root); err == nil {
+		t.Fatal("os.RemoveAll removed a tree holding a read-only directory; the fixture no longer reproduces the husk")
+	}
+	if err := forceRemoveAll(root); err != nil {
+		t.Fatalf("forceRemoveAll(%s) = %v, want nil", root, err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("forceRemoveAll left %s behind: stat err = %v", root, err)
+	}
+}
+
+// TestForceRemoveAllReportsWhatItCannotRemove covers the other half of the
+// contract: a widened mode is not always enough, and the caller must still be
+// told which path stayed on disk.
+func TestForceRemoveAllReportsWhatItCannotRemove(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	target := unremovableFixtureDir(t, filepath.Join(t.TempDir(), "parent"))
+
+	err := forceRemoveAll(target)
+
+	if err == nil {
+		t.Fatal("forceRemoveAll returned nil for a directory it cannot unlink from a read-only parent")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("forceRemoveAll error = %v, want a permission error", err)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatalf("Stat(%s) = %v, want the reported directory still present", target, statErr)
+	}
+}
+
+// TestForceRemoveAllToleratesMissingPath keeps the reclaim usable for paths a
+// previous run already removed.
+func TestForceRemoveAllToleratesMissingPath(t *testing.T) {
+	if err := forceRemoveAll(filepath.Join(t.TempDir(), "no-such-dir")); err != nil {
+		t.Fatalf("forceRemoveAll(absent path) = %v, want nil", err)
+	}
+}
+
+// TestSweepOrphanRemovesStaleRootHoldingReadOnlyDirectory is the husk itself.
+// A root whose owner died mid-test keeps the read-only fixture the owner never
+// restored, so the sweep that judges it dead must also be able to reclaim it —
+// otherwise the root is judged dead on every later run and removed on none.
+func TestSweepOrphanRemovesStaleRootHoldingReadOnlyDirectory(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	root := t.TempDir()
+	dir := pidPrefixedTestDir(root, "pfx", nonLivePID(t))
+	readOnlyFixtureTree(t, dir)
+	backdatePastSweepAge(t, dir)
+
+	_ = captureSweepStderr(t, func() { sweepOrphanPIDPrefixedDirs(root, "pfx") })
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("sweepOrphanPIDPrefixedDirs left stale root %s behind: stat err = %v", dir, err)
+	}
+}
+
+// TestSweepOrphanReportsARootItCannotRemove pins the announcement. A removal
+// that fails silently is why the husk went unnoticed: the sweep kept judging
+// the root dead and kept discarding the reason it stayed.
+func TestSweepOrphanReportsARootItCannotRemove(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	parent := filepath.Join(t.TempDir(), "parent")
+	dir := pidPrefixedTestDir(parent, "pfx", nonLivePID(t))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll %s: %v", dir, err)
+	}
+	backdatePastSweepAge(t, dir)
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
+	if err := os.Chmod(parent, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", parent, err)
+	}
+
+	got := captureSweepStderr(t, func() { sweepOrphanPIDPrefixedDirs(parent, "pfx") })
+
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("Stat(%s) = %v, want the unremovable root still present", dir, err)
+	}
+	if !strings.Contains(got, dir) || !strings.Contains(got, "permission denied") {
+		t.Errorf("sweep stderr = %q, want a report naming %s and the removal error", got, dir)
 	}
 }

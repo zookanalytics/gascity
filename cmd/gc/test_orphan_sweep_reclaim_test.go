@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -205,5 +206,40 @@ func TestSweepIsSilentWhenDeathIsProven(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("sweep stderr = %q, want empty for a removal whose owner is provably dead", got)
+	}
+}
+
+// TestCleanupTemporaryPathsReclaimsReadOnlyFixtureTree pins the guard's own
+// reclaim. cleanupTemporaryPaths is what removes this run's temp root, so a
+// read-only fixture the run never restored has to be reclaimed here or it
+// outlives the process as a husk no later sweep can remove either.
+func TestCleanupTemporaryPathsReclaimsReadOnlyFixtureTree(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	root := filepath.Join(t.TempDir(), "root")
+	readOnlyFixtureTree(t, root)
+
+	g := &doltLeakGuardedTestingM{tempRoot: root, cleanupPaths: []string{root}}
+	_ = captureSweepStderr(t, g.cleanupTemporaryPaths)
+
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("cleanupTemporaryPaths left %s behind: stat err = %v", root, err)
+	}
+}
+
+// TestCleanupTemporaryPathsReportsAPathItCannotRemove pins the announcement
+// for the paths the reclaim cannot finish. Discarding that error is what let
+// a stranded root go unreported for the life of the run.
+func TestCleanupTemporaryPathsReportsAPathItCannotRemove(t *testing.T) {
+	skipWhenRootIgnoresPermissions(t)
+	target := unremovableFixtureDir(t, filepath.Join(t.TempDir(), "parent"))
+
+	g := &doltLeakGuardedTestingM{tempRoot: target, cleanupPaths: []string{"", target}}
+	got := captureSweepStderr(t, g.cleanupTemporaryPaths)
+
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("Stat(%s) = %v, want the unremovable path still present", target, err)
+	}
+	if !strings.Contains(got, target) || !strings.Contains(got, "permission denied") {
+		t.Errorf("cleanup stderr = %q, want a report naming %s and the removal error", got, target)
 	}
 }
