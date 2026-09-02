@@ -358,12 +358,13 @@ func singleStoreReadCount(command string) int {
 // the reader words, their failure clauses, and the crash-recovery tier's
 // presence-key prelude.
 //
-// The last one is undone by generating both forms from the production function
-// itself rather than by pasting its text here. That keeps the guard honest as
-// the enrichment evolves: a change INSIDE the enrichment renormalizes away (it
-// is by definition part of the sanctioned difference), while any change outside
-// the two generators still fails, which is the property this test exists for.
-func renormalizeFederatedCommand(federated string) string {
+// Each fragment it undoes is generated from the production builder rather than
+// pasted here. That keeps the guard honest as those builders evolve: a change
+// INSIDE one renormalizes away (it is by definition part of the sanctioned
+// difference), while any change outside them still fails, which is the property
+// this test exists for. beads names the compatibility level the two forms were
+// built at, since the reads carry --include-ephemeral from it.
+func renormalizeFederatedCommand(federated string, beads BeadsConfig) string {
 	// The generated script is embedded in the final command by shellquote.Join,
 	// which wraps it in single quotes and rewrites every inner ' as '\''. The
 	// fragments below are generated raw, so they must be escaped the same way to
@@ -380,10 +381,13 @@ func renormalizeFederatedCommand(federated string) string {
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
 			assignedInProgressTierCommand(shellVar, QueryTopology{}))
 	}
+	for _, tier := range []func(QueryTopology) string{poolDemandRoutedTierRead, poolDemandMigrationTierRead} {
+		federated = replaceFragment(federated,
+			tier(QueryTopology{Beads: beads, FederatedReady: true}),
+			tier(QueryTopology{Beads: beads}))
+	}
 	federated = strings.ReplaceAll(federated, gcReadyCommand, bdReadyCommand)
 	federated = strings.ReplaceAll(federated, `--json --limit=1) || exit $?`, `--json --limit=1 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
-	federated = strings.ReplaceAll(federated, `--sort oldest --limit=20 2>/dev/null) || exit $?`, `--sort oldest --limit=20 2>/dev/null)`)
 	return federated
 }
 
@@ -410,7 +414,7 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			// Everything outside the reader words, their failure handling, and the
 			// crash-recovery presence key must be untouched. Normalizing the
 			// federated form back onto the single-store one is what proves it.
-			if renormalized := renormalizeFederatedCommand(federated); renormalized != single {
+			if renormalized := renormalizeFederatedCommand(federated, bd105); renormalized != single {
 				t.Errorf("%s/%s: the federated command differs from the single-store one by more than the reader, its failure clause, and the crash-recovery presence key\n federated(normalized)=%q\n      single-store=%q", shape.name, v.name, renormalized, single)
 			}
 		}

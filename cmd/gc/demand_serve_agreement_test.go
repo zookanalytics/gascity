@@ -68,10 +68,24 @@ func agreementRows() []agreementRow {
 		{name: "slot-suffixed route, non-pool agent", bead: routed("a-4", "rig/solo-1"), wantServable: false},
 		{name: "unknown target", bead: routed("a-5", "rig/nobody"), wantServable: false},
 		{
+			// Topology, not work, whichever key carries the route. The query
+			// cannot exclude it (bd has no "not a workflow root" predicate), so
+			// counting it would spawn a seat per tick for the whole run.
 			name: "workflow root routed by run_target only",
 			bead: beads.Bead{ID: "a-6", Status: "open", Type: "task", Metadata: map[string]string{
 				beadmeta.KindMetadataKey:      beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			// Why the exclusion is keyed on kind rather than root-ness: a
+			// vapor/root-only wisp root IS the work, and it is what wakes a
+			// scaled-to-zero pool.
+			name: "wisp root on the canonical route key",
+			bead: beads.Bead{ID: "a-13", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindWisp,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: true,
 		},
@@ -159,6 +173,29 @@ func holdLabelAgreementRows() []agreementRow {
 	return rows
 }
 
+// workflowTopologyAgreementRows is generated from the kind set itself, so a
+// kind added to WorkflowTopologyKinds cannot ship without this property
+// covering it. These carry the CANONICAL route key: a root is stamped with
+// gc.routed_to and its finalize edge is "tracks" rather than "blocks", so it
+// stays ready, routed and unassigned from the pour until the run ends.
+func workflowTopologyAgreementRows() []agreementRow {
+	rows := make([]agreementRow, 0, len(beadmeta.WorkflowTopologyKinds))
+	for _, kind := range beadmeta.WorkflowTopologyKinds {
+		rows = append(rows, agreementRow{
+			name: "routed " + kind + " topology bead",
+			bead: beads.Bead{
+				ID: "topology-" + kind, Status: "open", Type: "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:     kind,
+					beadmeta.RoutedToMetadataKey: agreementTemplate,
+				},
+			},
+			wantServable: false,
+		})
+	}
+	return rows
+}
+
 // TestDemandCountsExactlyTheClaimableRows states the demand side's verdict over
 // the corpus and pins the ROUTE half against the claim matcher.
 //
@@ -174,7 +211,7 @@ func TestDemandCountsExactlyTheClaimableRows(t *testing.T) {
 	templates := map[string]struct{}{agreementTemplate: {}}
 	routeTargets := hookClaimRouteTargets(agreementTemplate)
 
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		t.Run(row.name, func(t *testing.T) {
 			// The same-tick pass runs before demand is counted, so the property
 			// is asserted over the POST-rewrite row.
@@ -273,7 +310,7 @@ func TestSlotSuffixCollapseIsPersistedForClaimableFormsOnly(t *testing.T) {
 	var seeded []beads.Bead
 	var stores []beads.Store
 	want := map[string]string{}
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		created, err := store.Create(beads.Bead{
 			Title:    row.name,
 			Type:     row.bead.Type,
@@ -381,7 +418,7 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	legacyOpts, legacyMetaWant := parseReadyArgsForTest(t, tierThreeLegacyReaderArgs(t, query, agreementTemplate))
 	assertLegacyTierFilterUnchanged(t, query)
 
-	for _, row := range append(agreementRows(), holdLabelAgreementRows()...) {
+	for _, row := range append(append(agreementRows(), holdLabelAgreementRows()...), workflowTopologyAgreementRows()...) {
 		t.Run(row.name, func(t *testing.T) {
 			bead := postCanonicalizeBead(cfg, row.bead)
 
@@ -399,12 +436,58 @@ func TestGoPredicateAndGeneratedQueryAgreeRowByRow(t *testing.T) {
 	}
 }
 
+// TestCountFormDeclinesEveryKindTheHookRefuses closes the third representation.
+//
+// TestGoPredicateAndGeneratedQueryAgreeRowByRow pins the Go demand predicate
+// against the worker's first-row query PLUS the hook's Go post-filter, because
+// that filter is where the topology dimension is decided. The reconciler's
+// count-form has no Go reader behind it — its last stage is the count — so the
+// rule has to be spelled in its own jq, and nothing in either package would
+// notice if it were not. That gap is the claim-path/count-path split: rows the
+// hook refuses, counted as demand, spawning a seat per tick for the life of the
+// run.
+func TestCountFormDeclinesEveryKindTheHookRefuses(t *testing.T) {
+	agent := config.Agent{Name: "worker", Dir: "rig"}
+	countForm := agent.EffectivePoolDemandQueryFor(config.QueryTopology{})
+
+	// The one restatement, in the style legacyWorkflowTierServes uses for the
+	// migration tier: the count-form's exclusion, spelled from the same kind
+	// set. Requiring the whole disjunction rather than each kind separately is
+	// what keeps an unrelated coincidence in another tier from passing for it.
+	conds := make([]string, len(beadmeta.WorkflowTopologyKinds))
+	for i, kind := range beadmeta.WorkflowTopologyKinds {
+		conds[i] = `. == "` + kind + `"`
+	}
+	if want := strings.Join(conds, " or "); !strings.Contains(countForm, want) {
+		t.Fatalf("count-form does not decline workflow topology: want %q in %q", want, countForm)
+	}
+
+	for _, kind := range beadmeta.WorkflowTopologyKinds {
+		t.Run(kind, func(t *testing.T) {
+			row, err := json.Marshal([]map[string]any{{
+				"id":       "topology-" + kind,
+				"metadata": map[string]string{beadmeta.KindMetadataKey: kind},
+			}})
+			if err != nil {
+				t.Fatalf("encoding row: %v", err)
+			}
+			if workQueryHasReadyWork(filterUnreadyHookCandidates(string(row), time.Now())) {
+				t.Fatalf("the hook serves a %s bead, so the count-form exclusion above would be counting rows a worker CAN take", kind)
+			}
+		})
+	}
+}
+
 // legacyWorkflowTierServes evaluates the generated query's LEGACY workflow-root
 // tier: its own reader flags plus the jq post-filter the builder pipes the
-// result through. That filter keeps only rows whose gc.routed_to is empty, which
-// is the same gate the Go side applies in routedToAndLegacyWorkflowCandidates —
-// run_target is consulted only when there is no canonical route. Mirroring one
-// jq clause here is the single restatement in this conformance, and
+// result through. That filter has two clauses and only the first is restated
+// here. It keeps rows whose gc.routed_to is empty, which is the same gate the Go
+// side applies in routedToAndLegacyWorkflowCandidates — run_target is consulted
+// only when there is no canonical route. Its second clause drops workflow
+// topology, and workerIsServed already runs the production filter that decides
+// that (filterUnreadyHookCandidates, over the same beadmeta kind set the clause
+// is rendered from), so restating it would compare a copy against itself. One
+// restatement is the whole of this conformance, and
 // assertLegacyTierFilterUnchanged is what keeps it honest.
 func legacyWorkflowTierServes(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) bool {
 	if !workerIsServed(bead, opts, metaWant) {
@@ -442,11 +525,12 @@ func workerIsServed(bead beads.Bead, opts readyOpts, metaWant []metadataFieldFil
 // restatement in place.
 func assertLegacyTierFilterUnchanged(t *testing.T, query string) {
 	t.Helper()
-	// The exact filter poolDemandMigrationFilterJQ(1) renders into
-	// poolDemandFirstRowFunctionScript, brackets and limit slice included. The
-	// query is compared with the sh -c single-quote escaping undone, so the pin
-	// holds the jq PROGRAM rather than the quoting of the shell wrapper around it.
-	const wantFilter = `jq '[.[] | select((.metadata["gc.routed_to"] // "") == "")] | .[:1]'`
+	// The exact filter poolDemandTierFilterJQ(migrationTierSelectorJQ(), 1)
+	// renders into poolDemandFirstRowFunctionScript, brackets and limit slice
+	// included. The query is compared with the sh -c single-quote escaping undone,
+	// so the pin holds the jq PROGRAM rather than the quoting of the shell wrapper
+	// around it.
+	const wantFilter = `jq -c '[.[] | select((.metadata["gc.routed_to"] // "") == "") | select(((.metadata["gc.kind"] // "") | (. == "workflow" or . == "scope" or . == "spec")) | not)] | .[:1]'`
 	if !strings.Contains(unescapeShellSingleQuotes(query), wantFilter) {
 		t.Fatalf("the legacy workflow tier's post-filter is no longer exactly\n  %s\nso the Go mirror in legacyWorkflowTierServes is unpinned. Re-derive the mirror against the new filter, then update this pin.\nGenerated query:\n%s", wantFilter, query)
 	}

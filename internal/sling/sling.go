@@ -1356,8 +1356,9 @@ func InstantiateCompiledSlingFormula(ctx context.Context, recipe *formula.Recipe
 // materialize a workflow no worker can ever pick up.
 //
 // A sling IS the dispatch, so the pour must leave behind demand. The workflow
-// root never supplies it: the root is blocked by its own workflow-finalize step
-// from the moment it is created, so it is excluded from every ready query.
+// root never supplies it: a topology bead is excluded from pool demand and
+// from the hook by its gc.kind, whatever its route and whether or not it is
+// blocked (demandRowServable, isWorkflowTopologyHookCandidate).
 // Demand therefore rests entirely on the runnable steps, and if none of them
 // carries a route the whole workflow is inert.
 //

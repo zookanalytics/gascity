@@ -6,7 +6,6 @@ package graphroute
 import (
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
@@ -77,10 +76,11 @@ func IsControlDispatcherKind(kind string) bool {
 
 // IsWorkflowTopologyKind reports whether a gc.kind value identifies a
 // workflow-topology step (root workflow, scope latch, or formula spec).
-// Routing never lands on these — they exist to structure the graph, not
-// to be claimed by an agent.
+// These structure the graph rather than carry work: no agent may claim one
+// and no reader counts one as demand. The root still records gc.routed_to
+// to name the run, so the exclusion keys on gc.kind, not on routing.
 func IsWorkflowTopologyKind(kind string) bool {
-	return slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
+	return beadmeta.IsWorkflowTopologyKind(kind)
 }
 
 // IsCompiledGraphWorkflow reports whether a compiled recipe is a graph.v2
@@ -605,12 +605,11 @@ func DecorateGraphWorkflowRecipeWithDefaultBinding(recipe *formula.Recipe, route
 			step.Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}
 		if step.IsRoot {
-			// gc.routed_to is the canonical (and sole) persisted delivery key
-			// every runtime demand/claim/scale reader consults; the workflow root
-			// must carry it to be claimable, exactly like its own child steps and
-			// every legacy bead. Without it a pool-routed root is spawned-for by
-			// scale_check but never claimed by the worker, then idle-reaped
-			// (fixes #2763; gc.run_target retired as a wire field — ga-eld2x).
+			// gc.routed_to is the sole persisted delivery key the runtime
+			// readers consult. Recording a route is not being claimable:
+			// readers exclude a topology bead by gc.kind, so the root's route
+			// names the run without making the root itself demand or
+			// claimable work.
 			step.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
 			delete(step.Metadata, beadmeta.RunTargetMetadataKey)
 			if rootSessionName != "" {

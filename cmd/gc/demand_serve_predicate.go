@@ -10,7 +10,7 @@ package main
 // The controller's demand loop counted any ready, unassigned row whose route
 // normalized to T. The worker's Tier-3 query serves a strictly smaller set: it
 // passes --exclude-type=epic and one --exclude-label per dispatch hold, and it
-// matches the route by EXACT string. So three classes of row were permanent
+// matches the route by EXACT string. So four classes of row were permanent
 // capacity demand that no worker could ever claim:
 //
 //   - a routed EPIC (an unassigned parent has no executable spec — the query
@@ -18,7 +18,10 @@ package main
 //   - a bead parked on hold:mayor / hold:external (parked precisely because the
 //     next actor is not this worker),
 //   - a route stamped with a live slot suffix, "<base>-N", which the demand side
-//     normalizes to <base> and every raw consumer rejects.
+//     normalizes to <base> and every raw consumer rejects,
+//   - a workflow-topology bead — a graph.v2 root, a scope latch, a step-spec
+//     sidecar — which carries a route but no executable body, and which the
+//     hook's own filter strips before a worker ever sees it.
 //
 // Each one spawns a seat, the seat's hook reads empty, it drains, and the
 // controller counts the row again on the next tick. Forever.
@@ -101,6 +104,14 @@ func demandRowServable(b beads.Bead) bool {
 				return false
 			}
 		}
+	}
+	// KIND: no flag half at all. bd has no "not a workflow root" predicate, so
+	// the query returns one and the hook's own filter has the last word
+	// (isWorkflowTopologyHookCandidate). A topology bead stays ready, routed
+	// and unassigned for the whole run, so counting it is the fourth class of
+	// permanent demand this file exists to end.
+	if beadmeta.IsWorkflowTopologyKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
+		return false
 	}
 	return true
 }
