@@ -33,6 +33,9 @@ description: The shortest path for new contributors to get productive in Gas Cit
   PR — what the contributor is owed and how credit is recorded
 - [Maintainer Environment](maintainer-environment.md) for maintainers on the
   shared build hosts or the internal bd ledger — contributors can skip it
+- [Beads Version Bump Anchors](beads-version-bump-anchors.md) when moving the
+  `github.com/steveyegge/beads` pin — the version lives in a dozen files, and
+  four of them fail in places that never mention beads
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
