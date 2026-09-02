@@ -373,7 +373,7 @@ func TestApplyOverridesReportsEveryUnmatchedEntry(t *testing.T) {
 	}
 }
 
-// TestApplyOverridesErrorIsSingleLine keeps the diagnostic on one line: both
+// TestApplyOverridesErrorIsSingleLine keeps the diagnostic on one line: the
 // callers that log and continue render it through a single Printf, and a
 // multi-line error would split the operator-facing warning across records that
 // no longer carry the log prefix.

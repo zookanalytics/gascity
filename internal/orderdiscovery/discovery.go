@@ -144,7 +144,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	// documented workaround for the very bug this guard fixes — it disables the
 	// unbound copy so that copy stops stranding a wisp every cooldown — so it is
 	// already in city.toml wherever the bug was hit. ApplyOverrides treats an
-	// override that matches nothing as an error, so cutting these before it ran
+	// override that matches nothing as an error, so cutting these before it runs
 	// would turn that workaround into a hard scan failure for the callers that
 	// leave OnOverrideError nil (gc order, the doctor order-firing check).
 	// Matching here consumes such an entry as the no-op it has now become.
