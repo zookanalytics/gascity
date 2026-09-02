@@ -1042,11 +1042,22 @@ type bdIssue struct {
 	Labels       []string     `json:"labels"`
 	Metadata     StringMap    `json:"metadata,omitempty"`
 	Dependencies []bdIssueDep `json:"dependencies,omitempty"`
-	// DependencyCount is bd's own count of this row's BLOCKING edges,
-	// projected from the same dependency table and the same query as
-	// Dependencies. It is the control that turns "bd carried edges inline"
-	// into a falsifiable claim — see bdstore_inline_deps.go. A pointer so a bd
-	// that omits the field stays distinguishable from one reporting zero.
+	// DependencyCount is bd's own count of this row's edges, taken from the
+	// dependency tables with no join to the issues they point at. WHICH edges
+	// it counts depends on the command that produced the row, and this store's
+	// two readers of the field differ with it:
+	//
+	//   - `bd list` projects it as COUNT(*) WHERE type = 'blocks', from the
+	//     same query as the inline Dependencies. That makes it the control
+	//     turning "bd carried edges inline" into a falsifiable claim, against
+	//     the blocking edges only — see bdstore_inline_deps.go.
+	//   - `bd show` projects it over EVERY edge of the row, while rendering
+	//     Dependencies through a join that silently drops any edge whose target
+	//     is not resident. A count above the rendered edges is that drop, and
+	//     Get repairs it — see completeShownDependencies.
+	//
+	// A pointer so a bd that omits the field stays distinguishable from one
+	// reporting zero.
 	DependencyCount *int         `json:"dependency_count,omitempty"`
 	Ephemeral       bool         `json:"ephemeral,omitempty"`
 	NoHistory       bool         `json:"no_history,omitempty"`
@@ -1235,12 +1246,7 @@ func (b *bdIssue) toBead() Bead {
 	deps := b.normalizedDependencies()
 	parentID := b.ParentID
 	if parentID == "" {
-		for _, dep := range deps {
-			if dep.IssueID == b.ID && dep.Type == "parent-child" {
-				parentID = dep.DependsOnID
-				break
-			}
-		}
+		parentID = parentIDFromDeps(b.ID, deps)
 	}
 	status, indefinitelyDeferred := normalizedBdReadState(b.Status)
 	return Bead{
@@ -1312,6 +1318,19 @@ func (b *bdIssue) normalizedDependencies() []Dep {
 		})
 	}
 	return deps
+}
+
+// parentIDFromDeps reads a bead's parent off its own down-dependency set: the
+// target of its parent-child edge. It is the fallback for a bd that did not
+// project the parent column, and it has to see the edges the bead ends up
+// carrying — so a repaired dependency set re-runs it.
+func parentIDFromDeps(id string, deps []Dep) string {
+	for _, dep := range deps {
+		if dep.IssueID == id && dep.Type == "parent-child" {
+			return dep.DependsOnID
+		}
+	}
+	return ""
 }
 
 // isBdNotFound returns true if the error from bd CLI indicates a "not found" condition.
@@ -1704,6 +1723,9 @@ func (s *BdStore) Get(id string) (Bead, error) {
 		// errors.Is(err, ErrNotFound) callers remain unaffected.
 		return Bead{}, fmt.Errorf("getting bead %q (resolved to %q): %w", id, bead.ID, ErrIDCollision)
 	}
+	if err := s.completeShownDependencies(&bead, &issues[0]); err != nil {
+		return Bead{}, err
+	}
 	return bead, nil
 }
 
@@ -1757,6 +1779,51 @@ func bdSplitSafeKeys(meta map[string]string) error {
 	return nil
 }
 
+// completeShownDependencies repairs the dependency set `bd show` renders when
+// that projection dropped edges.
+//
+// bd answers show's .dependencies by joining every dependency row to the issues
+// table and skipping the ones whose target this database holds no row for
+// (issueops.GetDependenciesWithMetadataInTx). An edge into another rig's store
+// is exactly that case, so it disappears with no error and no marker: the write
+// reported success, the row is in the dependency table, and the read says there
+// is no edge. That is the wrong answer this reader has to stop producing, and
+// the same one DepList's edge-record read closes on its own axis.
+//
+// The shortfall is MEASURED, not assumed. show's dependency_count is a COUNT(*)
+// over the same dependency tables with no join, so the two disagree exactly when
+// rows were dropped, and the disagreement is readable in the answer already in
+// hand. That is what keeps the repair off the hot path: a bead whose edges all
+// resolve — every bead in a city that spans one store — costs no extra
+// subprocess, and only a bead that provably lost an edge pays for one.
+//
+// A repair that does not reach the count is an error rather than a short list,
+// whether the edge records could not be read at all or came back still short of
+// it. Once the count has been read this reader KNOWS the set is incomplete, and
+// handing it back as though it were whole is the silence the whole path exists
+// to close.
+func (s *BdStore) completeShownDependencies(bead *Bead, row *bdIssue) error {
+	if row.DependencyCount == nil || *row.DependencyCount <= len(bead.Dependencies) {
+		return nil
+	}
+	rendered := len(bead.Dependencies)
+	records, err := s.DepList(bead.ID, "down")
+	if err != nil {
+		return fmt.Errorf("getting bead %q: bd show rendered %d of its %d dependency edges and the edge records could not be read: %w",
+			bead.ID, rendered, *row.DependencyCount, err)
+	}
+	repaired := unionDeps(bead.Dependencies, records)
+	if len(repaired) < *row.DependencyCount {
+		return fmt.Errorf("getting bead %q: bd show rendered %d of its %d dependency edges and the edge records brought the set to only %d",
+			bead.ID, rendered, *row.DependencyCount, len(repaired))
+	}
+	bead.Dependencies = repaired
+	if bead.ParentID == "" {
+		bead.ParentID = parentIDFromDeps(bead.ID, bead.Dependencies)
+	}
+	return nil
+}
+
 // ErrBdSplitLabel refuses a label that fails beadmeta.ValidLabel: bd reads
 // --add-label, --remove-label and create's --labels as CSV records, so
 // "note,gc:session" would add gc:session, and '"gc:session"' or
@@ -1794,6 +1861,29 @@ func bdUnsetMetadataArgs(keys []string) []string {
 		args = append(args, "--unset-metadata", key)
 	}
 	return args
+}
+
+// unionDeps merges two readings of one bead's down edges, keeping rendered's
+// order and appending what only records saw.
+//
+// It is a union rather than a replacement because the two readers each see a
+// subset and neither invents an edge: show's join reaches both dependency
+// planes and drops non-resident targets, while the edge records drop nothing
+// but are read from the one plane the anchor lives on. Taking the union is what
+// makes the repair unable to lose an edge the render already had.
+func unionDeps(rendered, records []Dep) []Dep {
+	seen := make(map[Dep]struct{}, len(rendered)+len(records))
+	out := make([]Dep, 0, len(rendered)+len(records))
+	for _, group := range [][]Dep{rendered, records} {
+		for _, dep := range group {
+			if _, dup := seen[dep]; dup {
+				continue
+			}
+			seen[dep] = struct{}{}
+			out = append(out, dep)
+		}
+	}
+	return out
 }
 
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
@@ -3752,17 +3842,70 @@ func (s *BdStore) DepRemove(issueID, dependsOnID string) error {
 	return nil
 }
 
-// bdDepIssue is the JSON shape returned by bd dep list --json.
-// It's a bdIssue with an added dependency_type field.
+// bdDepIssue is the JSON shape `bd dep list` returns from its Relations role:
+// a bdIssue — the issue on the far end of the edge — with an added
+// dependency_type field.
 type bdDepIssue struct {
 	bdIssue
 	DepType string `json:"dependency_type"`
 }
 
 // DepList returns dependencies via bd dep list --json.
+//
+// The "down" direction reads edge records so that an edge whose target is not
+// resident in this store is reported rather than dropped; see depListDown.
+// "up" keeps the issue shape because bd exposes no inbound edge-record role,
+// so a DEPENDENT that this store holds no row for remains invisible on that
+// axis.
 func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
-	args := []string{"dep", "list", id, "--json"}
 	if direction == "up" {
+		return s.depListRows(id, true)
+	}
+	return s.depListDown(id)
+}
+
+// depListDown answers the "down" axis from the edge records of the one anchor
+// asked for, read through DepListBatch: bd's one-id call prints the
+// depended-on beads' rows, a join that drops every edge whose target this
+// database holds no row for, and DepListBatch is the read that names a lone
+// anchor twice to get the records instead. Every record that read returns
+// belongs to the anchor, and the anchor is reported as the CALLER spelled it —
+// DepList's long-standing contract, which a short id resolved by bd would
+// otherwise silently restate.
+//
+// A backend that does not implement the edge-record read (DepListBatch reports
+// it with ErrDepListBatchUnsupported) is read in the issues shape instead,
+// which such a backend answers; the cross-store edges that shape drops are
+// edges that backend cannot report either way.
+func (s *BdStore) depListDown(id string) ([]Dep, error) {
+	byAnchor, err := s.DepListBatch([]string{id})
+	if err != nil {
+		if errors.Is(err, ErrDepListBatchUnsupported) {
+			return s.depListRows(id, false)
+		}
+		return nil, fmt.Errorf("listing deps for %q: %w", id, err)
+	}
+	anchors := make([]string, 0, len(byAnchor))
+	for anchor := range byAnchor {
+		anchors = append(anchors, anchor)
+	}
+	sort.Strings(anchors)
+	var result []Dep
+	for _, anchor := range anchors {
+		for _, dep := range byAnchor[anchor] {
+			result = append(result, Dep{IssueID: id, DependsOnID: dep.DependsOnID, Type: dep.Type})
+		}
+	}
+	return result, nil
+}
+
+// depListRows reads one anchor's edges in bd's Relations shape: the issues on
+// the far end of each edge. up selects the issues that depend on id; otherwise
+// the issues id depends on. The shape is a join, so an edge whose far end this
+// store holds no row for is not in it.
+func (s *BdStore) depListRows(id string, up bool) ([]Dep, error) {
+	args := []string{"dep", "list", id, "--json"}
+	if up {
 		args = append(args, "--direction=up")
 	}
 	out, err := s.runBDTransientRead(args...)
@@ -3787,11 +3930,10 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 		if depType == "" {
 			depType = "blocks"
 		}
-		switch direction {
-		case "up":
+		if up {
 			// "up" query on id: returned issues depend on id.
 			result[i] = Dep{IssueID: di.ID, DependsOnID: id, Type: depType}
-		default:
+		} else {
 			// "down" query on id: id depends on returned issues.
 			result[i] = Dep{IssueID: id, DependsOnID: di.ID, Type: depType}
 		}
