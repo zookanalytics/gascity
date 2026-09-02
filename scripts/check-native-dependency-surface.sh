@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-max_modules="${GC_NATIVE_DEP_MAX_MODULES:-727}"
+# Exact ratchet, not headroom: this is the module count of the graph today, so
+# any growth trips the guard and gets reviewed rather than absorbed silently.
+# Raise it in the same commit that causes the growth -- a beads pin bump is the
+# usual cause, and the failure message reports the new count. Full anchor list:
+# engdocs/contributors/beads-version-bump-anchors.md.
+max_modules="${GC_NATIVE_DEP_MAX_MODULES:-740}"
 # max_binary_bytes re-baselined 2026-08-29 (ga-iuznq2). The build below now
 # adds -trimpath and CGO_ENABLED=0, which removes cross-host path-embedding
 # and native C-object (dolthub/gozstd, ICU) variance that previously made
