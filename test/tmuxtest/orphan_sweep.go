@@ -32,9 +32,25 @@ const SocketParentDirPrefix = "gct-"
 // the shared home.
 const socketParentAliveSentinelName = ".gc-test-alive.lock"
 
-// socketParentSweepMinAge is the minimum age before a PID-prefixed dir
-// becomes a sweep candidate. It closes the window where a sibling run has
-// created its dir but not yet acquired the alive sentinel.
+// socketParentSetupCompleteMarkerName is written into a socket parent dir once
+// its alive sentinel is held. Its presence beside a free sentinel proves the
+// creator finished starting up and has since died, which is what lets the sweep
+// reclaim the dir immediately instead of waiting out socketParentSweepMinAge.
+// The name matches the active-root marker cmd/gc writes into its own test temp
+// roots, so both sweeps describe a finished setup the same way. Sharing the
+// name is safe even though both sweeps scan /tmp: cmd/gc's prefix ("gct") is a
+// proper prefix of this package's ("gct-"), so the separation comes from
+// pidFromPrefixedDirName requiring a digit immediately after the prefix, not
+// from the prefixes themselves. That rejects "gct-<pid>-<random>" for cmd/gc's
+// scan and "gct<pid>" for this one, so neither sweep ever reads the other's
+// marker.
+const socketParentSetupCompleteMarkerName = ".gc-test-active-root"
+
+// socketParentSweepMinAge is how long a dir whose liveness cannot be settled
+// from its own contents is left alone. It closes the window where a sibling run
+// has created its dir but not yet acquired the alive sentinel. A dir carrying
+// both the sentinel and the setup-complete marker is not ambiguous and does not
+// wait this out; see SweepOrphanPIDPrefixedDirs.
 const socketParentSweepMinAge = time.Hour
 
 // PIDPrefixedTempPattern returns the os.MkdirTemp pattern for this
@@ -80,6 +96,13 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 	return true, false
 }
 
+// hasSetupCompleteMarker reports whether dir carries the setup-complete marker,
+// which NewSocketParentDir writes only after taking the alive sentinel.
+func hasSetupCompleteMarker(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, socketParentSetupCompleteMarkerName))
+	return err == nil
+}
+
 // pidFromPrefixedDirName parses the owner PID out of a socket-parent dir name
 // of the form "<prefix><PID>-<random>" -- the shape NewSocketParentDir creates
 // via os.MkdirTemp(root, "<prefix><PID>-*"). The "-" separator after the PID is
@@ -119,13 +142,16 @@ func pidFromPrefixedDirName(name, prefix string) (int, bool) {
 // Liveness is decided by the alive sentinel flock when present: flock state
 // is visible across PID namespaces, whereas raw PID liveness reports every
 // host PID as dead from inside a bwrap --unshare-pid sandbox that shares
-// the host /tmp (ga-djbcqt). PID liveness is only a fallback for a
-// "<prefix><PID>-<random>" dir that crashed between MkdirTemp and
-// HoldAliveSentinel; legacy pre-sweep names with no "-" after the PID are
-// rejected by pidFromPrefixedDirName and never swept here. Dirs younger than
-// socketParentSweepMinAge are never touched, covering the window before a
-// sibling run's sentinel exists. Each removal is described on diagnostics;
-// callers that do not surface cleanup logs should pass io.Discard.
+// the host /tmp (ga-djbcqt). A free sentinel beside the setup-complete marker
+// settles death outright, because NewSocketParentDir writes that marker only
+// once the flock is held; such a dir is removed at any age. Every other shape
+// is ambiguous -- the owner may be mid-setup -- so it must age past
+// socketParentSweepMinAge first, and a "<prefix><PID>-<random>" dir with no
+// sentinel at all then falls back to PID liveness, covering a creator that
+// crashed between MkdirTemp and HoldAliveSentinel. Legacy pre-sweep names with
+// no "-" after the PID are rejected by pidFromPrefixedDirName and never swept
+// here. Each removal is described on diagnostics; callers that do not surface
+// cleanup logs should pass io.Discard.
 func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 	if diagnostics == nil {
 		diagnostics = io.Discard
@@ -145,19 +171,44 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 			continue
 		}
 		info, err := e.Info()
-		if err != nil || now.Sub(info.ModTime()) < socketParentSweepMinAge {
+		if err != nil {
 			continue
 		}
 		path := filepath.Join(root, e.Name())
+		// aliveSentinelHeld holds a real LOCK_EX for the length of its probe,
+		// while HoldAliveSentinel takes its own lock LOCK_NB and fails outright
+		// rather than waiting. Probing a young unmarked dir -- the one shape
+		// whose owner may still be between opening its sentinel and locking it
+		// -- would therefore break that owner's NewSocketParentDir. So the
+		// cheap checks gate the probe: a marked dir is past that window by
+		// construction and safe to probe at any age.
+		complete := hasSetupCompleteMarker(path)
+		aged := now.Sub(info.ModTime()) >= socketParentSweepMinAge
+		if !complete && !aged {
+			continue
+		}
 		exists, held := aliveSentinelHeld(path)
-		var reason string
-		switch {
-		case held:
+		if held {
 			// Creator (possibly in another PID namespace) is still alive.
 			continue
+		}
+		var reason string
+		switch {
+		case exists && complete:
+			// NewSocketParentDir takes the flock before writing the marker, so
+			// this pair describes a run that finished starting up and has since
+			// died. No startup race is left to guard, so the age guard does not
+			// apply.
+			reason = "setup complete, owner gone"
+		case !aged:
+			// A marker with no sentinel beside it is not the reclaim shape --
+			// only the pair is proof -- so this dir is still ambiguous and the
+			// age guard governs it.
+			continue
 		case exists:
-			// Sentinel present but unlocked: the creator is gone. Remove.
-			reason = "free sentinel"
+			// A sentinel with no marker: setup never finished. The age guard
+			// above has cleared the startup window, so the owner is gone.
+			reason = "free sentinel, setup incomplete"
 		default:
 			// A "<prefix><PID>-<random>" dir with no sentinel: its creator
 			// crashed between MkdirTemp and HoldAliveSentinel. Fall back to
@@ -182,6 +233,13 @@ func SweepOrphanPIDPrefixedDirs(root, prefix string, diagnostics io.Writer) {
 // from a concurrent sibling's sweep -- the runtime finalizes unreachable
 // os.Files, which releases the flock. Sweep removal messages are written to
 // diagnostics.
+//
+// The setup-complete marker is written last on purpose, and
+// SweepOrphanPIDPrefixedDirs depends on that order: a marker can only exist
+// once the flock was held, so a marker beside a free sentinel proves the owner
+// is gone rather than still starting up. That is what lets the sweep reclaim a
+// dead socket parent immediately instead of waiting out
+// socketParentSweepMinAge.
 func NewSocketParentDir(root string, diagnostics io.Writer) (dir string, sentinel *os.File, err error) {
 	SweepOrphanPIDPrefixedDirs(root, SocketParentDirPrefix, diagnostics)
 	dir, err = os.MkdirTemp(root, PIDPrefixedTempPattern(SocketParentDirPrefix))
@@ -192,6 +250,12 @@ func NewSocketParentDir(root string, diagnostics io.Writer) (dir string, sentine
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return "", nil, err
+	}
+	marker := filepath.Join(dir, socketParentSetupCompleteMarkerName)
+	if err := os.WriteFile(marker, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o644); err != nil {
+		_ = sentinel.Close()
+		_ = os.RemoveAll(dir)
+		return "", nil, fmt.Errorf("writing setup-complete marker in %q: %w", dir, err)
 	}
 	return dir, sentinel, nil
 }
