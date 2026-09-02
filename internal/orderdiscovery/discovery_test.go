@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestScanAllNilConfigUsesDefaultCityRootsAndOSFS(t *testing.T) {
@@ -195,6 +196,76 @@ interval = "1h"
 	}
 	if aa[0].Interval != "15m" {
 		t.Fatalf("Interval = %q, want partially applied override %q", aa[0].Interval, "15m")
+	}
+}
+
+// TestScanAllStaleOverrideKeepsLaterOverridesInForce covers the deployment
+// shape: an [[orders.overrides]] entry naming an order that no longer exists,
+// sitting above the entries that throttle the background orders. The caller
+// logs and continues, so the entries below the stale one decide what the
+// supervisor actually runs — they must be in force, and the diagnostic must
+// name the entry that was skipped.
+func TestScanAllStaleOverrideKeepsLaterOverridesInForce(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "liveness-sweep", `[order]
+formula = "mol-liveness-sweep"
+trigger = "cooldown"
+interval = "6h"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "feedback-distiller", `[order]
+formula = "mol-feedback-distiller"
+trigger = "cooldown"
+interval = "24h"
+`)
+
+	disabled := false
+	interval := "24h"
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				// The stale entry, at the top of the array where it used to
+				// cost every entry below it.
+				{Name: "doc-keeper-drift-audit", Rig: "signal-loom", Enabled: &disabled},
+				{Name: "liveness-sweep", Interval: &interval},
+				{Name: "feedback-distiller", Enabled: &disabled},
+			},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnOverrideError: func(err error) error {
+			handled = err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, `order "doc-keeper-drift-audit"`) {
+		t.Fatalf("handled override error = %q, want the stale entry named", handled)
+	}
+
+	byName := map[string]orders.Order{}
+	for _, a := range aa {
+		byName[a.Name] = a
+	}
+	sweep, ok := byName["liveness-sweep"]
+	if !ok {
+		t.Fatalf("liveness-sweep missing from %#v", aa)
+	}
+	if sweep.Interval != "24h" {
+		t.Errorf("liveness-sweep interval = %q, want the override applied (%q)", sweep.Interval, "24h")
+	}
+	distiller, ok := byName["feedback-distiller"]
+	if !ok {
+		t.Fatalf("feedback-distiller missing from %#v", aa)
+	}
+	if distiller.IsEnabled() {
+		t.Error("feedback-distiller is enabled; want the override to have disabled it")
 	}
 }
 
@@ -1032,12 +1103,10 @@ interval = "5m"
 // documented workaround for this very bug: it disables the unbound city copy
 // so the copy stops stranding a wisp every cooldown. It is in city.toml on
 // every deployment that hit the bug before this guard existed. ApplyOverrides
-// errors on an override that matches nothing and returns at the FIRST miss, so
-// a drop that ran before the overrides would turn that workaround into a hard
-// scan failure for the callers that leave OnOverrideError nil (gc order, the
-// doctor order-firing check) and would strand every LATER override unapplied
-// for the ones that log and continue — silently re-enabling orders the
-// operator had disabled.
+// errors on an override that matches nothing, so a drop that ran before the
+// overrides would turn that workaround into a hard scan failure for the
+// callers that leave OnOverrideError nil (gc order, the doctor order-firing
+// check).
 func TestScanAllRiglessOverrideStillMatchesDroppedRigScopedOrder(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	packDir, _ := orderDiscoveryPackLayer(t, "shared-pack")
