@@ -186,14 +186,20 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			continue
 		}
 		aged := now.Sub(info.ModTime()) >= testOrphanSweepMinAge
+		// An empty reason marks a removal that needs no announcement. Only the
+		// shapes whose liveness was inferred get named on stderr, because those
+		// are the ones that could have reaped a live dir.
 		var reason string
 		switch {
 		case exists && hasActiveTempRootMarker(path):
 			// createActiveTestTempRoot takes the flock before writing the
 			// marker, so this pair describes a run that finished starting up
 			// and has since died. No startup race is left to guard, so the
-			// age guard does not apply and the root is reclaimed now.
-			reason = "free sentinel, setup completed"
+			// age guard does not apply and the root is reclaimed now. Death is
+			// proven rather than inferred, and this is the shape nearly every
+			// reclaim takes, so it stays silent: a subprocess inherits stderr,
+			// and tests that assert on a child's output read the announcement
+			// as the child's own.
 		case !aged:
 			// Not provably dead and younger than the guard: the owner may
 			// still be between MkdirTemp and its flock.
@@ -213,9 +219,11 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 			}
 			reason = "legacy: pid dead, no active marker"
 		}
-		// Name each removal so a recurrence of ga-djbcqt is attributable
-		// from run logs instead of gate-log forensics.
-		fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
+		if reason != "" {
+			// Name each inferred removal so a recurrence of ga-djbcqt is
+			// attributable from run logs instead of gate-log forensics.
+			fmt.Fprintf(os.Stderr, "cmd/gc test sweep: removing %s (%s)\n", path, reason)
+		}
 		_ = os.RemoveAll(path)
 	}
 }

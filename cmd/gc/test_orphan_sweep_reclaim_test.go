@@ -76,8 +76,8 @@ func TestSweepKeepsIncompleteRootWithinAgeGuard(t *testing.T) {
 
 // TestSweepKeepsCompletedRootWhoseSentinelIsHeld guards the reclaim against
 // reaping a live sibling: a held flock means the owner is alive even when its
-// PID is invisible from another PID namespace (ga-djbcqt), and that outranks
-// both the marker and any age.
+// PID is invisible from another PID namespace, and that outranks both the
+// marker and any age.
 func TestSweepKeepsCompletedRootWhoseSentinelIsHeld(t *testing.T) {
 	parent := t.TempDir()
 	dir, _ := completedTestTempRoot(t, parent, "pfx", nonLivePID(t))
@@ -182,5 +182,28 @@ func TestHandleTerminationSignalRemovesTemporaryPaths(t *testing.T) {
 		if _, err := os.Stat(dir); !os.IsNotExist(err) {
 			t.Errorf("%s survived the termination handler", dir)
 		}
+	}
+}
+
+// TestSweepIsSilentWhenDeathIsProven pins the one removal shape that says
+// nothing. A marker beside a free sentinel proves the owner died after setup,
+// so the removal cannot be reaping a live dir and needs no forensic record.
+// It is also the shape nearly every reclaim takes, and a test binary's
+// subprocesses inherit stderr, so announcing it puts harness chatter inside
+// output that tests assert belongs to the child command.
+func TestSweepIsSilentWhenDeathIsProven(t *testing.T) {
+	parent := t.TempDir()
+	dir, sentinel := completedTestTempRoot(t, parent, "pfx", nonLivePID(t))
+	if err := sentinel.Close(); err != nil {
+		t.Fatalf("close sentinel: %v", err)
+	}
+
+	got := captureSweepStderr(t, func() { sweepOrphanPIDPrefixedDirs(parent, "pfx") })
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("sweepOrphanPIDPrefixedDirs did not remove %s: %v", dir, err)
+	}
+	if got != "" {
+		t.Errorf("sweep stderr = %q, want empty for a removal whose owner is provably dead", got)
 	}
 }
