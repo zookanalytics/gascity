@@ -3249,9 +3249,9 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 
 // workAssignmentStores returns the store set a closing session's work may be
 // assigned in: the leading work store, then every distinct rig store in a
-// deterministic (rig-name) order, then any extra legs the caller knows about.
+// deterministic (rig-name) order.
 //
-// Upstream retired this helper in favour of the storeref resolver
+// Upstream retired this helper in favor of the storeref resolver
 // (assignedWorkPlanForSessionInfo), which builds a plan from a session Info.
 // The close paths that call this hold a raw bead rather than an Info, and they
 // close for reasons — stale-session, dead-runtime, stranded repair — that are
@@ -3265,7 +3265,7 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // a resolved lookup: its callers hold a raw bead, so there is no session Info to
 // build a storeref plan from and no walked leg set to hand back. Keeping the
 // union in this one function is what confines the fork delta to a single seam.
-func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store { // residency:allow this function IS the fork-local release union; why it is not a storeref consumer is the doc comment directly above.
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) []beads.Store { // residency:allow this function IS the fork-local release union; why it is not a storeref consumer is the doc comment directly above.
 	if store == nil {
 		return nil
 	}
@@ -3281,31 +3281,7 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, e
 	for _, name := range names {
 		stores = append(stores, rigStores[name])
 	}
-	for _, candidate := range extra {
-		if candidate == nil || workAssignmentStoresHave(stores, candidate) {
-			continue
-		}
-		stores = append(stores, candidate)
-	}
 	return stores
-}
-
-// workAssignmentStoresHave reports whether candidate is already a leg. The
-// sessions and graph classes are served from ONE binding on a converged split
-// (openStorageRoutes keys every assigned class to the engine it opened), so a
-// reconciler scan led by the sessions-class store is already reading the store a
-// caller would add here.
-func workAssignmentStoresHave(stores []beads.Store, candidate beads.Store) bool {
-	key, ok := storePointerKey(candidate)
-	if !ok {
-		return false
-	}
-	for _, existing := range stores {
-		if existingKey, ok := storePointerKey(existing); ok && existingKey == key {
-			return true
-		}
-	}
-	return false
 }
 
 // closeBead sets final metadata on a session bead and closes it.
