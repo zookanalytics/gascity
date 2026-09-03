@@ -28,7 +28,7 @@ func memStoreFactory() func(string) (beads.Store, error) {
 // TestDoctorNestedWorktreeLiveness_ReportsLiveProcessCWD pins the wiring half
 // of the gate: the doctor's probe sees a process running in a candidate
 // worktree and names the signal, which is what makes the prune check reject
-// it (gc-9hy4l).
+// it.
 func TestDoctorNestedWorktreeLiveness_ReportsLiveProcessCWD(t *testing.T) {
 	wt := t.TempDir()
 	nested := filepath.Join(wt, "sub")

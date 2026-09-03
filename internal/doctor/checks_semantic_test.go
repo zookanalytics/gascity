@@ -1433,7 +1433,7 @@ func TestPathStrictlyInside(t *testing.T) {
 // worktree a running agent occupies is never prunable, whatever its git state
 // says. Both trees here are equally clean, which is the normal resting state
 // of a healthy agent between commits, so liveness is the only thing that can
-// separate them (gc-9hy4l).
+// separate them.
 func TestNestedWorktreePruneCheck_LiveWorktreeIsNotPrunable(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "agent-1")
