@@ -411,6 +411,9 @@ func TestRunWorktreeReapJSONCarriesVerdicts(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("decoding stdout %q: %v", stdout.String(), err)
 	}
+	if got.SchemaVersion != "1" || !got.OK || got.Command != "worktree reap" || got.Action != "reap" {
+		t.Errorf("envelope = %+v, want the standard success envelope", got)
+	}
 	if !got.DryRun {
 		t.Error("dry_run = false, want true without --apply")
 	}
@@ -426,6 +429,9 @@ func TestRunWorktreeReapJSONCarriesVerdicts(t *testing.T) {
 	if !strings.Contains(got.Protected[0].Reason, "live") {
 		t.Errorf("protected reason = %q, want the live-process reason", got.Protected[0].Reason)
 	}
+	// Verdict entries appear only on a populated pass, so this is where their
+	// shape meets the published schema.
+	validateJSONAgainstResultSchema(t, []string{"worktree", "reap"}, stdout.Bytes())
 }
 
 func TestRunWorktreeReapNoCandidatesReportsNothingEligible(t *testing.T) {
@@ -514,4 +520,40 @@ func TestNewWorktreeReapCmdDefaultsToDryRun(t *testing.T) {
 	if apply {
 		t.Error("--apply defaults to true, want false so the command never deletes unasked")
 	}
+}
+
+// TestCmdWorktreeReapStrictJSONContract runs the command through the root, which
+// is where the JSON contract gate lives: a built-in command whose result schema
+// is missing is rejected with json_unsupported before its RunE executes, so
+// declaring a --json flag is not by itself enough to make the mode usable.
+func TestCmdWorktreeReapStrictJSONContract(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_JSON_CONTRACT_STRICT", "1")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	cityPath := t.TempDir()
+	writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+
+	args := []string{"--city", cityPath, "worktree", "reap", "--json"}
+	var stdout, stderr bytes.Buffer
+	if code := run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("run(%v) = %d: stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "json_unsupported") {
+		t.Fatalf("gc worktree reap does not declare JSON support: %s", stdout.String())
+	}
+	var result worktreeReapJSON
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal JSON output %q: %v", stdout.String(), err)
+	}
+	if result.SchemaVersion != "1" || !result.OK || result.Command != "worktree reap" || result.Action != "reap" {
+		t.Fatalf("JSON result = %+v, want the standard success envelope", result)
+	}
+	if !result.DryRun {
+		t.Errorf("dry_run = false, want true without --apply")
+	}
+	if result.Reaped == nil || result.Protected == nil {
+		t.Errorf("reaped=%v protected=%v, want both verdict arrays present", result.Reaped, result.Protected)
+	}
+	validateJSONAgainstResultSchema(t, []string{"worktree", "reap"}, stdout.Bytes())
 }

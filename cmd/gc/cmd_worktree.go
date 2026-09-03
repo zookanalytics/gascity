@@ -366,9 +366,16 @@ type worktreeReapEntryJSON struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// worktreeReapJSON is the machine-readable form of one reap pass. DryRun true
-// means Reaped lists what --apply would have removed.
+// worktreeReapJSON is the machine-readable form of one reap pass. The first four
+// fields are the CLI's standard result envelope, which the root JSON contract
+// requires of any command that declares --json. DryRun true means Reaped lists
+// what --apply would have removed. writeWorktreeReapJSON fills the envelope, so
+// a caller constructs only the pass's own verdicts.
 type worktreeReapJSON struct {
+	SchemaVersion  string                  `json:"schema_version"`
+	OK             bool                    `json:"ok"`
+	Command        string                  `json:"command"`
+	Action         string                  `json:"action"`
 	DryRun         bool                    `json:"dry_run"`
 	LivenessSource string                  `json:"liveness_source,omitempty"`
 	Reaped         []worktreeReapEntryJSON `json:"reaped"`
@@ -516,7 +523,15 @@ func sortReapDecisions(decisions []reapDecision) []reapDecision {
 	return sorted
 }
 
+// writeWorktreeReapJSON stamps the result envelope and encodes the payload.
+// Filling the envelope here rather than at each call site keeps two callers from
+// describing the same command differently. ok is derived from the pass's own
+// errors, which is the signal the exit code carries as well.
 func writeWorktreeReapJSON(stdout, stderr io.Writer, payload worktreeReapJSON) int {
+	payload.SchemaVersion = "1"
+	payload.OK = len(payload.Errors) == 0
+	payload.Command = "worktree reap"
+	payload.Action = "reap"
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(payload); err != nil {

@@ -57,9 +57,18 @@ reason each protected worktree was held.
 gc worktree reap --apply
 ```
 
-Removal deletes the checkout only. Commits stay reachable through their
-branches, and pushed branches are untouched on the remote, so a reaped
-worktree reproduces with `git worktree add <path> origin/<branch>`.
+Removal deletes the checkout only. `git worktree remove` leaves `refs/heads/`
+alone, and the git gate holds any worktree whose HEAD is reachable from no
+branch, tag, or remote-tracking ref, so the commits survive on a ref you can
+check out again:
+
+```bash
+git worktree add <path> <branch>
+```
+
+The worktree's own branch is that ref, and it is local. A branch that was never
+pushed still passes the gate, so name `origin/<branch>` only when
+`git branch -r` lists it.
 
 ## What is protected, and why
 
