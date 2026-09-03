@@ -134,8 +134,10 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 }
 
 func durationRangeNonPositiveDisables(dr durationRange) bool {
-	return dr.context == "[session]" &&
-		(dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout")
+	if dr.context == "[session]" {
+		return dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout"
+	}
+	return strings.HasPrefix(dr.context, "agent ") && dr.field == "idle_timeout"
 }
 
 // CanFix returns false — unreasonable durations must be corrected by the user.
