@@ -699,6 +699,28 @@ func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T)
 
 // --- NestedWorktreePruneCheck ---
 
+// noLiveWorktrees is a LiveWorktreeProbe reporting an empty host: no process
+// and no session is working in any candidate. Tests that exercise the git
+// classification gates use it so liveness never masks the behavior under test.
+func noLiveWorktrees() (func(string) (bool, string), error) {
+	return func(string) (bool, string) { return false, "" }, nil
+}
+
+// liveWorktrees returns a LiveWorktreeProbe reporting each path in live as
+// occupied, with reason as the matched signal.
+func liveWorktrees(reason string, live ...string) LiveWorktreeProbe {
+	return func() (func(string) (bool, string), error) {
+		return func(p string) (bool, string) {
+			for _, l := range live {
+				if l == p {
+					return true, reason
+				}
+			}
+			return false, ""
+		}, nil
+	}
+}
+
 // fakeGitWorktree implements gitWorktree for tests. Behaves like the
 // shared admin dir of a multi-worktree repo: list returns the same
 // entries regardless of which path is used to construct it. Per-path
@@ -787,7 +809,7 @@ func makeAgentHomeAdmin(t *testing.T, dir, rig, agent, adminRoot string) string 
 
 func TestNestedWorktreePruneCheck_NoWorktreesDir(t *testing.T) {
 	dir := t.TempDir()
-	c := NewNestedWorktreePruneCheck(config.DoctorConfig{})
+	c := NewNestedWorktreePruneCheck(config.DoctorConfig{}, noLiveWorktrees)
 	r := c.Run(&CheckContext{CityPath: dir})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK", r.Status)
@@ -799,7 +821,8 @@ func TestNestedWorktreePruneCheck_NoNestedWorktrees(t *testing.T) {
 	home := makeAgentHome(t, dir, "polecat-1")
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -843,7 +866,8 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -909,7 +933,8 @@ func TestNestedWorktreePruneCheck_PruneTrueEscalatesSeverity(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{NestedWorktreePrune: true},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{NestedWorktreePrune: true},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -937,7 +962,8 @@ func TestNestedWorktreePruneCheck_AllUnsafeReturnsOK(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -969,7 +995,8 @@ func TestNestedWorktreePruneCheck_AllUnsafeWithListingErrorReturnsWarning(t *tes
 	}
 
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			switch path {
 			case homeB:
@@ -1014,7 +1041,8 @@ func TestNestedWorktreePruneCheck_DeduplicatesAcrossHomes(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1061,7 +1089,8 @@ func TestNestedWorktreePruneCheck_FixContinuesPastError(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1105,7 +1134,8 @@ func TestNestedWorktreePruneCheck_FixRevalidatesBeforeRemove(t *testing.T) {
 	var removes []string
 	uncommitted := map[string]bool{}
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1144,7 +1174,8 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1218,7 +1249,8 @@ func TestNestedWorktreePruneCheck_DedupsWorktreeListAcrossSharedAdminDir(t *test
 	var listCalls []string
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1261,7 +1293,8 @@ func TestNestedWorktreePruneCheck_DedupCoversNestedUnderEveryHome(t *testing.T) 
 
 	var listCalls []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1308,7 +1341,8 @@ func TestNestedWorktreePruneCheck_FixUsesParentForGitContext(t *testing.T) {
 
 	var removes, removeFrom []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1347,7 +1381,8 @@ func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
 
 	var removes []string
 	c := &NestedWorktreePruneCheck{
-		cfg: config.DoctorConfig{},
+		gatherLive: noLiveWorktrees,
+		cfg:        config.DoctorConfig{},
 		newGit: func(path string) gitWorktree {
 			return &fakeGitWorktree{
 				listResp: []git.Worktree{
@@ -1391,5 +1426,216 @@ func TestPathStrictlyInside(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("pathStrictlyInside(%q, %q) = %v, want %v", tt.child, tt.parent, got, tt.want)
 		}
+	}
+}
+
+// TestNestedWorktreePruneCheck_LiveWorktreeIsNotPrunable pins that a nested
+// worktree a running agent occupies is never prunable, whatever its git state
+// says. Both trees here are equally clean, which is the normal resting state
+// of a healthy agent between commits, so liveness is the only thing that can
+// separate them (gc-9hy4l).
+func TestNestedWorktreePruneCheck_LiveWorktreeIsNotPrunable(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	inUse := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "in-use"))
+	idle := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "idle"))
+	for _, p := range []string{inUse, idle} {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var removes []string
+	c := &NestedWorktreePruneCheck{
+		gatherLive: liveWorktrees("live process cwd "+inUse, inUse),
+		cfg:        config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			// Both trees are entirely clean: no uncommitted work, no
+			// unpushed commits, no stashes. Only liveness separates them.
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: inUse, Branch: "in-use"},
+					{Path: idle, Branch: "idle"},
+				},
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
+	}
+
+	byPath := map[string]nestedWorktreeFinding{}
+	for _, f := range c.findings {
+		byPath[f.path] = f
+	}
+	if f, ok := byPath[inUse]; !ok || f.safeToRm {
+		t.Fatalf("live worktree %s classified safeToRm=%v (found=%v); a running agent's cwd is never prunable", inUse, f.safeToRm, ok)
+	}
+	if got := byPath[inUse].reason; !strings.Contains(got, "live process cwd") {
+		t.Errorf("reason for live worktree = %q, want it to name the liveness signal", got)
+	}
+	if f, ok := byPath[idle]; !ok || !f.safeToRm {
+		t.Errorf("idle clean worktree %s should stay prunable (safeToRm=%v, found=%v)", idle, f.safeToRm, ok)
+	}
+
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(removes) != 1 || removes[0] != idle {
+		t.Fatalf("removes = %v, want only the idle worktree %s", removes, idle)
+	}
+}
+
+// TestNestedWorktreePruneCheck_FixRevalidatesLiveness closes the
+// classify-to-rm window for liveness specifically: an agent that starts
+// working in a candidate after Run classified it safe must still be seen at
+// removal time. Fix re-gathers rather than reusing Run's snapshot.
+func TestNestedWorktreePruneCheck_FixRevalidatesLiveness(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes []string
+	var occupied bool
+	c := &NestedWorktreePruneCheck{
+		gatherLive: func() (func(string) (bool, string), error) {
+			live := occupied
+			return func(p string) (bool, string) {
+				if live && p == nested {
+					return true, "live process cwd " + nested
+				}
+				return false, ""
+			}, nil
+		},
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: nested, Branch: "task"},
+				},
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	if r := c.Run(&CheckContext{CityPath: dir}); r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (one safely prunable)", r.Status)
+	}
+
+	occupied = true // an agent claims the tree between classify and fix
+	err := c.Fix(&CheckContext{CityPath: dir})
+	if err == nil {
+		t.Fatal("Fix should fail closed when revalidation finds the worktree newly live")
+	}
+	if !strings.Contains(err.Error(), "no longer safe to remove") {
+		t.Errorf("error = %v, want it to report the failed revalidation", err)
+	}
+	if len(removes) != 0 {
+		t.Errorf("removes = %v, want none: the worktree went live before removal", removes)
+	}
+}
+
+// TestNestedWorktreePruneCheck_LivenessProbeErrorRejects pins the fail-closed
+// contract for an indeterminate scan. An unreadable process table means the
+// check cannot vouch for any candidate, so none is prunable and the failure
+// is surfaced as an inspection error rather than silently treated as "nothing
+// is running".
+func TestNestedWorktreePruneCheck_LivenessProbeErrorRejects(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes []string
+	c := &NestedWorktreePruneCheck{
+		gatherLive: func() (func(string) (bool, string), error) {
+			return nil, errors.New("process table unavailable")
+		},
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "h"},
+					{Path: nested, Branch: "task"},
+				},
+				removeCalls: &removes,
+				currentPath: path,
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s details=%v", r.Status, r.Message, r.Details)
+	}
+	if !strings.Contains(r.Message, "none safely prunable") {
+		t.Errorf("message = %q, want 'none safely prunable'", r.Message)
+	}
+	if len(c.findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(c.findings))
+	}
+	f := c.findings[0]
+	if f.safeToRm {
+		t.Error("candidate classified safe despite an indeterminate liveness scan")
+	}
+	if !f.probeErr {
+		t.Error("liveness gather failure should count as an inspection failure")
+	}
+	if !strings.Contains(f.reason, "process table unavailable") {
+		t.Errorf("reason = %q, want it to carry the gather error", f.reason)
+	}
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(removes) != 0 {
+		t.Errorf("removes = %v, want none", removes)
+	}
+}
+
+// TestNestedWorktreePruneCheck_MissingLivenessProbeRejects pins that a check
+// constructed without a liveness probe prunes nothing. Absent wiring must
+// degrade to "removes nothing", never to "removes without checking".
+func TestNestedWorktreePruneCheck_MissingLivenessProbeRejects(t *testing.T) {
+	dir := t.TempDir()
+	home := makeAgentHome(t, dir, "agent-1")
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var removes []string
+	c := NewNestedWorktreePruneCheck(config.DoctorConfig{}, nil)
+	c.newGit = func(path string) gitWorktree {
+		return &fakeGitWorktree{
+			listResp: []git.Worktree{
+				{Path: home, Branch: "h"},
+				{Path: nested, Branch: "task"},
+			},
+			removeCalls: &removes,
+			currentPath: path,
+		}
+	}
+	if r := c.Run(&CheckContext{CityPath: dir}); r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg=%s", r.Status, r.Message)
+	}
+	for _, f := range c.findings {
+		if f.safeToRm {
+			t.Fatalf("%s classified safe with no liveness probe configured", f.path)
+		}
+	}
+	if err := c.Fix(&CheckContext{CityPath: dir}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(removes) != 0 {
+		t.Errorf("removes = %v, want none", removes)
 	}
 }

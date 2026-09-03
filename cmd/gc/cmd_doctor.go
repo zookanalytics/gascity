@@ -370,16 +370,19 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// on-disk binary; it cannot see the case where the two agree and both are
 	// days behind origin/main, which reports clean everywhere else (gc-0qbf5).
 	register(doctor.NewBinaryFreshnessCheckForConfig(cfg, cfgErr))
-	// Worktree checks deliberately run even when cfgErr != nil — they
-	// only need the city path, and a broken city.toml is exactly when
-	// silent disk-fill is most likely. The zero-value DoctorConfig
-	// produces sensible 10/50 GB defaults via its accessor methods.
+	// Worktree checks deliberately run even when cfgErr != nil — they need
+	// only the city path, and a broken city.toml is exactly when silent
+	// disk-fill is most likely. The zero-value DoctorConfig produces
+	// sensible 10/50 GB defaults via its accessor methods. The prune check
+	// additionally consults liveness before it removes anything; that gate
+	// fails closed, so a city too broken to answer it prunes nothing rather
+	// than pruning unchecked.
 	var doctorCfg config.DoctorConfig
 	if cfg != nil {
 		doctorCfg = cfg.Doctor
 	}
 	register(doctor.NewWorktreeDiskSizeCheck(doctorCfg))
-	register(doctor.NewNestedWorktreePruneCheck(doctorCfg))
+	register(doctor.NewNestedWorktreePruneCheck(doctorCfg, doctorNestedWorktreeLiveness(cityPath, storeOK, storeFactory)))
 
 	// Custom types / hold-label conventions — city store (gated with preflight).
 	if storeOK {
