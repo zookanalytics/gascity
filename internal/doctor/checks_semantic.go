@@ -133,6 +133,12 @@ func (c *DurationRangeCheck) collectRanges() []durationRange {
 	return ranges
 }
 
+// durationRangeNonPositiveDisables reports whether a non-positive value turns
+// the field off rather than misconfiguring it. Agent idle_timeout qualifies:
+// the runtime tracks only agents whose IdleTimeoutDuration is above zero.
+// Agent drain_timeout does not — an explicit "0" is a real, immediate
+// deadline, because only an empty or unparseable value falls back to the
+// 5m default.
 func durationRangeNonPositiveDisables(dr durationRange) bool {
 	if dr.context == "[session]" {
 		return dr.field == "progress_stall_timeout" || dr.field == "claim_holder_stall_timeout"
