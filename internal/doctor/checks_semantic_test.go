@@ -199,6 +199,19 @@ func TestDurationRangeCheck_AgentIdleTimeout(t *testing.T) {
 	}
 }
 
+func TestDurationRangeCheck_AgentIdleTimeoutZeroDisables(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", IdleTimeout: "0"},
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK; details = %v", r.Status, r.Details)
+	}
+}
+
 func TestDurationRangeCheck_AgentPoolDrainTimeout(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
@@ -212,6 +225,22 @@ func TestDurationRangeCheck_AgentPoolDrainTimeout(t *testing.T) {
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+}
+
+func TestDurationRangeCheck_AgentDrainTimeoutZeroWarns(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", DrainTimeout: "0"},
+		},
+	}
+	c := NewDurationRangeCheck(cfg)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(strings.Join(r.Details, "\n"), "drain_timeout") {
+		t.Errorf("details = %v, want drain_timeout warning", r.Details)
 	}
 }
 
