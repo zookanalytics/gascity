@@ -591,12 +591,23 @@ func TestSweepOrphanRemovesStaleCmdGCTempRootInSystemTmp(t *testing.T) {
 	}
 }
 
+// denyUnlinkUnder leaves dir readable and searchable but not writable, so
+// nothing inside it can be unlinked. The mode is restored on cleanup, before
+// t.TempDir removes the tree, so a failing assertion does not strand the
+// fixture on disk.
+func denyUnlinkUnder(t *testing.T, dir string) {
+	t.Helper()
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("Chmod(%s): %v", dir, err)
+	}
+}
+
 // readOnlyFixtureTree builds <dir>/locked holding a file, then denies writes
 // on the locked directory. That is the shape a test leaves behind when it
 // chmods a fixture read-only and the process dies before its own t.Cleanup
 // restores the mode: os.RemoveAll strips the rest of the tree and cannot
-// unlink the file under the locked directory. The restore is registered here
-// so the enclosing t.TempDir can be removed even when the assertion fails.
+// unlink the file under the locked directory.
 func readOnlyFixtureTree(t *testing.T, dir string) {
 	t.Helper()
 	locked := filepath.Join(dir, "locked")
@@ -606,10 +617,7 @@ func readOnlyFixtureTree(t *testing.T, dir string) {
 	if err := os.WriteFile(filepath.Join(locked, "payload.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatalf("writing payload under %s: %v", locked, err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
-	if err := os.Chmod(locked, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", locked, err)
-	}
+	denyUnlinkUnder(t, locked)
 }
 
 // unremovableFixtureDir returns a directory whose parent denies writes, so no
@@ -621,10 +629,7 @@ func unremovableFixtureDir(t *testing.T, parent string) string {
 	if err := os.MkdirAll(target, 0o755); err != nil {
 		t.Fatalf("MkdirAll %s: %v", target, err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-	if err := os.Chmod(parent, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", parent, err)
-	}
+	denyUnlinkUnder(t, parent)
 	return target
 }
 
@@ -705,10 +710,7 @@ func TestSweepOrphanReportsARootItCannotRemove(t *testing.T) {
 		t.Fatalf("MkdirAll %s: %v", dir, err)
 	}
 	backdatePastSweepAge(t, dir)
-	t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
-	if err := os.Chmod(parent, 0o555); err != nil {
-		t.Fatalf("Chmod(%s): %v", parent, err)
-	}
+	denyUnlinkUnder(t, parent)
 
 	got := captureSweepStderr(t, func() { sweepOrphanPIDPrefixedDirs(parent, "pfx") })
 

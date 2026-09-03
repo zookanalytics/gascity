@@ -218,7 +218,7 @@ func TestCleanupTemporaryPathsReclaimsReadOnlyFixtureTree(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	readOnlyFixtureTree(t, root)
 
-	g := &doltLeakGuardedTestingM{tempRoot: root, cleanupPaths: []string{root}}
+	g := &doltLeakGuardedTestingM{cleanupPaths: []string{root}}
 	_ = captureSweepStderr(t, g.cleanupTemporaryPaths)
 
 	if _, err := os.Stat(root); !os.IsNotExist(err) {
@@ -233,7 +233,7 @@ func TestCleanupTemporaryPathsReportsAPathItCannotRemove(t *testing.T) {
 	skipWhenRootIgnoresPermissions(t)
 	target := unremovableFixtureDir(t, filepath.Join(t.TempDir(), "parent"))
 
-	g := &doltLeakGuardedTestingM{tempRoot: target, cleanupPaths: []string{"", target}}
+	g := &doltLeakGuardedTestingM{cleanupPaths: []string{"", target}}
 	got := captureSweepStderr(t, g.cleanupTemporaryPaths)
 
 	if _, err := os.Stat(target); err != nil {
