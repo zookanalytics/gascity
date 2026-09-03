@@ -289,3 +289,108 @@ gc_harness_test_socket_holders() {
     }
   '
 }
+
+# gc_harness_referenced_paths prints every filesystem path a live process of the
+# invoking user still references — env values, argv, and cwd — one per line. It
+# is the liveness half of gc_harness_sweep_stale_build_dirs: a work dir whose
+# path appears here belongs to a running build and must be spared. Reading
+# /proc/<pid>/{environ,cmdline,cwd} is the predicate proven safe on gc-68bao,
+# where it spared every live build across two concurrent gates while 27
+# abandoned trees were reclaimed. Only the invoking user's process files are
+# readable, which is exactly the set that can own a 0700 go work dir, so a
+# different user's live build can never be misread as absent. Factored out as
+# the one data source so the self-test can inject a process table without a real
+# /proc.
+#
+# stderr is discarded at the loop, not per command: opening another user's
+# /proc/<pid>/environ is denied, and that open failure is the shell's, emitted
+# before a trailing per-command 2>/dev/null on the same line can take effect —
+# so on a shared host it would otherwise flood every caller with one
+# "Permission denied" per foreign process. A denied entry is simply not one of
+# ours and contributes nothing to the set.
+gc_harness_referenced_paths() {
+  local p
+  for p in /proc/[0-9]*; do
+    tr '\0' '\n' < "$p/environ" || true
+    tr '\0' '\n' < "$p/cmdline" || true
+    readlink "$p/cwd" || true
+  done 2>/dev/null
+}
+
+# gc_harness_reclaim_dir removes one abandoned work-dir tree. Every reclaim goes
+# through here — the one place the sweep deletes a directory — mirroring
+# gc_harness_kill_pid for process kills: it keeps the destroy authority
+# reviewable in isolation and gives the self-test a seam to record decisions
+# instead of removing real trees.
+gc_harness_reclaim_dir() {
+  local dir="${1:-}"
+  [[ -n "$dir" ]] || return 0
+  rm -rf -- "$dir" 2>/dev/null || true
+}
+
+# gc_harness_sweep_stale_build_dirs reclaims go's per-invocation compile and
+# link temp trees (go-build*, go-link*) that a killed run leaked. go removes its
+# work dir only on a clean exit, so a run ended by the watchdog above, a signal,
+# or an OOM kill leaves the tree behind and nothing else sweeps it; gc-68bao
+# measured 27 such trees holding 4.5G and a push gate that ENOSPC-failed before
+# them and passed 10/10 after. The trees appear both under $GOTMPDIR and, when a
+# run set no GOTMPDIR, directly under its TMPDIR, so every scratch root the
+# caller names is scanned at depth 1.
+#
+# Only the go-build*/go-link* shapes are touched, and that bound is the whole
+# safety argument: those prefixes are go's own, are never a checkout, a
+# cache-with-value, or a comparison base a human wants kept, and are regenerated
+# on the next build — so reclaiming one is always safe and needs no per-shape
+# judgment. (A broader age+liveness scan of every scratch dir was measured
+# against a real host and matched 662 owned dirs of mixed provenance, including
+# comparison bases; that is a policy call left to a follow-up, not encoded here.)
+# A tree is reclaimed only when it is owned by the invoking user, older than
+# min_age_seconds, and referenced by no live process. The age floor is the
+# caller's go test budget, so a concurrently starting build is never in scope,
+# and the liveness check spares an in-flight build regardless of age. Set
+# GC_TEST_NO_BUILD_DIR_SWEEP=1 to skip the reclaim entirely.
+gc_harness_sweep_stale_build_dirs() {
+  local min_age_seconds="${1:-3600}"
+  if (( $# > 0 )); then shift; fi
+  [[ "${GC_TEST_NO_BUILD_DIR_SWEEP:-0}" != "1" ]] || return 0
+  [[ $# -gt 0 ]] || return 0
+  # Liveness assessment needs procfs. Without it a dir cannot be proven unused,
+  # and reclaiming on an empty liveness set would delete a live build, so the
+  # whole sweep skips rather than guess — the leak is a Linux-host condition.
+  [[ -e /proc/self/cmdline ]] || return 0
+  [[ "$min_age_seconds" =~ ^[0-9]+$ ]] || return 0
+
+  local uid now referenced
+  uid="$(id -u)"
+  now="$(date +%s)"
+  referenced="$(gc_harness_referenced_paths)"
+
+  local reclaimed=0
+  local root child base mtime
+  for root in "$@"; do
+    [[ -n "$root" && -d "$root" ]] || continue
+    while IFS= read -r child; do
+      [[ -n "$child" ]] || continue
+      base="${child##*/}"
+      case "$base" in
+        go-build*|go-link*) ;;
+        *) continue ;;
+      esac
+      # A go work dir never carries a .git pointer; skipping one is defence in
+      # depth so a name collision can never turn the sweep on a checkout.
+      [[ -e "$child/.git" ]] && continue
+      mtime="$(stat -c %Y "$child" 2>/dev/null)" || continue
+      (( now - mtime >= min_age_seconds )) || continue
+      if [[ -n "$referenced" ]] && grep -qF -- "$child" <<< "$referenced"; then
+        continue
+      fi
+      printf 'harness sweep: reclaiming abandoned go work dir %s (age %ss, no live holder)\n' \
+        "$child" "$(( now - mtime ))" >&2
+      gc_harness_reclaim_dir "$child"
+      reclaimed=$(( reclaimed + 1 ))
+    done < <(find "$root" -maxdepth 1 -mindepth 1 -type d -uid "$uid" 2>/dev/null || true)
+  done
+
+  (( reclaimed == 0 )) || printf 'harness sweep: reclaimed %s abandoned go work dir(s)\n' "$reclaimed" >&2
+  return 0
+}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -457,5 +458,110 @@ func TestGoTestShardLeavesNothingHoldingTheCallersPipe(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("reading the shard runner's output blocked after the run finished: a descendant outlived the run holding the caller's pipe")
+	}
+}
+
+// buildDirSweepHarness runs gc_harness_sweep_stale_build_dirs against a fixture
+// scratch tree and returns its reclaim decisions. Two seams are overridden: the
+// liveness source (so the test supplies a process's referenced paths without a
+// real /proc) and the one function that deletes a tree (so decisions are
+// recorded instead of destroying real dirs), mirroring how the process sweep
+// overrides gc_harness_kill_pid.
+func buildDirSweepHarness(t *testing.T, minAge string, roots []string, referenced string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	refFixture := filepath.Join(dir, "referenced.txt")
+	if err := os.WriteFile(refFixture, []byte(referenced), 0o644); err != nil {
+		t.Fatalf("write referenced fixture: %v", err)
+	}
+	reclaimLog := filepath.Join(dir, "reclaims")
+
+	var rootArgs strings.Builder
+	for _, r := range roots {
+		fmt.Fprintf(&rootArgs, " %q", r)
+	}
+
+	script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+gc_harness_referenced_paths() { cat %q ; }
+gc_harness_reclaim_dir() { printf 'RECLAIMED %%s\n' "$1" >> %q ; }
+gc_harness_sweep_stale_build_dirs %s%s
+`, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"),
+		refFixture, reclaimLog, minAge, rootArgs.String())
+
+	out, err := exec.Command("bash", "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("build-dir sweep failed: %v\n%s", err, out)
+	}
+	reclaims, readErr := os.ReadFile(reclaimLog)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatalf("read reclaim log: %v", readErr)
+	}
+	return string(reclaims) + string(out)
+}
+
+// TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected is the
+// gc-68bao regression: go removes its go-build*/go-link* work dir only on a
+// clean exit, so a run the harness watchdog or a signal kills leaks the tree,
+// and nothing sweeps it — one measured hoard was 27 trees / 4.5G that
+// ENOSPC-failed a push gate. The sweep must reclaim an abandoned tree at any of
+// the scratch roots it is given while sparing a tree a live build still holds,
+// one too young to be abandoned, a non-go-work-dir shape it has no business
+// touching, and anything carrying a .git pointer.
+func TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("go work-dir reclaim reads /proc for liveness; Linux-only")
+	}
+
+	root := t.TempDir()                   // stands in for /var/tmp
+	gotmp := filepath.Join(root, "gotmp") // stands in for $GOTMPDIR
+
+	old := time.Now().Add(-time.Hour)
+	fresh := time.Now()
+
+	mk := func(parent, name string, mtime time.Time, dotGit bool) string {
+		p := filepath.Join(parent, name)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		if dotGit {
+			if err := os.WriteFile(filepath.Join(p, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
+				t.Fatalf("write .git in %s: %v", p, err)
+			}
+		}
+		if err := os.Chtimes(p, mtime, mtime); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+		return p
+	}
+
+	reclaimAbandoned := mk(root, "go-build2147480000", old, false)
+	reclaimLink := mk(root, "go-link-4242", old, false)
+	spareLive := mk(root, "go-build-live-holder", old, false)
+	spareFresh := mk(root, "go-build-fresh", fresh, false)
+	spareNonGo := mk(root, "gocache-tk-nnx2gd", old, false) // real cache shape, out of scope
+	spareWorktree := mk(root, "go-build-with-dotgit", old, true)
+
+	// The /var/tmp scan does not descend, so a tree leaked under $GOTMPDIR is
+	// only reclaimed through gotmp being passed as its own root. gotmp itself is
+	// a child of root but is spared there: its name is not a go work-dir shape.
+	mk(root, "gotmp", old, false)
+	reclaimNested := mk(gotmp, "go-build9998887", old, false)
+
+	// A live build holds spareLive as its working directory; the seam feeds that
+	// path to the sweep as the sole referenced path.
+	got := buildDirSweepHarness(t, "60", []string{root, gotmp}, spareLive+"\n")
+
+	for _, want := range []string{reclaimAbandoned, reclaimLink, reclaimNested} {
+		if !strings.Contains(got, "RECLAIMED "+want+"\n") {
+			t.Errorf("sweep left an abandoned go work dir behind: %s\nlog:\n%s", want, got)
+		}
+	}
+	for _, spared := range []string{spareLive, spareFresh, spareNonGo, spareWorktree} {
+		if strings.Contains(got, "RECLAIMED "+spared+"\n") {
+			t.Errorf("sweep reclaimed a dir it must spare: %s\nlog:\n%s", spared, got)
+		}
 	}
 }
