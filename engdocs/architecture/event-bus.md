@@ -422,10 +422,15 @@ suite against a stateful jq-based mock script.
   provider uses channel-based notification for zero-latency delivery
   in tests.
 
-- **No event retention or rotation.** The JSONL file grows without
-  bound. There is no built-in log rotation, retention policy, or
-  compaction. For long-running cities, manual truncation or external
-  log rotation is needed.
+- **Retention is size-triggered, so the window a query can reach is not
+  fixed.** `[events.rotation]` is enabled by default and rotates the active
+  `events.jsonl` once it passes `max_size_bytes` (256 MiB), checked every
+  1024 records or 60 seconds; `archive_retain_age` prunes archives by age and
+  keeps all of them when empty (`internal/config/config.go`
+  `EventsRotationConfig`). Nothing bounds the active log by TIME, so how much
+  history `gc events` can see depends on how fast the city is emitting. A busy
+  city holds minutes where a quiet one holds days, and no fixed retention
+  figure describes either.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
   JSONL file once, applies `Filter` as it reads, and stops early when a

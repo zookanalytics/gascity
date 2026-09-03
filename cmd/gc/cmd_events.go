@@ -192,6 +192,10 @@ DTO or SSE envelope.`,
 				fmt.Fprintln(stderr, "gc events: --after/--after-cursor require --follow or --watch (they resume a stream); use --since to bound a list by time") //nolint:errcheck
 				return errExit
 			}
+			if err := validateEventsType(typeFilter); err != nil {
+				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			if seqFlag {
 				if cmdEventsSeq(apiURL, stdout, stderr) != 0 {
 					return errExit
@@ -227,7 +231,12 @@ DTO or SSE envelope.`,
 	cmd.Flags().StringVar(&afterCursor, "after-cursor", "", "Resume from this supervisor event cursor (supervisor scope only)")
 	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value or key.subkey=value, repeatable)")
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
-	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
+	// Hidden, not MarkDeprecated: pflag buffers a deprecation notice into
+	// cobra's flagErrorBuf, ParseFlags drains it through Command.Print ->
+	// OutOrStderr, and cmd/gc/main.go points that writer at stdout. The notice
+	// then lands as line 1 of a stream this command documents as JSON Lines,
+	// where `wc -l` counts it as an event and `jq` fails on it.
+	_ = cmd.Flags().MarkHidden("json")
 	cmd.AddCommand(newEventsRotateCmd(stdout, stderr))
 	cmd.AddCommand(newEventsReemitExecutionCmd(stdout, stderr))
 	return cmd
@@ -537,6 +546,21 @@ func validateEventsCursor(scope eventsAPIScope, afterSeq uint64, afterCursor str
 	return nil
 }
 
+// validateEventsType rejects a comma-separated --type. Both filters that read
+// this value compare one exact string -- filterCityEvents tests
+// `item.Type != typeFilter`, and the API's EventListInput.Type is a scalar
+// query param -- so a list matches no event, the server mints no next_cursor,
+// and the command exits 0 with no records and nothing on stderr. That is
+// indistinguishable from "none of those events occurred", which is the answer
+// a coverage query is asking for. Reject rather than silently ignore, the same
+// way --after does above.
+func validateEventsType(typeFilter string) error {
+	if strings.Contains(typeFilter, ",") {
+		return fmt.Errorf("--type takes one event type, not a list: %q matches nothing and would report that empty result as success; run one query per type, or drop --type and filter the stream", typeFilter)
+	}
+	return nil
+}
+
 func validateEventsSince(sinceFlag string) error {
 	if strings.TrimSpace(sinceFlag) == "" {
 		return nil
@@ -564,10 +588,11 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return 1
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	if scope.isSupervisor() {
+		// fetchSupervisorEvents is one request whatever the filters say, so it
+		// keeps the single-request guard even under --since.
+		ctx, cancel := context.WithTimeout(context.Background(), eventsListTimeout)
+		defer cancel()
 		items, err := fetchSupervisorEvents(ctx, client, typeFilter, sinceFlag)
 		if err != nil {
 			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
@@ -577,8 +602,24 @@ func doEvents(scope eventsAPIScope, typeFilter, sinceFlag string, payloadMatch m
 		return printJSONLines(items, stdout, stderr)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), cityEventsListBudget(sinceFlag))
+	defer cancel()
+
 	items, err := fetchCityEvents(ctx, client, scope.cityName, typeFilter, sinceFlag, stderr)
 	if err != nil {
+		// A cut-short drain still holds real events. Print them, then fail: the
+		// caller gets the part of the window that was read and a non-zero status
+		// saying the rest was not. Dropping to the local fallback here would
+		// answer a partially-served window with a different source's data.
+		var truncated *eventsWindowTruncatedError
+		if errors.As(err, &truncated) {
+			items = filterCityEvents(items, 0, typeFilter, payloadMatch)
+			if code := printJSONLines(items, stdout, stderr); code != 0 {
+				return code
+			}
+			fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+			return 1
+		}
 		if fallback, ok, fallbackErr := readLocalCityEvents(scope, err, typeFilter, sinceFlag, stderr); ok {
 			if fallbackErr != nil {
 				fmt.Fprintf(stderr, "gc events: %v\n", fallbackErr) //nolint:errcheck
@@ -1034,6 +1075,54 @@ func probeCityEventsReachable(ctx context.Context, client *genclient.ClientWithR
 	return eventsListError(resp.StatusCode(), resp.Body)
 }
 
+// eventsListTimeout bounds an unpaginated city or supervisor event list: one
+// request, so this is a hang guard against a wedged server.
+var eventsListTimeout = 30 * time.Second
+
+// eventsDrainTimeout bounds a --since drain of the city list, which walks as
+// many pages as the window holds rather than issuing one request. Per-page
+// cost rises with cursor depth, so a fixed budget covers less of the window
+// the deeper it walks and guarantees no particular window: a 24h ask on a busy
+// city need not finish within it, and raising the budget buys more history at
+// a higher marginal cost per page.
+//
+// Overrunning it is not fatal: the walk returns the pages it read and names
+// where coverage stops, which is the property a caller measuring coverage
+// needs. The budget only decides how much of the window one invocation gets.
+var eventsDrainTimeout = 5 * time.Minute
+
+// cityEventsListBudget picks the budget for one city event list. Only a
+// --since request paginates, so only it needs more than the hang guard.
+func cityEventsListBudget(sinceFlag string) time.Duration {
+	if strings.TrimSpace(sinceFlag) != "" {
+		return eventsDrainTimeout
+	}
+	return eventsListTimeout
+}
+
+// eventsWindowTruncatedError reports a --since drain that ran out of budget
+// before it reached the bottom of the requested window. The events already
+// fetched are returned with it, because a coverage query has to be able to say
+// how far back it actually looked: discarding the walk makes a search that
+// never finished indistinguishable from one that found nothing, and a caller
+// counting stdout lines reads the second meaning.
+type eventsWindowTruncatedError struct {
+	since     string
+	fetched   int
+	oldestSeq int64
+	oldestTs  time.Time
+	cause     error
+}
+
+func (e *eventsWindowTruncatedError) Error() string {
+	return fmt.Sprintf(
+		"--since %s window is INCOMPLETE: read %d events back to seq %d (%s) before %v; anything older in the window was not read, so treat a count from this run as a floor, not a total",
+		e.since, e.fetched, e.oldestSeq, e.oldestTs.UTC().Format(time.RFC3339), e.cause,
+	)
+}
+
+func (e *eventsWindowTruncatedError) Unwrap() error { return e.cause }
+
 // cityEventsPageLimit bounds one page of the city event list. The endpoint
 // serves seq-DESC pages and mints next_cursor when more matching rows exist
 // strictly below the page's oldest seq (#4194).
@@ -1045,13 +1134,17 @@ const cityEventsPageLimit = int64(500)
 // next_cursor pointing strictly below the page's oldest seq.
 //
 // A bounded --since window is drained across pages so the requested window is
-// reported in full — otherwise any window holding more than one page of events
-// silently under-reports (the bug this fixes). Without --since the request is
-// unbounded, so the fetch stays a single page: gc events means "recent
-// activity", and a full descending drain of a 100 MB+ event history would blow
-// the command timeout for no user benefit. In that single-page case, when the
-// server signals more via next_cursor, an explicit truncation notice is written
-// to warn rather than silently dropping the older matches.
+// reported in full; without --since the request is unbounded, so the fetch
+// stays a single page. gc events means "recent activity", and a full
+// descending drain of a 100 MB+ event history serves no caller who did not ask
+// for a window. In that single-page case, when the server signals more via
+// next_cursor, an explicit truncation notice is written to warn rather than
+// silently dropping the older matches.
+//
+// A drain that outlives ctx returns the pages it did read, paired with an
+// *eventsWindowTruncatedError naming the oldest seq and timestamp it reached.
+// Callers must treat that result as a floor: it is the part of the window that
+// was searched, not the whole of it.
 func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses, cityName, typeFilter, sinceFlag string, warn io.Writer) ([]cliWireEvent, error) {
 	paginate := strings.TrimSpace(sinceFlag) != ""
 	var all []cliWireEvent
@@ -1072,6 +1165,16 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		resp, err := client.GetV0CityByCityNameEventsWithResponse(ctx, cityName, params)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil && len(all) > 0 {
+				sortCityEventsAscending(all)
+				return all, &eventsWindowTruncatedError{
+					since:     strings.TrimSpace(sinceFlag),
+					fetched:   len(all),
+					oldestSeq: all[0].Seq,
+					oldestTs:  all[0].Ts,
+					cause:     ctxErr,
+				}
+			}
 			return nil, &eventsAPITransportError{err: err}
 		}
 		if err := eventsListError(resp.StatusCode(), resp.Body); err != nil {
@@ -1106,8 +1209,12 @@ func fetchCityEvents(ctx context.Context, client *genclient.ClientWithResponses,
 		}
 		cursor = next
 	}
-	sort.Slice(all, func(i, j int) bool { return all[i].Seq < all[j].Seq })
+	sortCityEventsAscending(all)
 	return all, nil
+}
+
+func sortCityEventsAscending(items []cliWireEvent) {
+	sort.Slice(items, func(i, j int) bool { return items[i].Seq < items[j].Seq })
 }
 
 // fetchCityEventsAfterSeq returns every city event with Seq > afterSeq in
