@@ -156,9 +156,9 @@ func TestAssignedWorkSweepPlanFailsLoudOnARefusedCity(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // A rig-bound session reads its own rig store and the binding, in that order —
-// byte-identical to the pre-S2 workAssignmentStores(rigStore, nil, binding). The
-// city work store must NOT appear: reachability is the agent's SCOPE, and the
-// resolver is told which work legs the scope has rather than deciding it.
+// the leg set, and the order, that reachableStoresForSessionInfo answered with.
+// The city work store must NOT appear: reachability is the agent's SCOPE, and
+// the resolver is told which work legs the scope has rather than deciding it.
 func TestSessionAssignedWorkPlanStaysRigScopedAndAddsTheBinding(t *testing.T) {
 	cfg, cityPath, infos := rigScopedWakeFixture(t)
 	binding := beads.NewMemStore()
