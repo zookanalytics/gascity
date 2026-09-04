@@ -374,6 +374,21 @@ const (
 // covers only the gc. namespace.
 const MergeResultMetadataKey = "merge_result"
 
+// BranchMetadataKey records the git branch a work bead's implementation was
+// pushed to. A pack's workspace-setup step writes it once the worktree exists
+// and the branch is cut (values are pack-authored: "polecat/<bead-id>", ...);
+// the engine never writes it. It is the durable record that a branch was
+// actually produced for the bead, distinct from WorkBranchMetadataKey
+// ("gc.work_branch"), which is stamped at claim time to the branch the claiming
+// worker's CWD is on — in a pool that is the shared home worktree's default
+// branch, present on every claimed bead including molecule steps that push
+// nothing. So only this key evidences a completed-work handoff; the detached-
+// orphan recovery sweep reads it to tell a pushed work bead from a parked step.
+// Declared here beside MergeResultMetadataKey, the other pack string the engine
+// reads; like it, it stays out of KnownMetadataKeys, whose drift guard covers
+// only the gc. namespace.
+const BranchMetadataKey = "branch"
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
