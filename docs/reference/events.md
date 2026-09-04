@@ -167,6 +167,30 @@ A path that does not resolve is not an error — the record simply does not
 match — so the wrong form for the path returns nothing rather than reporting
 a problem.
 
+`--type` takes exactly one event type. A comma-separated value is rejected
+with a non-zero exit, because both filters that read it compare one exact
+string, so a list would match no event and report that empty result as
+success. To cover several types, run one query per type.
+
+### Window Coverage
+
+`--since` drains the whole requested window across keyset pages, so a busy
+city can take minutes. When the drain runs out of budget before it reaches the
+bottom of the window, `gc events` still writes every event it read to stdout,
+names the oldest sequence and timestamp it reached on stderr, and exits
+non-zero:
+
+```text
+gc events: --since 24h window is INCOMPLETE: read 41000 events back to seq
+4319949 (2026-09-02T19:10:28Z) before context deadline exceeded; anything
+older in the window was not read, so treat a count from this run as a floor,
+not a total
+```
+
+A count taken from such a run is a lower bound on the window, not a total.
+Any query that has to distinguish "none of these events occurred" from "the
+log was not fully read" must check the exit status, not just the line count.
+
 ## Machine-Readable Schema
 
 The <a href="https://raw.githubusercontent.com/gastownhall/gascity/main/docs/reference/schema/events.json" target="_blank" rel="noopener">events.json</a>
