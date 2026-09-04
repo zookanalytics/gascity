@@ -432,6 +432,9 @@ suite against a stateful jq-based mock script.
   events. `archive_retain_age` prunes older archives; a cursor older
   than the oldest retained event cannot be replayed in full, and the
   streams do not yet signal that gap.
+  The list paths (`gc events`, `ReadFiltered`) read the active file together
+  with every retained archive, so a query reaches the whole retained history,
+  not just the active file; only the archives still on disk bound it.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
   archives that overlap the filter and then the active JSONL file,
