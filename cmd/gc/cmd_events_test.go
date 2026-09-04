@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,12 +127,23 @@ func TestEventsJSONFlagIsSilentNoOp(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newEventsCmd(&stdout, &stderr)
+	// cmd/gc/main.go does root.SetOut(stdout), and that is the writer cobra
+	// drains pflag's deprecation notice through. Without these two lines the
+	// notice goes to the process stderr and this test cannot see it land in
+	// the JSONL stream.
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"--api", server.URL, "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("gc events --json execute: %v; stderr=%s", err, stderr.String())
 	}
 	if stderr.Len() > 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if !strings.HasPrefix(line, "{") {
+			t.Fatalf("stdout line %q is not JSON; the stream is documented as JSON Lines and a naive line count reads this as an event", line)
+		}
 	}
 	var got cliWireTaggedEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
@@ -1704,5 +1717,223 @@ func TestDoEventsWatchReplayDrainsAfterSeq(t *testing.T) {
 		if e.Seq != int64(i+101) {
 			t.Fatalf("event[%d].Seq = %d, want %d (ascending, contiguous from 101)", i, e.Seq, i+101)
 		}
+	}
+}
+
+// TestEventsTypeRejectsCommaList: --type is one exact string on both sides of
+// the wire, so a comma-separated list matches no event. Rejecting it keeps the
+// command from exiting 0 with no records and an empty stderr, which in a
+// coverage query reads as "none of those events occurred".
+func TestEventsTypeRejectsCommaList(t *testing.T) {
+	cases := [][]string{
+		{"--type", "session.woke,session.stopped"},
+		{"--type", "session.woke,session.stopped", "--since", "24h"},
+		{"--type", "a,b", "--watch"},
+		{"--type", "a,b", "--follow"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		cmd := newEventsCmd(&stdout, &stderr)
+		// Mirror the root command in cmd/gc/main.go: SetOut(stdout) plus
+		// SilenceUsage/SilenceErrors. Without the silencing cobra dumps its
+		// usage block onto the JSONL stream and the stdout assertion below
+		// measures the test harness rather than the command.
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("args %v: expected error, got nil (stdout=%q)", args, stdout.String())
+		}
+		if stdout.Len() > 0 {
+			t.Fatalf("args %v: stdout = %q, want empty", args, stdout.String())
+		}
+		if got := stderr.String(); !strings.Contains(got, "--type takes one event type") {
+			t.Fatalf("args %v: stderr = %q, want the one-type-per-query message", args, got)
+		}
+	}
+}
+
+// TestEventsTypeAcceptsSingleType is the control for the guard above: the
+// rejection must key on the comma, not on --type being set at all.
+func TestEventsTypeAcceptsSingleType(t *testing.T) {
+	if err := validateEventsType("session.woke"); err != nil {
+		t.Fatalf("validateEventsType(single) = %v, want nil", err)
+	}
+	if err := validateEventsType(""); err != nil {
+		t.Fatalf("validateEventsType(empty) = %v, want nil", err)
+	}
+}
+
+// TestFetchCityEventsReturnsPartialWindowOnDeadline: a --since drain that runs
+// out of budget mid-walk returns the pages it did read and names where
+// coverage stops, so a caller can tell an unfinished search from an empty one.
+// The failure it guards against: discarding every fetched page on deadline and
+// printing nothing.
+func TestFetchCityEventsReturnsPartialWindowOnDeadline(t *testing.T) {
+	const (
+		total    = 300
+		pageSize = 100 // not cityEventsPageLimit: the walk must read the
+		// server's page boundary rather than assume its own.
+	)
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	paged := pagedCityEventsHandler(t, allDesc, pageSize)
+	var pages atomic.Int64
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			// First page is served; every page after it outlives the budget.
+			if pages.Add(1) > 1 {
+				<-r.Context().Done()
+				return
+			}
+			paged(w, r)
+		},
+	})
+	defer server.Close()
+
+	client, err := genclient.NewClientWithResponses(server.URL)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	var warn bytes.Buffer
+	got, err := fetchCityEvents(ctx, client, "mc-city", "", "24h", &warn)
+	if err == nil {
+		t.Fatal("fetchCityEvents: err = nil, want a truncation error for an unfinished window")
+	}
+	var truncated *eventsWindowTruncatedError
+	if !errors.As(err, &truncated) {
+		t.Fatalf("fetchCityEvents: err = %v (%T), want *eventsWindowTruncatedError", err, err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("truncation error does not unwrap to the deadline: %v", err)
+	}
+	if len(got) != pageSize {
+		t.Fatalf("got %d events, want the %d the first page delivered (a cut-short walk must not discard what it read)", len(got), pageSize)
+	}
+	// Ascending, and the boundary the error reports is the oldest event held.
+	for i, item := range got {
+		if want := int64(total - pageSize + 1 + i); item.Seq != want {
+			t.Fatalf("event[%d].Seq = %d, want %d (ascending, newest page)", i, item.Seq, want)
+		}
+	}
+	if truncated.oldestSeq != got[0].Seq {
+		t.Fatalf("truncated.oldestSeq = %d, want %d (the oldest event actually read)", truncated.oldestSeq, got[0].Seq)
+	}
+	if truncated.fetched != len(got) {
+		t.Fatalf("truncated.fetched = %d, want %d", truncated.fetched, len(got))
+	}
+	for _, want := range []string{"INCOMPLETE", "--since 24h", "floor"} {
+		if !strings.Contains(truncated.Error(), want) {
+			t.Fatalf("truncation message %q missing %q", truncated.Error(), want)
+		}
+	}
+}
+
+// TestDoEventsPrintsPartialWindowAndFailsOnDeadline is the command-level half
+// of the guard above: the partial window reaches stdout, the boundary reaches
+// stderr, and the exit code is non-zero so a caller that only checks status
+// still learns the window is short.
+func TestDoEventsPrintsPartialWindowAndFailsOnDeadline(t *testing.T) {
+	prev := eventsDrainTimeout
+	eventsDrainTimeout = 300 * time.Millisecond
+	defer func() { eventsDrainTimeout = prev }()
+
+	const (
+		total    = 250
+		pageSize = 60
+	)
+	allDesc := make([]cliWireEvent, 0, total)
+	for seq := total; seq >= 1; seq-- {
+		allDesc = append(allDesc, cliWireEvent{
+			Actor: "gc", Seq: int64(seq), Type: "e.t",
+			Ts: time.Unix(1700000000+int64(seq), 0).UTC(),
+		})
+	}
+	paged := pagedCityEventsHandler(t, allDesc, pageSize)
+	var pages atomic.Int64
+	server := newEventsTestServer(t, testEventRoutes{
+		cityEvents: func(w http.ResponseWriter, r *http.Request) {
+			if pages.Add(1) > 1 {
+				<-r.Context().Done()
+				return
+			}
+			paged(w, r)
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	code := doEvents(eventsAPIScope{apiURL: server.URL, cityName: "mc-city"}, "", "24h", nil, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("doEvents = 0, want non-zero for an incomplete window; stderr=%q", stderr.String())
+	}
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != pageSize {
+		t.Fatalf("stdout carried %d lines, want the %d events the walk did read", len(lines), pageSize)
+	}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "{") {
+			t.Fatalf("stdout line %q is not JSON", line)
+		}
+	}
+	if got := stderr.String(); !strings.Contains(got, "INCOMPLETE") {
+		t.Fatalf("stderr = %q, want the incomplete-window boundary", got)
+	}
+}
+
+// TestCityEventsListBudgetOnlyPaginatedWalksGetTheDrainBudget pins which budget
+// applies: only --since paginates, so only --since is worth minutes.
+func TestCityEventsListBudgetOnlyPaginatedWalksGetTheDrainBudget(t *testing.T) {
+	if got := cityEventsListBudget(""); got != eventsListTimeout {
+		t.Fatalf("cityEventsListBudget(\"\") = %v, want the single-request guard %v", got, eventsListTimeout)
+	}
+	if got := cityEventsListBudget("  "); got != eventsListTimeout {
+		t.Fatalf("cityEventsListBudget(blank) = %v, want the single-request guard %v", got, eventsListTimeout)
+	}
+	if got := cityEventsListBudget("24h"); got != eventsDrainTimeout {
+		t.Fatalf("cityEventsListBudget(24h) = %v, want the drain budget %v", got, eventsDrainTimeout)
+	}
+}
+
+// TestDoEventsSupervisorKeepsSingleRequestGuardUnderSince pins the split
+// budget on the other side: fetchSupervisorEvents issues one request whatever
+// the filters say, so --since must not buy it the city drain's minutes. The
+// two budgets are set far apart here, and a stalling supervisor has to fail on
+// the short one.
+func TestDoEventsSupervisorKeepsSingleRequestGuardUnderSince(t *testing.T) {
+	prevList, prevDrain := eventsListTimeout, eventsDrainTimeout
+	eventsListTimeout = 200 * time.Millisecond
+	eventsDrainTimeout = 90 * time.Second
+	defer func() { eventsListTimeout, eventsDrainTimeout = prevList, prevDrain }()
+
+	server := newEventsTestServer(t, testEventRoutes{
+		supervisorEvents: func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		},
+	})
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	start := time.Now()
+	code := doEvents(eventsAPIScope{apiURL: server.URL}, "", "24h", nil, &stdout, &stderr)
+	elapsed := time.Since(start)
+
+	if code == 0 {
+		t.Fatalf("doEvents = 0, want non-zero from the stalled supervisor request")
+	}
+	// Generous ceiling: the point is that it fell well short of the drain
+	// budget, not that it hit the guard to the millisecond.
+	if elapsed > 30*time.Second {
+		t.Fatalf("supervisor list took %v; --since bought it the city drain budget instead of the %v guard", elapsed, eventsListTimeout)
 	}
 }
