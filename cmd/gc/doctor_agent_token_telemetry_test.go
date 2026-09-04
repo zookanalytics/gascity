@@ -297,3 +297,142 @@ func TestAgentTokenTelemetryIsAdvisory(t *testing.T) {
 		t.Errorf("severity = %v, want advisory", res.Severity)
 	}
 }
+
+// runTokenTelemetryCheckWithResolver runs the check with an injected live-transcript
+// resolver so a test can pin what the newest transcript under a work_dir looks
+// like without writing provider-native transcript files to disk.
+func runTokenTelemetryCheckWithResolver(t *testing.T, cityPath string, store beads.Store, now time.Time, resolver func(family, workDir string) (time.Time, bool)) *doctor.CheckResult {
+	t.Helper()
+	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil })
+	c.now = func() time.Time { return now }
+	if resolver != nil {
+		c.resolveLiveTranscript = resolver
+	}
+	return c.Run(nil)
+}
+
+// TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript is the discriminator
+// the escalation-noise fix asks for: a silent session whose live transcript is
+// still being written is working but not being recorded, not idle. Resolving the
+// transcript independently of the stored session_key finds the live one the stale
+// keyed lookup misses, so the check announces the gap instead of handing an
+// operator a converse sitting to confirm idleness (gc-1fke8).
+func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	loud := awakeSessionBead(t, store, "rig--polecat", now.Add(-4*time.Hour))
+	working := awakeSessionBead(t, store, "rig--refinery", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(working.ID, "work_dir", "/w/refinery"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The polecat has a recent sample; the refinery's newest fact is 90m old, past
+	// the one-hour silence threshold, so only the refinery is a silence candidate.
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: loud.ID, Worker: "rig--polecat", At: now.Add(-5 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+		{Kind: usage.KindModel, SessionID: working.ID, Worker: "rig--refinery", At: now.Add(-90 * time.Minute).UnixMilli(), IdempotencyKey: "k2"},
+	})
+
+	// The refinery's live transcript was written 5m ago — inside the silence
+	// window — yet nothing was recorded in that window: a real emission gap.
+	resolver := func(_, workDir string) (time.Time, bool) {
+		if workDir == "/w/refinery" {
+			return now.Add(-5 * time.Minute), true
+		}
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning; message=%q", res.Status, res.Message)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, working.ID) && !strings.Contains(joined, "rig--refinery") {
+		t.Errorf("gap session not named in details:\n%s", joined)
+	}
+	if !strings.Contains(joined, "live transcript written") {
+		t.Errorf("the finding must self-announce the live transcript, got:\n%s", joined)
+	}
+	if !strings.Contains(res.FixHint, "emission path") {
+		t.Errorf("a confirmed gap must point at the emission path, got hint %q", res.FixHint)
+	}
+	if strings.Contains(res.FixHint, "confirm the session is genuinely idle") {
+		t.Errorf("a confirmed gap must not carry the idle-confirmation hint: %q", res.FixHint)
+	}
+}
+
+// TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle is the noise-removal half:
+// a silent session whose live transcript is as quiet as its last recorded fact is
+// genuinely idle, so the check suppresses it instead of re-escalating benign idle
+// every hour — the re-escalation tk-jnrm6i documented (gc-1fke8).
+func TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	idle := awakeSessionBead(t, store, "rig--converse", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(idle.ID, "work_dir", "/w/converse"); err != nil {
+		t.Fatal(err)
+	}
+	lastFact := now.Add(-90 * time.Minute)
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: idle.ID, Worker: "rig--converse", At: lastFact.UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	// The live transcript's last write matches the newest recorded fact: nothing
+	// has happened since, so the session is genuinely idle, not a telemetry gap.
+	resolver := func(_, workDir string) (time.Time, bool) {
+		if workDir == "/w/converse" {
+			return lastFact, true
+		}
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok (idle session, benign silence); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+}
+
+// TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory pins the third case: when
+// two live model sessions share a pool work_dir, keyless newest-wins discovery
+// cannot attribute a transcript, so a silent session among them keeps today's
+// advisory wording rather than being matched to a guessed transcript (gc-1fke8).
+func TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	silent := awakeSessionBead(t, store, "pool--polecat-1", now.Add(-4*time.Hour))
+	busy := awakeSessionBead(t, store, "pool--polecat-2", now.Add(-4*time.Hour))
+	for _, id := range []string{silent.ID, busy.ID} {
+		if err := store.SetMetadata(id, "work_dir", "/w/pool"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Only the busy session has a recent sample; the other is silent but shares
+	// the directory, so the check cannot resolve its transcript.
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: busy.ID, Worker: "pool--polecat-2", At: now.Add(-5 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	resolver := func(_, workDir string) (time.Time, bool) {
+		t.Fatalf("resolver must not be called for a shared work_dir (%s)", workDir)
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (silent session reported as advisory); message=%q", res.Status, res.Message)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, silent.ID) && !strings.Contains(joined, "pool--polecat-1") {
+		t.Errorf("silent shared-workdir session not named in details:\n%s", joined)
+	}
+	if !strings.Contains(res.FixHint, "confirm the session is genuinely idle") {
+		t.Errorf("a shared work_dir must fall back to the advisory wording, got hint %q", res.FixHint)
+	}
+}
