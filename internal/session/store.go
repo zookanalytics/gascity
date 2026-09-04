@@ -181,6 +181,35 @@ func (s *Store) SetMarker(id, key, value string) error {
 	return s.setMetadataValue(id, key, value)
 }
 
+// ReconcileSessionKey overwrites a session's resume session_key with the id the
+// provider conversation is actually writing to now, and clears the
+// invocation-usage cursor in the same batch. A long-lived session whose
+// transcript forks mid-conversation (compaction, /clear, a resume the provider
+// forks to a new file) without a fresh-wake reset keeps session_key pinned to
+// the abandoned transcript. Every usage recorder resolves the transcript through
+// that key, so the whole awake interval records nothing. Reconciling the key
+// rebinds the sweep to the live transcript; clearing the cursor makes it resweep
+// from that transcript's head instead of a cursor pointing into the dead one.
+// Pairing the two writes in one batch keeps the key from ever standing with the
+// dead transcript's cursor.
+//
+// Unlike PersistSessionKey's set-when-empty contract this deliberately
+// overwrites a non-empty key. It is the reconciling writer the trusted
+// hook-stdin path (codex/claude, whose SessionStart hook delivers the live
+// conversation id) calls; every other writer keeps its non-empty guard. Empty id
+// or key is a no-op.
+func (s *Store) ReconcileSessionKey(id, sessionKey string) error {
+	id = strings.TrimSpace(id)
+	sessionKey = strings.TrimSpace(sessionKey)
+	if id == "" || sessionKey == "" {
+		return nil
+	}
+	return s.ApplyPatch(id, MetadataPatch{
+		"session_key":                    sessionKey,
+		MetadataKeyInvocationUsageCursor: "",
+	})
+}
+
 // RecordCurrentBead stamps the work bead a session is currently processing.
 // Replaces recordCurrentBeadIDOnWake (session_bead_cycle.go), which uses a
 // single-key SetMetadata write — so this emits SetMetadata, not a batch.

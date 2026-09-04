@@ -98,17 +98,61 @@ func TestPersistPrimeHookProviderSessionKey_CodexHookStdinStillCaptured(t *testi
 	}
 }
 
-// TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite confirms an
-// already-captured key is authoritative: a resume-wake's SessionStart hook must
-// not clobber the stored key.
-func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T) {
+// TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinReconcilesStaleKey is
+// the regression guard for the model-usage emission gap: a long-lived claude
+// session whose transcript forked mid-conversation (compaction, /clear, a resume
+// the provider forks to a new file) reaches its SessionStart hook with the LIVE
+// conversation id on stdin while session_key is still pinned to the abandoned
+// transcript. gc prime --hook is authoritative for that trusted stdin, so it
+// reconciles the stored key to the live id and clears the usage cursor; leaving
+// the stale key records zero usage for the whole awake interval.
+func TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinReconcilesStaleKey(t *testing.T) {
 	cityDir, store := primeCaptureTestStore(t)
 	b, err := store.Create(beads.Bead{
 		Title: "session claude",
 		Type:  "session",
 		Metadata: map[string]string{
-			"provider_kind": "claude",
-			"session_key":   "original-uuid",
+			"provider_kind":           "claude",
+			"session_key":             "dead-transcript-uuid",
+			"invocation_usage_cursor": "msg_from_dead_transcript",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", b.ID)
+	isolateProviderSessionEnv(t)
+
+	const liveSessionID = "live-conversation-uuid"
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey(liveSessionID, &stderr)
+
+	if got := reloadSessionKey(t, cityDir, b.ID); got != liveSessionID {
+		t.Fatalf("session_key = %q, want %q (a stale key must reconcile to the live hook-stdin id; stderr=%q)", got, liveSessionID, stderr.String())
+	}
+	if got := reloadMarker(t, cityDir, b.ID, "invocation_usage_cursor"); got != "" {
+		t.Fatalf("invocation_usage_cursor = %q, want empty (reconcile must reset the cursor so the new transcript sweeps from its head)", got)
+	}
+	if !strings.Contains(stderr.String(), "reconciled stale resume session_key") {
+		t.Errorf("reconcile must be observable, got stderr=%q", stderr.String())
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinSameIDNoReconcile is the
+// control: when the hook-stdin id already equals the stored key nothing is
+// rewritten. The usage cursor is preserved and no reconcile diagnostic fires, so
+// the once-per-conversation-start hook is idempotent for a session that has not
+// forked its transcript.
+func TestPersistPrimeHookProviderSessionKey_ClaudeHookStdinSameIDNoReconcile(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	const key = "same-uuid"
+	b, err := store.Create(beads.Bead{
+		Title: "session claude",
+		Type:  "session",
+		Metadata: map[string]string{
+			"provider_kind":           "claude",
+			"session_key":             key,
+			"invocation_usage_cursor": "msg_live",
 		},
 	})
 	if err != nil {
@@ -118,10 +162,16 @@ func TestPersistPrimeHookProviderSessionKey_ClaudeDoesNotOverwrite(t *testing.T)
 	isolateProviderSessionEnv(t)
 
 	var stderr bytes.Buffer
-	persistPrimeHookProviderSessionKey("different-uuid", &stderr)
+	persistPrimeHookProviderSessionKey(key, &stderr)
 
-	if got := reloadSessionKey(t, cityDir, b.ID); got != "original-uuid" {
-		t.Fatalf("session_key = %q, want unchanged %q", got, "original-uuid")
+	if got := reloadSessionKey(t, cityDir, b.ID); got != key {
+		t.Fatalf("session_key = %q, want unchanged %q", got, key)
+	}
+	if got := reloadMarker(t, cityDir, b.ID, "invocation_usage_cursor"); got != "msg_live" {
+		t.Fatalf("invocation_usage_cursor = %q, want unchanged msg_live (an equal id must not reset the cursor)", got)
+	}
+	if strings.Contains(stderr.String(), "reconciled") {
+		t.Errorf("no reconcile expected for an equal id, got stderr=%q", stderr.String())
 	}
 }
 
@@ -160,6 +210,60 @@ func TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyHookStdinRejected(t
 
 	if got := reloadSessionKey(t, cityDir, id); got != "" {
 		t.Fatalf("gemini session_key = %q, want empty (hook stdin id must not be captured for non-allowlisted families)", got)
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyNonEmptyNotReconciled
+// pins the safety boundary in the reconcile direction: a non-allowlisted family
+// (gemini) must not have a non-empty key overwritten from hook stdin. Only
+// codex/claude deliver their authoritative live conversation id there; every
+// other family surfaces resume state by another route.
+func TestPersistPrimeHookProviderSessionKey_UnsupportedFamilyNonEmptyNotReconciled(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	b, err := store.Create(beads.Bead{
+		Title:    "session gemini",
+		Type:     "session",
+		Metadata: map[string]string{"provider_kind": "gemini", "session_key": "gemini-original"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", b.ID)
+	isolateProviderSessionEnv(t)
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey("gemini-different", &stderr)
+
+	if got := reloadSessionKey(t, cityDir, b.ID); got != "gemini-original" {
+		t.Fatalf("gemini session_key = %q, want unchanged gemini-original (untrusted family must not reconcile from hook stdin)", got)
+	}
+}
+
+// TestPersistPrimeHookProviderSessionKey_EnvPathNonEmptyNotReconciled confirms
+// the reconcile is surgical to the hook-stdin path: an id delivered via
+// GC_PROVIDER_SESSION_ID (fromHookStdin=false) is a launch-time env value, not
+// the id of a forked live conversation, so it must never overwrite a non-empty
+// key. Only the SessionStart hook's stdin carries the live transcript id.
+func TestPersistPrimeHookProviderSessionKey_EnvPathNonEmptyNotReconciled(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	b, err := store.Create(beads.Bead{
+		Title:    "session claude",
+		Type:     "session",
+		Metadata: map[string]string{"provider_kind": "claude", "session_key": "env-original"},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Setenv("GC_SESSION_ID", b.ID)
+	t.Setenv("GEMINI_SESSION_ID", "")
+	t.Setenv("GC_PROVIDER_SESSION_ID_REQUIRED", "1")
+	t.Setenv("GC_PROVIDER_SESSION_ID", "env-different")
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKey("", &stderr)
+
+	if got := reloadSessionKey(t, cityDir, b.ID); got != "env-original" {
+		t.Fatalf("claude env session_key = %q, want unchanged env-original (env path must not reconcile a non-empty key)", got)
 	}
 }
 
@@ -203,6 +307,14 @@ func TestPersistPrimeHookProviderSessionKey_RejectsIDEqualToGCSessionID(t *testi
 
 func reloadSessionKey(t *testing.T, cityDir, id string) string {
 	t.Helper()
+	return reloadMarker(t, cityDir, id, "session_key")
+}
+
+// reloadMarker reopens the on-disk store and returns a session bead's metadata
+// value for key, so a test can assert what gc prime --hook actually persisted
+// (session_key, invocation_usage_cursor) rather than an in-memory copy.
+func reloadMarker(t *testing.T, cityDir, id, key string) string {
+	t.Helper()
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
@@ -211,5 +323,5 @@ func reloadSessionKey(t *testing.T, cityDir, id string) string {
 	if err != nil {
 		t.Fatalf("get session bead: %v", err)
 	}
-	return strings.TrimSpace(b.Metadata["session_key"])
+	return strings.TrimSpace(b.Metadata[key])
 }
