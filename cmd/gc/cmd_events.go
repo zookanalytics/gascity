@@ -192,6 +192,10 @@ DTO or SSE envelope.`,
 				fmt.Fprintln(stderr, "gc events: --after/--after-cursor require --follow or --watch (they resume a stream); use --since to bound a list by time") //nolint:errcheck
 				return errExit
 			}
+			if err := validateEventsType(typeFilter); err != nil {
+				fmt.Fprintf(stderr, "gc events: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			if seqFlag {
 				if cmdEventsSeq(apiURL, stdout, stderr) != 0 {
 					return errExit
@@ -227,7 +231,12 @@ DTO or SSE envelope.`,
 	cmd.Flags().StringVar(&afterCursor, "after-cursor", "", "Resume from this supervisor event cursor (supervisor scope only)")
 	cmd.Flags().StringArrayVar(&payloadMatch, "payload-match", nil, "Filter by payload field (key=value or key.subkey=value, repeatable)")
 	cmd.Flags().BoolVar(&jsonFlagDeprecated, "json", false, "Deprecated: output is always JSONL. Accepted for back-compat.")
-	_ = cmd.Flags().MarkDeprecated("json", "output is always JSONL; the flag is now a no-op and will be removed in a future release")
+	// Hidden, not MarkDeprecated: pflag buffers a deprecation notice into
+	// cobra's flagErrorBuf, ParseFlags drains it through Command.Print ->
+	// OutOrStderr, and cmd/gc/main.go points that writer at stdout. The notice
+	// then lands as line 1 of a stream this command documents as JSON Lines,
+	// where `wc -l` counts it as an event and `jq` fails on it.
+	_ = cmd.Flags().MarkHidden("json")
 	cmd.AddCommand(newEventsRotateCmd(stdout, stderr))
 	cmd.AddCommand(newEventsReemitExecutionCmd(stdout, stderr))
 	return cmd
@@ -533,6 +542,21 @@ func validateEventsCursor(scope eventsAPIScope, afterSeq uint64, afterCursor str
 	}
 	if !scope.isSupervisor() && strings.TrimSpace(afterCursor) != "" {
 		return fmt.Errorf("--after-cursor is only valid in supervisor scope")
+	}
+	return nil
+}
+
+// validateEventsType rejects a comma-separated --type. Both filters that read
+// this value compare one exact string -- filterCityEvents tests
+// `item.Type != typeFilter`, and the API's EventListInput.Type is a scalar
+// query param -- so a list matches no event, the server mints no next_cursor,
+// and the command exits 0 with no records and nothing on stderr. That is
+// indistinguishable from "none of those events occurred", which is the answer
+// a coverage query is asking for. Reject rather than silently ignore, the same
+// way --after does above.
+func validateEventsType(typeFilter string) error {
+	if strings.Contains(typeFilter, ",") {
+		return fmt.Errorf("--type takes one event type, not a list: %q matches nothing and would report that empty result as success; run one query per type, or drop --type and filter the stream", typeFilter)
 	}
 	return nil
 }

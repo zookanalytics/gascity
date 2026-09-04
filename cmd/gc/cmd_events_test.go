@@ -126,12 +126,23 @@ func TestEventsJSONFlagIsSilentNoOp(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	cmd := newEventsCmd(&stdout, &stderr)
+	// cmd/gc/main.go does root.SetOut(stdout), and that is the writer cobra
+	// drains pflag's deprecation notice through. Without these two lines the
+	// notice goes to the process stderr and this test cannot see it land in
+	// the JSONL stream.
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
 	cmd.SetArgs([]string{"--api", server.URL, "--json"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("gc events --json execute: %v; stderr=%s", err, stderr.String())
 	}
 	if stderr.Len() > 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if !strings.HasPrefix(line, "{") {
+			t.Fatalf("stdout line %q is not JSON; the stream is documented as JSON Lines and a naive line count reads this as an event", line)
+		}
 	}
 	var got cliWireTaggedEvent
 	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
@@ -2060,5 +2071,51 @@ func TestDoEventsWatchReplayDrainsAfterSeq(t *testing.T) {
 		if e.Seq != int64(i+101) {
 			t.Fatalf("event[%d].Seq = %d, want %d (ascending, contiguous from 101)", i, e.Seq, i+101)
 		}
+	}
+}
+
+// TestEventsTypeRejectsCommaList: --type is one exact string on both sides of
+// the wire, so a comma-separated list matches no event. Rejecting it keeps the
+// command from exiting 0 with no records and an empty stderr, which in a
+// coverage query reads as "none of those events occurred".
+func TestEventsTypeRejectsCommaList(t *testing.T) {
+	cases := [][]string{
+		{"--type", "session.woke,session.stopped"},
+		{"--type", "session.woke,session.stopped", "--since", "24h"},
+		{"--type", "a,b", "--watch"},
+		{"--type", "a,b", "--follow"},
+	}
+	for _, args := range cases {
+		var stdout, stderr bytes.Buffer
+		cmd := newEventsCmd(&stdout, &stderr)
+		// Mirror the root command in cmd/gc/main.go: SetOut(stdout) plus
+		// SilenceUsage/SilenceErrors. Without the silencing cobra dumps its
+		// usage block onto the JSONL stream and the stdout assertion below
+		// measures the test harness rather than the command.
+		cmd.SetOut(&stdout)
+		cmd.SetErr(&stderr)
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("args %v: expected error, got nil (stdout=%q)", args, stdout.String())
+		}
+		if stdout.Len() > 0 {
+			t.Fatalf("args %v: stdout = %q, want empty", args, stdout.String())
+		}
+		if got := stderr.String(); !strings.Contains(got, "--type takes one event type") {
+			t.Fatalf("args %v: stderr = %q, want the one-type-per-query message", args, got)
+		}
+	}
+}
+
+// TestEventsTypeAcceptsSingleType is the control for the guard above: the
+// rejection must key on the comma, not on --type being set at all.
+func TestEventsTypeAcceptsSingleType(t *testing.T) {
+	if err := validateEventsType("session.woke"); err != nil {
+		t.Fatalf("validateEventsType(single) = %v, want nil", err)
+	}
+	if err := validateEventsType(""); err != nil {
+		t.Fatalf("validateEventsType(empty) = %v, want nil", err)
 	}
 }
