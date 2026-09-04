@@ -2746,7 +2746,8 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (nothing live working in the tree, clean tree, no unpushed commits,
+// no stashes).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true

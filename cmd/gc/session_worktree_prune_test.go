@@ -10,7 +10,40 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
+
+// livePruneAllowed is a successfully-scanned liveness snapshot that shows no
+// process or session in any worktree, so the liveness gate never blocks — the
+// implicit shape every prune test assumed before the gate existed. Shared by
+// both the raw and session.Info prune test forms.
+func livePruneAllowed() worktreeLivenessInputs {
+	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}}
+}
+
+// liveAt returns a successfully-scanned liveness snapshot reporting a live
+// process cwd at each given directory, normalized the way the production
+// process-table scan records them.
+func liveAt(dirs ...string) worktreeLivenessInputs {
+	cwds := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		cwds = append(cwds, pathutil.NormalizePathForCompare(d))
+	}
+	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true, cwds: cwds}}
+}
+
+// liveViaSession returns a successfully-scanned liveness snapshot with no live
+// process cwd but the given open-session working directories, exercising the
+// session-dir cross-check independently of the /proc scan.
+func liveViaSession(dirs ...string) worktreeLivenessInputs {
+	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: dirs}
+}
+
+// liveScanUnavailable is the indeterminate liveness snapshot — the process
+// table could not be enumerated — which must fail closed and block every prune.
+func liveScanUnavailable() worktreeLivenessInputs {
+	return worktreeLivenessInputs{live: liveWorktreeState{scanned: false}}
+}
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
 // probe; WorktreeRemoveErr controls the destructive call, and removed
@@ -162,7 +195,7 @@ func TestPruneAgentHomeWorktreeIfSafe_DisabledByConfig(t *testing.T) {
 	fx.cfg.Daemon.AutoPruneWorkerDir = &off
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true while disabled")
 	}
 	if rigProbe := fx.probesByWD[fx.rigRoot]; rigProbe != nil && rigProbe.removeInvoked {
@@ -176,7 +209,7 @@ func TestPruneAgentHomeWorktreeIfSafe_NoWorkerDir(t *testing.T) {
 	delete(session.Metadata, "worker_dir")
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with no worker_dir")
 	}
 }
@@ -193,7 +226,7 @@ func TestPruneAgentHomeWorktreeIfSafe_LegacyWorkDirKey(t *testing.T) {
 	fx.setProbe(fx.rigRoot, rigProbe)
 
 	var stderr bytes.Buffer
-	if !pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
+	if !pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatalf("prune returned false on legacy work_dir; stderr=%s", stderr.String())
 	}
 	if !rigProbe.removeInvoked || rigProbe.removedPath != fx.workerDir || !rigProbe.removedForce {
@@ -216,7 +249,7 @@ func TestPruneAgentHomeWorktreeIfSafe_OutsideWorktreesTree(t *testing.T) {
 	session.Metadata["worker_dir"] = outside
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true for path outside .gc/worktrees")
 	}
 }
@@ -231,7 +264,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RejectsWorktreesRoot(t *testing.T) {
 	session.Metadata["worker_dir"] = wtRoot
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true for .gc/worktrees root itself")
 	}
 }
@@ -242,7 +275,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RelativeWorkerDir(t *testing.T) {
 	session.Metadata["worker_dir"] = "relative/path"
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true for relative worker_dir")
 	}
 }
@@ -254,7 +287,7 @@ func TestPruneAgentHomeWorktreeIfSafe_MissingDotGit(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with missing .git pointer")
 	}
 }
@@ -264,7 +297,7 @@ func TestPruneAgentHomeWorktreeIfSafe_NotARepo(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: false})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true when IsRepo=false")
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
@@ -275,7 +308,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUncommitted(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUncommitted: true, currentBranch: "builder/ga-abc123"})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with uncommitted work")
 	}
 	if !strings.Contains(stderr.String(), "uncommitted changes") {
@@ -289,7 +322,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasUnpushed(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUnpushed: true, currentBranch: "builder/ga-def456"})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with unpushed commits")
 	}
 	if !strings.Contains(stderr.String(), "unpushed commits") {
@@ -303,7 +336,7 @@ func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, unpushedErr: errors.New("boom")})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true after unpushed probe error")
 	}
 	if !strings.Contains(stderr.String(), "unpushed probe failed") {
@@ -317,7 +350,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with stashes")
 	}
 	if !strings.Contains(stderr.String(), "stashed work") {
@@ -331,7 +364,7 @@ func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true after stash probe error")
 	}
 	if !strings.Contains(stderr.String(), "stash probe failed") {
@@ -346,7 +379,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true without rig path")
 	}
 	if !strings.Contains(stderr.String(), "rig path unresolved") {
@@ -361,7 +394,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RigPathEmpty(t *testing.T) {
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with empty rig path")
 	}
 	if !strings.Contains(stderr.String(), "rig path unresolved") {
@@ -379,7 +412,7 @@ func TestPruneAgentHomeWorktreeIfSafe_RemoveFails(t *testing.T) {
 	})
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true when WorktreeRemove failed")
 	}
 	if !strings.Contains(stderr.String(), "pruning worker_dir") || !strings.Contains(stderr.String(), "locked") {
@@ -396,7 +429,7 @@ func TestPruneAgentHomeWorktreeIfSafe_HappyPath(t *testing.T) {
 	fx.setProbe(fx.rigRoot, rigProbe)
 
 	var stderr bytes.Buffer
-	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
 		t.Fatalf("prune returned false on happy path; stderr=%s", stderr.String())
 	}
 	if wdProbe.removeInvoked {
@@ -420,9 +453,112 @@ func TestPruneAgentHomeWorktreeIfSafe_HappyPath(t *testing.T) {
 func TestPruneAgentHomeWorktreeIfSafe_NilConfig(t *testing.T) {
 	fx := newPruneFixture(t)
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, nil, &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, nil, livePruneAllowed(), &stderr) {
 		t.Fatal("prune returned true with nil cfg")
 	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LivenessScanUnavailable(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveScanUnavailable(), &stderr) {
+		t.Fatal("prune returned true when the liveness scan was indeterminate")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked despite indeterminate liveness")
+	}
+	if !strings.Contains(stderr.String(), "liveness scan unavailable") {
+		t.Errorf("expected fail-closed reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LiveProcessCWD(t *testing.T) {
+	fx := newPruneFixture(t)
+	// Clean tree — the normal resting state of a healthy agent between commits.
+	// Without the liveness gate this passes every git probe and the worktree is
+	// force-removed out from under the running process.
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveAt(fx.workerDir), &stderr) {
+		t.Fatal("prune returned true for a worktree with a live process cwd")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked on a live worktree")
+	}
+	if !strings.Contains(stderr.String(), "live process cwd") {
+		t.Errorf("expected live-process reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LiveProcessInSubdir(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+	subdir := filepath.Join(fx.workerDir, "internal", "build")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveAt(subdir), &stderr) {
+		t.Fatal("prune returned true while a process runs in a subdir of the worktree")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked while a process runs under the worktree")
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LiveViaOpenSessionDir(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	// No live process cwd, but an open session still records this dir.
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr) {
+		t.Fatal("prune returned true for a worktree an open session is working in")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked on a worktree an open session holds")
+	}
+	if !strings.Contains(stderr.String(), "active session dir") {
+		t.Errorf("expected active-session reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_LiveTakesPrecedenceOverGitState(t *testing.T) {
+	fx := newPruneFixture(t)
+	// Uncommitted work AND a live process. Liveness is checked first, so the
+	// worktree is refused as live and no .worktree-stale marker is written into
+	// the tree the live process is using.
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasUncommitted: true, currentBranch: "builder/ga-live1"})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveAt(fx.workerDir), &stderr) {
+		t.Fatal("prune returned true for a live worktree")
+	}
+	if !strings.Contains(stderr.String(), "live process cwd") {
+		t.Errorf("expected live reason to win over git-state; got %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "uncommitted") {
+		t.Errorf("git-state probe ran before liveness; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestLookupRigRootForSession(t *testing.T) {
