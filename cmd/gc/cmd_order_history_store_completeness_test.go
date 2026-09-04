@@ -18,14 +18,19 @@ import (
 // (`--limit N`) answers for every one of them, rather than for whichever
 // registration happened to be found first (gc-6a6vz).
 
-// orderRunsStoreForScoped builds a store holding count order-run beads for a
-// single scoped order name, one hour apart going back from newest. It mirrors
-// orderHistoryRunsStore but takes the scoped name so each rig's registration
-// gets its own rows.
-func orderRunsStoreForScoped(t *testing.T, scoped string, newest time.Time, count int) beads.Store {
+// orderScopedTestRunCount is how many runs each rig's registration seeds. The
+// store-completeness assertions count against it: with two rigs seeded, a total
+// short of twice this number means a store was never read.
+const orderScopedTestRunCount = 3
+
+// orderRunsStoreForScoped builds a store holding orderScopedTestRunCount
+// order-run beads for a single scoped order name, one hour apart going back
+// from newest. It mirrors orderHistoryRunsStore but takes the scoped name so
+// each rig's registration gets its own rows.
+func orderRunsStoreForScoped(t *testing.T, scoped string, newest time.Time) beads.Store {
 	t.Helper()
-	rows := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	rows := make([]string, 0, orderScopedTestRunCount)
+	for i := 0; i < orderScopedTestRunCount; i++ {
 		rows = append(rows, fmt.Sprintf(
 			`{"id":%q,"title":"run %d","status":"closed","issue_type":"task","created_at":%q,"labels":["order-run:%s"]}`,
 			fmt.Sprintf("%s-%d", strings.ReplaceAll(scoped, ":", "-"), i),
@@ -59,8 +64,8 @@ func twoRigOrderRegistrations() []orders.Order {
 // partial read is indistinguishable from a complete one at the terminal.
 func TestOrderHistoryBoundedReadIsStoreCompleteAcrossRigs(t *testing.T) {
 	newest := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
-	storeA := orderRunsStoreForScoped(t, "digest:rig:rig-a", newest, 3)
-	storeB := orderRunsStoreForScoped(t, "digest:rig:rig-b", newest.Add(-30*time.Minute), 3)
+	storeA := orderRunsStoreForScoped(t, "digest:rig:rig-a", newest)
+	storeB := orderRunsStoreForScoped(t, "digest:rig:rig-b", newest.Add(-30*time.Minute))
 
 	resolver := func(a orders.Order) ([]beads.OrdersStore, error) {
 		switch a.Rig {
@@ -82,15 +87,16 @@ func TestOrderHistoryBoundedReadIsStoreCompleteAcrossRigs(t *testing.T) {
 	}
 
 	payload := orderHistoryEntries(t, &stdout)
-	if len(payload.Entries) != 6 {
-		t.Fatalf("entries = %d, want 6 (3 per rig across 2 rigs); a short count means a store was not read", len(payload.Entries))
+	if want := 2 * orderScopedTestRunCount; len(payload.Entries) != want {
+		t.Fatalf("entries = %d, want %d (%d per rig across 2 rigs); a short count means a store was not read",
+			len(payload.Entries), want, orderScopedTestRunCount)
 	}
 	seen := map[string]int{}
 	for _, e := range payload.Entries {
 		seen[e.Rig]++
 	}
-	if seen["rig-a"] != 3 || seen["rig-b"] != 3 {
-		t.Fatalf("per-rig counts = %v, want 3 each; a bounded read must be store-complete", seen)
+	if seen["rig-a"] != orderScopedTestRunCount || seen["rig-b"] != orderScopedTestRunCount {
+		t.Fatalf("per-rig counts = %v, want %d each; a bounded read must be store-complete", seen, orderScopedTestRunCount)
 	}
 }
 
@@ -102,8 +108,8 @@ func TestOrderHistoryBoundedReadKeepsNewestAcrossRigs(t *testing.T) {
 	newest := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
 	// rig-b's newest run is 30 minutes older than rig-a's, so a correct merge
 	// interleaves them: a-0, b-0, a-1, b-1, ...
-	storeA := orderRunsStoreForScoped(t, "digest:rig:rig-a", newest, 3)
-	storeB := orderRunsStoreForScoped(t, "digest:rig:rig-b", newest.Add(-30*time.Minute), 3)
+	storeA := orderRunsStoreForScoped(t, "digest:rig:rig-a", newest)
+	storeB := orderRunsStoreForScoped(t, "digest:rig:rig-b", newest.Add(-30*time.Minute))
 
 	resolver := func(a orders.Order) ([]beads.OrdersStore, error) {
 		switch a.Rig {
