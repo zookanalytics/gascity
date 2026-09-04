@@ -422,15 +422,20 @@ suite against a stateful jq-based mock script.
   provider uses channel-based notification for zero-latency delivery
   in tests.
 
-- **Retention is size-triggered, so the window a query can reach is not
-  fixed.** `[events.rotation]` is enabled by default and rotates the active
-  `events.jsonl` once it passes `max_size_bytes` (256 MiB), checked every
-  1024 records or 60 seconds; `archive_retain_age` prunes archives by age and
-  keeps all of them when empty (`internal/config/config.go`
-  `EventsRotationConfig`). Nothing bounds the active log by TIME, so how much
-  history `gc events` can see depends on how fast the city is emitting. A busy
-  city holds minutes where a quiet one holds days, and no fixed retention
-  figure describes either.
+- **Rotation is size-triggered, but a query reaches the retained archives,
+  not just the active file.** `[events.rotation]` is enabled by default. It
+  rotates the active `events.jsonl` into a sibling archive once the file
+  passes `max_size_bytes` (256 MiB), checked every 1024 records or 60 seconds
+  (`internal/config/config.go` `EventsRotationConfig`). Nothing bounds the
+  active file by time, so a busy city rotates it sooner than a quiet one, but
+  that only sets how much history the active file alone holds. The list paths
+  read the active file together with every sibling archive (`ReadFiltered`,
+  and `ReadFilteredWithInFlight` for a segment still mid-rotation), so
+  `gc events` reaches the whole retained history rather than just the active
+  file. How far back that reaches is governed by archive retention:
+  `archive_retain_age` prunes archives older than its duration and keeps all
+  of them when it is empty, so the default retains every archive and bounds
+  visibility only by the archives still on disk.
 
 - **ReadFiltered streams without indexes.** `ReadFiltered` scans the
   JSONL file once, applies `Filter` as it reads, and stops early when a
