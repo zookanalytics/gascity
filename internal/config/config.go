@@ -2412,8 +2412,11 @@ type DoctorConfig struct {
 	// worktrees are present, so CI / scripted doctor runs fail until
 	// the operator runs `gc doctor --fix`. Actual removal still
 	// requires --fix; this flag does not auto-prune. Safety is
-	// enforced by mechanical checks (no uncommitted changes, no
-	// unpushed commits, no stashes) — never by role identity.
+	// enforced by mechanical checks (nothing live working in the
+	// worktree, no uncommitted changes, no unpushed commits, no
+	// stashes) — never by role identity. Liveness is mechanical in the
+	// same sense as the others: it asks which directory a running
+	// process or open session occupies, and names no role.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
 	// Checks holds city-local inline doctor checks declared via
@@ -2789,7 +2792,8 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits, no stashes).
+// probes (nothing live working in the tree, clean tree, no unpushed commits,
+// no stashes).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
