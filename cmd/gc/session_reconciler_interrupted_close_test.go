@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -927,5 +929,72 @@ func TestReconcileSessionBeads_UnknownStateIgnoresWakeAndRestartRequests(t *test
 		if call.Method == "Start" || call.Method == "Stop" {
 			t.Fatalf("provider %s(%s) called, want no start or stop for a skipped row", call.Method, call.Name)
 		}
+	}
+}
+
+// A finished interrupted close reclaims the seat's worktree through the same
+// liveness gate as every other worker_dir prune: a process still running in
+// the tree keeps it, and only a scan that shows nothing live lets the prune go
+// on to the git-state gates.
+func TestInterruptedCloseGatesTheWorktreePruneOnLiveness(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		live bool
+	}{
+		{name: "a live process keeps the worktree", live: true},
+		{name: "nothing live lets the prune go on", live: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now().UTC()
+			cityPath, cfg, store, sp, seat := newInterruptedClosePoolCity(t, now)
+			workerDir := filepath.Join(cityPath, ".gc", "worktrees", "repo", "workers", "worker-1")
+			if err := os.MkdirAll(workerDir, 0o755); err != nil {
+				t.Fatalf("mkdir worker_dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+				t.Fatalf("write .git marker: %v", err)
+			}
+			if err := store.SetMetadataBatch(seat.ID, map[string]string{"worker_dir": workerDir}); err != nil {
+				t.Fatalf("record worker_dir: %v", err)
+			}
+			halfCloseSessionBead(t, store, seat.ID, "stranded-repair", now.Add(-time.Hour), nil)
+
+			gitDir := t.TempDir()
+			probe := &fakeGitProbe{isRepo: true, gitDir: gitDir}
+			origProbe := newGitProbe
+			newGitProbe = func(string) gitProbe { return probe }
+			t.Cleanup(func() { newGitProbe = origProbe })
+			state := liveWorktreeState{scanned: true}
+			if tc.live {
+				state = liveAt(workerDir).live
+			}
+			origScan := collectLiveWorktreeStateFn
+			collectLiveWorktreeStateFn = func() liveWorktreeState { return state }
+			t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+
+			var out strings.Builder
+			drainAckRewakeTick(t, cityPath, cfg, sp, store, newDrainOps(sp), newDrainTracker(), &asyncStartTracker{}, &clock.Fake{Time: now}, &out)
+
+			got, err := store.Get(seat.ID)
+			if err != nil {
+				t.Fatalf("reload seat: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("precondition: half-closed seat status = %q, want closed\n%s", got.Status, out.String())
+			}
+			blocked := strings.Contains(out.String(), "not pruning worker_dir "+workerDir+": live process cwd")
+			if blocked != tc.live {
+				t.Fatalf("liveness refusal logged = %v, want %v\n%s", blocked, tc.live, out.String())
+			}
+			if probe.removeInvoked {
+				t.Fatalf("worktree removed (rig path is unresolvable in this fixture; live=%v)\n%s", tc.live, out.String())
+			}
+			// Past the liveness gate the prune reaches its last gate, the rig
+			// path this fixture does not resolve.
+			reachedRigGate := strings.Contains(out.String(), "not pruning worker_dir "+workerDir+": rig path unresolved")
+			if reachedRigGate == tc.live {
+				t.Fatalf("prune reached the rig-path gate = %v with live=%v\n%s", reachedRigGate, tc.live, out.String())
+			}
+		})
 	}
 }
