@@ -169,11 +169,26 @@ func pathAtOrUnder(root, candidate string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// sessionRecordedWorktreeDirs returns the working directories recorded for a
+// single session Info: the canonical worker_dir (via WorkerDirFromInfo), plus
+// the raw work_dir and gc.work_dir mirrors so a session whose canonical dir is
+// momentarily unstamped still contributes its recorded path. liveSessionWorktreeDirs
+// unions this across every open session to build the active-session set, and the
+// worker_dir auto-prune passes the retired session's own set to
+// worktreeLivenessBlocksPrune so the pass's pre-close snapshot entry for that
+// session is not read as a live signal against its own worktree.
+func sessionRecordedWorktreeDirs(info sessionpkg.Info) []string {
+	return []string{
+		sessionpkg.WorkerDirFromInfo(info),
+		info.WorkDir,
+		info.WorkDirCanonical,
+		info.WorkerDir,
+	}
+}
+
 // liveSessionWorktreeDirs collects the recorded working directories of every
-// open (non-closed) session in the snapshot: the canonical worker_dir first
-// (via WorkerDirFromInfo), plus the raw work_dir and gc.work_dir mirrors so a
-// session whose canonical dir is momentarily unstamped still contributes a
-// protecting path. The result is the "active session set" the reaper
+// open (non-closed) session in the snapshot (see sessionRecordedWorktreeDirs
+// for the per-session fields). The result is the "active session set" the reaper
 // cross-checks against — a belt-and-suspenders signal alongside the
 // authoritative /proc cwd scan, since session metadata is stamped at
 // create/dispatch and is not continuously refreshed. Deduplicated; empty
@@ -196,10 +211,9 @@ func liveSessionWorktreeDirs(snapshot *sessionBeadSnapshot) []string {
 		dirs = append(dirs, p)
 	}
 	for _, info := range snapshot.OpenInfos() {
-		add(sessionpkg.WorkerDirFromInfo(info))
-		add(info.WorkDir)
-		add(info.WorkDirCanonical)
-		add(info.WorkerDir)
+		for _, dir := range sessionRecordedWorktreeDirs(info) {
+			add(dir)
+		}
 	}
 	return dirs
 }
