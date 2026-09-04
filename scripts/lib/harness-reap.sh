@@ -294,13 +294,11 @@ gc_harness_test_socket_holders() {
 # invoking user still references — env values, argv, and cwd — one per line. It
 # is the liveness half of gc_harness_sweep_stale_build_dirs: a work dir whose
 # path appears here belongs to a running build and must be spared. Reading
-# /proc/<pid>/{environ,cmdline,cwd} is the predicate proven safe on gc-68bao,
-# where it spared every live build across two concurrent gates while 27
-# abandoned trees were reclaimed. Only the invoking user's process files are
-# readable, which is exactly the set that can own a 0700 go work dir, so a
-# different user's live build can never be misread as absent. Factored out as
-# the one data source so the self-test can inject a process table without a real
-# /proc.
+# /proc/<pid>/{environ,cmdline,cwd} is the liveness predicate. Only the invoking
+# user's process files are readable, which is exactly the set that can own a
+# 0700 go work dir, so a different user's live build can never be misread as
+# absent. Factored out as the one data source so the self-test can inject a
+# process table without a real /proc.
 #
 # stderr is discarded at the loop, not per command: opening another user's
 # /proc/<pid>/environ is denied, and that open failure is the shell's, emitted
@@ -331,23 +329,20 @@ gc_harness_reclaim_dir() {
 # gc_harness_sweep_stale_build_dirs reclaims go's per-invocation compile and
 # link temp trees (go-build*, go-link*) that a killed run leaked. go removes its
 # work dir only on a clean exit, so a run ended by the watchdog above, a signal,
-# or an OOM kill leaves the tree behind and nothing else sweeps it; gc-68bao
-# measured 27 such trees holding 4.5G and a push gate that ENOSPC-failed before
-# them and passed 10/10 after. The trees appear both under $GOTMPDIR and, when a
-# run set no GOTMPDIR, directly under its TMPDIR, so every scratch root the
-# caller names is scanned at depth 1.
+# or an OOM kill leaves the tree behind and nothing else sweeps it. The trees
+# appear both under $GOTMPDIR and, when a run set no GOTMPDIR, directly under
+# its TMPDIR, so every scratch root the caller names is scanned at depth 1.
 #
 # Only the go-build*/go-link* shapes are touched, and that bound is the whole
 # safety argument: those prefixes are go's own, are never a checkout, a
 # cache-with-value, or a comparison base a human wants kept, and are regenerated
 # on the next build — so reclaiming one is always safe and needs no per-shape
-# judgment. (A broader age+liveness scan of every scratch dir was measured
-# against a real host and matched 662 owned dirs of mixed provenance, including
-# comparison bases; that is a policy call left to a follow-up, not encoded here.)
-# A tree is reclaimed only when it is owned by the invoking user, older than
-# min_age_seconds, and referenced by no live process. The age floor is the
-# caller's go test budget, so a concurrently starting build is never in scope,
-# and the liveness check spares an in-flight build regardless of age. Set
+# judgment. Broader cache-root cleanup — arbitrary scratch dirs of mixed
+# provenance, which can include comparison bases a human wants kept — is out of
+# scope here. A tree is reclaimed only when it is owned by the invoking user,
+# older than min_age_seconds, and referenced by no live process. The age floor
+# is the caller's go test budget, so a concurrently starting build is never in
+# scope, and the liveness check spares an in-flight build regardless of age. Set
 # GC_TEST_NO_BUILD_DIR_SWEEP=1 to skip the reclaim entirely.
 gc_harness_sweep_stale_build_dirs() {
   local min_age_seconds="${1:-3600}"

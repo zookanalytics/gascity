@@ -286,12 +286,11 @@ export TEST_LOCAL_NICE="$nice_prefix"
 sweep_min_age_seconds="$(gc_harness_duration_seconds "$go_test_timeout")" || sweep_min_age_seconds=3600
 gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
 
-# Reclaim go's leaked compile/link temp before adding load of our own
-# (gc-68bao). go deletes its per-invocation work dir only on a clean exit, so a
-# run the watchdog above, a signal, or an OOM kill ends leaks go-build*/go-link*
-# under $GOTMPDIR — or under /var/tmp when the run set no GOTMPDIR — and nothing
-# else sweeps them. One measured hoard was 27 trees / 4.5G that ENOSPC-failed
-# this very gate. Same age floor as the process sweep, so an in-flight build is
+# Reclaim go's leaked compile/link temp before adding load of our own. go
+# deletes its per-invocation work dir only on a clean exit, so a run the
+# watchdog above, a signal, or an OOM kill ends leaks go-build*/go-link* under
+# $GOTMPDIR — or under /var/tmp when the run set no GOTMPDIR — and nothing else
+# sweeps them. Same age floor as the process sweep, so an in-flight build is
 # never in scope; a bare session reports no GOTMPDIR, so fall back to the shim's
 # on-disk root.
 gc_harness_sweep_stale_build_dirs "$sweep_min_age_seconds" \

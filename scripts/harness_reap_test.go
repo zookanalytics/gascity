@@ -502,11 +502,10 @@ gc_harness_sweep_stale_build_dirs %s%s
 	return string(reclaims) + string(out)
 }
 
-// TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected is the
-// gc-68bao regression: go removes its go-build*/go-link* work dir only on a
-// clean exit, so a run the harness watchdog or a signal kills leaks the tree,
-// and nothing sweeps it — one measured hoard was 27 trees / 4.5G that
-// ENOSPC-failed a push gate. The sweep must reclaim an abandoned tree at any of
+// TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected verifies the
+// go work-dir sweep: go removes its go-build*/go-link* work dir only on a clean
+// exit, so a run the harness watchdog or a signal kills leaks the tree and
+// nothing else sweeps it. The sweep must reclaim an abandoned tree at any of
 // the scratch roots it is given while sparing a tree a live build still holds,
 // one too young to be abandoned, a non-go-work-dir shape it has no business
 // touching, and anything carrying a .git pointer.
