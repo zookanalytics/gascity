@@ -327,23 +327,28 @@ gc_harness_reclaim_dir() {
 }
 
 # gc_harness_sweep_stale_build_dirs reclaims go's per-invocation compile and
-# link temp trees (go-build*, go-link*) that a killed run leaked. go removes its
-# work dir only on a clean exit, so a run ended by the watchdog above, a signal,
-# or an OOM kill leaves the tree behind and nothing else sweeps it. The trees
-# appear both under $GOTMPDIR and, when a run set no GOTMPDIR, directly under
-# its TMPDIR, so every scratch root the caller names is scanned at depth 1.
+# link temp trees that a killed run leaked. go removes its work dir only on a
+# clean exit, so a run ended by the watchdog above, a signal, or an OOM kill
+# leaves the tree behind and nothing else sweeps it. The trees appear both under
+# $GOTMPDIR and, when a run set no GOTMPDIR, directly under its TMPDIR, so every
+# scratch root the caller names is scanned at depth 1.
 #
-# Only the go-build*/go-link* shapes are touched, and that bound is the whole
-# safety argument: those prefixes are go's own, are never a checkout, a
-# cache-with-value, or a comparison base a human wants kept, and are regenerated
-# on the next build — so reclaiming one is always safe and needs no per-shape
-# judgment. Broader cache-root cleanup — arbitrary scratch dirs of mixed
-# provenance, which can include comparison bases a human wants kept — is out of
-# scope here. A tree is reclaimed only when it is owned by the invoking user,
-# older than min_age_seconds, and referenced by no live process. The age floor
-# is the caller's go test budget, so a concurrently starting build is never in
-# scope, and the liveness check spares an in-flight build regardless of age. Set
-# GC_TEST_NO_BUILD_DIR_SWEEP=1 to skip the reclaim entirely.
+# go builds those dirs with os.MkdirTemp(dir, "go-build") and
+# os.MkdirTemp(dir, "go-link-"), each of which appends a decimal random suffix,
+# so the only go-owned shapes are go-build<digits> and go-link-<digits>. The
+# sweep matches exactly those, and that exactness is the whole safety argument:
+# a go-owned work dir is never a checkout, a cache-with-value, or a comparison
+# base a human wants kept, and is regenerated on the next build, so reclaiming
+# one is always safe and needs no per-shape judgment. Matching the bare
+# go-build/go-link prefix instead would also select human-named scratch such as
+# go-build-base, which this path would then rm -rf. Broader cache-root cleanup —
+# arbitrary scratch dirs of mixed provenance, which can include comparison bases
+# a human wants kept — is out of scope here. A tree is reclaimed only when it is
+# owned by the invoking user, older than min_age_seconds, and referenced by no
+# live process. The age floor is the caller's go test budget, so a concurrently
+# starting build is never in scope, and the liveness check spares an in-flight
+# build regardless of age. Set GC_TEST_NO_BUILD_DIR_SWEEP=1 to skip the reclaim
+# entirely.
 gc_harness_sweep_stale_build_dirs() {
   local min_age_seconds="${1:-3600}"
   if (( $# > 0 )); then shift; fi
@@ -367,10 +372,10 @@ gc_harness_sweep_stale_build_dirs() {
     while IFS= read -r child; do
       [[ -n "$child" ]] || continue
       base="${child##*/}"
-      case "$base" in
-        go-build*|go-link*) ;;
-        *) continue ;;
-      esac
+      # Match only go's generated shapes, not the bare go-build/go-link prefix:
+      # this path rm -rf's what it matches, and the prefix alone also selects
+      # human-named scratch such as go-build-base.
+      [[ "$base" =~ ^go-build[0-9]+$ || "$base" =~ ^go-link-[0-9]+$ ]] || continue
       # A go work dir never carries a .git pointer; skipping one is defence in
       # depth so a name collision can never turn the sweep on a checkout.
       [[ -e "$child/.git" ]] && continue

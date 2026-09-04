@@ -503,12 +503,13 @@ gc_harness_sweep_stale_build_dirs %s%s
 }
 
 // TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected verifies the
-// go work-dir sweep: go removes its go-build*/go-link* work dir only on a clean
-// exit, so a run the harness watchdog or a signal kills leaks the tree and
-// nothing else sweeps it. The sweep must reclaim an abandoned tree at any of
-// the scratch roots it is given while sparing a tree a live build still holds,
-// one too young to be abandoned, a non-go-work-dir shape it has no business
-// touching, and anything carrying a .git pointer.
+// go work-dir sweep: go removes its work dir only on a clean exit, so a run the
+// harness watchdog or a signal kills leaks the tree and nothing else sweeps it.
+// The sweep must reclaim an abandoned go-build<n>/go-link-<n> tree at any of the
+// scratch roots it is given while sparing a tree a live build still holds, one
+// too young to be abandoned, anything carrying a .git pointer, and — because the
+// sweep rm -rf's whatever it matches — any dir that is not go's exact generated
+// shape, including a go-prefixed but human-named comparison base.
 func TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("go work-dir reclaim reads /proc for liveness; Linux-only")
@@ -538,10 +539,23 @@ func TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected(t *testin
 
 	reclaimAbandoned := mk(root, "go-build2147480000", old, false)
 	reclaimLink := mk(root, "go-link-4242", old, false)
-	spareLive := mk(root, "go-build-live-holder", old, false)
-	spareFresh := mk(root, "go-build-fresh", fresh, false)
-	spareNonGo := mk(root, "gocache-tk-nnx2gd", old, false) // real cache shape, out of scope
-	spareWorktree := mk(root, "go-build-with-dotgit", old, true)
+	// Spared by a real predicate, not by shape: each carries a valid
+	// go-build<n>/go-link-<n> name so the shape gate passes and the
+	// liveness/age/.git predicate is what does the sparing.
+	spareLive := mk(root, "go-build770001", old, false)
+	spareFresh := mk(root, "go-build550002", fresh, false)
+	spareWorktree := mk(root, "go-build330003", old, true)
+	// Spared by shape. go builds its work dirs with os.MkdirTemp(dir,
+	// "go-build") and os.MkdirTemp(dir, "go-link-"), which append a decimal
+	// suffix, so the only go-owned shapes are go-build<digits> and
+	// go-link-<digits>. These share a go prefix but are not that shape — a
+	// human-named comparison base, or a digit-then-letter tail — and one carries
+	// no go prefix at all (a real cache dir). All are old and unreferenced, so
+	// shape is the only thing standing between them and an rm -rf.
+	spareHumanBuild := mk(root, "go-build-base", old, false)
+	spareHumanLink := mk(root, "go-link-base", old, false)
+	spareDigitThenLetters := mk(root, "go-build12ab", old, false)
+	spareNonGo := mk(root, "gocache-tk-nnx2gd", old, false)
 
 	// The /var/tmp scan does not descend, so a tree leaked under $GOTMPDIR is
 	// only reclaimed through gotmp being passed as its own root. gotmp itself is
@@ -558,7 +572,10 @@ func TestHarnessSweepReclaimsLeakedGoWorkDirsButSparesLiveAndProtected(t *testin
 			t.Errorf("sweep left an abandoned go work dir behind: %s\nlog:\n%s", want, got)
 		}
 	}
-	for _, spared := range []string{spareLive, spareFresh, spareNonGo, spareWorktree} {
+	for _, spared := range []string{
+		spareLive, spareFresh, spareWorktree,
+		spareHumanBuild, spareHumanLink, spareDigitThenLetters, spareNonGo,
+	} {
 		if strings.Contains(got, "RECLAIMED "+spared+"\n") {
 			t.Errorf("sweep reclaimed a dir it must spare: %s\nlog:\n%s", spared, got)
 		}
