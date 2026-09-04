@@ -434,6 +434,55 @@ func TestRunWorktreeReapJSONCarriesVerdicts(t *testing.T) {
 	validateJSONAgainstResultSchema(t, []string{"worktree", "reap"}, stdout.Bytes())
 }
 
+// TestRunWorktreeReapJSONPartialFailureIsFailureEnvelope proves a reap pass that
+// could not scan a rig emits the shared failure envelope, not a success shape.
+// The scan failure returns a nonzero exit, so an ok:true payload would match
+// neither the reap result schema (ok is const true) nor the shared failure
+// schema (which requires an error object) — the reachable partial-failure path
+// the success-path contract test cannot reach.
+func TestRunWorktreeReapJSONPartialFailureIsFailureEnvelope(t *testing.T) {
+	cityPath, _ := initReapRig(t)
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	store := beads.NewMemStoreFrom(1, nil, nil)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	var stdout, stderr bytes.Buffer
+	code := runWorktreeReap(reapScopeFor(cityPath, notARepo, store), false, true, events.Discard, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("exit code = 0, want nonzero for an unscannable rig\nstderr:\n%s", stderr.String())
+	}
+	var got worktreeReapJSON
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decoding stdout %q: %v", stdout.String(), err)
+	}
+	if got.SchemaVersion != "1" || got.OK || got.Command != "worktree reap" || got.Action != "reap" {
+		t.Errorf("envelope = %+v, want a failure envelope (ok:false)", got)
+	}
+	if got.Error == nil {
+		t.Fatalf("error object is nil, want the failure schema's required error")
+	}
+	if got.Error.Code != worktreeReapIncompleteCode || got.Error.Message == "" || got.Error.ExitCode != 1 {
+		t.Errorf("error = %+v, want code %q, a non-empty message, exit_code 1", got.Error, worktreeReapIncompleteCode)
+	}
+	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], reapTestRigName) {
+		t.Errorf("errors = %+v, want one entry naming rig %q", got.Errors, reapTestRigName)
+	}
+	// The reaped and protected arrays survive in the failure envelope: a machine
+	// caller reading a partial pass still gets the verdicts, which a bare error
+	// envelope would drop. Both are present-but-empty here since the only rig
+	// failed to scan.
+	if got.Reaped == nil || got.Protected == nil {
+		t.Errorf("reaped=%v protected=%v, want both arrays present in the failure envelope", got.Reaped, got.Protected)
+	}
+	// The ok:false output must meet the shared failure schema — the contract a
+	// nonzero exit's JSON answers.
+	validateJSONAgainstFailureSchema(t, []string{"worktree", "reap"}, stdout.Bytes())
+}
+
 func TestRunWorktreeReapNoCandidatesReportsNothingEligible(t *testing.T) {
 	cityPath, rigRoot := initReapRig(t)
 	store := beads.NewMemStoreFrom(1, nil, nil)

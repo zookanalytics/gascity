@@ -6,6 +6,7 @@ import (
 	"io"
 	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -313,6 +314,12 @@ func writeWorktreeCleanupReport(rep worktree.CleanupReport, opts worktreeCmdOpts
 
 const worktreeReapCmdName = "gc worktree reap"
 
+// worktreeReapIncompleteCode is the failure-envelope code a --json reap pass
+// carries when it could not scan a rig or complete a removal. The pass is a
+// failure even though it may have reaped and protected other worktrees, so the
+// code names the partial-completion, not a total abort.
+const worktreeReapIncompleteCode = "worktree_reap_incomplete"
+
 func newWorktreeReapCmd(stdout, stderr io.Writer) *cobra.Command {
 	var (
 		apply   bool
@@ -370,7 +377,10 @@ type worktreeReapEntryJSON struct {
 // fields are the CLI's standard result envelope, which the root JSON contract
 // requires of any command that declares --json. DryRun true means Reaped lists
 // what --apply would have removed. writeWorktreeReapJSON fills the envelope, so
-// a caller constructs only the pass's own verdicts.
+// a caller constructs only the pass's own verdicts. A pass that could not scan
+// a rig or complete a removal is a failure: OK is false and Error carries the
+// shared failure object, so the output meets the failure schema while Reaped
+// and Protected still report the partial pass.
 type worktreeReapJSON struct {
 	SchemaVersion  string                  `json:"schema_version"`
 	OK             bool                    `json:"ok"`
@@ -381,6 +391,7 @@ type worktreeReapJSON struct {
 	Reaped         []worktreeReapEntryJSON `json:"reaped"`
 	Protected      []worktreeReapEntryJSON `json:"protected"`
 	Errors         []string                `json:"errors,omitempty"`
+	Error          *jsonSchemaErrorDetail  `json:"error,omitempty"`
 }
 
 func cmdWorktreeReap(apply, jsonOut bool, stdout, stderr io.Writer) int {
@@ -526,12 +537,22 @@ func sortReapDecisions(decisions []reapDecision) []reapDecision {
 // writeWorktreeReapJSON stamps the result envelope and encodes the payload.
 // Filling the envelope here rather than at each call site keeps two callers from
 // describing the same command differently. ok is derived from the pass's own
-// errors, which is the signal the exit code carries as well.
+// errors, which is the signal the exit code carries as well. On a failed pass ok
+// is false and the shared error object is stamped from the same errors, so the
+// output validates against the failure schema instead of a success shape no
+// nonzero exit can satisfy.
 func writeWorktreeReapJSON(stdout, stderr io.Writer, payload worktreeReapJSON) int {
 	payload.SchemaVersion = "1"
 	payload.OK = len(payload.Errors) == 0
 	payload.Command = "worktree reap"
 	payload.Action = "reap"
+	if !payload.OK {
+		payload.Error = &jsonSchemaErrorDetail{
+			Code:     worktreeReapIncompleteCode,
+			Message:  strings.Join(payload.Errors, "; "),
+			ExitCode: 1,
+		}
+	}
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(payload); err != nil {

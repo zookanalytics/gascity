@@ -274,3 +274,41 @@ func validateJSONAgainstResultSchemaE(command []string, data []byte) error {
 	}
 	return nil
 }
+
+func validateJSONAgainstFailureSchema(t *testing.T, command []string, data []byte) {
+	t.Helper()
+	if err := validateJSONAgainstFailureSchemaE(command, data); err != nil {
+		t.Fatalf("failure payload for %v does not validate: %v\n%s", command, err, string(data))
+	}
+}
+
+// validateJSONAgainstFailureSchemaE validates data against the command's failure
+// schema, falling back to the shared failure envelope when the command declares
+// no command-specific one — the resolution schemaForRole performs for the
+// failure role.
+func validateJSONAgainstFailureSchemaE(command []string, data []byte) error {
+	rawSchema, err := readBuiltinSchema(command, jsonSchemaFailureRole)
+	if err != nil {
+		if rawSchema, err = readSharedFailureSchema(); err != nil {
+			return fmt.Errorf("read failure schema for %v: %w", command, err)
+		}
+	}
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(rawSchema))
+	if err != nil {
+		return fmt.Errorf("parse failure schema for %v: %w", command, err)
+	}
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("parse payload for %v: %w", command, err)
+	}
+	compiler := jsonschema.NewCompiler()
+	schemaURL := strings.Join(command, "/") + "/failure.schema.json"
+	if err := compiler.AddResource(schemaURL, schemaDoc); err != nil {
+		return fmt.Errorf("add failure schema resource for %v: %w", command, err)
+	}
+	compiled, err := compiler.Compile(schemaURL)
+	if err != nil {
+		return fmt.Errorf("compile failure schema for %v: %w", command, err)
+	}
+	return compiled.Validate(instance)
+}
