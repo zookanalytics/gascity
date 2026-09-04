@@ -389,30 +389,83 @@ type gitWorktree interface {
 	WorktreeRemove(path string, force bool) error
 }
 
+// LiveWorktreeProbe gathers the liveness snapshot for one classification
+// pass and returns a lookup reporting whether a live process or session is
+// working at or beneath a candidate worktree, with a human-readable reason
+// naming the signal that matched.
+//
+// Gathering once per pass keeps the process-table walk off the per-candidate
+// path. A non-nil error means liveness is indeterminate: the check then
+// rejects every candidate rather than prune one it cannot vouch for.
+type LiveWorktreeProbe func() (lookup func(path string) (bool, string), err error)
+
+// nestedLiveness is one gathered liveness snapshot, shared by every
+// candidate in a single classification pass.
+type nestedLiveness struct {
+	// lookup answers liveness for one candidate path. Valid only when err
+	// is nil.
+	lookup func(path string) (bool, string)
+	// err records a failed or unavailable gather. While it is set every
+	// candidate is rejected as a probe error.
+	err error
+}
+
 // NestedWorktreePruneCheck identifies nested git worktrees inside agent
-// home worktrees that are safely reclaimable: no uncommitted changes,
-// no unpushed commits, no stashed work. These reproduce from the remote
-// via `git worktree add path origin/<branch>`, so removing the local
+// home worktrees that are safely reclaimable: nothing live working in
+// them, no uncommitted changes, no unpushed commits, no stashed work.
+// These reproduce from the remote via
+// `git worktree add path origin/<branch>`, so removing the local
 // directory is non-destructive.
 //
-// The rule is mechanical, never role-coupled: any nested worktree whose
-// branch tip is reachable from a remote and whose working tree is clean
-// is reclaimable, regardless of which agent created it.
+// The rule is mechanical, never role-coupled: any nested worktree that
+// no live process or session is working in, whose branch tip is
+// reachable from a remote, and whose working tree is clean is
+// reclaimable, regardless of which agent created it. Liveness is a fact
+// about runtime state — which directory a running process occupies —
+// in the same way a stash is a fact about git state; it identifies no
+// role by name.
 type NestedWorktreePruneCheck struct {
 	cfg config.DoctorConfig
 	// newGit produces a gitWorktree handle for a given path. Production
 	// uses git.New; tests inject fakes.
 	newGit func(path string) gitWorktree
+	// gatherLive supplies the liveness snapshot consulted before the git
+	// probes. Run and Fix each gather their own so a session that starts
+	// between them is still seen.
+	gatherLive LiveWorktreeProbe
 	// findings is populated by Run for Fix to consume.
 	findings []nestedWorktreeFinding
 }
 
 // NewNestedWorktreePruneCheck creates the prune check using real git.
-func NewNestedWorktreePruneCheck(cfg config.DoctorConfig) *NestedWorktreePruneCheck {
+//
+// gatherLive supplies the liveness gate. It is a required argument rather
+// than an optional setter because a check that cannot see live sessions
+// force-removes the working directory of a running agent; passing nil is
+// honored as "liveness unavailable" and rejects every candidate.
+func NewNestedWorktreePruneCheck(cfg config.DoctorConfig, gatherLive LiveWorktreeProbe) *NestedWorktreePruneCheck {
 	return &NestedWorktreePruneCheck{
-		cfg:    cfg,
-		newGit: func(p string) gitWorktree { return git.New(p) },
+		cfg:        cfg,
+		newGit:     func(p string) gitWorktree { return git.New(p) },
+		gatherLive: gatherLive,
 	}
+}
+
+// liveness runs the configured probe once, normalizing every "cannot tell"
+// shape into an error snapshot. A check built without a probe, or one whose
+// probe yields no lookup, rejects every candidate instead of pruning blind.
+func (c *NestedWorktreePruneCheck) liveness() nestedLiveness {
+	if c.gatherLive == nil {
+		return nestedLiveness{err: errors.New("no liveness probe configured")}
+	}
+	lookup, err := c.gatherLive()
+	if err != nil {
+		return nestedLiveness{err: err}
+	}
+	if lookup == nil {
+		return nestedLiveness{err: errors.New("liveness probe returned no lookup")}
+	}
+	return nestedLiveness{lookup: lookup}
 }
 
 // Name returns the check identifier.
@@ -485,6 +538,10 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 		adminGroups[key] = append(adminGroups[key], home)
 	}
 
+	// One liveness gather serves the whole pass: the process-table walk is
+	// far more expensive than the per-candidate git probes.
+	live := c.liveness()
+
 	seen := make(map[string]bool)
 	var listingErrs []string
 	for _, key := range adminOrder {
@@ -519,7 +576,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 				continue
 			}
 			seen[candidate] = true
-			c.findings = append(c.findings, classifyNested(c.newGit, candidate, parent, wt.Branch))
+			c.findings = append(c.findings, classifyNested(c.newGit, live, candidate, parent, wt.Branch))
 		}
 	}
 
@@ -580,7 +637,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	details = append(details, safe...)
 	details = append(details, unsafe...)
 	r.Details = details
-	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with clean work tree, no unpushed commits, no stashes)"
+	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with nothing live working in them, a clean work tree, no unpushed commits, no stashes)"
 	return r
 }
 
@@ -595,6 +652,10 @@ func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 // success. Worktrees marked unsafe (uncommitted / unpushed / stashed)
 // are never touched.
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
+	// Re-gather rather than reuse Run's snapshot: a session can start in a
+	// candidate between the classify and the removal, which is precisely the
+	// window the revalidation below exists to close.
+	live := c.liveness()
 	var errs []error
 	for _, f := range c.findings {
 		if !f.safeToRm {
@@ -604,7 +665,7 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 		// being removed: git refuses to remove a worktree whose path
 		// equals cwd in some configurations, and operating from cwd of
 		// a directory we're about to delete is fragile in general.
-		current := classifyNested(c.newGit, f.path, f.parent, f.branch)
+		current := classifyNested(c.newGit, live, f.path, f.parent, f.branch)
 		if !current.safeToRm {
 			reason := current.reason
 			if reason == "" {
@@ -623,12 +684,25 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 
 // classifyNested runs the safety gates on a candidate nested worktree
 // and returns a finding describing whether it is safe to remove and,
-// if not, the first reason it was rejected. Order of checks matches
-// the user's manual recovery procedure: probe git, then status, log,
-// stash. Any probe error rejects the candidate with a visible reason:
-// "can't tell" is not safe enough for a destructive fix.
-func classifyNested(newGit func(string) gitWorktree, path, parent, branch string) nestedWorktreeFinding {
+// if not, the first reason it was rejected. Liveness comes first: a
+// worktree an agent is running in is unsafe to delete whatever its git
+// state says, and a clean tree is the normal resting state of a healthy
+// agent between commits, so the git probes alone cannot see the case.
+// The remaining order matches the user's manual recovery procedure:
+// probe git, then status, log, stash. Any probe error rejects the
+// candidate with a visible reason: "can't tell" is not safe enough for
+// a destructive fix.
+func classifyNested(newGit func(string) gitWorktree, live nestedLiveness, path, parent, branch string) nestedWorktreeFinding {
 	f := nestedWorktreeFinding{path: path, parent: parent, branch: branch}
+	if live.err != nil {
+		f.reason = fmt.Sprintf("liveness probe failed: %v", live.err)
+		f.probeErr = true
+		return f
+	}
+	if inUse, why := live.lookup(path); inUse {
+		f.reason = why
+		return f
+	}
 	gw := newGit(path)
 	if !gw.IsRepo() {
 		f.reason = "git status unreadable"
