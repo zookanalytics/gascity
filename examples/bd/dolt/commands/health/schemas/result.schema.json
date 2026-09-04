@@ -62,7 +62,27 @@
           "type": "integer"
         },
         "dolt_stale": {
-          "type": "boolean"
+          "type": ["boolean", "null"]
+        },
+        "databases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "state", "age_sec"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": ["ok", "stale", "torn", "missing", "unknown"]
+              },
+              "age_sec": {
+                "type": "integer"
+              }
+            },
+            "additionalProperties": true
+          }
         }
       },
       "additionalProperties": true

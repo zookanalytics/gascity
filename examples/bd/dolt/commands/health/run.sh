@@ -278,22 +278,163 @@ if [ "$server_reachable" = true ]; then
 fi
 
 # Check backup freshness.
-backup_freshness=""
-backup_stale=false
-backup_age_sec=0
-newest_backup=$(ls -1d "$GC_CITY_PATH"/migration-backup-* 2>/dev/null | sort -r | head -1 || true)
-if [ -n "$newest_backup" ]; then
-  backup_mtime=$(stat -c %Y "$newest_backup" 2>/dev/null || stat -f %m "$newest_backup" 2>/dev/null || echo 0)
-  now=$(date +%s)
-  backup_age_sec=$((now - backup_mtime))
-  if [ "$backup_age_sec" -ge 3600 ]; then
-    backup_freshness="$((backup_age_sec / 3600))h$((backup_age_sec % 3600 / 60))m"
-  elif [ "$backup_age_sec" -ge 60 ]; then
-    backup_freshness="$((backup_age_sec / 60))m$((backup_age_sec % 60))s"
-  else
-    backup_freshness="${backup_age_sec}s"
+#
+# The scheduled backup (assets/scripts/mol-dog-backup.sh) syncs each database to
+# a file:// Dolt remote under $GC_BACKUP_ARTIFACT_DIR/<db> (default
+# $GC_CITY_PATH/.dolt-backup/<db>). Measure THOSE destinations, per database —
+# not the migration-backup-* rollback snapshot, which this city never produces
+# and which pinned dolt_stale false through a total backup outage (gc-ny33h).
+#
+# Verify by ordering, not age alone: Dolt writes chunk files first and the
+# manifest LAST, so a healthy destination's newest file IS the manifest (an
+# equal-second tie resolves to it, since the manifest is committed last). A
+# chunk strictly newer than the manifest is a torn sync — uploaded but never
+# committed, not restorable to that point — which an age-only probe cannot see.
+#
+# dolt_stale is three-state: false only when EVERY measured destination is OK
+# (manifest newest and within 2x the 6h cadence); true when any is definitively
+# bad (torn, stale manifest, or never backed up); null when nothing could be
+# measured (no local databases, an unreadable destination, or only an in-flight
+# sync we cannot yet conclude on). A destination the probe did not or could not
+# measure never renders dolt_stale:false.
+BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
+backup_grace_sec="${GC_DOLT_BACKUP_GRACE_SEC:-900}"
+backup_stale_h="${GC_DOLT_BACKUP_STALE_H:-12}"
+case "$backup_grace_sec" in ''|*[!0-9]*) backup_grace_sec=900 ;; esac
+case "$backup_stale_h" in ''|*[!0-9]*) backup_stale_h=12 ;; esac
+
+# file_mtime PATH — epoch seconds of PATH's mtime, portably (GNU -c, BSD -f),
+# 0 when the file is absent or unreadable. Same idiom the compaction-marker
+# scan uses above.
+file_mtime() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0
+}
+
+# fmt_age SECONDS — compact freshness string (5h2m / 3m4s / 9s) for the
+# dolt_freshness field and the human-readable surface.
+fmt_age() {
+  _a="$1"
+  if [ "$_a" -ge 3600 ]; then printf '%sh%sm' "$((_a / 3600))" "$((_a % 3600 / 60))"
+  elif [ "$_a" -ge 60 ]; then printf '%sm%ss' "$((_a / 60))" "$((_a % 60))"
+  else printf '%ss' "$_a"; fi
+}
+
+# backup_check_db NAME — classify NAME's backup destination and emit
+# `state|manifest_age_sec`, state one of ok, stale, torn, missing, unknown. One
+# `ls -t` pass orders the destination (no per-chunk stat fork — this runs on
+# every health tick); only the manifest and the newest non-manifest entry are
+# stat'd. An unreadable destination is UNPROVEN (unknown), never clean.
+backup_check_db() {
+  _bname="$1"
+  _bdir="$BACKUP_ARTIFACT_DIR/$_bname"
+  if [ ! -d "$_bdir" ]; then
+    printf 'missing|0'
+    return
   fi
-  [ "$backup_age_sec" -gt 1800 ] && backup_stale=true
+  _bnow=$(date +%s)
+  _m_t=$(file_mtime "$_bdir/manifest")
+  _ls_rc=0
+  _listing=$(ls -1t "$_bdir" 2>/dev/null) || _ls_rc=$?
+  _newest_other=$(printf '%s\n' "$_listing" | grep -vFx manifest | head -1)
+  _other_t=0
+  if [ -n "$_newest_other" ]; then
+    _other_t=$(file_mtime "$_bdir/$_newest_other")
+  fi
+  _m_age=$(( _bnow - _m_t ))
+  _age_h=$(( _m_age / 3600 ))
+  _since=$(( _bnow - _other_t ))
+  if [ "$_ls_rc" -ne 0 ]; then
+    # UNPROVEN: the destination could not be read. Never call it clean.
+    if [ "$_m_t" -eq 0 ]; then
+      printf 'unknown|0'
+    elif [ "$_age_h" -gt "$backup_stale_h" ]; then
+      printf 'stale|%s' "$_m_age"
+    else
+      printf 'unknown|%s' "$_m_age"
+    fi
+  elif [ "$_m_t" -eq 0 ]; then
+    # No committed manifest. A recent write may be the first sync in flight.
+    if [ "$_other_t" -gt 0 ] && [ "$_since" -le "$backup_grace_sec" ]; then
+      printf 'unknown|0'
+    else
+      printf 'missing|0'
+    fi
+  elif [ "$_other_t" -gt "$_m_t" ]; then
+    # A file is strictly newer than the manifest: mid-sync within grace, else
+    # a torn sync that never committed.
+    if [ "$_since" -le "$backup_grace_sec" ] && [ "$_age_h" -le "$backup_stale_h" ]; then
+      printf 'unknown|%s' "$_m_age"
+    else
+      printf 'torn|%s' "$_m_age"
+    fi
+  elif [ "$_age_h" -gt "$backup_stale_h" ]; then
+    printf 'stale|%s' "$_m_age"
+  else
+    printf 'ok|%s' "$_m_age"
+  fi
+}
+
+# Enumerate the databases whose backups we expect, the way the backup job does:
+# an explicit GC_BACKUP_DATABASES list when set, otherwise every user database
+# on disk. Sourced from the data dir (not the SQL catalog) so the check still
+# runs when the server is down — exactly when a backup matters most. A
+# configured external endpoint keeps no local backup artifact, so there is
+# nothing local to measure and the aggregate stays null.
+backup_expected_dbs=""
+if [ "$is_external" != true ]; then
+  if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
+    backup_expected_dbs=$(printf '%s' "$GC_BACKUP_DATABASES" | tr ',' '\n' \
+      | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' || true)
+  elif [ -d "$data_dir" ]; then
+    for bdb_dir in "$data_dir"/*/; do
+      [ -d "$bdb_dir/.dolt" ] || continue
+      bdb_name="$(basename "$bdb_dir")"
+      case "$(printf '%s' "$bdb_name" | tr '[:upper:]' '[:lower:]')" in information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe) continue ;; esac
+      db_name_is_safe "$bdb_name" || continue
+      backup_expected_dbs="$backup_expected_dbs$bdb_name
+"
+    done
+  fi
+fi
+
+# Classify each expected destination and fold the per-database states into the
+# three-state aggregate. dolt_age_sec / dolt_freshness carry the OLDEST measured
+# manifest — the worst-case restorable point across databases.
+backup_db_info=""
+backup_saw_any=0
+backup_saw_bad=0
+backup_saw_unknown=0
+backup_age_sec=0
+for bdb_name in $backup_expected_dbs; do
+  db_name_is_safe "$bdb_name" || continue
+  bdb_result=$(backup_check_db "$bdb_name")
+  bdb_state="${bdb_result%%|*}"
+  bdb_age="${bdb_result##*|}"
+  case "$bdb_age" in ''|*[!0-9]*) bdb_age=0 ;; esac
+  backup_db_info="$backup_db_info$bdb_name|$bdb_state|$bdb_age
+"
+  backup_saw_any=1
+  case "$bdb_state" in
+    ok) ;;
+    unknown) backup_saw_unknown=1 ;;
+    *) backup_saw_bad=1 ;;
+  esac
+  if [ "$bdb_age" -gt "$backup_age_sec" ]; then backup_age_sec="$bdb_age"; fi
+done
+
+if [ "$backup_saw_any" -eq 0 ]; then
+  backup_stale=null
+  backup_age_sec=0
+elif [ "$backup_saw_bad" -eq 1 ]; then
+  backup_stale=true
+elif [ "$backup_saw_unknown" -eq 1 ]; then
+  backup_stale=null
+else
+  backup_stale=false
+fi
+backup_freshness=""
+if [ "$backup_age_sec" -gt 0 ]; then
+  backup_freshness=$(fmt_age "$backup_age_sec")
 fi
 
 # Find orphan databases.
@@ -576,7 +717,18 @@ JSONEOF
   "backups": {
     "dolt_freshness": "$backup_freshness",
     "dolt_age_sec": $backup_age_sec,
-    "dolt_stale": $backup_stale
+    "dolt_stale": $backup_stale,
+    "databases": [
+JSONEOF
+  first=true
+  printf '%s\n' "$backup_db_info" | while IFS='|' read -r bname bstate bage; do
+    [ -z "$bname" ] && continue
+    if [ "$first" = true ]; then first=false; else echo ","; fi
+    printf '      {"name": "%s", "state": "%s", "age_sec": %s}' "$bname" "$bstate" "$bage"
+  done
+  cat <<JSONEOF
+
+    ]
   },
   "orphans": [
 JSONEOF
@@ -642,14 +794,29 @@ if [ -n "$db_info" ]; then
   done
 fi
 
-if [ -n "$backup_freshness" ]; then
-  stale=""
-  [ "$backup_stale" = true ] && stale=" [STALE]"
-  echo ""
-  echo "Backups: ${backup_freshness} ago${stale}"
+echo ""
+if [ "$backup_stale" = null ] && [ -z "$backup_db_info" ]; then
+  echo "Backups: no local databases to verify"
 else
-  echo ""
-  echo "Backups: none found"
+  case "$backup_stale" in
+    true)  echo "Backups: STALE — one or more destinations not restorable" ;;
+    false)
+      if [ -n "$backup_freshness" ]; then
+        echo "Backups: ok (oldest manifest ${backup_freshness} ago)"
+      else
+        echo "Backups: ok"
+      fi
+      ;;
+    *)     echo "Backups: unverified — a destination could not be measured" ;;
+  esac
+  printf '%s\n' "$backup_db_info" | while IFS='|' read -r bname bstate bage; do
+    [ -z "$bname" ] && continue
+    if [ "$bage" -gt 0 ]; then
+      echo "  $bname: $bstate ($(fmt_age "$bage") ago)"
+    else
+      echo "  $bname: $bstate"
+    fi
+  done
 fi
 
 if [ "$quarantine_count" -gt 0 ]; then
