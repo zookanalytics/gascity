@@ -2443,6 +2443,95 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
+// TestGcBdHeartbeatRefreshesClaimStampedBySessionID is the end-to-end proof
+// that doBd threads the own-claim actor into the bd heartbeat subprocess
+// (gc-ox80c): a bead whose assignee is this session's GC_SESSION_ID is
+// heartbeated under that id even though the ambient BEADS_ACTOR is the session
+// name. The refused cases pin upstream's identity policy (#6324): a claim held
+// under the session name or the alias alone is a shared chair, not this
+// session's own, so the heartbeat keeps the ambient actor and bd refuses it.
+func TestGcBdHeartbeatRefreshesClaimStampedBySessionID(t *testing.T) {
+	// The write guard's store.Get shells `bd show --json <id>`; return a bead
+	// held by the assignee under test. The heartbeat leg records the actor it
+	// ran under.
+	setup := func(t *testing.T, assignee string) string {
+		t.Helper()
+		capture := filepath.Join(t.TempDir(), "gc-bd-actor.txt")
+		silentFallbackTestSetup(t, `#!/bin/sh
+sub=""
+for a in "$@"; do
+  case "$a" in
+    show|heartbeat|update|close|reopen|delete) sub="$a"; break;;
+  esac
+done
+case "$sub" in
+  show)
+    printf '%s' '[{"id":"demo-abc","assignee":"'"${FAKE_ASSIGNEE}"'","status":"in_progress","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+    ;;
+  heartbeat)
+    printf '%s' "${BEADS_ACTOR:-}" > "${CAPTURE_PATH}"
+    ;;
+esac
+`)
+		t.Setenv("CAPTURE_PATH", capture)
+		t.Setenv("FAKE_ASSIGNEE", assignee)
+		return capture
+	}
+	heartbeatActor := func(t *testing.T, capture string) string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+			t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+		}
+		data, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+
+	t.Run("claim stamped with the session bead id refreshes as that id", func(t *testing.T) {
+		capture := setup(t, "lx-sess")
+		t.Setenv("GC_SESSION_ID", "lx-sess")
+		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+		t.Setenv("GC_ALIAS", "")
+		t.Setenv("BEADS_ACTOR", "gc-pool-name")
+		if got := heartbeatActor(t, capture); got != "lx-sess" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the owning session id %q", got, "lx-sess")
+		}
+	})
+	t.Run("claim held under the session name alone is refused (#6324)", func(t *testing.T) {
+		capture := setup(t, "gc-pool-name")
+		t.Setenv("GC_SESSION_ID", "lx-sess")
+		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+		t.Setenv("GC_ALIAS", "")
+		t.Setenv("BEADS_ACTOR", "city-default-actor")
+		if got := heartbeatActor(t, capture); got != "city-default-actor" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "city-default-actor")
+		}
+	})
+	t.Run("claim held under the alias alone is refused (#6324)", func(t *testing.T) {
+		capture := setup(t, "reviewer")
+		t.Setenv("GC_SESSION_ID", "lx-sess")
+		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+		t.Setenv("GC_ALIAS", "reviewer")
+		t.Setenv("BEADS_ACTOR", "gc-pool-name")
+		if got := heartbeatActor(t, capture); got != "gc-pool-name" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "gc-pool-name")
+		}
+	})
+	t.Run("claim held by another session is refused", func(t *testing.T) {
+		capture := setup(t, "lx-someone-else")
+		t.Setenv("GC_SESSION_ID", "lx-sess")
+		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+		t.Setenv("GC_ALIAS", "")
+		t.Setenv("BEADS_ACTOR", "gc-pool-name")
+		if got := heartbeatActor(t, capture); got != "gc-pool-name" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "gc-pool-name")
+		}
+	})
+}
+
 // TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
 func TestBdMutationWriteID(t *testing.T) {
 	t.Run("extracts id from write subcommands", func(t *testing.T) {

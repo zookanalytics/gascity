@@ -103,6 +103,42 @@ func TestCloseActorForOwnClaim(t *testing.T) {
 			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
 			session, strPtr("ci-wisp-fe8"), "",
 		},
+		{
+			// gc-ox80c: bd's heartbeat is owner-only too, so the holder of a
+			// claim gc hook --claim stamped with the session bead id refreshes
+			// the lease under that id.
+			"own claim under the session bead id heartbeats as that id",
+			[]string{"heartbeat", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("ci-wisp-fe8")},
+			session, nil, "ci-wisp-fe8",
+		},
+		{
+			"a heartbeat of a bead held by another session keeps the session's own actor",
+			[]string{"heartbeat", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("ci-wisp-other")},
+			session, nil, "",
+		},
+		{
+			// #6324 applies to heartbeat as well: a session-name-only match is
+			// a shared chair, not this session's own identity.
+			"a heartbeat of a claim held under the session name is not the session's own",
+			[]string{"heartbeat", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("rig--gc__review-synthesizer-1-pool")},
+			session, strPtr("city-default-actor"), "",
+		},
+		{
+			"a heartbeat of a claim held under the alias is not the session's own",
+			[]string{"heartbeat", "ci-1"},
+			map[string]beads.Bead{"ci-1": held("reviewer")},
+			map[string]string{"GC_SESSION_ID": "ci-wisp-fe8", "GC_ALIAS": "reviewer", "BEADS_ACTOR": "rig--gc__review-synthesizer-1-pool"},
+			nil, "",
+		},
+		{
+			"an unread heartbeat target leaves bd's check to decide",
+			[]string{"heartbeat", "ci-1"},
+			map[string]beads.Bead{},
+			session, nil, "",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			effective := tc.env["BEADS_ACTOR"]
@@ -140,5 +176,34 @@ func TestOwnClaimCloseEnvRewritesTheChildActor(t *testing.T) {
 	other := map[string]beads.Bead{"ci-1": {ID: "ci-1", Assignee: "ci-wisp-other"}}
 	if got := ownClaimCloseEnv(childEnv, []string{"close", "ci-1"}, other, getenv); !slices.Equal(got, childEnv) {
 		t.Fatalf("ownClaimCloseEnv(another session's claim) = %v, want the child env unchanged", got)
+	}
+}
+
+// TestOwnClaimActorTargets pins which bd invocations the own-claim actor
+// rewrite applies to: the close forms, and the lone-id heartbeat that
+// rewriteBdHeartbeatArgs guarantees; nothing else.
+func TestOwnClaimActorTargets(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		args    []string
+		wantIDs []string
+		wantOK  bool
+	}{
+		{"close", []string{"close", "ci-1", "--reason", "done"}, []string{"ci-1"}, true},
+		{"update to closed", []string{"update", "ci-1", "--status", "closed"}, []string{"ci-1"}, true},
+		{"lone-id heartbeat", []string{"heartbeat", "ci-1"}, []string{"ci-1"}, true},
+		{"heartbeat without an id", []string{"heartbeat"}, nil, false},
+		{"heartbeat with a blank id", []string{"heartbeat", "  "}, nil, false},
+		{"heartbeat with extra args", []string{"heartbeat", "ci-1", "ci-2"}, nil, false},
+		{"metadata update", []string{"update", "ci-1", "--set-metadata", "gc.outcome=pass"}, nil, false},
+		{"show", []string{"show", "ci-1"}, nil, false},
+		{"empty", nil, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ids, ok := ownClaimActorTargets(tc.args)
+			if ok != tc.wantOK || !slices.Equal(ids, tc.wantIDs) {
+				t.Fatalf("ownClaimActorTargets(%v) = (%v, %v), want (%v, %v)", tc.args, ids, ok, tc.wantIDs, tc.wantOK)
+			}
+		})
 	}
 }

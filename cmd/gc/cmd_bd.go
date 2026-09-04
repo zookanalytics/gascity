@@ -685,8 +685,10 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-	// A session closing work it claimed closes it under the identity the claim
-	// recorded, so bd's assignee check passes without --force.
+	// A session closing or heartbeating work it claimed acts under the identity
+	// the claim recorded, so bd's owner-only assignee check passes without
+	// --force (close) and the lease actually refreshes (heartbeat). Reuses the
+	// beads the write guard above already read into guardBeads.
 	cmd.Env = ownClaimCloseEnv(cmd.Env, bdArgs, guardBeads, os.Getenv)
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
