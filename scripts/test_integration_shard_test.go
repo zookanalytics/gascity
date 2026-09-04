@@ -475,6 +475,7 @@ case "$1" in
       GOMODCACHE) echo /tmp/fake-gomodcache ;;
       GOTMPDIR) echo "" ;;
       GOROOT) echo /tmp/fake-goroot ;;
+      GOTOOLCHAIN) echo local ;;
       GOOS) echo "${GOOS:-$modeled_goos}" ;;
       GOARCH) echo "${GOARCH:-$modeled_goarch}" ;;
       *) echo "unexpected go env key: $2" >&2; exit 1 ;;
