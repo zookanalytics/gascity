@@ -411,6 +411,7 @@ GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
 GOTMPDIR_VAL  := $(shell go env GOTMPDIR)
 GOROOT_VAL    := $(shell go env GOROOT)
+GOTOOLCHAIN_VAL := $(shell go env GOTOOLCHAIN)
 
 ## ISOLATED_GITCONFIG: seeded global git config for tests. HOME is allowlisted
 ## below but SSH_AUTH_SOCK is not, so a host ~/.gitconfig with commit.gpgsign=true
@@ -452,6 +453,7 @@ TEST_ENV = env -i \
 	GOMODCACHE="$(GOMODCACHE_VAL)" \
 	GOTMPDIR="$(GOTMPDIR_VAL)" \
 	GOROOT="$${GOROOT:-$(GOROOT_VAL)}" \
+	GOTOOLCHAIN="$${GOTOOLCHAIN:-$(GOTOOLCHAIN_VAL)}" \
 	GOENV="$${GOENV-}" \
 	GOFLAGS="$${GOFLAGS-}" \
 	GO111MODULE="$${GO111MODULE-}" \

@@ -75,6 +75,7 @@ case "${1:-}" in
   env)
     case "${2:-}" in
       GOPATH|GOCACHE|GOMODCACHE|GOTMPDIR|GOROOT) printf '%%s\n' %q ;;
+      GOTOOLCHAIN) printf '%%s\n' local ;;
       *) exit 99 ;;
     esac
     ;;
