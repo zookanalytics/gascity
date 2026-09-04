@@ -2,15 +2,19 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
+	"github.com/gastownhall/gascity/internal/worker"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // tokenTelemetrySilenceThreshold is how long an awake session may go without a
@@ -41,15 +45,21 @@ const tokenTelemetryReadLimit = 8 << 20 // 8 MiB
 // This check is that missing signal: it makes the next blind spot announce
 // itself instead of reading as a confident zero.
 //
-// Detection only, and deliberately a warning rather than an error: an awake but
+// Detection only, and deliberately a warning rather than an error. An awake but
 // genuinely idle session — a converse thread nobody has typed into for an hour —
-// is silent for a benign reason, and the two are not separable from bead state
-// alone. The finding names the session so an operator can tell them apart.
+// is silent for a benign reason. Bead state alone cannot tell that apart from a
+// working session whose telemetry is not being recorded, so for each silent
+// session the check cross-references the live transcript under the session's
+// work_dir, resolved independently of the stored session_key. A transcript still
+// being written while no fact is recorded is a real emission gap that the finding
+// announces; a transcript as quiet as the facts is benign idleness the check
+// suppresses. When no unambiguous live transcript resolves — a shared pool
+// work_dir, or none on disk — the check falls back to naming the session for an
+// operator to judge.
 //
-// That inseparability is also why the result is SeverityAdvisory: it is a
-// reading for an operator, never a gate. Left blocking, it reported an
-// unactionable finding every hour and desensitized its readers to the blocking
-// findings that do need action (gc-w8sxu).
+// The result is SeverityAdvisory: it is a reading for an operator, never a gate.
+// Left blocking, it reported an unactionable finding every hour and desensitized
+// its readers to the blocking findings that do need action (gc-w8sxu).
 //
 // The population is awake sessions that invoke a model. A session with no
 // provider resolves no model at all — config.ResolveProvider's start_command
@@ -63,11 +73,43 @@ type agentTokenTelemetryCheck struct {
 	newStore func(string) (beads.Store, error)
 	// now is injectable so tests can pin the clock against fixture timestamps.
 	now func() time.Time
+	// resolveLiveTranscript reports how long ago the newest transcript being
+	// written under workDir for the provider family was last written, resolved
+	// independently of any stored session_key. found is false when no transcript
+	// resolves. Injectable so tests can supply fixtures without provider-native
+	// transcript files on disk.
+	resolveLiveTranscript func(family, workDir string) (modTime time.Time, found bool)
 }
 
 // newAgentTokenTelemetryCheck constructs an agentTokenTelemetryCheck.
 func newAgentTokenTelemetryCheck(cityPath string, newStore func(string) (beads.Store, error)) *agentTokenTelemetryCheck {
-	return &agentTokenTelemetryCheck{cityPath: cityPath, newStore: newStore, now: time.Now}
+	return &agentTokenTelemetryCheck{
+		cityPath:              cityPath,
+		newStore:              newStore,
+		now:                   time.Now,
+		resolveLiveTranscript: liveTranscriptModTime,
+	}
+}
+
+// liveTranscriptModTime resolves the newest transcript being written under
+// workDir for the provider family, independently of any stored session_key, and
+// returns its modtime. Bypassing the keyed lookup is the crux: the keyed path
+// would read the same stale transcript a session_key-staleness emission bug is
+// stuck on, so a session that is actually working would misreport as idle. It is
+// the production resolver behind agentTokenTelemetryCheck.resolveLiveTranscript.
+func liveTranscriptModTime(family, workDir string) (time.Time, bool) {
+	if strings.TrimSpace(workDir) == "" {
+		return time.Time{}, false
+	}
+	path := workertranscript.DiscoverPath(worker.DefaultSearchPaths(), family, workDir, "")
+	if path == "" {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime().UTC(), true
 }
 
 // Name returns the check's identifier.
@@ -127,37 +169,74 @@ func (c *agentTokenTelemetryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 	cutoff := now.Add(-tokenTelemetrySilenceThreshold)
 	lastSampleBySession, newestSample := tokenSampleIndex(facts)
 
-	awake, unmeasured, silent := c.scanAwakeSessions(store, lastSampleBySession, now, cutoff)
-	if len(silent) == 0 {
-		if awake == 0 {
+	scan := c.scanAwakeSessions(store, lastSampleBySession, now, cutoff)
+	if len(scan.gaps)+len(scan.indeterminate) == 0 {
+		if scan.awake == 0 {
 			return advisoryResult(okCheck(c.Name(),
-				"no awake model-invoking session(s) past the grace period"+unmeasuredSuffix(unmeasured)))
+				"no awake model-invoking session(s) past the grace period"+unmeasuredSuffix(scan.unmeasured)))
 		}
 		return advisoryResult(okCheck(c.Name(),
-			fmt.Sprintf("all %d awake session(s) past the grace period have recent token samples%s",
-				awake, unmeasuredSuffix(unmeasured))))
+			fmt.Sprintf("all %d awake session(s) past the grace period have recent token samples or are idle%s",
+				scan.awake, unmeasuredSuffix(scan.unmeasured))))
 	}
-	sort.Strings(silent)
+	sort.Strings(scan.gaps)
+	sort.Strings(scan.indeterminate)
+	// Gaps lead: an actionable finding reads before the ones an operator must judge.
+	details := append(append([]string{}, scan.gaps...), scan.indeterminate...)
 
 	// Every awake session silent at once is a different diagnosis from one
 	// silent session among many: it points at the emission path having stopped
 	// rather than at a single agent, which is what a shared cutoff timestamp
 	// across many agents looks like.
-	fleetWide := len(silent) == awake && awake > 1
+	fleetWide := len(details) == scan.awake && scan.awake > 1
 	message := fmt.Sprintf("%d of %d awake session(s) have recorded no token samples in the last %s",
-		len(silent), awake, tokenTelemetrySilenceThreshold)
-	hint := "confirm the session is genuinely idle; if it is working, its invocation telemetry is not being recorded"
-	if fleetWide {
+		len(details), scan.awake, tokenTelemetrySilenceThreshold)
+	var hint string
+	switch {
+	case fleetWide:
 		message = fmt.Sprintf("no token samples recorded for ANY of the %d awake session(s) in the last %s (newest sample: %s)",
-			awake, tokenTelemetrySilenceThreshold, formatSampleAge(newestSample, now))
+			scan.awake, tokenTelemetrySilenceThreshold, formatSampleAge(newestSample, now))
 		hint = "every awake session going silent together points at the emission path, not at one agent: check the controller's model-usage sweep and the usage sink"
+	case len(scan.gaps) > 0:
+		hint = "the named session(s) are still writing transcripts while nothing is recorded for them: the model-usage sweep is reading a stale transcript. Investigate the emission path, not the agents."
+	default:
+		hint = "confirm the session is genuinely idle; if it is working, its invocation telemetry is not being recorded"
 	}
-	return advisoryResult(warnCheck(c.Name(), message+unmeasuredSuffix(unmeasured), hint, silent))
+	return advisoryResult(warnCheck(c.Name(), message+unmeasuredSuffix(scan.unmeasured), hint, details))
 }
 
-// scanAwakeSessions returns the number of awake model-invoking sessions past the
-// grace period, how many awake sessions were excluded as non-model, and a detail
-// line for each measured session that has recorded no sample since cutoff.
+// awakeSilenceScan is the outcome of scanning awake sessions for silence. gaps
+// and indeterminate are both reported; a session classified idle is dropped
+// because its silence is benign.
+type awakeSilenceScan struct {
+	// awake is the number of awake model-invoking sessions past the grace period.
+	awake int
+	// unmeasured is the number of awake sessions excluded because they invoke no
+	// model and can never record a token sample.
+	unmeasured int
+	// gaps names each silent session whose live transcript is still being written:
+	// a real emission gap an operator should act on.
+	gaps []string
+	// indeterminate names each silent session with no unambiguous live transcript
+	// to judge by — a shared pool work_dir, or none on disk — left for an operator.
+	indeterminate []string
+}
+
+// scanAwakeSessions classifies every awake model-invoking session past the grace
+// period that has recorded no sample since cutoff.
+//
+// A silent session is not automatically a finding: bead state cannot tell a
+// working-but-unrecorded session from a benignly idle one. The scan resolves each
+// silent session's live transcript under its work_dir, independently of the
+// stored session_key (see liveTranscriptModTime), and classifies by whether that
+// transcript is still being written inside the silence window:
+//   - A transcript written since the cutoff, while no fact landed in the window,
+//     is a real emission gap and goes in gaps.
+//   - A transcript as quiet as the facts is genuinely idle, and the session is
+//     dropped as benign.
+//   - A work_dir shared by another live model session, or one with no transcript
+//     on disk, is indeterminate: it is reported with today's advisory wording
+//     rather than guessed.
 //
 // Sessions in a terminal state are out of scope: they cannot be expected to emit.
 // So are sessions with no awake_started_at (never confirmed a start) and those
@@ -171,7 +250,7 @@ func (c *agentTokenTelemetryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 // --serve --follow` loop. Reading the ladder rather than the raw provider keeps a
 // wrapped provider alias in the measured population; deriving the exclusion from
 // the provider (not from a session name or template) keeps role names out of Go.
-func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSample map[string]time.Time, now, cutoff time.Time) (awake, unmeasured int, silent []string) {
+func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSample map[string]time.Time, now, cutoff time.Time) awakeSilenceScan {
 	sessions, err := store.List(beads.ListQuery{
 		Type:      session.BeadType,
 		Label:     session.LabelSession,
@@ -179,8 +258,27 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		AllowScan: true,
 	})
 	if err != nil {
-		return 0, 0, []string{fmt.Sprintf("listing session beads: %v", err)}
+		return awakeSilenceScan{indeterminate: []string{fmt.Sprintf("listing session beads: %v", err)}}
 	}
+
+	// Count non-terminal model-invoking sessions per work_dir. A work_dir shared
+	// by two of them holds two live transcripts that keyless, newest-wins
+	// discovery cannot tell apart, so a silent session sharing one is left
+	// indeterminate rather than matched to a guessed transcript.
+	liveByWorkDir := map[string]int{}
+	for _, b := range sessions {
+		if b.Metadata == nil || isComputeTerminalState(b.Metadata["state"]) {
+			continue
+		}
+		if session.ProviderFamilyFromMetadata(b.Metadata, "") == "" {
+			continue
+		}
+		if wd := contract.WorkerDirFromMetadata(b.Metadata); wd != "" {
+			liveByWorkDir[wd]++
+		}
+	}
+
+	var scan awakeSilenceScan
 	for _, b := range sessions {
 		if b.Metadata == nil || isComputeTerminalState(b.Metadata["state"]) {
 			continue
@@ -189,11 +287,12 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		if err != nil || started.After(cutoff) {
 			continue
 		}
-		if session.ProviderFamilyFromMetadata(b.Metadata, "") == "" {
-			unmeasured++
+		family := session.ProviderFamilyFromMetadata(b.Metadata, "")
+		if family == "" {
+			scan.unmeasured++
 			continue
 		}
-		awake++
+		scan.awake++
 		if last, ok := lastSample[b.ID]; ok && !last.Before(cutoff) {
 			continue
 		}
@@ -201,10 +300,31 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 		if name == "" {
 			name = b.ID
 		}
-		silent = append(silent, fmt.Sprintf("%s (%s): awake %s, last token sample %s",
-			name, b.ID, formatSampleAge(started, now), formatSampleAge(lastSample[b.ID], now)))
+		detail := fmt.Sprintf("%s (%s): awake %s, last token sample %s",
+			name, b.ID, formatSampleAge(started, now), formatSampleAge(lastSample[b.ID], now))
+
+		workDir := contract.WorkerDirFromMetadata(b.Metadata)
+		if workDir == "" || liveByWorkDir[workDir] > 1 {
+			scan.indeterminate = append(scan.indeterminate, detail)
+			continue
+		}
+		modTime, found := c.resolveLiveTranscript(family, workDir)
+		if !found {
+			scan.indeterminate = append(scan.indeterminate, detail)
+			continue
+		}
+		if modTime.After(cutoff) {
+			// The live transcript is being written inside the silence window while
+			// no fact landed in it: the session is working and its telemetry is not
+			// being recorded. Announce it so the finding needs no converse sitting.
+			scan.gaps = append(scan.gaps, detail+fmt.Sprintf(", live transcript written %s but no usage recorded",
+				formatSampleAge(modTime, now)))
+			continue
+		}
+		// The live transcript is as quiet as the facts: genuinely idle. Its silence
+		// is benign, so it is dropped rather than re-escalated every hour.
 	}
-	return awake, unmeasured, silent
+	return scan
 }
 
 // unmeasuredSuffix states how many awake sessions were left out of the
