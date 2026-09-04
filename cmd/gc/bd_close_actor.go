@@ -6,17 +6,21 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// closeActorForOwnClaim returns the actor a session's close of its own claimed
-// work should run under, or "" to leave the actor alone.
+// closeActorForOwnClaim returns the actor a session's owner-only bd operation
+// on its own claimed work should run under, or "" to leave the actor alone.
+// The operations are the ones ownClaimActorTargets selects: a close (`close`,
+// `update --status closed`) and a lease refresh (`heartbeat <id>`).
 //
-// bd authorizes a close by comparing the bead's assignee with the actor as
+// bd authorizes both by comparing the bead's assignee with the actor as
 // strings. A pool session claims work under its session bead id but acts under
 // its session name (BEADS_ACTOR), so its close of a bead it holds is refused
 // ("assignee is <bead id>, actor is <session name>; reclaim or use --force"),
-// and workers learn to force every close. When every assigned target is held
-// by this session's own identity, closing under that exact identity is the
-// same principal speaking, and bd's check passes without --force. A bead held
-// by anyone else keeps the session's own actor, so bd still refuses it.
+// and workers learn to force every close; its heartbeat of that bead is
+// refused the same way, so every claimed lease expires minutes after the
+// claim and `bd reclaim` cannot tell a live holder from a dead one. When every
+// assigned target is held by this session's own identity, acting under that
+// exact identity is the same principal speaking, and bd's check passes. A bead
+// held by anyone else keeps the session's own actor, so bd still refuses it.
 //
 // The session's own identities are exactly its session bead id (GC_SESSION_ID,
 // unique to this session) and the effective BEADS_ACTOR the bd child runs
@@ -26,8 +30,8 @@ import (
 // predecessor's chair-named claim without --force. effectiveActor is the
 // child's command-env BEADS_ACTOR, which can differ from the process env.
 func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string, effectiveActor string) string {
-	ids, isClose := workRecordCloseTargets(bdArgs)
-	if !isClose {
+	ids, ok := ownClaimActorTargets(bdArgs)
+	if !ok {
 		return ""
 	}
 	sessionID := strings.TrimSpace(getenv("GC_SESSION_ID"))
@@ -58,6 +62,46 @@ func closeActorForOwnClaim(bdArgs []string, targets map[string]beads.Bead, geten
 		return ""
 	}
 	return actor
+}
+
+// ownClaimActorTargets returns the bead IDs of a bd invocation that bd
+// authorizes owner-only against the bead's assignee, and whether the
+// invocation is one at all. It covers the close forms workRecordCloseTargets
+// recognizes (`close`, `update --status closed`) and the lone-id lease refresh
+// `heartbeat <id>` (rewriteBdHeartbeatArgs has already reduced heartbeat to
+// exactly that shape before doBd reaches this point). Anything else reports
+// not-a-target so the actor rewrite stays out of the way.
+func ownClaimActorTargets(bdArgs []string) ([]string, bool) {
+	if len(bdArgs) == 2 && bdArgs[0] == "heartbeat" && strings.TrimSpace(bdArgs[1]) != "" {
+		return bdArgs[1:2], true
+	}
+	return workRecordCloseTargets(bdArgs)
+}
+
+// ownClaimHeartbeatNeedsRead returns the bead id a session's `heartbeat <id>`
+// must still read, and whether it must. The exact-ID write guard skips its
+// read where bd resolves ids exactly (bdWriteGuardNeedsRead), but the
+// claim-identity heartbeat needs the bead's assignee to choose its actor.
+// Close-shaped writes already keep the guard's read. No read is needed when
+// targets already holds the bead, outside a session, or when the child's
+// effective actor already is GC_SESSION_ID: closeActorForOwnClaim then never
+// changes the actor.
+func ownClaimHeartbeatNeedsRead(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string, effectiveActor string) (string, bool) {
+	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
+		return "", false
+	}
+	ids, ok := ownClaimActorTargets(bdArgs)
+	if !ok {
+		return "", false
+	}
+	sessionID := strings.TrimSpace(getenv("GC_SESSION_ID"))
+	if sessionID == "" || strings.TrimSpace(effectiveActor) == sessionID {
+		return "", false
+	}
+	if _, read := targets[ids[0]]; read {
+		return "", false
+	}
+	return ids[0], true
 }
 
 // ownClaimCloseEnv returns the bd child's env for bdArgs: unchanged, or with

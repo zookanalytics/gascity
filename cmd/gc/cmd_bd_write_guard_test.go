@@ -156,6 +156,10 @@ func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 			calls := writeBatchGuardBdStub(t, `    "show --json demo-abc")
       printf '[{"id":"demo-abc","status":"open"}]\n' ;;`)
 
+			// Outside a session: a session's heartbeat reads its claim
+			// (TestGcBdSessionHeartbeatReadsItsClaimWhereBdResolvesIDsExactly).
+			t.Setenv("GC_SESSION_ID", "")
+
 			var stdout, stderr bytes.Buffer
 			if code := doBd(tc.args, &stdout, &stderr); code != 0 {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tc.args, code, stderr.String())
