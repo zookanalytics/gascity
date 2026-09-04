@@ -177,18 +177,29 @@ func detachedOrphanRoutesFor(store, routeStore beads.Store) (detachedOrphanRoute
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
 // fully-detached handoff orphan: open, unassigned, no pool route (neither
-// gc.routed_to nor a legacy gc.run_target), no gc.kind, no merge_result, branch
-// set (indicating work was done and pushed), and a session back-reference —
-// gc.session_id or gc.session_name — from which the pool route can be recovered.
-// This sweep's novel domain is exactly work that carries *no* self-declared
-// route: a bead that still has gc.run_target is recovered earlier in the same
-// tick by restoreCarriedWorkRoutes from its own declared route, and any
-// non-empty gc.kind is a workflow-root/control/topology bead that
-// carriedPoolRoute deliberately keeps out of pool demand.
+// gc.routed_to nor a legacy gc.run_target), no gc.kind, not a molecule step
+// (no gc.step_id / gc.step_ref), no merge_result, a pushed-branch record (the
+// "branch" key), and a session back-reference — gc.session_id or
+// gc.session_name — from which the pool route can be recovered. This sweep's
+// novel domain is exactly work that carries *no* self-declared route: a bead
+// that still has gc.run_target is recovered earlier in the same tick by
+// restoreCarriedWorkRoutes from its own declared route, and any non-empty
+// gc.kind is a workflow-root/control/topology bead that carriedPoolRoute
+// deliberately keeps out of pool demand.
 //
-// merge_result belongs in that signature because a merge cadence parks a
-// finished anchor by clearing assignee and gc.routed_to while leaving
-// gc.work_branch and the claim-time session keys in place. That leaves it
+// The branch gate reads BranchMetadataKey ("branch"), the record a pack's
+// workspace-setup writes when it cuts the branch — the only field that
+// evidences a completed-work handoff. It is deliberately not gc.work_branch:
+// that key is stamped at claim time to the claiming worker's CWD branch, which
+// in a pool is the shared home worktree's default branch, so it sits on every
+// claimed bead — including molecule steps and plain claimed beads that push
+// nothing. gc.step_id / gc.step_ref exclude those steps outright: a molecule
+// step is advanced by its formula chain, never by route recovery, so restoring
+// a route on a parked step only re-offers a dead chain to the pool.
+//
+// merge_result belongs in the signature because a merge cadence parks a
+// finished anchor by clearing assignee and gc.routed_to while leaving the
+// branch record and the claim-time session keys in place. That leaves it
 // identical to a failed handoff in every other field.
 func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if b.Status != "open" {
@@ -206,11 +217,15 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey]) != "" {
 		return false // any non-empty kind is workflow-root/control/topology work, not fully-detached pool work
 	}
+	if strings.TrimSpace(b.Metadata[beadmeta.StepIDMetadataKey]) != "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.StepRefMetadataKey]) != "" {
+		return false // a molecule step bead; its formula chain advances it, not route recovery
+	}
 	if strings.TrimSpace(b.Metadata[beadmeta.MergeResultMetadataKey]) != "" {
 		return false // an anchor in a merge cadence; that cadence drives it, not the pool
 	}
-	if strings.TrimSpace(b.Metadata[beadmeta.WorkBranchMetadataKey]) == "" {
-		return false // no work branch → not a completed-work handoff bead
+	if strings.TrimSpace(b.Metadata[beadmeta.BranchMetadataKey]) == "" {
+		return false // no pushed-branch record → not a completed-work handoff bead
 	}
 	// Accept either session back-reference. The claim path stamps gc.session_id
 	// whenever GC_SESSION_ID is set and adds gc.session_name only when
