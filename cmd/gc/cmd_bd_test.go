@@ -2395,6 +2395,122 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
+// TestHeartbeatActorForOwnedClaim covers the owner-only actor resolution that
+// lets a claim holder refresh its own lease: gc hook --claim stamps the
+// assignee as the session bead id while the ambient BEADS_ACTOR is the session
+// name, so the actor must be resolved to the assignee when it is one this
+// session owns, and left alone otherwise so bd still refuses foreign claims.
+func TestHeartbeatActorForOwnedClaim(t *testing.T) {
+	identities := []string{"lx-sess", "gc-pool-name", "gc-alias"}
+	cases := []struct {
+		name         string
+		assignee     string
+		ambientActor string
+		wantActor    string
+		wantOverride bool
+	}{
+		{"owned assignee differs from ambient actor overrides", "lx-sess", "gc-pool-name", "lx-sess", true},
+		{"assignee already equals ambient actor is left alone", "gc-pool-name", "gc-pool-name", "", false},
+		{"assignee this session does not own is left alone", "lx-other", "gc-pool-name", "", false},
+		{"empty assignee is left alone", "", "gc-pool-name", "", false},
+		{"whitespace assignee trims before matching", "  lx-sess  ", "gc-pool-name", "lx-sess", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotActor, gotOverride := heartbeatActorForOwnedClaim(tc.assignee, tc.ambientActor, identities)
+			if gotActor != tc.wantActor || gotOverride != tc.wantOverride {
+				t.Fatalf("heartbeatActorForOwnedClaim(%q, %q) = (%q, %v), want (%q, %v)",
+					tc.assignee, tc.ambientActor, gotActor, gotOverride, tc.wantActor, tc.wantOverride)
+			}
+		})
+	}
+}
+
+// TestResolveHeartbeatActorOverride covers the wiring that turns the fetched
+// bead plus this session's env identities into a BEADS_ACTOR override decision.
+func TestResolveHeartbeatActorOverride(t *testing.T) {
+	// A pool worker: hook --claim stamped the assignee as GC_SESSION_ID while
+	// the ambient BEADS_ACTOR is the session name.
+	t.Setenv("GC_SESSION_ID", "lx-sess")
+	t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+	t.Setenv("BEADS_ACTOR", "gc-pool-name")
+
+	owned := map[string]beads.Bead{"demo-abc": {ID: "demo-abc", Assignee: "lx-sess"}}
+
+	t.Run("heartbeat on an owned bead overrides to the assignee", func(t *testing.T) {
+		actor, ok := resolveHeartbeatActorOverride([]string{"heartbeat", "demo-abc"}, owned)
+		if !ok || actor != "lx-sess" {
+			t.Fatalf("resolveHeartbeatActorOverride = (%q, %v), want (lx-sess, true)", actor, ok)
+		}
+	})
+	t.Run("non-heartbeat command is left alone", func(t *testing.T) {
+		if actor, ok := resolveHeartbeatActorOverride([]string{"update", "demo-abc"}, owned); ok {
+			t.Fatalf("resolveHeartbeatActorOverride(update) = (%q, true), want no override", actor)
+		}
+	})
+	t.Run("bead absent from the guard set is left alone", func(t *testing.T) {
+		if actor, ok := resolveHeartbeatActorOverride([]string{"heartbeat", "demo-xyz"}, owned); ok {
+			t.Fatalf("resolveHeartbeatActorOverride(unknown id) = (%q, true), want no override", actor)
+		}
+	})
+	t.Run("assignee this session does not own is left alone", func(t *testing.T) {
+		foreign := map[string]beads.Bead{"demo-abc": {ID: "demo-abc", Assignee: "lx-someone-else"}}
+		if actor, ok := resolveHeartbeatActorOverride([]string{"heartbeat", "demo-abc"}, foreign); ok {
+			t.Fatalf("resolveHeartbeatActorOverride(foreign owner) = (%q, true), want no override", actor)
+		}
+	})
+	t.Run("nil guard set is left alone", func(t *testing.T) {
+		if actor, ok := resolveHeartbeatActorOverride([]string{"heartbeat", "demo-abc"}, nil); ok {
+			t.Fatalf("resolveHeartbeatActorOverride(nil beads) = (%q, true), want no override", actor)
+		}
+	})
+}
+
+// TestGcBdHeartbeatRefreshesClaimStampedBySessionID is the end-to-end proof
+// that doBd threads the resolved owner into the bd subprocess: a bead whose
+// assignee is this session's GC_SESSION_ID is heartbeated under that id even
+// though the ambient BEADS_ACTOR is the session name.
+func TestGcBdHeartbeatRefreshesClaimStampedBySessionID(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "gc-bd-actor.txt")
+	// The write guard's store.Get shells `bd show --json <id>`; return a bead
+	// owned by GC_SESSION_ID. The heartbeat leg records the actor it ran under.
+	silentFallbackTestSetup(t, `#!/bin/sh
+sub=""
+for a in "$@"; do
+  case "$a" in
+    show|heartbeat|update|close|reopen|delete) sub="$a"; break;;
+  esac
+done
+case "$sub" in
+  show)
+    printf '%s' '[{"id":"demo-abc","assignee":"lx-sess","status":"in_progress","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]'
+    ;;
+  heartbeat)
+    printf '%s' "${BEADS_ACTOR:-}" > "${CAPTURE_PATH}"
+    ;;
+esac
+`)
+	t.Setenv("CAPTURE_PATH", capture)
+	t.Setenv("GC_SESSION_ID", "lx-sess")
+	t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+	t.Setenv("BEADS_ACTOR", "gc-pool-name")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotActor := string(data); gotActor != "lx-sess" {
+		t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the owning session id %q", gotActor, "lx-sess")
+	}
+}
+
 // TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
 func TestBdMutationWriteID(t *testing.T) {
 	t.Run("extracts id from write subcommands", func(t *testing.T) {

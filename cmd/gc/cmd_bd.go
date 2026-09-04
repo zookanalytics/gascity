@@ -210,6 +210,59 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"heartbeat", rest[0]}, nil
 }
 
+// sessionOwnIdentities returns the identity spellings this process's session
+// answers to, in the same set the claim path builds (cmd_hook.go's
+// identityCandidates): the session bead id, the session name, the alias, and
+// the agent. gc hook --claim stamps a bead's assignee as one of these (the
+// session bead id, GC_SESSION_ID), so an owner-only operation must recognize
+// all of them as this session when it decides whether it owns a claim.
+func sessionOwnIdentities() []string {
+	return hookClaimIdentityCandidates(
+		os.Getenv("GC_SESSION_ID"),
+		os.Getenv("GC_SESSION_NAME"),
+		os.Getenv("GC_ALIAS"),
+		os.Getenv("GC_AGENT"),
+	)
+}
+
+// heartbeatActorForOwnedClaim resolves the actor `gc bd heartbeat` must run as
+// and reports whether that differs from the ambient BEADS_ACTOR. bd's heartbeat
+// is owner-only: it refreshes the lease only when the actor matches the bead's
+// assignee exactly. gc hook --claim stamps the assignee as the session's own
+// identity (typically GC_SESSION_ID), while a session's ambient BEADS_ACTOR is
+// usually its runtime name (GC_SESSION_NAME) — so the holder of a claim cannot
+// refresh it under the ambient actor. When the bead's current assignee is one
+// of THIS session's own identities, heartbeat as that assignee, mirroring the
+// claim path (claimFirstReadyHookAssignment uses the bead's current assignee as
+// the claim actor for the same reason). When it is not, the actor is left
+// unchanged so bd refuses a heartbeat this session does not own.
+func heartbeatActorForOwnedClaim(assignee, ambientActor string, identities []string) (string, bool) {
+	assignee = strings.TrimSpace(assignee)
+	if assignee == "" || assignee == strings.TrimSpace(ambientActor) {
+		return "", false
+	}
+	if !hookClaimHasIdentity(assignee, identities) {
+		return "", false
+	}
+	return assignee, true
+}
+
+// resolveHeartbeatActorOverride decides whether a `gc bd heartbeat` command
+// needs its BEADS_ACTOR overridden, and to what. It reuses the bead the
+// exact-ID write guard already fetched into guardBeads, so no second store read
+// is needed. Any command that is not a lone-id heartbeat, or whose bead was not
+// fetched by the guard, is left with the ambient actor.
+func resolveHeartbeatActorOverride(bdArgs []string, guardBeads map[string]beads.Bead) (string, bool) {
+	if len(bdArgs) != 2 || bdArgs[0] != "heartbeat" {
+		return "", false
+	}
+	bead, ok := guardBeads[bdArgs[1]]
+	if !ok {
+		return "", false
+	}
+	return heartbeatActorForOwnedClaim(bead.Assignee, os.Getenv("BEADS_ACTOR"), sessionOwnIdentities())
+}
+
 // bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
 // whose rig segment is absent from the loaded city configuration. These values
 // are opaque to bd, so gc bd is the common admission boundary for stale and
@@ -515,6 +568,15 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	// bd's heartbeat is owner-only and matches the actor to the bead's assignee
+	// exactly. gc hook --claim stamps that assignee as the session bead id while
+	// the ambient BEADS_ACTOR is the session name, so the claim holder cannot
+	// refresh its own lease under the ambient actor. When the assignee is one of
+	// this session's identities, heartbeat as it — reusing the bead the write
+	// guard above already read into guardBeads.
+	if actor, ok := resolveHeartbeatActorOverride(bdArgs, guardBeads); ok {
+		env = append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+actor)
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
