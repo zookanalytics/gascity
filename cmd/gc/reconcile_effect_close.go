@@ -457,12 +457,47 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
 	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
-		pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
+		pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.pruneLiveness(store, b), c.stderr)
 	}
 }
 
 // pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
 var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
+
+// pruneLiveness is the liveness snapshot the worker_dir auto-prune consults
+// (gc-9hy4l): the process-table walk plus the worktree dirs every OPEN session
+// row other than closed's records. Gathered per cascade rather than per pass
+// because a pool-slot close is rare, and only when auto-prune is enabled: the
+// prune is a no-op otherwise and never reads the inputs. An unreadable row
+// list leaves the session dirs empty; the process walk still gates the prune,
+// and an indeterminate walk makes it fail closed.
+func (c *closeReleases) pruneLiveness(store beads.Store, closed beads.Bead) worktreeLivenessInputs {
+	if c.cfg == nil || !c.cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		return worktreeLivenessInputs{}
+	}
+	in := worktreeLivenessInputs{live: collectLiveWorktreeStateFn()}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		return in
+	}
+	seen := make(map[string]struct{})
+	for _, r := range rows {
+		if r.ID == closed.ID || r.Status == "closed" {
+			continue
+		}
+		for _, dir := range sessionRecordedWorktreeDirs(sessionInfoFromBead(r)) {
+			if dir = strings.TrimSpace(dir); dir == "" || !filepath.IsAbs(dir) {
+				continue
+			}
+			if _, dup := seen[dir]; dup {
+				continue
+			}
+			seen[dir] = struct{}{}
+			in.sessionDirs = append(in.sessionDirs, dir)
+		}
+	}
+	return in
+}
 
 // workDirInUse reports an open session row other than closed's whose work
 // dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),

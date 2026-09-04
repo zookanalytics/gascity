@@ -2177,7 +2177,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// cannot route around its own name, so the template falls to zero seats
 		// until someone kills the pane by hand. See
 		// retirePoolSlotAtDrainDeadline for the gates.
-		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, sw, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, dt, stderr); retired {
+		if fold, retired := retirePoolSlotAtDrainDeadline(cityPath, cfg, sp, store, sw, snapshot, info, tp.TemplateName, tp.Hints.ProcessNames, storeQueryPartial, reconcileOpts.deferSessionClosesOnBoot, clk, rec, dt, stderr); retired {
 			tick.apply(id, fold)
 			tick.markClosed(id)
 			continue
@@ -4498,6 +4498,26 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	})
 
 	phaseStart = time.Now()
+	// Liveness inputs for the worker_dir auto-prune below, gathered at most
+	// once per pass and shared across every prune decision: the process-table
+	// walk is far more expensive than the per-session git probes, and the
+	// closed-bead reaper gathers the same way. It is gathered lazily, on the
+	// first prune the pass reaches, because most passes retire no seat and the
+	// walk is a subprocess on a host without /proc (lsof on macOS): paid every
+	// tick it turned a 1 s differential run into minutes. Only gathered when
+	// auto-prune is enabled, since pruneAgentHomeWorktreeIfSafeInfo is a no-op
+	// otherwise and never consults the (zero-value, unscanned) inputs. When it
+	// IS enabled and the scan comes back indeterminate, that unscanned value
+	// makes the prune fail closed, which is the intended protection.
+	pruneLiveness := sync.OnceValue(func() worktreeLivenessInputs {
+		if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
+			return worktreeLivenessInputs{}
+		}
+		return worktreeLivenessInputs{
+			live:        collectLiveWorktreeStateFn(),
+			sessionDirs: liveSessionWorktreeDirs(snapshot),
+		}
+	})
 	for _, target := range wakeTargets {
 		if ctx != nil && ctx.Err() != nil {
 			return 0
@@ -4971,7 +4991,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if !storeQueryPartial &&
 				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], clk, stderr) {
 				tick.markClosed(target.info.ID)
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
+				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, pruneLiveness(), stderr)
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
@@ -4992,10 +5012,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)
 				// Pool worktrees are transient by design — reclaim disk
-				// when the session bead is retired. Skipped under safety
-				// gates (uncommitted, unpushed, stashed) and overridable
-				// via cfg.Daemon.AutoPruneWorkerDir.
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
+				// when the session bead is retired. Skipped when a process is
+				// still live in the tree or under the safety gates (uncommitted,
+				// unpushed, stashed) and overridable via
+				// cfg.Daemon.AutoPruneWorkerDir.
+				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, pruneLiveness(), stderr)
 			}
 		}
 	}
