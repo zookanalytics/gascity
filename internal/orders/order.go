@@ -230,6 +230,13 @@ func (a *Order) IsCityScoped() bool {
 	return a.Scope == "city"
 }
 
+// IsRigScoped reports whether the order declares scope = "rig" explicitly.
+// An order that declares nothing is rig-scoped only under a rig import;
+// orderdiscovery.ScanAll says what each declaration means at each scope.
+func (a *Order) IsRigScoped() bool {
+	return a.Scope == "rig"
+}
+
 // RequiresBackendValues returns the backend names requires_backend accepts,
 // in documentation order.
 func RequiresBackendValues() []string {
