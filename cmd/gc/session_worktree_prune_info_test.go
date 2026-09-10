@@ -314,21 +314,78 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_LiveProcessInSubdir(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_LiveViaOpenSessionDir(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafeInfo_OwnRecordedSessionDirDoesNotBlockSelf(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
 	rigProbe := &fakeGitProbe{isRepo: true}
 	fx.setProbe(fx.rigRoot, rigProbe)
 
+	// The reconciler gathers the active-session set from the snapshot taken at
+	// tick start, which still lists the session being pruned as open — so its
+	// own worker_dir appears in sessionDirs. That self-reference must not read
+	// as a live signal against its own worktree.
 	var stderr bytes.Buffer
 	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr)
+	if !rigProbe.removeInvoked {
+		t.Errorf("WorktreeRemove not invoked; the retired session's own dir wrongly blocked its own prune; log: %q", stderr.String())
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafeInfo_OtherSessionNestedDirBlocks(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	// A different open session records a directory strictly beneath the
+	// worktree. That is not the retired session's own dir, so it is not
+	// self-filtered and still blocks removal.
+	nested := filepath.Join(fx.workerDir, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession(nested), &stderr)
 	if rigProbe.removeInvoked {
-		t.Error("WorktreeRemove invoked on a worktree an open session holds")
+		t.Error("WorktreeRemove invoked while a different open session works beneath the worktree")
 	}
 	if !strings.Contains(stderr.String(), "active session dir") {
 		t.Errorf("expected active-session reason log; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot
+// reproduces the reconciler's real pre-close composition rather than a
+// hand-built sessionDirs: the pass builds its liveness inputs from the snapshot
+// captured at tick start (via liveSessionWorktreeDirs), which lists the prunable
+// pool session as open, then closes and prunes that same session with the frozen
+// inputs. The session's own worker_dir is therefore in the carried set and must
+// not block reclaiming its now-retired worktree.
+func TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	info := fx.sessionInfo()
+	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info})
+	pruneLiveness := worktreeLivenessInputs{
+		live:        liveWorktreeState{scanned: true},
+		sessionDirs: liveSessionWorktreeDirs(snapshot),
+	}
+	// Guard the reproduction: the session's worker_dir really is in the set the
+	// pass would carry, so a passing prune proves the self-filter, not an
+	// accidentally-empty set.
+	if len(pruneLiveness.sessionDirs) == 0 {
+		t.Fatal("snapshot produced no session dirs; test would not exercise the self-reference")
+	}
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, pruneLiveness, &stderr)
+	if !rigProbe.removeInvoked {
+		t.Fatalf("retired pool session present in the open snapshot was not pruned; log: %q", stderr.String())
+	}
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_LiveTakesPrecedenceOverGitState(t *testing.T) {

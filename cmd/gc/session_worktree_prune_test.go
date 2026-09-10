@@ -519,19 +519,45 @@ func TestPruneAgentHomeWorktreeIfSafe_LiveProcessInSubdir(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_LiveViaOpenSessionDir(t *testing.T) {
+func TestPruneAgentHomeWorktreeIfSafe_OwnRecordedSessionDirDoesNotBlockSelf(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
 	rigProbe := &fakeGitProbe{isRepo: true}
 	fx.setProbe(fx.rigRoot, rigProbe)
 
-	// No live process cwd, but an open session still records this dir.
+	// The reconciler gathers the active-session set from the snapshot taken at
+	// tick start, which still lists the session being pruned as open — so its
+	// own worker_dir appears in sessionDirs. That self-reference must not read
+	// as a live signal against its own worktree, or a clean retired pool
+	// worktree is never reclaimed.
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr) {
-		t.Fatal("prune returned true for a worktree an open session is working in")
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr) {
+		t.Fatalf("prune skipped a clean worktree whose only session-dir signal was its own retired session; log: %q", stderr.String())
+	}
+	if !rigProbe.removeInvoked {
+		t.Error("WorktreeRemove not invoked for a prunable worktree")
+	}
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_OtherSessionNestedDirBlocks(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	// A different open session records a directory strictly beneath the
+	// worktree (a nested tree it is working in). That is not the retired
+	// session's own dir, so it is not self-filtered and still blocks removal.
+	nested := filepath.Join(fx.workerDir, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatalf("mkdir nested: %v", err)
+	}
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(nested), &stderr) {
+		t.Fatal("prune returned true while a different open session works beneath the worktree")
 	}
 	if rigProbe.removeInvoked {
-		t.Error("WorktreeRemove invoked on a worktree an open session holds")
+		t.Error("WorktreeRemove invoked while a different open session works beneath the worktree")
 	}
 	if !strings.Contains(stderr.String(), "active session dir") {
 		t.Errorf("expected active-session reason log; got %q", stderr.String())
