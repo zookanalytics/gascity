@@ -136,6 +136,39 @@ func (a SessionLogAdapter) InvocationUsage(provider, path string) ([]sessionlog.
 	return invocationUsageSpecs[family].extract(a, path)
 }
 
+// NewestInvocationUsageTime returns the timestamp of the newest usage-bearing
+// model invocation recorded in the transcript at path for the provider, and
+// false when no entry carries token usage (or none carries a timestamp).
+//
+// It reads the normalized history and takes the newest entry whose Usage is set,
+// which is family-uniform: the claude reader stamps usage from the assistant
+// message and the codex reader attaches detached token_count usage, both onto the
+// entry's own timestamp. It is deliberately NOT the transcript file's modtime:
+// non-usage writes — user messages, tool results, reasoning records — bump the
+// file without being a model invocation, so a modtime read misreports an idle
+// session whose transcript was merely appended to as a recent invocation.
+func (a SessionLogAdapter) NewestInvocationUsageTime(provider, path string) (time.Time, bool, error) {
+	snapshot, err := a.LoadHistory(LoadRequest{Provider: provider, TranscriptPath: path})
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	var newest time.Time
+	found := false
+	for _, entry := range snapshot.Entries {
+		if entry.Usage == nil || entry.Timestamp == nil {
+			continue
+		}
+		if !found || entry.Timestamp.After(newest) {
+			newest = *entry.Timestamp
+			found = true
+		}
+	}
+	if !found {
+		return time.Time{}, false, nil
+	}
+	return newest.UTC(), true, nil
+}
+
 // TailActivityForProvider reads tail activity for a provider whose transcript
 // tail cannot be read from a trailing record. Whole-file-JSON mirror families
 // need the normalized history; everything else keeps the cheap tail path.

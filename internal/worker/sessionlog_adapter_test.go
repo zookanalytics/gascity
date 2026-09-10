@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -107,6 +108,74 @@ func TestSessionLogAdapterLoadHistoryClaude(t *testing.T) {
 	}
 	if snapshot.Cursor.AfterEntryID != "a2" {
 		t.Fatalf("Cursor.AfterEntryID = %q, want a2", snapshot.Cursor.AfterEntryID)
+	}
+}
+
+// TestSessionLogAdapterNewestInvocationUsageTimeIgnoresNonUsageWrites pins the
+// contract the token-telemetry doctor check depends on: the returned time is the
+// newest USAGE-BEARING model invocation, not the newest transcript entry. The
+// last entry here is a user message written after the assistant turn, so a naive
+// "newest entry" read (or the file modtime) would report it; the method must
+// instead return the assistant turn's timestamp because that is the only entry
+// carrying token usage.
+func TestSessionLogAdapterNewestInvocationUsageTimeIgnoresNonUsageWrites(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/usage-project"
+	base := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(base, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	path := filepath.Join(transcriptDir, "sess-claude.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"a1","parentUuid":"u1","type":"assistant","message":{"role":"assistant","content":"working","model":"claude-sonnet","stop_reason":"end_turn","usage":{"input_tokens":1000}},"timestamp":"2025-01-01T00:00:01Z","sessionId":"provider-claude"}`,
+		`{"uuid":"u2","parentUuid":"a1","type":"user","message":{"role":"user","content":"one more thing"},"timestamp":"2025-01-01T00:05:00Z","sessionId":"provider-claude"}`,
+	)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	got, found, err := adapter.NewestInvocationUsageTime("claude/tmux-cli", path)
+	if err != nil {
+		t.Fatalf("NewestInvocationUsageTime() error = %v", err)
+	}
+	if !found {
+		t.Fatal("found = false, want true (the assistant turn carries usage)")
+	}
+	want := time.Date(2025, 1, 1, 0, 0, 1, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("NewestInvocationUsageTime() = %s, want %s (the usage-bearing turn, not the later user write)", got, want)
+	}
+}
+
+// TestSessionLogAdapterNewestInvocationUsageTimeNoUsageEntries pins the
+// indeterminate case: a transcript with recent writes but no usage-bearing entry
+// yields found=false, so the doctor check leaves the session for an operator to
+// judge rather than inventing an invocation time from a non-usage write.
+func TestSessionLogAdapterNewestInvocationUsageTimeNoUsageEntries(t *testing.T) {
+	t.Parallel()
+
+	workDir := "/tmp/no-usage-project"
+	base := t.TempDir()
+	slug := strings.NewReplacer("/", "-", ".", "-").Replace(workDir)
+	transcriptDir := filepath.Join(base, slug)
+	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
+		t.Fatalf("mkdir transcript dir: %v", err)
+	}
+	path := filepath.Join(transcriptDir, "sess-claude.jsonl")
+	writeLines(t, path,
+		`{"uuid":"u1","type":"user","message":{"role":"user","content":"hello"},"timestamp":"2025-01-01T00:00:00Z","sessionId":"provider-claude"}`,
+		`{"uuid":"u2","parentUuid":"u1","type":"user","message":{"role":"user","content":"anyone there"},"timestamp":"2025-01-01T00:05:00Z","sessionId":"provider-claude"}`,
+	)
+
+	adapter := SessionLogAdapter{SearchPaths: []string{base}}
+	_, found, err := adapter.NewestInvocationUsageTime("claude/tmux-cli", path)
+	if err != nil {
+		t.Fatalf("NewestInvocationUsageTime() error = %v", err)
+	}
+	if found {
+		t.Fatal("found = true, want false (no entry carries token usage)")
 	}
 }
 
