@@ -21,3 +21,11 @@ func interruptProcessGroup(cmd *exec.Cmd) error {
 	}
 	return cmd.Process.Signal(os.Interrupt)
 }
+
+// foregroundGroupMembersOf and reinterruptForegroundChildren are no-ops on
+// Windows, which has no POSIX process groups; the group interrupt the ladder
+// rescues never succeeds there, so the ladder is never launched. The stubs keep
+// the platform-neutral Cancel closure compiling.
+func foregroundGroupMembersOf(_ *exec.Cmd) []int { return nil }
+
+func reinterruptForegroundChildren(_ *exec.Cmd, _ []int) {}

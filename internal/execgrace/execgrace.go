@@ -73,11 +73,22 @@ func Apply(cmd *exec.Cmd, grace time.Duration) *atomic.Bool {
 // forced kill, recording in accepted whether cancellation was delivered so the
 // caller can let it win over the command's own exit status. Platforms without
 // process groups or os.Interrupt (such as Windows) fall back to Kill.
+//
+// A single group interrupt can miss a foreground child that was mid-fork/exec
+// when it was delivered, leaving the shell blocked in wait with its trap
+// deferred until WaitDelay force-kills it. On a successful group interrupt the
+// Cancel spawns a ladder (reinterruptForegroundChildren) that re-interrupts the
+// surviving child until it exits or the grace budget elapses, so the trap runs.
+// The foreground children are snapshotted before the interrupt — while the
+// shell is still blocked in them, before its trap can start — so the ladder
+// never re-signals a process the trap later spawns.
 func InterruptThenKill(cmd *exec.Cmd, accepted *atomic.Bool) func() error {
 	return func() error {
+		blockers := foregroundGroupMembersOf(cmd)
 		err := interruptProcessGroup(cmd)
 		if err == nil {
 			accepted.Store(true)
+			go reinterruptForegroundChildren(cmd, blockers)
 			return nil
 		}
 		if errors.Is(err, os.ErrProcessDone) {
