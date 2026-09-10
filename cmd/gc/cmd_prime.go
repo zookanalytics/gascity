@@ -773,13 +773,37 @@ func persistPrimeHookProviderSessionKey(hookProviderSessionID string, stderr io.
 		return
 	}
 	if existing := strings.TrimSpace(info.SessionKey); existing != "" {
+		// A non-empty key is authoritative for every writer except the trusted
+		// hook-stdin path. That stdin carries the id of the conversation the
+		// process is writing to right now, so when a long-lived codex/claude
+		// session forks its transcript mid-conversation (compaction, /clear, a
+		// resume the provider forks to a new file) without a fresh-wake reset,
+		// the stored key stays pinned to the abandoned transcript. Every
+		// model-usage recorder resolves the transcript through the key, so it
+		// records nothing for the rest of the interval. Reconcile to the live id
+		// and reset the usage cursor so the sweep rebinds and resweeps from the
+		// new transcript's head. Every other writer's set-when-empty guard, and
+		// the env path (a launch-time value, not a live fork), stay untouched.
+		reconcilable := fromHookStdin &&
+			providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) &&
+			existing != providerSessionID
+		if !reconcilable {
+			return
+		}
+		if err := sessFront.ReconcileSessionKey(gcSessionID, providerSessionID); err != nil {
+			warn("reconciling session_key for session %q: %v", gcSessionID, err)
+			return
+		}
+		if stderr != nil {
+			fmt.Fprintf(stderr, "gc prime --hook: reconciled stale resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
+		}
 		return
 	}
 	if err := sessFront.SetMarker(gcSessionID, "session_key", providerSessionID); err != nil {
 		warn("writing session_key for session %q: %v", gcSessionID, err)
 		return
 	}
-	// Runs once per session (the empty-key check above guards re-entry).
+	// Initial capture; the reconcile arm above handles a later divergence.
 	if stderr != nil {
 		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
 	}
