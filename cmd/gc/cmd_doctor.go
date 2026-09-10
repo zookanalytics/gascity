@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/spf13/cobra"
 )
 
@@ -381,7 +382,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
 			register(newBacklogDepthCheck(cityPath, storeFactory))
 			register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
-			register(newAgentTokenTelemetryCheck(cityPath, storeFactory))
+			register(newAgentTokenTelemetryCheck(cityPath, storeFactory, worker.MergeSearchPaths(cfg.Daemon.ObservePaths)))
 			register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			register(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
 			// Differential probe: the preflight above just proved the store

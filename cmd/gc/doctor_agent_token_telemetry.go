@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,7 +13,6 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/worker"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // tokenTelemetrySilenceThreshold is how long an awake session may go without a
@@ -50,12 +48,15 @@ const tokenTelemetryReadLimit = 8 << 20 // 8 MiB
 // is silent for a benign reason. Bead state alone cannot tell that apart from a
 // working session whose telemetry is not being recorded, so for each silent
 // session the check cross-references the live transcript under the session's
-// work_dir, resolved independently of the stored session_key. A transcript still
-// being written while no fact is recorded is a real emission gap that the finding
-// announces; a transcript as quiet as the facts is benign idleness the check
-// suppresses. When no unambiguous live transcript resolves — a shared pool
-// work_dir, or none on disk — the check falls back to naming the session for an
-// operator to judge.
+// work_dir, resolved independently of the stored session_key, and reads the
+// timestamp of the newest usage-bearing model invocation in it — not the
+// transcript file's modtime, which a user message or tool result bumps without a
+// model ever being invoked. A usage-bearing invocation newer than the silence
+// cutoff while no fact landed in the window is a real emission gap that the
+// finding announces; a transcript whose newest invocation is as old as the facts
+// is benign idleness the check suppresses. When no unambiguous live transcript
+// resolves — a shared pool work_dir, or none on disk — the check falls back to
+// naming the session for an operator to judge.
 //
 // The result is SeverityAdvisory: it is a reading for an operator, never a gate.
 // Left blocking, it reported an unactionable finding every hour and desensitized
@@ -71,45 +72,66 @@ const tokenTelemetryReadLimit = 8 << 20 // 8 MiB
 type agentTokenTelemetryCheck struct {
 	cityPath string
 	newStore func(string) (beads.Store, error)
+	// searchPaths is the transcript search-root set — the worker defaults merged
+	// with the city's configured [daemon] observe_paths — so a city that stores
+	// transcripts only under observe paths still resolves them.
+	searchPaths []string
 	// now is injectable so tests can pin the clock against fixture timestamps.
 	now func() time.Time
-	// resolveLiveTranscript reports how long ago the newest transcript being
-	// written under workDir for the provider family was last written, resolved
-	// independently of any stored session_key. found is false when no transcript
-	// resolves. Injectable so tests can supply fixtures without provider-native
-	// transcript files on disk.
-	resolveLiveTranscript func(family, workDir string) (modTime time.Time, found bool)
+	// resolveLiveTranscript reports the timestamp of the newest usage-bearing
+	// model invocation in the live transcript under workDir for the provider
+	// family, resolved independently of any stored session_key. found is false
+	// when no transcript resolves or none of its entries carries token usage.
+	// Injectable so tests can supply fixtures without provider-native transcript
+	// files on disk.
+	resolveLiveTranscript func(family, workDir string) (usageTime time.Time, found bool)
 }
 
-// newAgentTokenTelemetryCheck constructs an agentTokenTelemetryCheck.
-func newAgentTokenTelemetryCheck(cityPath string, newStore func(string) (beads.Store, error)) *agentTokenTelemetryCheck {
-	return &agentTokenTelemetryCheck{
-		cityPath:              cityPath,
-		newStore:              newStore,
-		now:                   time.Now,
-		resolveLiveTranscript: liveTranscriptModTime,
+// newAgentTokenTelemetryCheck constructs an agentTokenTelemetryCheck. searchPaths
+// is the transcript search-root set, already merged with the city's configured
+// observe paths by the caller.
+func newAgentTokenTelemetryCheck(cityPath string, newStore func(string) (beads.Store, error), searchPaths []string) *agentTokenTelemetryCheck {
+	c := &agentTokenTelemetryCheck{
+		cityPath:    cityPath,
+		newStore:    newStore,
+		searchPaths: searchPaths,
+		now:         time.Now,
 	}
+	c.resolveLiveTranscript = c.liveTranscriptUsageTime
+	return c
 }
 
-// liveTranscriptModTime resolves the newest transcript being written under
-// workDir for the provider family, independently of any stored session_key, and
-// returns its modtime. Bypassing the keyed lookup is the crux: the keyed path
-// would read the same stale transcript a session_key-staleness emission bug is
-// stuck on, so a session that is actually working would misreport as idle. It is
-// the production resolver behind agentTokenTelemetryCheck.resolveLiveTranscript.
-func liveTranscriptModTime(family, workDir string) (time.Time, bool) {
+// liveTranscriptUsageTime resolves the live transcript under workDir for the
+// provider family, independently of any stored session_key, and returns the
+// timestamp of the newest usage-bearing model invocation in it.
+//
+// Bypassing the keyed lookup is one crux: the keyed path would read the same
+// stale transcript a session_key-staleness emission bug is stuck on, so a session
+// that is actually working would misreport as idle. Reading the newest
+// usage-bearing invocation rather than the file modtime is the other: the file's
+// modtime is bumped by any write — a user message, a tool result, a reasoning
+// record — none of which is a model invocation that owes a usage fact, so a
+// modtime read reports a genuinely idle session as a working one the moment its
+// transcript is appended to. It is the production resolver behind
+// agentTokenTelemetryCheck.resolveLiveTranscript.
+func (c *agentTokenTelemetryCheck) liveTranscriptUsageTime(family, workDir string) (time.Time, bool) {
 	if strings.TrimSpace(workDir) == "" {
 		return time.Time{}, false
 	}
-	path := workertranscript.DiscoverPath(worker.DefaultSearchPaths(), family, workDir, "")
-	if path == "" {
-		return time.Time{}, false
-	}
-	info, err := os.Stat(path)
+	factory, err := worker.NewFactory(worker.FactoryConfig{SearchPaths: c.searchPaths})
 	if err != nil {
 		return time.Time{}, false
 	}
-	return info.ModTime().UTC(), true
+	adapter := factory.Adapter()
+	path := adapter.DiscoverWorkDirTranscript(family, workDir)
+	if path == "" {
+		return time.Time{}, false
+	}
+	usageTime, found, err := adapter.NewestInvocationUsageTime(family, path)
+	if err != nil || !found {
+		return time.Time{}, false
+	}
+	return usageTime, true
 }
 
 // Name returns the check's identifier.
@@ -198,7 +220,7 @@ func (c *agentTokenTelemetryCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 			scan.awake, tokenTelemetrySilenceThreshold, formatSampleAge(newestSample, now))
 		hint = "every awake session going silent together points at the emission path, not at one agent: check the controller's model-usage sweep and the usage sink"
 	case len(scan.gaps) > 0:
-		hint = "the named session(s) are still writing transcripts while nothing is recorded for them: the model-usage sweep is reading a stale transcript. Investigate the emission path, not the agents."
+		hint = "the named session(s) are still recording model usage in their transcripts while no fact lands for them: the model-usage sweep is reading a stale transcript. Investigate the emission path, not the agents."
 	default:
 		hint = "confirm the session is genuinely idle; if it is working, its invocation telemetry is not being recorded"
 	}
@@ -228,12 +250,12 @@ type awakeSilenceScan struct {
 // A silent session is not automatically a finding: bead state cannot tell a
 // working-but-unrecorded session from a benignly idle one. The scan resolves each
 // silent session's live transcript under its work_dir, independently of the
-// stored session_key (see liveTranscriptModTime), and classifies by whether that
-// transcript is still being written inside the silence window:
-//   - A transcript written since the cutoff, while no fact landed in the window,
-//     is a real emission gap and goes in gaps.
-//   - A transcript as quiet as the facts is genuinely idle, and the session is
-//     dropped as benign.
+// stored session_key (see liveTranscriptUsageTime), and classifies by the
+// timestamp of the newest usage-bearing model invocation in it:
+//   - A usage-bearing invocation since the cutoff, while no fact landed in the
+//     window, is a real emission gap and goes in gaps.
+//   - A newest invocation as old as the facts is genuinely idle, and the session
+//     is dropped as benign.
 //   - A work_dir shared by another live model session, or one with no transcript
 //     on disk, is indeterminate: it is reported with today's advisory wording
 //     rather than guessed.
@@ -308,21 +330,23 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 			scan.indeterminate = append(scan.indeterminate, detail)
 			continue
 		}
-		modTime, found := c.resolveLiveTranscript(family, workDir)
+		usageTime, found := c.resolveLiveTranscript(family, workDir)
 		if !found {
 			scan.indeterminate = append(scan.indeterminate, detail)
 			continue
 		}
-		if modTime.After(cutoff) {
-			// The live transcript is being written inside the silence window while
-			// no fact landed in it: the session is working and its telemetry is not
-			// being recorded. Announce it so the finding needs no converse sitting.
-			scan.gaps = append(scan.gaps, detail+fmt.Sprintf(", live transcript written %s but no usage recorded",
-				formatSampleAge(modTime, now)))
+		if usageTime.After(cutoff) {
+			// The transcript records a usage-bearing model invocation inside the
+			// silence window while no fact landed in it: the session is working and
+			// its telemetry is not being recorded. Announce it so the finding needs
+			// no converse sitting.
+			scan.gaps = append(scan.gaps, detail+fmt.Sprintf(", transcript shows model usage %s but no usage fact recorded",
+				formatSampleAge(usageTime, now)))
 			continue
 		}
-		// The live transcript is as quiet as the facts: genuinely idle. Its silence
-		// is benign, so it is dropped rather than re-escalated every hour.
+		// The transcript's newest usage-bearing invocation is as old as the facts:
+		// genuinely idle. Its silence is benign, so it is dropped rather than
+		// re-escalated every hour.
 	}
 	return scan
 }

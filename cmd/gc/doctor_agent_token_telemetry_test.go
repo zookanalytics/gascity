@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/usage"
 )
 
@@ -66,7 +68,18 @@ func writeUsageFacts(t *testing.T, path string, facts []usage.Fact) {
 
 func runTokenTelemetryCheck(t *testing.T, cityPath string, store beads.Store, now time.Time) *doctor.CheckResult {
 	t.Helper()
-	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil })
+	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil }, nil)
+	c.now = func() time.Time { return now }
+	return c.Run(nil)
+}
+
+// runTokenTelemetryCheckWithSearchPaths runs the check on its production resolver
+// with the given transcript search roots, so a test can exercise discovery,
+// history loading, and the newest-usage-bearing-invocation read end to end against
+// a real transcript file on disk rather than an injected timestamp.
+func runTokenTelemetryCheckWithSearchPaths(t *testing.T, cityPath string, store beads.Store, now time.Time, searchPaths []string) *doctor.CheckResult {
+	t.Helper()
+	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil }, searchPaths)
 	c.now = func() time.Time { return now }
 	return c.Run(nil)
 }
@@ -299,11 +312,11 @@ func TestAgentTokenTelemetryIsAdvisory(t *testing.T) {
 }
 
 // runTokenTelemetryCheckWithResolver runs the check with an injected live-transcript
-// resolver so a test can pin what the newest transcript under a work_dir looks
-// like without writing provider-native transcript files to disk.
+// resolver so a test can pin the newest usage-bearing invocation time under a
+// work_dir without writing provider-native transcript files to disk.
 func runTokenTelemetryCheckWithResolver(t *testing.T, cityPath string, store beads.Store, now time.Time, resolver func(family, workDir string) (time.Time, bool)) *doctor.CheckResult {
 	t.Helper()
-	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil })
+	c := newAgentTokenTelemetryCheck(cityPath, func(string) (beads.Store, error) { return store, nil }, nil)
 	c.now = func() time.Time { return now }
 	if resolver != nil {
 		c.resolveLiveTranscript = resolver
@@ -312,11 +325,12 @@ func runTokenTelemetryCheckWithResolver(t *testing.T, cityPath string, store bea
 }
 
 // TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript is the discriminator
-// the escalation-noise fix asks for: a silent session whose live transcript is
-// still being written is working but not being recorded, not idle. Resolving the
-// transcript independently of the stored session_key finds the live one the stale
-// keyed lookup misses, so the check announces the gap instead of handing an
-// operator a converse sitting to confirm idleness (gc-1fke8).
+// the escalation-noise fix asks for: a silent session whose live transcript records
+// a usage-bearing model invocation inside the silence window is working but not
+// being recorded, not idle. Resolving the transcript independently of the stored
+// session_key finds the live one the stale keyed lookup misses, so the check
+// announces the gap instead of handing an operator a converse sitting to confirm
+// idleness (gc-1fke8).
 func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -335,8 +349,8 @@ func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) 
 		{Kind: usage.KindModel, SessionID: working.ID, Worker: "rig--refinery", At: now.Add(-90 * time.Minute).UnixMilli(), IdempotencyKey: "k2"},
 	})
 
-	// The refinery's live transcript was written 5m ago — inside the silence
-	// window — yet nothing was recorded in that window: a real emission gap.
+	// The refinery's newest usage-bearing model invocation was 5m ago — inside the
+	// silence window — yet nothing was recorded in that window: a real emission gap.
 	resolver := func(_, workDir string) (time.Time, bool) {
 		if workDir == "/w/refinery" {
 			return now.Add(-5 * time.Minute), true
@@ -352,8 +366,8 @@ func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) 
 	if !strings.Contains(joined, working.ID) && !strings.Contains(joined, "rig--refinery") {
 		t.Errorf("gap session not named in details:\n%s", joined)
 	}
-	if !strings.Contains(joined, "live transcript written") {
-		t.Errorf("the finding must self-announce the live transcript, got:\n%s", joined)
+	if !strings.Contains(joined, "transcript shows model usage") {
+		t.Errorf("the finding must self-announce the unrecorded usage, got:\n%s", joined)
 	}
 	if !strings.Contains(res.FixHint, "emission path") {
 		t.Errorf("a confirmed gap must point at the emission path, got hint %q", res.FixHint)
@@ -381,8 +395,8 @@ func TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle(t *testing.T) {
 		{Kind: usage.KindModel, SessionID: idle.ID, Worker: "rig--converse", At: lastFact.UnixMilli(), IdempotencyKey: "k1"},
 	})
 
-	// The live transcript's last write matches the newest recorded fact: nothing
-	// has happened since, so the session is genuinely idle, not a telemetry gap.
+	// The transcript's newest usage-bearing invocation matches the newest recorded
+	// fact: nothing has happened since, so the session is genuinely idle, not a gap.
 	resolver := func(_, workDir string) (time.Time, bool) {
 		if workDir == "/w/converse" {
 			return lastFact, true
@@ -434,5 +448,125 @@ func TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory(t *testing.T) {
 	}
 	if !strings.Contains(res.FixHint, "confirm the session is genuinely idle") {
 		t.Errorf("a shared work_dir must fall back to the advisory wording, got hint %q", res.FixHint)
+	}
+}
+
+// writeClaudeTranscriptForWorkDir writes a claude JSONL transcript discoverable
+// under searchRoot for workDir, using the same ProjectSlug layout Claude Code
+// writes on disk, so the production resolver reads a real transcript file rather
+// than an injected timestamp.
+func writeClaudeTranscriptForWorkDir(t *testing.T, searchRoot, workDir string, lines []string) {
+	t.Helper()
+	slugDir := filepath.Join(searchRoot, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(slugDir, "session.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// claudeAssistantUsageLine builds a claude assistant transcript entry that carries
+// token usage, timestamped at at.
+func claudeAssistantUsageLine(uuid, parent string, at time.Time) string {
+	return fmt.Sprintf(`{"uuid":%q,"parentUuid":%q,"type":"assistant","message":{"role":"assistant","content":"done","model":"claude-sonnet","stop_reason":"end_turn","usage":{"input_tokens":1200,"output_tokens":40}},"timestamp":%q,"sessionId":"provider-claude"}`,
+		uuid, parent, at.UTC().Format(time.RFC3339))
+}
+
+// claudeUserLine builds a claude user transcript entry: a non-usage write that
+// bumps the transcript file's modtime without a model being invoked.
+func claudeUserLine(uuid, parent string, at time.Time) string {
+	return fmt.Sprintf(`{"uuid":%q,"parentUuid":%q,"type":"user","message":{"role":"user","content":"one more thing"},"timestamp":%q,"sessionId":"provider-claude"}`,
+		uuid, parent, at.UTC().Format(time.RFC3339))
+}
+
+// TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime is the
+// regression the pre-open review asked for: the discriminator must be the newest
+// usage-bearing model invocation in the live transcript, not the transcript file's
+// modtime. A non-usage write — a user message, a tool result, a reasoning record —
+// bumps the file without a model being invoked, so a modtime read would report a
+// genuinely idle session as a working one the moment its transcript is appended
+// to. Here the newest usage-bearing turn is 90m old (as old as the last recorded
+// fact) while a user message landed 5m ago; the session is idle and must NOT be
+// reported as an emission gap (gc-1fke8).
+func TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	searchRoot := t.TempDir()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	workDir := filepath.Join(t.TempDir(), "idle-project")
+	idle := awakeSessionBead(t, store, "rig--converse", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(idle.ID, "work_dir", workDir); err != nil {
+		t.Fatal(err)
+	}
+
+	lastFact := now.Add(-90 * time.Minute)
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: idle.ID, Worker: "rig--converse", At: lastFact.UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	// Newest usage-bearing turn is 90m old (matches the fact); a non-usage user
+	// message landed 5m ago and only bumps the file's modtime.
+	writeClaudeTranscriptForWorkDir(t, searchRoot, workDir, []string{
+		claudeUserLine("u1", "", now.Add(-95*time.Minute)),
+		claudeAssistantUsageLine("a1", "u1", lastFact),
+		claudeUserLine("u9", "a1", now.Add(-5*time.Minute)),
+	})
+
+	res := runTokenTelemetryCheckWithSearchPaths(t, cityPath, store, now, []string{searchRoot})
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok (idle: newest usage-bearing turn predates the cutoff); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if strings.Contains(joined, "transcript shows model usage") {
+		t.Errorf("a recent non-usage write must not be reported as an emission gap:\n%s", joined)
+	}
+}
+
+// TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath pins the
+// second review finding: the check must search the city's configured observe
+// paths, not only the built-in defaults. The transcript here lives ONLY under a
+// custom search root, and its newest usage-bearing turn is 5m old while the last
+// recorded fact is 90m old — a real emission gap. The check can find it, and so
+// classify it as a gap, only when the configured search root is threaded in; on
+// bare defaults it would miss the transcript entirely and fall back to the
+// idle-confirmation advisory (gc-1fke8).
+func TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	searchRoot := t.TempDir()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	workDir := filepath.Join(t.TempDir(), "working-project")
+	working := awakeSessionBead(t, store, "rig--refinery", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(working.ID, "work_dir", workDir); err != nil {
+		t.Fatal(err)
+	}
+
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: working.ID, Worker: "rig--refinery", At: now.Add(-90 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	// The newest usage-bearing turn is 5m old — inside the silence window — and the
+	// transcript lives only under the custom search root.
+	writeClaudeTranscriptForWorkDir(t, searchRoot, workDir, []string{
+		claudeUserLine("u1", "", now.Add(-10*time.Minute)),
+		claudeAssistantUsageLine("a1", "u1", now.Add(-5*time.Minute)),
+	})
+
+	res := runTokenTelemetryCheckWithSearchPaths(t, cityPath, store, now, []string{searchRoot})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (gap found under the configured search root); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, "transcript shows model usage") {
+		t.Errorf("gap under the configured search root must self-announce the unrecorded usage, got:\n%s", joined)
+	}
+	if !strings.Contains(res.FixHint, "emission path") {
+		t.Errorf("a confirmed gap must point at the emission path, got hint %q", res.FixHint)
 	}
 }
