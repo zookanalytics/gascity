@@ -5,20 +5,14 @@ import (
 	"testing"
 )
 
-// A named session's hook work query has two tiers: an ungated assigned tier
-// (--assignee=<self>) and a routed tier (routed_to=<self>, assignee=EMPTY) that
-// sits behind an origin gate. A live named session carries
-// GC_SESSION_ORIGIN=named, so before the self-target admit the gate exit-0s the
-// routed tier and the session never claims work routed to its own identity;
-// assigned work still flows because its tier is ungated. The gate admits the
-// routed tier for a non-ephemeral session only when the probe target ($1) equals
-// the session's own claim alias (GC_ALIAS), so it surfaces exactly the work the
-// session itself can claim and nothing routed elsewhere. The identities line up
-// by construction for a plain named session: poolDemandTarget() (baked in as $1),
-// RoutedToIdentity() (the claim-match target), and GC_ALIAS all resolve to the
-// same QualifiedName(). poolDemandOriginGateScript() is the single origin gate;
-// buildWorkQuery (the combined work query) and routedPoolWorkQueryProbeScript
-// (the split-tier EffectiveRoutedPoolQuery) both use it.
+// These tests pin the named-session origin gate on the hook work query. The query
+// has an ungated assigned tier (--assignee=<self>) and a routed tier
+// (routed_to=<self>, assignee="") behind poolDemandOriginGateScript(). For a
+// non-ephemeral origin the gate admits the routed tier only when the probe target
+// ($1) equals the session's own claim alias (GC_ALIAS), so a named session surfaces
+// its own routed work and nothing routed elsewhere. Both the combined query
+// (buildWorkQuery) and the split-tier query (routedPoolWorkQueryProbeScript) share
+// that gate; namedSelfTargetAdmit in workquery.go carries why the identities line up.
 
 // fakeBDSelfRoutedFrontier returns a fake bd whose only ready work is a single
 // unassigned bead routed to route. list/query/show are empty, so the assigned
@@ -49,10 +43,9 @@ esac
 `
 }
 
-// TestEffectiveWorkQueryNamedSessionSurfacesSelfRoutedWork is the primary RED pin:
-// the combined work query must surface a named session's own routed, unassigned
-// work. Fails on the pre-fix gate, which exit-0s for GC_SESSION_ORIGIN=named
-// before probe_pool_demand.
+// TestEffectiveWorkQueryNamedSessionSurfacesSelfRoutedWork: the combined work query
+// must surface a named session's own routed, unassigned work. With origin=named and
+// GC_ALIAS equal to the routed target, the gate admits the routed tier.
 func TestEffectiveWorkQueryNamedSessionSurfacesSelfRoutedWork(t *testing.T) {
 	a := Agent{Name: "olivia"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
@@ -64,10 +57,10 @@ func TestEffectiveWorkQueryNamedSessionSurfacesSelfRoutedWork(t *testing.T) {
 	}
 }
 
-// TestEffectiveRoutedPoolQueryNamedSessionSurfacesSelfRoutedWork is the RED pin
-// for the split-tier prompt path (the plain gate via routedPoolWorkQueryProbeScript).
-// A pack that spells out the routed-pool tier as its own prompt slot hit the same
-// deadlock; the gate must admit self-target work there too.
+// TestEffectiveRoutedPoolQueryNamedSessionSurfacesSelfRoutedWork: the split-tier
+// routed-pool path (EffectiveRoutedPoolQuery, used when a pack spells the routed-pool
+// tier out as its own prompt slot) carries the same gate and must admit a named
+// session's self-target work too.
 func TestEffectiveRoutedPoolQueryNamedSessionSurfacesSelfRoutedWork(t *testing.T) {
 	a := Agent{Name: "olivia"}
 	out := runShellWithFakeBd(t, a.EffectiveRoutedPoolQuery(), map[string]string{
@@ -79,10 +72,9 @@ func TestEffectiveRoutedPoolQueryNamedSessionSurfacesSelfRoutedWork(t *testing.T
 	}
 }
 
-// TestEffectiveWorkQueryEphemeralSessionStillSurfacesRoutedWork is the control for
-// the positive pins: a pool seat (GC_SESSION_ORIGIN=ephemeral) already discovered
-// routed work and must keep doing so. Green before and after; if it ever reddens,
-// the change broke the untouched ephemeral arm rather than the named arm.
+// TestEffectiveWorkQueryEphemeralSessionStillSurfacesRoutedWork: a pool seat
+// (GC_SESSION_ORIGIN=ephemeral) falls through the gate's ephemeral arm and discovers
+// routed work. This control guards that the ephemeral arm stays open.
 func TestEffectiveWorkQueryEphemeralSessionStillSurfacesRoutedWork(t *testing.T) {
 	a := Agent{Name: "olivia"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
@@ -95,10 +87,9 @@ func TestEffectiveWorkQueryEphemeralSessionStillSurfacesRoutedWork(t *testing.T)
 
 // TestEffectiveWorkQueryNamedSessionDoesNotSurfaceOtherPoolRoutedWork guards the
 // over-claim boundary: a named identity that ALSO backs a pool (PoolName set) has
-// poolDemandTarget()=PoolName, so its probe target is the POOL, not its own claim
-// identity (GC_ALIAS). The self-target admit must NOT fire — else the session
-// would claim work routed to a different (pool) queue. This is the sentinel for
-// the "delete the whole gate" mutation.
+// poolDemandTarget()=PoolName, so its probe target is the pool, not its own claim
+// identity (GC_ALIAS). The self-target admit must NOT fire, or the session would
+// claim work routed to a different (pool) queue.
 func TestEffectiveWorkQueryNamedSessionDoesNotSurfaceOtherPoolRoutedWork(t *testing.T) {
 	a := Agent{Name: "olivia", PoolName: "crew"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
@@ -110,10 +101,10 @@ func TestEffectiveWorkQueryNamedSessionDoesNotSurfaceOtherPoolRoutedWork(t *test
 	}
 }
 
-// TestEffectiveWorkQueryNamedSessionWithoutAliasStaysGated pins fail-closed
-// behavior: origin=named but no GC_ALIAS in the environment. The [ -n "$GC_ALIAS" ]
-// guard keeps the routed tier gated rather than admitting generic
-// pool-demand-shaped discovery under no identity.
+// TestEffectiveWorkQueryNamedSessionWithoutAliasStaysGated is the fail-closed case:
+// origin=named with no GC_ALIAS set. The [ -n "$GC_ALIAS" ] guard keeps the routed
+// tier gated rather than admitting generic pool-demand-shaped discovery under no
+// identity.
 func TestEffectiveWorkQueryNamedSessionWithoutAliasStaysGated(t *testing.T) {
 	a := Agent{Name: "olivia"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
@@ -125,10 +116,10 @@ func TestEffectiveWorkQueryNamedSessionWithoutAliasStaysGated(t *testing.T) {
 	}
 }
 
-// TestEffectiveWorkQueryNamedSessionStillFindsAssignedWork is the control proving
-// the ungated assigned (crash-recovery) tier is untouched: assignee=<self> work is
-// served regardless of origin, which is why the defect only ever hid routed,
-// unassigned work.
+// TestEffectiveWorkQueryNamedSessionStillFindsAssignedWork covers the ungated
+// assigned (crash-recovery) tier: assignee=<self> work is served regardless of
+// origin. The gate governs only the routed, unassigned tier, so an assigned bead
+// surfaces even for a named session.
 func TestEffectiveWorkQueryNamedSessionStillFindsAssignedWork(t *testing.T) {
 	a := Agent{Name: "olivia"}
 	out := runEffectiveWorkQuery(t, a, map[string]string{
@@ -161,10 +152,10 @@ esac
 	}
 }
 
-// TestNamedSessionOriginGatesAdmitOnlySelfTarget is the per-clause mutation pin on
-// the generated gate string itself. The origin gate must:
-//   - keep the ephemeral / no-origin arm a plain fall-through (pool seats and the
-//     reconciler's session-less demand detection are unchanged), and
+// TestNamedSessionOriginGatesAdmitOnlySelfTarget asserts the generated gate string
+// directly. The origin gate must:
+//   - keep the ephemeral / no-origin arm a plain fall-through, so pool seats and the
+//     reconciler's session-less demand detection are never gated, and
 //   - admit a non-ephemeral session's routed tier only when both the alias is set
 //     and the probe target equals it ([ -n "$GC_ALIAS" ] && [ "$1" = "$GC_ALIAS" ]).
 func TestNamedSessionOriginGatesAdmitOnlySelfTarget(t *testing.T) {
@@ -180,11 +171,11 @@ func TestNamedSessionOriginGatesAdmitOnlySelfTarget(t *testing.T) {
 	}
 }
 
-// TestPoolDemandQueryHasNoOriginGate pins the constraint that the origin gate lives
-// ONLY on the claim-discovery paths (work + routed pool). The reconciler
-// scale-check (buildPoolDemandQuery -> poolDemandCountShell) must never carry it,
-// so widening the gate cannot move a pool scale decision. The golden fixtures pin
-// the exact PoolDemand bytes; this states the invariant directly.
+// TestPoolDemandQueryHasNoOriginGate pins that the origin gate lives ONLY on the
+// claim-discovery paths (work + routed pool). The reconciler scale-check
+// (buildPoolDemandQuery -> poolDemandCountShell) must never carry it, so the gate
+// cannot move a pool scale decision. The golden fixtures pin the exact PoolDemand
+// bytes; this states the invariant directly.
 func TestPoolDemandQueryHasNoOriginGate(t *testing.T) {
 	topos := []QueryTopology{
 		{},
