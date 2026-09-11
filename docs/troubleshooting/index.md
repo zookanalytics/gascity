@@ -13,6 +13,7 @@ alive.
 - [Diagnose a Failed gc start](/troubleshooting/gc-start-walkthrough) — match a `gc start` failure symptom to its cause and resolution.
 - [Recover from Dolt Bloat](/troubleshooting/dolt-bloat-recovery) — recover a beads store whose Dolt noms directory has grown out of proportion.
 - [Clean Up bd Auto-Backups](/troubleshooting/bd-backup-cleanup) — reclaim space when bd's `.beads/backup/` directory grows large enough to threaten disk pressure.
+- [Reclaim Finished Worktrees](/troubleshooting/reclaim-worktrees) — remove the per-bead git worktrees left behind by finished work before they fill the disk.
 
 ## Operate
 

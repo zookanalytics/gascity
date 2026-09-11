@@ -88,7 +88,7 @@ gc [flags]
 | [gc version](#gc-version) | Print gc version |
 | [gc wait](#gc-wait) | Inspect and manage durable session waits |
 | [gc whoami](#gc-whoami) | Show the authenticated hosted Gas City account |
-| [gc worktree](#gc-worktree) | Ensure or verify agent workspace worktrees |
+| [gc worktree](#gc-worktree) | Ensure, verify, and reclaim agent workspace worktrees |
 
 ## gc agent
 
@@ -5110,7 +5110,7 @@ gc whoami [flags]
 
 ## gc worktree
 
-Ensure or verify agent workspace worktrees.
+Ensure, verify, and reclaim agent workspace worktrees.
 
 gc worktree is the single transactional owner for workspace provisioning.
 Postconditions: the path is a direct child of the configured per-rig root and
@@ -5121,6 +5121,10 @@ can atomically publish the same evidence on the bead. A new branch is created
 from --base, resolved verbatim against the local repository. Failed creation
 rolls back everything it created; --dry-run plans without mutating anything.
 
+ensure, verify and cleanup each act on one named worktree. reap is the bulk
+counterpart: it classifies every per-bead worktree in the city against its work
+bead and removes the finished ones.
+
 ```
 gc worktree
 ```
@@ -5129,6 +5133,7 @@ gc worktree
 |------------|-------------|
 | [gc worktree cleanup](#gc-worktree-cleanup) | Remove an owned worktree after all safety gates pass |
 | [gc worktree ensure](#gc-worktree-ensure) | Ensure the worktree exists and satisfies all postconditions |
+| [gc worktree reap](#gc-worktree-reap) | Remove per-bead worktrees whose work bead is closed |
 | [gc worktree verify](#gc-worktree-verify) | Verify the worktree satisfies all postconditions without mutating |
 
 ## gc worktree cleanup
@@ -5189,6 +5194,37 @@ gc worktree ensure [flags]
 | `--repo` | string |  | repository directory the worktree belongs to (required) |
 | `--root` | string |  | configured per-rig worktree root; path must be its direct child (required) |
 | `--store-ref` | string |  | work bead store reference (required) |
+
+## gc worktree reap
+
+Classify every per-bead worktree under .gc/worktrees/&lt;rig&gt;/ and remove the
+ones whose work bead is closed and that pass every safety gate: past the
+configured freshness quarantine, unreferenced by any non-terminal bead, no live
+process or open session working in the tree, and a clean git state that removal
+would not orphan commits from. Every gate fails closed — an indeterminate answer
+protects the tree.
+
+This is the same classification the reconciler patrol runs when
+[daemon] auto_reap_closed_bead_worktrees is enabled, on demand and without
+changing the city's configuration. It reports what it would remove and removes
+nothing until --apply is passed.
+
+```
+gc worktree reap [flags]
+```
+
+**Example:**
+
+```
+gc worktree reap
+gc worktree reap --apply
+gc worktree reap --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool |  | remove the eligible worktrees (default: report only) |
+| `--json` | bool |  | emit machine-readable JSON |
 
 ## gc worktree verify
 

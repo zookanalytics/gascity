@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc worktree reap --json success result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "command",
+    "action",
+    "dry_run",
+    "reaped",
+    "protected"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "worktree reap" },
+    "action": { "const": "reap" },
+    "dry_run": { "type": "boolean" },
+    "liveness_source": { "type": "string" },
+    "reaped": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verdict" }
+    },
+    "protected": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/verdict" }
+    },
+    "errors": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "verdict": {
+      "type": "object",
+      "required": ["bead_id", "rig", "path"],
+      "properties": {
+        "bead_id": { "type": "string" },
+        "rig": { "type": "string" },
+        "path": { "type": "string" },
+        "branch": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

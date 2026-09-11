@@ -385,7 +385,6 @@ type gitWorktree interface {
 	WorktreeList() ([]git.Worktree, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
-	HasStashesResult() (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -412,10 +411,15 @@ type nestedLiveness struct {
 
 // NestedWorktreePruneCheck identifies nested git worktrees inside agent
 // home worktrees that are safely reclaimable: nothing live working in
-// them, no uncommitted changes, no unpushed commits, no stashed work.
-// These reproduce from the remote via
-// `git worktree add path origin/<branch>`, so removing the local
-// directory is non-destructive.
+// them, no uncommitted changes, no unpushed commits. These reproduce
+// from the remote via `git worktree add path origin/<branch>`, so
+// removing the local directory is non-destructive.
+//
+// Stashed work is not one of the gates. refs/stash is a single
+// repository-global ref carrying no worktree identity, so `git stash list`
+// answers identically in every worktree of the repo, and gating on it reports
+// every nested worktree in a rig as unsafe for as long as one stash exists
+// anywhere in it. Removal leaves refs/stash untouched in any case.
 //
 // The rule is mechanical, never role-coupled: any nested worktree that
 // no live process or session is working in, whose branch tip is
@@ -637,7 +641,7 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	details = append(details, safe...)
 	details = append(details, unsafe...)
 	r.Details = details
-	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with nothing live working in them, a clean work tree, no unpushed commits, no stashes)"
+	r.FixHint = "run `gc doctor --fix` to remove safely-prunable nested worktrees (mechanical: only those with nothing live working in them, a clean work tree, no unpushed commits)"
 	return r
 }
 
@@ -649,8 +653,8 @@ func (c *NestedWorktreePruneCheck) CanFix() bool { return true }
 // broken worktree does not strand the rest — operators run --fix to
 // reclaim disk, and partial success is more useful than zero progress.
 // Returns the joined errors of all failed removals, or nil on full
-// success. Worktrees marked unsafe (uncommitted / unpushed / stashed)
-// are never touched.
+// success. Worktrees marked unsafe (uncommitted / unpushed) are never
+// touched.
 func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 	// Re-gather rather than reuse Run's snapshot: a session can start in a
 	// candidate between the classify and the removal, which is precisely the
@@ -689,7 +693,7 @@ func (c *NestedWorktreePruneCheck) Fix(_ *CheckContext) error {
 // state says, and a clean tree is the normal resting state of a healthy
 // agent between commits, so the git probes alone cannot see the case.
 // The remaining order matches the user's manual recovery procedure:
-// probe git, then status, log, stash. Any probe error rejects the
+// probe git, then status, then log. Any probe error rejects the
 // candidate with a visible reason: "can't tell" is not safe enough for
 // a destructive fix.
 func classifyNested(newGit func(string) gitWorktree, live nestedLiveness, path, parent, branch string) nestedWorktreeFinding {
@@ -720,16 +724,6 @@ func classifyNested(newGit func(string) gitWorktree, live nestedLiveness, path, 
 	}
 	if hasUnpushed {
 		f.reason = "has unpushed commits"
-		return f
-	}
-	hasStashes, err := gw.HasStashesResult()
-	if err != nil {
-		f.reason = fmt.Sprintf("stash probe failed: %v", err)
-		f.probeErr = true
-		return f
-	}
-	if hasStashes {
-		f.reason = "has stashed work"
 		return f
 	}
 	f.safeToRm = true
