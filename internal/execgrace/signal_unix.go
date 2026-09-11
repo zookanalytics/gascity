@@ -10,17 +10,10 @@ import (
 	"time"
 )
 
-const (
-	// reinterruptInterval is how often the re-interrupt ladder re-sends the
-	// interrupt to a foreground child that survived the first one and re-checks
-	// whether the blockers are gone.
-	reinterruptInterval = 25 * time.Millisecond
-	// blockerAppearWindow bounds how long the ladder waits for a foreground
-	// child to appear before concluding the first interrupt already sufficed
-	// (the shell ran its trap without a blocking child). It covers the case
-	// where cancellation raced the child's own fork/exec.
-	blockerAppearWindow = 250 * time.Millisecond
-)
+// reinterruptInterval is how often the re-interrupt ladder re-sends the
+// interrupt to a foreground child that survived the first one and re-checks
+// whether the blockers are gone.
+const reinterruptInterval = 25 * time.Millisecond
 
 // getpgid and killProcessGroup are indirection seams over the corresponding
 // syscalls so tests can force the fallback branches below deterministically —
@@ -90,43 +83,31 @@ func foregroundGroupMembersOf(cmd *exec.Cmd) []int {
 // that survived the first group interrupt, until it exits or the grace budget
 // runs out. It runs in its own goroutine for the life of the cancellation.
 //
-// A single group interrupt can miss a foreground child that was mid-fork/exec
-// when it was delivered — its signal disposition not yet settled to the
-// default — so the child keeps running, the shell stays blocked in wait, and
-// its rollback trap is deferred until WaitDelay force-kills the shell. Once the
-// child has settled a moment later, an interrupt reaches it normally.
+// A single group interrupt can miss a foreground child whose signal disposition
+// had not yet settled to the default when it was delivered (it was mid-exec), so
+// the child keeps running, the shell stays blocked in wait, and its rollback
+// trap is deferred until WaitDelay force-kills the shell. Re-sending the
+// interrupt once the disposition settles reaches the child normally and frees
+// the shell to run its trap.
 //
-// blockers is the pre-interrupt snapshot of foreground children. The ladder
-// re-signals exactly those pids, never the group, so a process the trap later
-// spawns (a teardown command) is a different pid and is never signaled. It
-// stops the instant they are all gone, since the shell can then run its trap.
-// The grace budget is cmd.WaitDelay — the same window before os/exec escalates
-// to SIGKILL — so the ladder never outlives the cancellation.
+// blockers is the pre-interrupt snapshot of foreground children, and the ladder
+// acts only on it: it re-signals exactly those pids, never the group, so a
+// process the trap later spawns (a teardown command) is a different pid and is
+// never signaled. It stops the instant the blockers are gone, since the shell
+// can then run its trap. The grace budget is cmd.WaitDelay — the same window
+// before os/exec escalates to SIGKILL — so the ladder never outlives the
+// cancellation.
+//
+// An empty snapshot is inert. With no foreground child captured before the
+// interrupt there is nothing that could have missed it, and a pid that appears
+// afterward cannot be re-signaled safely: it is indistinguishable from a
+// teardown process the shell's trap spawned once it ran, which interrupting
+// would cut short.
 func reinterruptForegroundChildren(cmd *exec.Cmd, blockers []int) {
-	if cmd.Process == nil || cmd.WaitDelay <= 0 {
-		return
-	}
-	leader := cmd.Process.Pid
-	pgid, err := syscall.Getpgid(leader)
-	if err != nil {
+	if cmd.Process == nil || cmd.WaitDelay <= 0 || len(blockers) == 0 {
 		return
 	}
 	deadline := time.Now().Add(cmd.WaitDelay)
-
-	// An empty snapshot means the child was mid-fork when the interrupt was
-	// delivered — the very race this rescues. Watch briefly for it to appear;
-	// the shell cannot reach its trap until a foreground child returns, so a
-	// child seen now is still one blocking the trap, not one the trap spawned.
-	if len(blockers) == 0 {
-		for appearDeadline := time.Now().Add(blockerAppearWindow); len(blockers) == 0 && time.Now().Before(appearDeadline); {
-			time.Sleep(reinterruptInterval)
-			blockers = foregroundGroupMembers(pgid, leader)
-		}
-		if len(blockers) == 0 {
-			return
-		}
-	}
-
 	for time.Now().Before(deadline) {
 		alive := alivePids(blockers)
 		if len(alive) == 0 {

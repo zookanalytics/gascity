@@ -127,6 +127,64 @@ sleep 30`
 	}
 }
 
+// TestApplyReinterruptLeavesTrapTeardownAloneWhenNoForegroundChild proves the
+// re-interrupt ladder is inert when the shell leader has no foreground child at
+// cancellation. The pre-interrupt snapshot is then empty, and an empty snapshot
+// cannot tell a child that was mid-exec (which should be re-interrupted) from no
+// child at all — in the latter case the shell runs its INT trap immediately and
+// the only process to appear afterward is one the trap spawned. Re-signaling
+// that teardown process would cut rollback short, so an empty snapshot must
+// produce no re-interrupt.
+//
+// The shell blocks in the read builtin on a pipe whose write end the test holds
+// open, so it has no foreground child (empty snapshot) yet still runs its trap
+// on the interrupt. The trap spawns a teardown command that sleeps before
+// recording completion; its marker must be present.
+func TestApplyReinterruptLeavesTrapTeardownAloneWhenNoForegroundChild(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS != "linux" {
+		t.Skip("the foreground-child re-interrupt enumerates the process group via /proc; Linux-only")
+	}
+	dir := t.TempDir()
+	restored := filepath.Join(dir, "restored")
+	tornDown := filepath.Join(dir, "torn_down")
+
+	// A pipe whose write end stays open keeps the shell blocked in read with no
+	// foreground child, so the pre-interrupt snapshot is empty. os/exec hands an
+	// *os.File stdin straight to the child, and os.Pipe's write end is O_CLOEXEC
+	// so the child never inherits it — read sees neither data nor EOF until the
+	// deferred close, well after the interrupt.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = pr.Close() }()
+	defer func() { _ = pw.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// The trap runs a teardown command that takes 300ms before recording its
+	// completion, then writes its own marker. grace (3s) leaves ample room for
+	// both to finish before WaitDelay would force-kill.
+	script := `trap 'sh -c "sleep 0.3; echo done > \"$TORNDOWN\""; echo restored > "$RESTORED"; exit 130' INT
+read _ignored`
+	cmd := exec.CommandContext(ctx, "sh", "-c", script)
+	cmd.Stdin = pr
+	cmd.Env = append(os.Environ(), "RESTORED="+restored, "TORNDOWN="+tornDown)
+	Apply(cmd, 3*time.Second)
+
+	if err := cmd.Run(); err == nil {
+		t.Fatal("expected the canceled command to report an error")
+	}
+	if _, err := os.Stat(restored); err != nil {
+		t.Fatalf("rollback trap never ran: %v", err)
+	}
+	if _, err := os.Stat(tornDown); err != nil {
+		t.Fatalf("teardown spawned by the trap was cut short — an empty snapshot must not re-signal a process that appears after the interrupt: %v", err)
+	}
+}
+
 // TestApplyForceKillsUncooperative proves the grace escalation: a command that
 // ignores the interrupt must still die within WaitDelay rather than hanging
 // the caller forever.
