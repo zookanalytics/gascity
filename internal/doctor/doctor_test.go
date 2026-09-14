@@ -952,7 +952,15 @@ func (c *lateWritingCheck) RenderExtras(_ *CheckContext, _ io.Writer) {
 // corruption on a buffer-backed writer). Coordination is via channels so the
 // assertion is deterministic rather than timing-based and holds under -race.
 func TestRunCheckTimeoutIsolatesLateFixOutput(t *testing.T) {
-	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	// Doctor.Run races the check goroutine's first scheduling against
+	// time.After(CheckTimeout). A millisecond-scale bound lets a loaded parallel
+	// shard lose that race: the fast initial Run is marked "timed out", the fix
+	// path is skipped (Doctor.Run only fixes a check that did not time out), and
+	// fixStart is never closed. Seconds of headroom make the initial Run's
+	// classification independent of host load, while the wedged fix still reaches
+	// the timeout because it blocks on release by construction.
+	const checkTimeout = 2 * time.Second
+	d := &Doctor{CheckTimeout: checkTimeout}
 	check := &lateWritingOnFixCheck{
 		name:      "late-fix-writer",
 		fixStart:  make(chan struct{}),
@@ -965,9 +973,16 @@ func TestRunCheckTimeoutIsolatesLateFixOutput(t *testing.T) {
 	done := make(chan *Report, 1)
 	go func() { done <- d.Run(&CheckContext{}, &buf, true) }()
 
-	// Wait until Fix is running, then let the 25ms bound fire and abandon it
+	// Wait until Fix is running, then let the per-check bound fire and abandon it
 	// (Fix stays blocked on release, so it cannot complete within the bound).
-	<-check.fixStart
+	// Bound the wait: if the headroom above is still lost and the fix path is
+	// skipped, fixStart never closes, so fail fast with a diagnostic instead of
+	// stalling until the 20m go-test budget panics the binary.
+	select {
+	case <-check.fixStart:
+	case <-time.After(30 * time.Second):
+		t.Fatal("fix never started: the check's initial Run missed its CheckTimeout under load, so the fix-timeout path was not exercised")
+	}
 	report := <-done
 
 	// The initial Run failed fast; the FIX was abandoned, so the result is an
