@@ -332,6 +332,60 @@ func TestSetMarkerEmptyValueClears(t *testing.T) {
 	}
 }
 
+// TestReconcileSessionKey proves the reconciling writer overwrites a non-empty
+// session_key AND clears the invocation-usage cursor in a single batch. A
+// long-lived session whose provider transcript forked mid-conversation is left
+// with session_key pinned to the abandoned transcript; reconciling to the live
+// id rebinds the model-usage sweep, and clearing the cursor makes it resweep the
+// new transcript from its head instead of a cursor pointing into the dead one.
+func TestReconcileSessionKey(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{
+		"session_key":                    "old-uuid",
+		MetadataKeyInvocationUsageCursor: "msg_from_dead_transcript",
+	})
+	is, rec := recordingStore(t, b)
+
+	if err := is.ReconcileSessionKey("s-1", "new-uuid"); err != nil {
+		t.Fatalf("ReconcileSessionKey: %v", err)
+	}
+
+	// Both writes land in one atomic batch — an interrupted single-key sequence
+	// could leave the new key paired with the dead transcript's cursor.
+	calls := rec.CallsForOp("SetMetadataBatch")
+	if len(calls) != 1 {
+		t.Fatalf("want 1 SetMetadataBatch, got %d", len(calls))
+	}
+	want := map[string]string{"session_key": "new-uuid", MetadataKeyInvocationUsageCursor: ""}
+	if !reflect.DeepEqual(calls[0].Metadata, want) {
+		t.Errorf("batch = %#v, want %#v", calls[0].Metadata, want)
+	}
+	got, err := is.Get("s-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.SessionKey != "new-uuid" {
+		t.Errorf("session_key = %q, want new-uuid", got.SessionKey)
+	}
+}
+
+// TestReconcileSessionKeyEmptyIsNoOp proves a degenerate call writes nothing:
+// the reconciling writer must never clear a live key or cursor on an empty id or
+// empty replacement key.
+func TestReconcileSessionKeyEmptyIsNoOp(t *testing.T) {
+	b := sessionBeadFixture("s-1", "open", map[string]string{"session_key": "old-uuid"})
+	is, rec := recordingStore(t, b)
+
+	if err := is.ReconcileSessionKey("s-1", ""); err != nil {
+		t.Fatalf("ReconcileSessionKey(empty key): %v", err)
+	}
+	if err := is.ReconcileSessionKey("", "new-uuid"); err != nil {
+		t.Fatalf("ReconcileSessionKey(empty id): %v", err)
+	}
+	if ops := opsOf(rec.Calls()); len(ops) != 0 {
+		t.Fatalf("degenerate reconcile wrote ops %v, want none", ops)
+	}
+}
+
 // TestRecordCurrentBeadEmitsSingleKeySetMetadata proves RecordCurrentBead emits
 // a single-key SetMetadata of CurrentBeadIDKey — byte-identical to
 // recordCurrentBeadIDOnWake's raw store.SetMetadata write (NOT a batch).
