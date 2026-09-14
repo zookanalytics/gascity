@@ -31,6 +31,90 @@ type gitProbe interface {
 // through a package-level var so tests can stub the git invocations.
 var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
 
+// worktreeLivenessInputs bundles the liveness signals the worker_dir auto-prune
+// consults before removing a closed session's worktree: the authoritative
+// process-table scan (live) and the recorded working directories of every open
+// session (sessionDirs). The reconciler gathers both once per pass and shares
+// the same value across every prune decision in that pass, matching the
+// closed-bead reaper's own once-per-pass gather — the process-table walk is far
+// more expensive than the per-worktree git probes.
+type worktreeLivenessInputs struct {
+	live        liveWorktreeState
+	sessionDirs []string
+}
+
+// worktreeLivenessBlocksPrune reports whether the pass's liveness snapshot
+// forbids removing workerDir, logging the reason to stderr when it does. It is
+// the shared gate both prune forms consult before the git-state probes, so a
+// clean tree — the normal resting state of a healthy agent between commits —
+// can no longer read as prunable while a process is running in it.
+//
+// selfSessionDirs are the retired session's own recorded worktree dirs. They
+// are dropped from the active-session cross-check before it runs: the pass
+// gathers sessionDirs from the snapshot taken at tick start, which still lists
+// the session being pruned as open, so its own recorded directory would
+// otherwise read as a live signal against its own worktree and no clean pool
+// worktree would ever be reclaimed. The /proc cwd scan is consulted unchanged —
+// a process genuinely still running in the tree (a drain in flight, a crash
+// adoption, a reaped-but-live runtime) is a real liveness signal and still
+// blocks — so only the recorded-metadata signal is self-filtered.
+//
+// It fails closed: an indeterminate scan (scanned=false) blocks removal,
+// because a scan that observed nothing running is indistinguishable from one
+// that could not run at all. A live process cwd, or a different open session
+// recorded as working at or beneath workerDir, also blocks. This is the same
+// shared boundary (bead_worktree_liveness.go) the closed-bead reaper and the
+// doctor prune check read; liveness is a fact about which directory a running
+// process occupies and names no role.
+//
+// No .worktree-stale marker is written for a liveness block: unlike the
+// git-state gates, liveness is transient and self-resolving once the process
+// exits, and writing into a tree a process is actively using would race that
+// process.
+func worktreeLivenessBlocksPrune(workerDir string, liveness worktreeLivenessInputs, selfSessionDirs []string, stderr io.Writer) bool {
+	if !liveness.live.scanned {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: liveness scan unavailable (failing closed)\n", workerDir) //nolint:errcheck
+		return true
+	}
+	sessionDirs := excludeNormalizedDirs(liveness.sessionDirs, selfSessionDirs)
+	if isLive, why := worktreeIsLive(workerDir, liveness.live, sessionDirs); isLive {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, why) //nolint:errcheck
+		return true
+	}
+	return false
+}
+
+// excludeNormalizedDirs returns the entries of dirs whose normalized path does
+// not match any normalized entry of exclude. It is how the worker_dir auto-prune
+// drops the retired session's own recorded dirs from the active-session liveness
+// set before the cross-check compares it against that session's worker_dir.
+// Comparison is on pathutil.NormalizePathForCompare so it matches worktreeIsLive's
+// own normalization; a dir a different session recorded strictly beneath the
+// worktree is not an exact match, so it survives and still blocks. Empty exclude
+// entries never match.
+func excludeNormalizedDirs(dirs, exclude []string) []string {
+	if len(dirs) == 0 || len(exclude) == 0 {
+		return dirs
+	}
+	skip := make(map[string]struct{}, len(exclude))
+	for _, e := range exclude {
+		if n := pathutil.NormalizePathForCompare(e); n != "" {
+			skip[n] = struct{}{}
+		}
+	}
+	if len(skip) == 0 {
+		return dirs
+	}
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if _, ok := skip[pathutil.NormalizePathForCompare(d)]; ok {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
 // pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
 // can later detect when it's safe to reclaim. Best-effort: write failures are
@@ -48,27 +132,35 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 
 // pruneAgentHomeWorktreeIfSafe removes the worktree at the closed session's
 // worker_dir, after applying the same safety gates as doctor's
-// NestedWorktreePruneCheck. Returns true when the removal actually
-// happened.
+// NestedWorktreePruneCheck — including the liveness gate, so a closed session
+// whose process is still running (a drain in flight, a crash adoption, a
+// reaped-but-live runtime) does not have its worker_dir force-removed out from
+// under it. Returns true when the removal actually happened.
 //
 // The decision is mechanical, never role-coupled: any pool-managed agent
 // worktree that lives under the city's .gc/worktrees/ tree, is a git
-// worktree, and probes clean is safe to reclaim. Pool sessions are
-// transient by design — their worktrees were never meant to outlive the
-// session bead.
+// worktree, has nothing live working in it, and probes clean is safe to
+// reclaim. Pool sessions are transient by design — their worktrees were never
+// meant to outlive the session bead.
+//
+// liveness is the pass's once-gathered liveness snapshot (the /proc cwd scan
+// plus the open sessions' recorded working directories); the caller gathers it
+// once and shares it across every prune decision in the pass.
 //
 // No-op when:
 //   - cfg.Daemon.AutoPruneWorkerDir is false
 //   - the session bead has no worker_dir metadata
 //   - the worker_dir does not live under cityPath/.gc/worktrees/
 //   - the worker_dir is missing on disk or has no .git pointer
+//   - a live process, or a different open session, is working at or beneath the
+//     worker_dir, or the liveness scan is indeterminate (fails closed)
 //   - the worktree has uncommitted changes, unpushed commits, or stashes
 //   - the rig that owns the session cannot be resolved to a filesystem path
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
 // still shows up via `gc doctor` later, which is the operator's existing
 // reclaim path.
-func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *config.City, stderr io.Writer) bool {
+func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *config.City, liveness worktreeLivenessInputs, stderr io.Writer) bool {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return false
 	}
@@ -92,6 +184,13 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 
 	gp := newGitProbe(workerDir)
 	if !gp.IsRepo() {
+		return false
+	}
+	// Liveness before the git-state probes: a clean tree is the normal resting
+	// state of a healthy agent between commits, so those probes alone cannot
+	// see a live worktree, and checking first also avoids writing a stale
+	// marker into a tree a process is still using.
+	if worktreeLivenessBlocksPrune(workerDir, liveness, []string{workerDir}, stderr) {
 		return false
 	}
 	if gp.HasUncommittedWork() {
@@ -142,9 +241,10 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 // session.WorkerDirFromInfo (the canonical→legacy Info fallback equivalent to
 // contract.WorkerDirFromMetadata), the rig-root lookup reads Info.Template via
 // lookupRigRootForSessionInfo, and the log line reads Info.SessionNameMetadata —
-// every safety gate and the removal itself are unchanged. Byte-identical to the
-// raw form, which survives for its test callers.
-func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
+// every safety gate (including the shared liveness gate) and the removal itself
+// are unchanged. Byte-identical to the raw form, which survives for its test
+// callers.
+func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, liveness worktreeLivenessInputs, stderr io.Writer) {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return
 	}
@@ -167,6 +267,13 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 
 	gp := newGitProbe(workerDir)
 	if !gp.IsRepo() {
+		return
+	}
+	// Liveness before the git-state probes: a clean tree is the normal resting
+	// state of a healthy agent between commits, so those probes alone cannot
+	// see a live worktree, and checking first also avoids writing a stale
+	// marker into a tree a process is still using.
+	if worktreeLivenessBlocksPrune(workerDir, liveness, sessionRecordedWorktreeDirs(info), stderr) {
 		return
 	}
 	if gp.HasUncommittedWork() {
