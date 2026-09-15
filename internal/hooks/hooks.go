@@ -1492,11 +1492,15 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 	}
 
 	// Second pass: normalize matcher only when the entry is identifiably
-	// GC-managed. Blocks user-authored SessionStart entries with
-	// matcher:"" from being silently rewritten to "startup".
+	// GC-managed. The canonical managed SessionStart matcher is "" — the
+	// source-agnostic form that fires on resume/clear/compact/fork as well as
+	// startup, so gc prime --hook's session-key handling runs on every session
+	// source, not only a fresh launch. Rewrite the legacy "startup" form back to
+	// "". User-authored SessionStart entries with a "startup" matcher are left
+	// untouched by the hasManagedCommand gate.
 	if event == "SessionStart" && hasManagedCommand {
-		if matcher, ok := entry["matcher"].(string); ok && matcher == "" {
-			entry["matcher"] = "startup"
+		if matcher, ok := entry["matcher"].(string); ok && matcher == "startup" {
+			entry["matcher"] = ""
 			changed = true
 		}
 	}

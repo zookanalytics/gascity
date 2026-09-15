@@ -134,8 +134,8 @@ func TestInstallClaude(t *testing.T) {
 	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
 		t.Error("claude SessionStart hook should mark managed hook invocation")
 	}
-	if entries := claudeHookEntries(t, runtimeData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "startup" {
-		t.Errorf("claude SessionStart matcher should be \"startup\" to avoid re-injecting prompt on resume/clear/compact, got %q", func() string {
+	if entries := claudeHookEntries(t, runtimeData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "" {
+		t.Errorf("claude SessionStart matcher should be \"\" (source-agnostic) so gc prime --hook runs on resume/clear/compact/fork, not only startup, got %q", func() string {
 			if len(entries) == 0 {
 				return ""
 			}
@@ -289,7 +289,13 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readEmbedded: %v", err)
 	}
-	stale := strings.Replace(string(current), `"matcher": "startup"`, `"matcher": ""`, 1)
+	// The legacy generated form pinned SessionStart to matcher "startup", so the
+	// hook fired only on a fresh launch. The canonical form is now the
+	// source-agnostic empty matcher (also fires on resume/clear/compact/fork), so
+	// upgrading an existing city must rewrite a stale "startup" back to "".
+	// SessionStart is the first hook entry in the embedded config, so replacing
+	// the first empty matcher targets it, not PreCompact/UserPromptSubmit.
+	stale := strings.Replace(string(current), `"matcher": ""`, `"matcher": "startup"`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check SessionStart matcher pattern")
 	}
@@ -302,8 +308,8 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 
 	hookData := fs.Files["/city/hooks/claude.json"]
 	runtimeData := fs.Files["/city/.gc/settings.json"]
-	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "startup" {
-		t.Fatalf("upgraded hook SessionStart matcher = %q, want startup", func() string {
+	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "" {
+		t.Fatalf("upgraded hook SessionStart matcher = %q, want \"\" (source-agnostic)", func() string {
 			if len(entries) == 0 {
 				return ""
 			}
@@ -312,6 +318,45 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 	}
 	if string(runtimeData) != string(hookData) {
 		t.Fatalf("runtime Claude settings should mirror upgraded hook settings:\n%s", string(runtimeData))
+	}
+}
+
+// TestInstallClaudeSessionStartMatcherIsSourceAgnostic guards the fix for the
+// model-usage emission gap: the managed Claude SessionStart hook must run
+// gc prime --hook on every session source (startup, resume, clear, compact,
+// fork), not only startup. gc prime --hook maintains the provider session_key,
+// and that maintenance is needed on the mid-session rotations — resume, /clear,
+// compaction, fork — where a fresh startup hook never fires and a session_key
+// bound to a dead conversation would otherwise never be refreshed. A
+// "startup"-only matcher silences the hook on exactly those rotations. Claude
+// Code treats an empty SessionStart matcher as matching every source (the form
+// PreCompact and UserPromptSubmit already use), so this test fails if a later
+// edit narrows the matcher back to "startup" or any other non-empty source
+// filter.
+//
+// Prompt re-injection is not a risk: gc prime --hook suppresses the startup
+// prompt whenever GC_STARTUP_PROMPT_DELIVERED=1, which the resume path re-sets
+// for hook consumption (cmd/gc/session_lifecycle_parallel.go), so the
+// source-agnostic matcher runs the session_key maintenance without repeating
+// the prompt.
+func TestInstallClaudeSessionStartMatcherIsSourceAgnostic(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	runtimeData, ok := fs.Files["/city/.gc/settings.json"]
+	if !ok {
+		t.Fatal("expected /city/.gc/settings.json to be written")
+	}
+	entries := claudeHookEntries(t, runtimeData, "SessionStart")
+	if len(entries) != 1 {
+		t.Fatalf("SessionStart entries = %d, want 1:\n%s", len(entries), string(runtimeData))
+	}
+	if entries[0].Matcher != "" {
+		t.Fatalf("SessionStart matcher = %q, want \"\" (source-agnostic — must fire on resume/clear/compact/fork, not only startup)", entries[0].Matcher)
+	}
+	if cmd := claudeHookCommand(t, runtimeData, "SessionStart"); !strings.Contains(cmd, "gc prime --hook") {
+		t.Fatalf("SessionStart hook should run the gc prime --hook persistence command, got %q", cmd)
 	}
 }
 
@@ -974,7 +1019,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) 
 		t.Fatalf("readEmbedded: %v", err)
 	}
 	stale := strings.Replace(string(current), `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook`, 1)
-	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
+	stale = strings.Replace(stale, `"matcher": ""`, `"matcher": "startup"`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check combined SessionStart drift pattern")
 	}
@@ -994,8 +1039,8 @@ func TestInstallClaudeUpgradesGeneratedFileWithCombinedKnownDrift(t *testing.T) 
 	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
 		t.Fatalf("upgraded combined-drift SessionStart missing managed marker: %s", sessionStartCommand)
 	}
-	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "startup" {
-		t.Fatalf("upgraded combined-drift hook SessionStart matcher = %q, want startup", func() string {
+	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "" {
+		t.Fatalf("upgraded combined-drift hook SessionStart matcher = %q, want \"\" (source-agnostic)", func() string {
 			if len(entries) == 0 {
 				return ""
 			}
@@ -1015,7 +1060,7 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	}
 	stale := strings.Replace(string(current), `gc handoff --auto \"context cycle\"`, `gc prime --hook`, 1)
 	stale = strings.Replace(stale, `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex`, `gc prime --hook --hook-format codex`, 1)
-	stale = strings.Replace(stale, `"matcher": "startup"`, `"matcher": ""`, 1)
+	stale = strings.Replace(stale, `"matcher": ""`, `"matcher": "startup"`, 1)
 	if stale == string(current) {
 		t.Fatal("stale fixture did not diverge from current embedded config — check all known Claude drift patterns")
 	}
@@ -1035,8 +1080,8 @@ func TestInstallClaudeUpgradesGeneratedFileWithAllKnownDrift(t *testing.T) {
 	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
 		t.Fatalf("upgraded all-drift SessionStart missing managed marker: %s", sessionStartCommand)
 	}
-	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "startup" {
-		t.Fatalf("upgraded all-drift hook SessionStart matcher = %q, want startup", func() string {
+	if entries := claudeHookEntries(t, hookData, "SessionStart"); len(entries) == 0 || entries[0].Matcher != "" {
+		t.Fatalf("upgraded all-drift hook SessionStart matcher = %q, want \"\" (source-agnostic)", func() string {
 			if len(entries) == 0 {
 				return ""
 			}
@@ -1164,19 +1209,21 @@ func TestInstallClaudeDoesNotClobberUserWrappedCommand(t *testing.T) {
 	}
 }
 
-// TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher is the second
-// regression for the heuristic-tightening fixup. Codex's major finding #2
-// flagged that upgradeClaudeHookEntry would rewrite ANY SessionStart entry
-// with matcher:"" to matcher:"startup", regardless of whether the entry's
-// commands were GC-managed. A user-authored entry with matcher:"" and a
-// non-managed command must survive untouched.
-func TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher(t *testing.T) {
+// TestInstallClaudeDoesNotNormalizeUserAuthoredStartupMatcher guards that
+// matcher normalization fires only on GC-managed SessionStart entries. The
+// canonical managed matcher is "" (source-agnostic), and upgradeClaudeHookEntry
+// rewrites a legacy "startup" matcher to "" — but only when the entry carries a
+// recognized managed command. A user-authored entry with a "startup" matcher
+// and a non-managed command must survive untouched. A "startup" fixture is used
+// deliberately: the managed base entry now carries matcher "", so a "" fixture
+// would be indistinguishable from the base and could not detect a rewrite.
+func TestInstallClaudeDoesNotNormalizeUserAuthoredStartupMatcher(t *testing.T) {
 	fs := fsys.NewFake()
 	userOwned := `{
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "",
+        "matcher": "startup",
         "hooks": [
           {
             "type": "command",
@@ -1195,18 +1242,18 @@ func TestInstallClaudeDoesNotNormalizeUserAuthoredEmptyMatcher(t *testing.T) {
 
 	runtime := fs.Files["/city/.gc/settings.json"]
 	entries := claudeHookEntries(t, runtime, "SessionStart")
-	// The user-authored SessionStart entry should survive with matcher
-	// unchanged; merge may add the managed entry separately but the
-	// user-authored matcher:"" must not be normalized away.
+	// The user-authored SessionStart entry should survive with its "startup"
+	// matcher unchanged; merge may add the managed entry separately, but the
+	// user-authored non-managed matcher must not be normalized to "".
 	foundUserOwned := false
 	for _, e := range entries {
-		if e.Matcher == "" {
+		if e.Matcher == "startup" {
 			foundUserOwned = true
 			break
 		}
 	}
 	if !foundUserOwned {
-		t.Fatalf("user-authored SessionStart entry with matcher:\"\" was rewritten — gc must not normalize matcher unless entry is identifiably GC-managed:\n%s", string(runtime))
+		t.Fatalf("user-authored SessionStart entry with matcher:\"startup\" was rewritten — gc must not normalize matcher unless entry is identifiably GC-managed:\n%s", string(runtime))
 	}
 }
 
