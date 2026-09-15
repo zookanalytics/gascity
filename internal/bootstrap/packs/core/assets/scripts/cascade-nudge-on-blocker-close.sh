@@ -7,10 +7,15 @@
 #
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open or deferred dependent. Idempotent: a given
-# (blocker, dependent) pair is nudged at most once. Dedup state lives in
-# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
-# both city- and pack-scoped — multi-city installs never cross-pollinate.
+# assignee of every open or deferred dependent whose OTHER blocks-deps are
+# also all closed — a true ready-transition. A dependent still blocked by a
+# sibling is skipped, because "may be unblocked" is false until its last
+# blocker closes. Idempotent per (blocker, dependent) pair via dedup state in
+# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json (both city- and
+# pack-scoped, so multi-city installs never cross-pollinate). The last blocker
+# to close surfaces the dependent once per blocker still inside the lookback
+# window, so the nudge carries the dependent as its bead reference and the
+# queue collapses the copies into one delivery.
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
@@ -126,8 +131,34 @@ while IFS= read -r blocker; do
             continue
         fi
         set_rig_args "$dep_id"
+
+        # Fire only on a TRUE ready-transition. A dependent with N blockers
+        # surfaces here when the FIRST of them closes, but "may be unblocked" is
+        # false until the LAST one does. Re-read the dependent's own blocks-deps
+        # (its rig scope is already in RIG_ARG from set_rig_args above) and skip
+        # unless every one is closed; the last blocker's own close event re-runs
+        # this order and finds the dependent ready.
+        DEP_BLOCKERS="$(gc bd dep list "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+            --direction=down --type=blocks --json 2>/dev/null)" || DEP_BLOCKERS=""
+        # The dependent provably has at least one blocks edge — the just-closed
+        # blocker is what surfaced it — so an empty or unreadable result is an
+        # anomaly, not a ready dependent. Fail closed: skip without recording
+        # dedup state so a later eval retries, rather than sending a false
+        # "may be unblocked".
+        if [ -z "$DEP_BLOCKERS" ] || [ "$DEP_BLOCKERS" = "[]" ]; then continue; fi
+        still_open="$(printf '%s' "$DEP_BLOCKERS" \
+            | jq -r '[.[] | select(.status != "closed") | .id] | join(" ")' 2>/dev/null)" || still_open=""
+        if [ -n "$still_open" ]; then continue; fi
+
         msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$assignee" "$msg" >/dev/null 2>&1; then
+        # --reference-bead names the dependent so repeat cascade nudges for the
+        # same (assignee, dependent) collapse in the queue instead of stacking:
+        # the last blocker to close surfaces the dependent once per blocker still
+        # inside the lookback window, and the queue supersedes all but one.
+        # --delivery=queue makes this an async reminder whose exit status
+        # reflects the enqueue itself, not a live wake that can fail after it.
+        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+            --delivery=queue --reference-bead "$dep_id" "$assignee" "$msg" >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
             NUDGED=$((NUDGED + 1))
         fi
