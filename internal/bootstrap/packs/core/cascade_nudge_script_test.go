@@ -469,6 +469,62 @@ func TestCascadeNudgeKeepsAssigneePath(t *testing.T) {
 	}
 }
 
+// TestCascadeNudgeQueuesTheAssigneeNudgeWithABeadReference pins the queue
+// supersession the assignee arm relies on: its nudge is queued and names the
+// dependent as its bead reference, so the nudge queue keeps one reminder per
+// (session, dependent). The routed arm carries neither flag, because a queued
+// nudge never wakes the pool member that has to claim.
+func TestCascadeNudgeQueuesTheAssigneeNudgeWithABeadReference(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; cascade-nudge-on-blocker-close.sh requires it")
+	}
+
+	cases := []struct {
+		name      string
+		row       string
+		wantLine  string
+		wantFlags bool
+	}{
+		{
+			name:      "assignee",
+			row:       `{"id":"ga-dep","status":"open","assignee":"worker-1"}`,
+			wantLine:  "gc session nudge worker-1 blocker ga-blk closed — your dependent ga-dep may be unblocked",
+			wantFlags: true,
+		},
+		{
+			name:     "routed",
+			row:      `{"id":"ga-dep","status":"open","metadata":{"gc.routed_to":"gascity/pool"}}`,
+			wantLine: "gc session nudge pool-1 blocker ga-blk closed — routed dependent ga-dep may be ready to claim",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			stateDir := filepath.Join(dir, "state")
+			binDir, logPath := fakeGCBin(t, cascadeFake{
+				eventsPath: writeCascadeCloseEvent(t, "ga-blk"),
+				depJSON:    "[" + tc.row + "]",
+				members:    map[string][]string{"gascity/pool": {"pool-1"}},
+				failDir:    dir,
+			}.body())
+			if out, err := runCascadeNudge(t, binDir, stateDir); err != nil {
+				t.Fatalf("cascade-nudge-on-blocker-close.sh failed: %v\n%s", err, out)
+			}
+			_, logged := countNudges(t, logPath)
+			if !strings.Contains(logged, tc.wantLine) {
+				t.Fatalf("missing nudge %q; gc calls:\n%s", tc.wantLine, logged)
+			}
+			const flags = " --delivery=queue --reference-bead ga-dep"
+			if got := strings.Contains(logged, tc.wantLine+flags); got != tc.wantFlags {
+				t.Fatalf("nudge carries %q = %v, want %v; gc calls:\n%s", flags, got, tc.wantFlags, logged)
+			}
+			if !tc.wantFlags && (strings.Contains(logged, "--delivery") || strings.Contains(logged, "--reference-bead")) {
+				t.Fatalf("the routed nudge must carry no queue flags; gc calls:\n%s", logged)
+			}
+		})
+	}
+}
+
 // TestCascadeNudgeRetriesFailedRoutedNudge pins the failure contract for the
 // routed wake-up. An undeliverable nudge must not abort the run (a sibling
 // dependent of the same blocker still gets theirs), must not be recorded as
