@@ -80,16 +80,22 @@ func TestMergeSettingsJSON_CanonicalizesCommandsWithoutHTMLEscaping(t *testing.T
 	}
 }
 
-func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
-	// Crew scenario: overlay changes PreCompact catch-all command.
+func TestMergeSettingsJSON_SameMatcherUnionsInnerHooks(t *testing.T) {
+	// Two wrapper-shape entries that share a matcher have their inner hooks
+	// unioned, not the base entry replaced wholesale. In desiredClaudeSettings
+	// the base is the managed embedded settings and the overlay is the user's
+	// file, so a wholesale replace on a shared matcher silently dropped the
+	// managed command whenever a user added their own hook under the same
+	// matcher (gc-n1d9n). Claude/Gemini run every inner hook under a matching
+	// matcher, so unioning them is what keeps both commands live.
 	base := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
 		}
 	}`
 	over := `{
 		"hooks": {
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "my-backup.sh"}]}]
 		}
 	}`
 
@@ -105,13 +111,47 @@ func TestMergeSettingsJSON_SameMatcherReplacement(t *testing.T) {
 	hooks := doc["hooks"].(map[string]any)
 	arr := hooks["PreCompact"].([]any)
 	if len(arr) != 1 {
-		t.Fatalf("PreCompact entries = %d, want 1", len(arr))
+		t.Fatalf("PreCompact entries = %d, want 1 (single \"\" matcher):\n%s", len(arr), result)
 	}
-	entry := arr[0].(map[string]any)
-	innerHooks := entry["hooks"].([]any)
-	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff --auto "context cycle"` {
-		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
+	inner := arr[0].(map[string]any)["hooks"].([]any)
+	if len(inner) != 2 {
+		t.Fatalf("PreCompact inner hooks = %d, want 2 (base managed + overlay unioned):\n%s", len(inner), result)
+	}
+	// Base inner hooks come first; overlay's new ones are appended.
+	if cmd := inner[0].(map[string]any)["command"].(string); cmd != `gc handoff --auto "context cycle"` {
+		t.Errorf("first inner command = %q, want the managed base command", cmd)
+	}
+	if cmd := inner[1].(map[string]any)["command"].(string); cmd != "my-backup.sh" {
+		t.Errorf("second inner command = %q, want the overlay command my-backup.sh", cmd)
+	}
+}
+
+func TestMergeSettingsJSON_SameMatcherIdenticalInnerHooksDedup(t *testing.T) {
+	// Unioning inner hooks keys them by command, so re-merging identical inner
+	// hooks under a shared matcher stays idempotent: a repeated managed command
+	// collapses to one entry instead of accumulating on every install.
+	settings := `{
+		"hooks": {
+			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
+		}
+	}`
+
+	result, err := MergeSettingsJSON([]byte(settings), []byte(settings))
+	if err != nil {
+		t.Fatalf("MergeSettingsJSON: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(result, &doc); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	arr := doc["hooks"].(map[string]any)["PreCompact"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("PreCompact entries = %d, want 1:\n%s", len(arr), result)
+	}
+	inner := arr[0].(map[string]any)["hooks"].([]any)
+	if len(inner) != 1 {
+		t.Fatalf("PreCompact inner hooks = %d, want 1 (deduped by command):\n%s", len(inner), result)
 	}
 }
 
@@ -351,7 +391,10 @@ func TestMergeSettingsJSON_WitnessScenario(t *testing.T) {
 }
 
 func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
-	// Full crew scenario: base has 4 hooks, overlay overrides PreCompact only.
+	// Full crew scenario: base has 4 hooks, overlay adds a PreCompact command.
+	// The managed base command shares the "" matcher, so the merge unions the
+	// inner hooks: both the managed command and the overlay's own command
+	// survive rather than the overlay dropping the managed one.
 	base := `{
 		"hooks": {
 			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
@@ -383,21 +426,31 @@ func TestMergeSettingsJSON_CrewScenario(t *testing.T) {
 			t.Errorf("missing category %q", cat)
 		}
 	}
-	// PreCompact replaced.
+	// PreCompact keeps a single "" matcher entry whose inner hooks union the
+	// managed base command with the overlay's added command.
 	arr := hooks["PreCompact"].([]any)
 	if len(arr) != 1 {
 		t.Fatalf("PreCompact entries = %d, want 1", len(arr))
 	}
-	entry := arr[0].(map[string]any)
-	innerHooks := entry["hooks"].([]any)
-	cmd := innerHooks[0].(map[string]any)["command"].(string)
-	if cmd != `gc handoff --auto "context cycle"` {
-		t.Errorf("PreCompact command = %q, want gc handoff", cmd)
+	innerHooks := arr[0].(map[string]any)["hooks"].([]any)
+	if len(innerHooks) != 2 {
+		t.Fatalf("PreCompact inner hooks = %d, want 2 (managed base + overlay unioned):\n%s", len(innerHooks), result)
+	}
+	if cmd := innerHooks[0].(map[string]any)["command"].(string); cmd != "gc prime" {
+		t.Errorf("first PreCompact command = %q, want the managed base command gc prime", cmd)
+	}
+	if cmd := innerHooks[1].(map[string]any)["command"].(string); cmd != `gc handoff --auto "context cycle"` {
+		t.Errorf("second PreCompact command = %q, want the overlay command gc handoff", cmd)
 	}
 }
 
 func TestMergeSettingsJSON_BackwardCompat_FullOverlay(t *testing.T) {
-	// When overlay contains all hooks (legacy full copy), result equals overlay content.
+	// A full overlay copy of the current managed settings merges to itself: no
+	// category dropped, no inner hook duplicated. In desiredClaudeSettings the
+	// base is always the current managed embedded, so a legacy city carrying a
+	// full copy of those same settings must merge back to exactly that copy —
+	// the union keys inner hooks by command, so identical commands collapse
+	// rather than doubling.
 	full := `{
 		"hooks": {
 			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
@@ -406,14 +459,7 @@ func TestMergeSettingsJSON_BackwardCompat_FullOverlay(t *testing.T) {
 			"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "gc hook --inject"}]}]
 		}
 	}`
-	base := `{
-		"hooks": {
-			"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
-			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc prime"}]}],
-			"UserPromptSubmit": [{"matcher": "", "hooks": [{"type": "command", "command": "gc mail check --inject"}]}],
-			"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "gc hook --inject"}]}]
-		}
-	}`
+	base := full
 
 	result, err := MergeSettingsJSON([]byte(base), []byte(full))
 	if err != nil {

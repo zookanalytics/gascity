@@ -80,7 +80,10 @@ func WithWrapBareHooks() MergeOption {
 //   - Non-hook top-level keys: last writer (overlay) wins.
 //   - Hook categories (keys under "hooks"): union across layers.
 //   - Entries within a hook category: merged by identity key.
-//     Same identity → overlay replaces base entry. New identity → appended.
+//     Same identity → for wrapper-shape entries (both carry an inner "hooks"
+//     array) the inner hooks are unioned so both sides' commands survive; for
+//     any other shape the overlay entry replaces the base entry. New identity →
+//     appended.
 //   - Identity key extraction:
 //     1. "matcher" key → identity is the matcher value
 //     2. "command" key → identity is "cmd:<value>"
@@ -231,8 +234,8 @@ func mergeHookArray(base, over []any) []any {
 			continue
 		}
 		if idx, found := baseIdx[key]; found {
-			// Same identity → replace in-place.
-			result[idx] = entry
+			// Same identity → merge in-place.
+			result[idx] = mergeCollidingEntries(result[idx], entry)
 		} else {
 			// New identity → append.
 			result = append(result, entry)
@@ -240,6 +243,43 @@ func mergeHookArray(base, over []any) []any {
 		}
 	}
 	return result
+}
+
+// mergeCollidingEntries combines two hook entries that share an identity key.
+//
+// When both are wrapper-shape entries — each carrying an inner "hooks" array,
+// as Claude/Gemini {"matcher": ..., "hooks": [...]} entries do — their inner
+// hooks are unioned (via mergeHookArray, keyed by command) so a shared matcher
+// keeps both sides' commands. Without this, an overlay entry replaced the base
+// entry wholesale, so a user hook sharing the managed base entry's matcher (the
+// source-agnostic "") silently dropped the managed command. Claude and Gemini
+// run every inner hook under a matching matcher, so unioning is the shape that
+// keeps both live, and keying inner hooks by command keeps a re-merge
+// idempotent.
+//
+// Any other shape — a bare {"command": ...}/{"bash": ...} entry, whose identity
+// already is the command itself — keeps last-writer-wins: the overlay entry
+// replaces the base entry so its attributes (timeout, on, ...) still override.
+func mergeCollidingEntries(base, over any) any {
+	baseMap, okBase := base.(map[string]any)
+	overMap, okOver := over.(map[string]any)
+	if !okBase || !okOver {
+		return over
+	}
+	baseInner, okBaseInner := toSliceAny(baseMap["hooks"])
+	overInner, okOverInner := toSliceAny(overMap["hooks"])
+	if !okBaseInner || !okOverInner {
+		return over
+	}
+	merged := make(map[string]any, len(baseMap)+len(overMap))
+	for k, v := range baseMap {
+		merged[k] = v
+	}
+	for k, v := range overMap {
+		merged[k] = v
+	}
+	merged["hooks"] = mergeHookArray(baseInner, overInner)
+	return merged
 }
 
 // hookEntryKey extracts the identity key from a hook entry.

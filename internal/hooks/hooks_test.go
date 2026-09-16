@@ -1329,6 +1329,57 @@ func TestInstallClaudeSplitsMixedManagedUserSessionStartEntry(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeKeepsManagedSessionStartBesideUserAllSourcesHook is the
+// regression for gc-n1d9n. When a city's settings already carry a
+// user-authored all-sources SessionStart hook (matcher ""), Install must keep
+// the managed gc prime --hook command alongside it, not drop it. The managed
+// base entry and the user entry share the same matcher, and the settings merge
+// keys hook entries by matcher: before the inner-hook union fix the user entry
+// replaced the managed base entry wholesale, silently removing the
+// GC_MANAGED_SESSION_HOOK maintenance command this branch exists to run on
+// every session source. This is a distinct source from the mixed-entry split
+// above: the user's command is not GC-managed, so upgradeClaudeFile never
+// touches it and the collision surfaces only in the base/override merge.
+func TestInstallClaudeKeepsManagedSessionStartBesideUserAllSourcesHook(t *testing.T) {
+	fs := fsys.NewFake()
+	const userCmd = `echo user-all-sources`
+	fs.Files["/city/.gc/settings.json"] = []byte(`{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "` + userCmd + `"
+          }
+        ]
+      }
+    ]
+  }
+}`)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+
+	// The managed persistence command must survive on a source-agnostic ""
+	// matcher — the whole point of the branch.
+	managedMatchers := sessionStartMatchersContaining(entries, "gc prime --hook")
+	if len(managedMatchers) != 1 || managedMatchers[0] != "" {
+		t.Fatalf("managed command matchers = %q, want [\"\"] — a user all-sources SessionStart hook must not drop the managed command:\n%s", managedMatchers, string(runtime))
+	}
+
+	// The user's own command must survive too, on its "" matcher.
+	userMatchers := sessionStartMatchersContaining(entries, userCmd)
+	if len(userMatchers) != 1 || userMatchers[0] != "" {
+		t.Fatalf("user command matchers = %q, want [\"\"] (preserved beside the managed command):\n%s", userMatchers, string(runtime))
+	}
+}
+
 // TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand is the regression
 // test for the suffix-append class of silent rewrites surfaced by Codex's
 // pass-2 review of PR #2072. The pass-1 fixup blocked wrapper prefixes
