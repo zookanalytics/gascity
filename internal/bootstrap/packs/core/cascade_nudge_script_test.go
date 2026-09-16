@@ -141,7 +141,8 @@ func TestCascadeSkipsPartialUnblock(t *testing.T) {
 
 // TestCascadeNudgesOnFullReadiness is the other half: a dependent whose every
 // blocks-dependency is closed IS nudged exactly once, and the nudge carries the
-// dependent as its bead reference so the queue can dedup and withdraw it.
+// dependent as its bead reference so repeated queued session nudges collapse by
+// supersession.
 func TestCascadeNudgesOnFullReadiness(t *testing.T) {
 	fix := t.TempDir()
 	state := t.TempDir()
@@ -163,7 +164,7 @@ func TestCascadeNudgesOnFullReadiness(t *testing.T) {
 		t.Fatalf("nudge must address the dependent's assignee:\n%s", log)
 	}
 	if !strings.Contains(log, "--reference-bead dep1") {
-		t.Fatalf("nudge must carry the dependent as its bead reference so the queue can dedup/withdraw it:\n%s", log)
+		t.Fatalf("nudge must carry the dependent as its bead reference so repeated queued session nudges supersede:\n%s", log)
 	}
 }
 

@@ -4744,13 +4744,11 @@ start_command = "echo"
 	}
 }
 
-// TestCmdSessionNudgeReferenceBeadSupersedes pins the queue half of the
-// cascade-nudge fix (gc-f3k8d): `gc session nudge --reference-bead <dep>`
-// stamps the dependent as the queued item's bead reference, so a second
-// cascade eval for the same (session, dependent) supersedes the first instead
-// of stacking a distinct fire-and-forget copy. Before the reference was
-// threadable, every eval minted a new unreferenced item that the queue could
-// neither collapse nor withdraw, and each re-injected at a turn boundary.
+// TestCmdSessionNudgeReferenceBeadSupersedes pins the queue behavior behind the
+// cascade nudge: `gc session nudge --reference-bead <dep>` stamps the dependent
+// as the queued item's bead reference, so a second queued session nudge for the
+// same (session, dependent) supersedes the first instead of stacking a distinct
+// fire-and-forget copy.
 func TestCmdSessionNudgeReferenceBeadSupersedes(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := t.TempDir()
