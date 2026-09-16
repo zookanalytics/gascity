@@ -1329,17 +1329,16 @@ func TestInstallClaudeSplitsMixedManagedUserSessionStartEntry(t *testing.T) {
 	}
 }
 
-// TestInstallClaudeKeepsManagedSessionStartBesideUserAllSourcesHook is the
-// regression for gc-n1d9n. When a city's settings already carry a
-// user-authored all-sources SessionStart hook (matcher ""), Install must keep
-// the managed gc prime --hook command alongside it, not drop it. The managed
-// base entry and the user entry share the same matcher, and the settings merge
-// keys hook entries by matcher: before the inner-hook union fix the user entry
-// replaced the managed base entry wholesale, silently removing the
-// GC_MANAGED_SESSION_HOOK maintenance command this branch exists to run on
-// every session source. This is a distinct source from the mixed-entry split
-// above: the user's command is not GC-managed, so upgradeClaudeFile never
-// touches it and the collision surfaces only in the base/override merge.
+// TestInstallClaudeKeepsManagedSessionStartBesideUserAllSourcesHook asserts
+// that when a city's settings already carry a user-authored all-sources
+// SessionStart hook (matcher ""), Install keeps the managed gc prime --hook
+// command alongside it rather than dropping it. The managed base entry and the
+// user entry share the "" matcher, and the settings merge keys hook entries by
+// matcher, so the two collide and their inner hooks are unioned — keeping the
+// managed command live on every session source. This is a distinct source from
+// the mixed-entry split above: the user's command is not GC-managed, so
+// upgradeClaudeFile never touches it and the collision surfaces only in the
+// base/override merge.
 func TestInstallClaudeKeepsManagedSessionStartBesideUserAllSourcesHook(t *testing.T) {
 	fs := fsys.NewFake()
 	const userCmd = `echo user-all-sources`

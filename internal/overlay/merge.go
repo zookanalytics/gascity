@@ -204,14 +204,15 @@ func mergeHooksMap(base, over map[string]any) map[string]any {
 }
 
 // mergeHookArray merges two arrays of hook entries by identity key.
-// Entries with the same identity → overlay replaces base in-place.
+// Entries with the same identity → combined in-place via mergeCollidingEntries
+// (wrapper-shape inner hooks unioned, any other shape overlay-replaced).
 // New entries → appended.
 func mergeHookArray(base, over []any) []any {
 	// Build ordered result starting from base entries.
 	result := make([]any, len(base))
 	copy(result, base)
 
-	// Index base entries by identity for in-place replacement.
+	// Index base entries by identity so a colliding overlay entry merges in-place.
 	baseIdx := make(map[string]int) // identity → index in result
 	for i, entry := range result {
 		if m, ok := entry.(map[string]any); ok {
@@ -249,13 +250,11 @@ func mergeHookArray(base, over []any) []any {
 //
 // When both are wrapper-shape entries — each carrying an inner "hooks" array,
 // as Claude/Gemini {"matcher": ..., "hooks": [...]} entries do — their inner
-// hooks are unioned (via mergeHookArray, keyed by command) so a shared matcher
-// keeps both sides' commands. Without this, an overlay entry replaced the base
-// entry wholesale, so a user hook sharing the managed base entry's matcher (the
-// source-agnostic "") silently dropped the managed command. Claude and Gemini
-// run every inner hook under a matching matcher, so unioning is the shape that
-// keeps both live, and keying inner hooks by command keeps a re-merge
-// idempotent.
+// hooks are unioned (via mergeHookArray, keyed by command) so entries sharing a
+// matcher keep both sides' commands. Claude and Gemini run every inner hook
+// under a matching matcher, so unioning is the shape that keeps a user hook and
+// the managed command both live when they share a matcher (the source-agnostic
+// ""), and keying inner hooks by command keeps a re-merge idempotent.
 //
 // Any other shape — a bare {"command": ...}/{"bash": ...} entry, whose identity
 // already is the command itself — keeps last-writer-wins: the overlay entry

@@ -82,12 +82,11 @@ func TestMergeSettingsJSON_CanonicalizesCommandsWithoutHTMLEscaping(t *testing.T
 
 func TestMergeSettingsJSON_SameMatcherUnionsInnerHooks(t *testing.T) {
 	// Two wrapper-shape entries that share a matcher have their inner hooks
-	// unioned, not the base entry replaced wholesale. In desiredClaudeSettings
-	// the base is the managed embedded settings and the overlay is the user's
-	// file, so a wholesale replace on a shared matcher silently dropped the
-	// managed command whenever a user added their own hook under the same
-	// matcher (gc-n1d9n). Claude/Gemini run every inner hook under a matching
-	// matcher, so unioning them is what keeps both commands live.
+	// unioned. In desiredClaudeSettings the base is the managed embedded settings
+	// and the overlay is the user's file, so when a user adds their own hook
+	// under a matcher the managed base entry also uses, the union keeps both
+	// commands live. Claude/Gemini run every inner hook under a matching matcher,
+	// so unioning them is the shape that preserves both.
 	base := `{
 		"hooks": {
 			"PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "gc handoff --auto \"context cycle\""}]}]
