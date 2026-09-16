@@ -11,7 +11,9 @@
 # closed (see still_held): at the assignee when one holds the bead, else at
 # its gc.routed_to target (the graph.v2 claim shape leaves the assignee empty
 # until a session claims the step). A routed target may be a pool base, which
-# nudge_routed_target resolves to its active members. Idempotent: a given
+# nudge_routed_target resolves to its active members. The assignee nudge is
+# queued with the dependent as its bead reference, so reminders about one
+# dependent collapse to one delivery. Idempotent: a given
 # (blocker, dependent) pair is nudged at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
 # both city- and pack-scoped — multi-city installs never cross-pollinate.
@@ -240,7 +242,14 @@ while IFS= read -r blocker; do
         esac
         if [ "$dep_kind" = "assignee" ]; then
             msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-            if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" >/dev/null 2>&1; then
+            # Queued, with the dependent as the nudge's bead reference: the
+            # queue keeps one reminder per (session, dependent), so two
+            # blockers of one dependent closing before one evaluation
+            # collapse to a single delivery, and the exit status is the
+            # enqueue's, so a delivery that fails after taking effect cannot
+            # leave the pair unrecorded and re-fire on every run in the
+            # lookback. The flags trail the message.
+            if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" --delivery=queue --reference-bead "$dep_id" >/dev/null 2>&1; then
                 STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
                 NUDGED=$((NUDGED + 1))
             fi

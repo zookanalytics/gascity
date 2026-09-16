@@ -3037,7 +3037,7 @@ func TestCmdSessionNudgeRegisteredCitySupervisorDownLeavesStartToReconciler(t *t
 		registerCityWithSupervisorForTest(t, cityDir)
 
 		var stdout, stderr bytes.Buffer
-		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", false, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", "", false, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNudge = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 		}
 		if !strings.Contains(stdout.String(), "Queued nudge for") {
@@ -3059,7 +3059,7 @@ func TestCmdSessionNudgeRegisteredCitySupervisorDownLeavesStartToReconciler(t *t
 		id := asleepNamedSessionForTest(t, cityDir)
 
 		var stdout, stderr bytes.Buffer
-		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", false, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNudge([]string{"mayor", "hello"}, nudgeDeliveryWaitIdle, "", "", false, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNudge = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 		}
 		if !strings.Contains(stdout.String(), "Queued nudge for") {
