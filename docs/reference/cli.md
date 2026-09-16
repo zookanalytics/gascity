@@ -4206,6 +4206,11 @@ equivalent to typing the message into the session's terminal.
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
+--reference-bead names a bead this nudge is about. A queued nudge that
+carries one supersedes any earlier still-queued nudge to the same session
+about the same bead, so a repeatedly-fired reminder collapses to a single
+delivery instead of stacking.
+
 ```
 gc session nudge <id-or-alias> <message...> [flags]
 ```
@@ -4214,6 +4219,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 |------|------|---------|-------------|
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
+| `--reference-bead` | string |  | bead id this nudge is about; repeat queued nudges about the same bead collapse to one delivery |
 
 ## gc session peek
 

@@ -2520,6 +2520,7 @@ func sessionKillRuntimeAlreadyInactive(info session.Info, sp runtime.Provider) b
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var delivery string
+	var referenceBead string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "nudge <id-or-alias> <message...>",
@@ -2530,7 +2531,12 @@ The message is delivered as text content to the session's input. This is
 equivalent to typing the message into the session's terminal.
 
 Accepts a session ID or session alias. Multi-word messages are
-joined automatically.`,
+joined automatically.
+
+--reference-bead names a bead this nudge is about. A queued nudge that
+carries one supersedes any earlier still-queued nudge to the same session
+about the same bead, so a repeatedly-fired reminder collapses to a single
+delivery instead of stacking.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			mode, err := parseNudgeDeliveryMode(delivery)
@@ -2538,7 +2544,7 @@ joined automatically.`,
 				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionNudge(args, mode, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionNudge(args, mode, referenceBead, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2546,6 +2552,7 @@ joined automatically.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
+	cmd.Flags().StringVar(&referenceBead, "reference-bead", "", "bead id this nudge is about; repeat queued nudges about the same bead collapse to one delivery")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
 }
@@ -2681,7 +2688,7 @@ type sessionNudgeJSON struct {
 }
 
 // cmdSessionNudge is the CLI entry point for "gc session nudge".
-func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, referenceBead string, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -2689,6 +2696,9 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if b := strings.TrimSpace(referenceBead); b != "" {
+		targetInfo.reference = &nudgeReference{Kind: "bead", ID: b}
 	}
 	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)
 }
