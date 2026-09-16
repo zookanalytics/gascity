@@ -324,13 +324,13 @@ func runTokenTelemetryCheckWithResolver(t *testing.T, cityPath string, store bea
 	return c.Run(nil)
 }
 
-// TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript is the discriminator
-// the escalation-noise fix asks for: a silent session whose live transcript records
+// TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript pins the
+// working-not-idle discriminator: a silent session whose live transcript records
 // a usage-bearing model invocation inside the silence window is working but not
 // being recorded, not idle. Resolving the transcript independently of the stored
 // session_key finds the live one the stale keyed lookup misses, so the check
 // announces the gap instead of handing an operator a converse sitting to confirm
-// idleness (gc-1fke8).
+// idleness.
 func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -377,10 +377,10 @@ func TestAgentTokenTelemetryFlagsWorkingSessionWithLiveTranscript(t *testing.T) 
 	}
 }
 
-// TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle is the noise-removal half:
+// TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle pins the idle case:
 // a silent session whose live transcript is as quiet as its last recorded fact is
 // genuinely idle, so the check suppresses it instead of re-escalating benign idle
-// every hour — the re-escalation tk-jnrm6i documented (gc-1fke8).
+// every hour.
 func TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -411,10 +411,10 @@ func TestAgentTokenTelemetryClassifiesQuietTranscriptAsIdle(t *testing.T) {
 	}
 }
 
-// TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory pins the third case: when
+// TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory pins the ambiguous case: when
 // two live model sessions share a pool work_dir, keyless newest-wins discovery
-// cannot attribute a transcript, so a silent session among them keeps today's
-// advisory wording rather than being matched to a guessed transcript (gc-1fke8).
+// cannot attribute a transcript, so a silent session among them keeps the
+// advisory wording rather than being matched to a guessed transcript.
 func TestAgentTokenTelemetrySharedWorkdirFallsBackToAdvisory(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -481,15 +481,15 @@ func claudeUserLine(uuid, parent string, at time.Time) string {
 		uuid, parent, at.UTC().Format(time.RFC3339))
 }
 
-// TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime is the
-// regression the pre-open review asked for: the discriminator must be the newest
-// usage-bearing model invocation in the live transcript, not the transcript file's
-// modtime. A non-usage write — a user message, a tool result, a reasoning record —
-// bumps the file without a model being invoked, so a modtime read would report a
-// genuinely idle session as a working one the moment its transcript is appended
-// to. Here the newest usage-bearing turn is 90m old (as old as the last recorded
-// fact) while a user message landed 5m ago; the session is idle and must NOT be
-// reported as an emission gap (gc-1fke8).
+// TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime pins the
+// discriminator to the newest usage-bearing model invocation in the live
+// transcript, not the transcript file's modtime. A non-usage write — a user
+// message, a tool result, a reasoning record — bumps the file without a model
+// being invoked, so a modtime read would report a genuinely idle session as a
+// working one the moment its transcript is appended to. Here the newest
+// usage-bearing turn is 90m old (as old as the last recorded fact) while a user
+// message landed 5m ago; the session is idle and must NOT be reported as an
+// emission gap.
 func TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -527,13 +527,13 @@ func TestAgentTokenTelemetryReadsUsageBearingInvocationNotFileModtime(t *testing
 }
 
 // TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath pins the
-// second review finding: the check must search the city's configured observe
-// paths, not only the built-in defaults. The transcript here lives ONLY under a
-// custom search root, and its newest usage-bearing turn is 5m old while the last
+// search scope: the check must search the city's configured observe paths, not
+// only the built-in defaults. The transcript here lives ONLY under a custom
+// search root, and its newest usage-bearing turn is 5m old while the last
 // recorded fact is 90m old — a real emission gap. The check can find it, and so
 // classify it as a gap, only when the configured search root is threaded in; on
 // bare defaults it would miss the transcript entirely and fall back to the
-// idle-confirmation advisory (gc-1fke8).
+// idle-confirmation advisory.
 func TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -577,7 +577,7 @@ func TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath(t *test
 // invocation is older than the cutoff yet newer than its last recorded fact still
 // proves an emission gap: the model was invoked after that fact landed and nothing
 // recorded it. A cutoff-only comparison drops this as benign idle even though the
-// transcript is newer than every fact the session has (gc-1fke8).
+// transcript is newer than every fact the session has.
 func TestAgentTokenTelemetryFlagsUsageNewerThanFactButOlderThanCutoff(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
@@ -623,13 +623,12 @@ func TestAgentTokenTelemetryFlagsUsageNewerThanFactButOlderThanCutoff(t *testing
 	}
 }
 
-// TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact covers the second
-// false-idle a cutoff-only comparison produced: a session that has never recorded
-// a fact of its own, whose live transcript's newest usage-bearing invocation is
-// older than the cutoff, while another session keeps the city usage log non-empty.
-// That transcript is newer than the session's empty fact history, so it is a real
-// emission gap — the model was invoked and nothing ever recorded it — not idle
-// (gc-1fke8).
+// TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact covers a session that
+// has never recorded a fact of its own: its live transcript's newest usage-bearing
+// invocation is older than the cutoff, while another session keeps the city usage
+// log non-empty. That transcript is newer than the session's empty fact history, so
+// it is a real emission gap — the model was invoked and nothing ever recorded it —
+// not idle. A cutoff-only comparison drops it as benign idle.
 func TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
