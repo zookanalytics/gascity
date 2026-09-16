@@ -269,7 +269,7 @@ func TestWorkerSiteSessionNudgeRefusesBeforeWriting(t *testing.T) {
 
 			for _, target := range []string{sessionID, "no-such-session"} {
 				var stdout, stderr bytes.Buffer
-				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, "", false, &stdout, &stderr); code != 1 {
+				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, "", "", false, &stdout, &stderr); code != 1 {
 					t.Fatalf("gc session nudge %s on a worker site = %d, want 1; stdout=%q stderr=%q", target, code, stdout.String(), stderr.String())
 				}
 				if !strings.Contains(stderr.String(), errWorkerSiteDeliveryNeedsController.Error()) || strings.Contains(stderr.String(), "recorded change") {

@@ -756,7 +756,7 @@ func TestCmdSessionNudgeLaneRefusesBeforeMaterializing(t *testing.T) {
 		t.Fatalf("writing city.toml: %v", err)
 	}
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryWaitIdle, "", true, &stdout, &stderr)
+	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryWaitIdle, "", "", true, &stdout, &stderr)
 	// The file store a test city opens applies guarded batches but names no
 	// id prefix, so it cannot open as a lane store.
 	if code != 1 || !strings.Contains(stderr.String(), "op journal cannot record this request (opening op store") {

@@ -2732,7 +2732,7 @@ var sessionKillWaitLease = session.WaitOperatorRuntimeLease
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
-	var delivery, key string
+	var delivery, key, referenceBead string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "nudge <id-or-alias> <message...>",
@@ -2756,7 +2756,12 @@ session, wait-idle and immediate deliver at once what their mode allows
 now, with or without a running controller; otherwise the nudge is reported
 queued, and the lane host serving the session delivers it as its mode
 says. The [ops] content gate does not govern such a nudge, and one whose op
-cannot be written is refused.`,
+cannot be written is refused.
+
+--reference-bead names a bead this nudge is about. A queued nudge that
+carries one supersedes any earlier still-queued nudge to the same session
+about the same bead, so a repeatedly-fired reminder collapses to a single
+delivery instead of stacking.`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			mode, err := parseNudgeDeliveryMode(delivery)
@@ -2764,7 +2769,7 @@ cannot be written is refused.`,
 				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionNudge(args, mode, key, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionNudge(args, mode, key, referenceBead, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2772,6 +2777,7 @@ cannot be written is refused.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
+	cmd.Flags().StringVar(&referenceBead, "reference-bead", "", "bead id this nudge is about; repeat queued nudges about the same bead collapse to one delivery")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	cmd.Flags().StringVar(&key, "key", "", sessionNudgeKeyUsage)
 	return cmd
@@ -3037,8 +3043,10 @@ type sessionNudgeJSON struct {
 // resolves the target or writes anything
 // (errWorkerSiteDeliveryNeedsController), and so does a require gate whose op
 // journal cannot record, or, when [ops] authoritative lists message, a lane
-// op that cannot be written (resolveSessionNudgeTarget).
-func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
+// op that cannot be written (resolveSessionNudgeTarget). referenceBead, when
+// set, names the bead the nudge is about; a queued nudge carrying one
+// supersedes an earlier still-queued nudge to the same session about it.
+func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, referenceBead string, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -3058,6 +3066,9 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, json
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if b := strings.TrimSpace(referenceBead); b != "" {
+		targetInfo.reference = &nudgeReference{Kind: "bead", ID: b}
 	}
 	return deliverSessionNudge(targetInfo, message, delivery, key, jsonOutput, stdout, stderr)
 }

@@ -828,7 +828,7 @@ func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
 	nudge := func(text, key string) func(*testing.T) (int, string, string) {
 		return func(*testing.T) (int, string, string) {
 			var stdout, stderr bytes.Buffer
-			code := cmdSessionNudge([]string{killPokeSessionIdentity, text}, nudgeDeliveryImmediate, key, true, &stdout, &stderr)
+			code := cmdSessionNudge([]string{killPokeSessionIdentity, text}, nudgeDeliveryImmediate, key, "", true, &stdout, &stderr)
 			return code, stdout.String(), stderr.String()
 		}
 	}
@@ -1124,7 +1124,7 @@ func TestSessionNudgeRequireNoNudgeStoreRefusesBeforeResolving(t *testing.T) {
 	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{} }
 	t.Cleanup(func() { openNudgeBeadStore = prev })
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", true, &stdout, &stderr)
+	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", "", true, &stdout, &stderr)
 	if code != 1 || !strings.Contains(stderr.String(), "op journal cannot record this request") {
 		t.Fatalf("nudge = %d, stderr = %q; want 1 and the require refusal", code, stderr.String())
 	}

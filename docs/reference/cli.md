@@ -4595,6 +4595,11 @@ queued, and the lane host serving the session delivers it as its mode
 says. The [ops] content gate does not govern such a nudge, and one whose op
 cannot be written is refused.
 
+--reference-bead names a bead this nudge is about. A queued nudge that
+carries one supersedes any earlier still-queued nudge to the same session
+about the same bead, so a repeatedly-fired reminder collapses to a single
+delivery instead of stacking.
+
 ```
 gc session nudge <id-or-alias> <message...> [flags]
 ```
@@ -4604,6 +4609,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
 | `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of acting again, except across a change to whether [ops] authoritative lists message, which refuses the rerun as a different request; ignored otherwise (default: a new key each run) |
+| `--reference-bead` | string |  | bead id this nudge is about; repeat queued nudges about the same bead collapse to one delivery |
 
 ## gc session peek
 
