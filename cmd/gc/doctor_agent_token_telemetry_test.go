@@ -667,3 +667,50 @@ func TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact(t *testing.T) {
 		t.Errorf("the finding must self-announce the unrecorded usage, got:\n%s", joined)
 	}
 }
+
+// TestAgentTokenTelemetryIgnoresReusedWorkdirTranscriptFromPriorEpoch pins the
+// awake-epoch bound on the gap classifier. Work_dir-only transcript discovery
+// resolves whatever transcript sits under the work_dir, so a session that reused
+// a work_dir a prior session left behind — a recycled pool worktree, or a
+// restarted session resuming one — surfaces that predecessor's transcript. Its
+// newest usage-bearing invocation predates this session's awake_started_at, so it
+// is not this awake epoch's work. A freshly restarted session that has invoked no
+// model yet must read as benign, not as a confirmed emission gap: the gap floor is
+// max(newest recorded fact, awake start), and usage older than the epoch is below
+// it. Comparing against the recorded fact alone reports the reuse as a gap.
+func TestAgentTokenTelemetryIgnoresReusedWorkdirTranscriptFromPriorEpoch(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	loud := awakeSessionBead(t, store, "rig--polecat", now.Add(-4*time.Hour))
+	// Restarted 90m ago — past the one-hour grace, so it reaches the classifier —
+	// but it has invoked no model since and recorded no fact of its own.
+	restarted := awakeSessionBead(t, store, "rig--refinery", now.Add(-90*time.Minute))
+	if err := store.SetMetadata(restarted.ID, "work_dir", "/w/refinery"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the loud session keeps the usage log non-empty; the restarted session
+	// has recorded nothing.
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: loud.ID, Worker: "rig--polecat", At: now.Add(-5 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	// The transcript discovered under the reused work_dir has its newest
+	// usage-bearing invocation 3h ago — before the restarted session's 90m-old
+	// awake epoch began, so it belongs to whoever held the work_dir before, not to
+	// this session's current epoch.
+	resolver := func(_, workDir string) (time.Time, bool) {
+		if workDir == "/w/refinery" {
+			return now.Add(-3 * time.Hour), true
+		}
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok (reused-workdir transcript predates the awake epoch, not a gap); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+}
