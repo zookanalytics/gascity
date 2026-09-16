@@ -56,9 +56,18 @@ func TestCascadeNudgeAbsorbsDuplicateCloseEvents(t *testing.T) {
 	}
 	dir := t.TempDir()
 	eventsPath := filepath.Join(dir, "events.jsonl")
+	// The bd shim answers both dep-list directions the script asks: the
+	// up-direction read names the dependent, and the down-direction read
+	// (the ready-transition gate) reports that dependent's blockers, all
+	// closed, so the only thing standing between the two copies and a second
+	// nudge is the per-pair dedup under test.
 	binDir, logPath := fakeGCBin(t, `case "$1" in
 events) cat '`+eventsPath+`' ;;
-bd) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
+bd)
+  case " $* " in
+    *" --direction=down "*) printf '%s\n' '[{"id":"ga-blk","status":"closed"}]' ;;
+    *) printf '%s\n' '[{"id":"ga-dep","status":"open","assignee":"worker-1"}]' ;;
+  esac ;;
 esac
 exit 0
 `)
@@ -82,7 +91,7 @@ exit 0
 		}
 	}
 	_, logged := countNudges(t, logPath)
-	if !strings.Contains(logged, "gc session nudge worker-1 blocker ga-blk closed") {
-		t.Fatalf("the nudge must reach the dependent's assignee and name the blocker; gc calls:\n%s", logged)
+	if !strings.Contains(logged, "gc session nudge --delivery=queue --reference-bead ga-dep worker-1 blocker ga-blk closed") {
+		t.Fatalf("the nudge must reach the dependent's assignee, name the blocker, and carry the dependent as its bead reference; gc calls:\n%s", logged)
 	}
 }
