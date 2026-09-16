@@ -144,6 +144,15 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// reference optionally names the object this nudge is about. When set, a
+	// queued nudge carries it and the queue supersedes any earlier still-queued
+	// nudge with the same agent, source, and reference, so repeated reminders
+	// about one object collapse to a single delivery. (A source may also
+	// re-check the referent at delivery and withdraw a stale nudge; that gate is
+	// per-source in blockedQueuedNudgeReason and is not wired for the session
+	// source today.) nil for an ordinary text nudge. Only the queue paths read
+	// it; live delivery ignores it.
+	reference *nudgeReference
 }
 
 type nudgeStatusJSON struct {
@@ -632,6 +641,7 @@ func queuedNudgeOptionsFromTarget(target nudgeTarget) queuedNudgeOptions {
 	return queuedNudgeOptions{
 		SessionID:         target.sessionID,
 		ContinuationEpoch: target.continuationEpoch,
+		Reference:         target.reference,
 	}
 }
 

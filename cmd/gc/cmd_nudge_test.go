@@ -4716,7 +4716,7 @@ start_command = "echo"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, true, &stdout, &stderr)
+	code := cmdSessionNudge([]string{"sess-worker", "check", "deploy"}, nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -4741,6 +4741,100 @@ start_command = "echo"
 	}
 	if pending[0].Agent != sessionBead.ID {
 		t.Fatalf("Agent = %q, want %s", pending[0].Agent, sessionBead.ID)
+	}
+}
+
+// TestCmdSessionNudgeReferenceBeadSupersedes pins the queue behavior behind the
+// cascade nudge: `gc session nudge --reference-bead <dep>` stamps the dependent
+// as the queued item's bead reference, so a second queued session nudge for the
+// same (session, dependent) supersedes the first instead of stacking a distinct
+// fire-and-forget copy.
+func TestCmdSessionNudgeReferenceBeadSupersedes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.gc): %v", err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+dir = "myrig"
+provider = "codex"
+start_command = "echo"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "sess-worker",
+			"agent_name":   "myrig/worker",
+			"template":     "myrig/worker",
+			"provider":     "codex",
+			"work_dir":     rigDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	nudge := func() {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := cmdSessionNudge(
+			[]string{"sess-worker", "blocker blk1 closed — your dependent dep-1 may be unblocked"},
+			nudgeDeliveryQueue, "dep-1", true, &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdSessionNudge = %d, want 0; stderr: %s", code, stderr.String())
+		}
+	}
+
+	// First cascade eval: one referenced, session-sourced item lands.
+	nudge()
+	pending, _, _, err := listQueuedNudges(cityDir, sessionBead.ID, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges (first): %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("after first nudge: pending = %d, want 1", len(pending))
+	}
+	if pending[0].Source != "session" {
+		t.Fatalf("queued source = %q, want session", pending[0].Source)
+	}
+	if pending[0].Reference == nil || pending[0].Reference.Kind != "bead" || pending[0].Reference.ID != "dep-1" {
+		t.Fatalf("queued reference = %+v, want bead/dep-1", pending[0].Reference)
+	}
+
+	// Second cascade eval for the same dependent: it must collapse into one
+	// deliverable, not stack a second copy.
+	nudge()
+	pending, inFlight, dead, err := listQueuedNudges(cityDir, sessionBead.ID, time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges (second): %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("after second nudge: pending = %d, want 1 (superseded, not stacked)", len(pending))
+	}
+	if len(inFlight) != 0 {
+		t.Fatalf("after second nudge: inFlight = %d, want 0", len(inFlight))
+	}
+	if len(dead) != 1 || dead[0].LastError != "superseded" {
+		t.Fatalf("after second nudge: dead = %d, want 1 superseded (got %+v)", len(dead), dead)
 	}
 }
 
