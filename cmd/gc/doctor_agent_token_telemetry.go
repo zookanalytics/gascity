@@ -51,10 +51,10 @@ const tokenTelemetryReadLimit = 8 << 20 // 8 MiB
 // work_dir, resolved independently of the stored session_key, and reads the
 // timestamp of the newest usage-bearing model invocation in it — not the
 // transcript file's modtime, which a user message or tool result bumps without a
-// model ever being invoked. A usage-bearing invocation newer than the silence
-// cutoff while no fact landed in the window is a real emission gap that the
-// finding announces; a transcript whose newest invocation is as old as the facts
-// is benign idleness the check suppresses. When no unambiguous live transcript
+// model ever being invoked. A usage-bearing invocation newer than the session's
+// newest recorded usage fact is a real emission gap that the finding announces;
+// a transcript whose newest invocation is no newer than the facts is benign
+// idleness the check suppresses. When no unambiguous live transcript
 // resolves — a shared pool work_dir, or none on disk — the check falls back to
 // naming the session for an operator to judge.
 //
@@ -252,10 +252,10 @@ type awakeSilenceScan struct {
 // silent session's live transcript under its work_dir, independently of the
 // stored session_key (see liveTranscriptUsageTime), and classifies by the
 // timestamp of the newest usage-bearing model invocation in it:
-//   - A usage-bearing invocation since the cutoff, while no fact landed in the
-//     window, is a real emission gap and goes in gaps.
-//   - A newest invocation as old as the facts is genuinely idle, and the session
-//     is dropped as benign.
+//   - A usage-bearing invocation newer than the session's newest recorded fact,
+//     with no fact recorded for it, is a real emission gap and goes in gaps.
+//   - A newest invocation no newer than the recorded fact is genuinely idle, and
+//     the session is dropped as benign.
 //   - A work_dir shared by another live model session, or one with no transcript
 //     on disk, is indeterminate: it is reported with today's advisory wording
 //     rather than guessed.
@@ -335,18 +335,22 @@ func (c *agentTokenTelemetryCheck) scanAwakeSessions(store beads.Store, lastSamp
 			scan.indeterminate = append(scan.indeterminate, detail)
 			continue
 		}
-		if usageTime.After(cutoff) {
-			// The transcript records a usage-bearing model invocation inside the
-			// silence window while no fact landed in it: the session is working and
-			// its telemetry is not being recorded. Announce it so the finding needs
-			// no converse sitting.
-			scan.gaps = append(scan.gaps, detail+fmt.Sprintf(", transcript shows model usage %s but no usage fact recorded",
+		if usageTime.After(lastSample[b.ID]) {
+			// The transcript's newest usage-bearing model invocation is newer than
+			// the session's newest recorded fact: the model was invoked after that
+			// fact landed and nothing recorded it, so the session is working and its
+			// telemetry is not being recorded. Announce it so the finding needs no
+			// converse sitting. The discriminator is the session's own recorded fact,
+			// not the fixed silence cutoff: an invocation older than the cutoff yet
+			// newer than every fact the session has is still an unrecorded gap.
+			scan.gaps = append(scan.gaps, detail+fmt.Sprintf(", transcript shows model usage %s with no fact recorded for it",
 				formatSampleAge(usageTime, now)))
 			continue
 		}
-		// The transcript's newest usage-bearing invocation is as old as the facts:
-		// genuinely idle. Its silence is benign, so it is dropped rather than
-		// re-escalated every hour.
+		// The transcript's newest usage-bearing invocation is no newer than the
+		// session's recorded facts: the last invocation already produced its fact and
+		// nothing has happened since, so the session is genuinely idle. Its silence is
+		// benign, dropped rather than re-escalated every hour.
 	}
 	return scan
 }

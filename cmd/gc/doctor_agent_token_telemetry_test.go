@@ -570,3 +570,101 @@ func TestAgentTokenTelemetryResolvesTranscriptUnderConfiguredObservePath(t *test
 		t.Errorf("a confirmed gap must point at the emission path, got hint %q", res.FixHint)
 	}
 }
+
+// TestAgentTokenTelemetryFlagsUsageNewerThanFactButOlderThanCutoff pins the
+// discriminator to the session's own newest recorded fact, not the fixed silence
+// cutoff. A silent session whose live transcript's newest usage-bearing model
+// invocation is older than the cutoff yet newer than its last recorded fact still
+// proves an emission gap: the model was invoked after that fact landed and nothing
+// recorded it. A cutoff-only comparison drops this as benign idle even though the
+// transcript is newer than every fact the session has (gc-1fke8).
+func TestAgentTokenTelemetryFlagsUsageNewerThanFactButOlderThanCutoff(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	loud := awakeSessionBead(t, store, "rig--polecat", now.Add(-4*time.Hour))
+	working := awakeSessionBead(t, store, "rig--refinery", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(working.ID, "work_dir", "/w/refinery"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The refinery's newest recorded fact is 90m old; a loud session keeps the
+	// usage log recent so the check does not bail on an empty log.
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: loud.ID, Worker: "rig--polecat", At: now.Add(-5 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+		{Kind: usage.KindModel, SessionID: working.ID, Worker: "rig--refinery", At: now.Add(-90 * time.Minute).UnixMilli(), IdempotencyKey: "k2"},
+	})
+
+	// The refinery's newest usage-bearing invocation was 70m ago: older than the
+	// one-hour cutoff, but newer than its 90m-old recorded fact — no fact landed
+	// for that invocation, so it is a real gap, not benign idle.
+	resolver := func(_, workDir string) (time.Time, bool) {
+		if workDir == "/w/refinery" {
+			return now.Add(-70 * time.Minute), true
+		}
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (usage newer than the recorded fact is a gap); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, working.ID) && !strings.Contains(joined, "rig--refinery") {
+		t.Errorf("gap session not named in details:\n%s", joined)
+	}
+	if !strings.Contains(joined, "transcript shows model usage") {
+		t.Errorf("the finding must self-announce the unrecorded usage, got:\n%s", joined)
+	}
+	if !strings.Contains(res.FixHint, "emission path") {
+		t.Errorf("a confirmed gap must point at the emission path, got hint %q", res.FixHint)
+	}
+}
+
+// TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact covers the second
+// false-idle a cutoff-only comparison produced: a session that has never recorded
+// a fact of its own, whose live transcript's newest usage-bearing invocation is
+// older than the cutoff, while another session keeps the city usage log non-empty.
+// That transcript is newer than the session's empty fact history, so it is a real
+// emission gap — the model was invoked and nothing ever recorded it — not idle
+// (gc-1fke8).
+func TestAgentTokenTelemetryFlagsFirstUsageWithNoRecordedFact(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	loud := awakeSessionBead(t, store, "rig--polecat", now.Add(-4*time.Hour))
+	working := awakeSessionBead(t, store, "rig--refinery", now.Add(-4*time.Hour))
+	if err := store.SetMetadata(working.ID, "work_dir", "/w/refinery"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the loud session has ever recorded a fact; the refinery has none.
+	writeUsageFacts(t, filepath.Join(cityPath, ".gc", "usage.jsonl"), []usage.Fact{
+		{Kind: usage.KindModel, SessionID: loud.ID, Worker: "rig--polecat", At: now.Add(-5 * time.Minute).UnixMilli(), IdempotencyKey: "k1"},
+	})
+
+	// The refinery's newest usage-bearing invocation was 70m ago: older than the
+	// cutoff, but newer than its empty fact history.
+	resolver := func(_, workDir string) (time.Time, bool) {
+		if workDir == "/w/refinery" {
+			return now.Add(-70 * time.Minute), true
+		}
+		return time.Time{}, false
+	}
+
+	res := runTokenTelemetryCheckWithResolver(t, cityPath, store, now, resolver)
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (usage with no recorded fact is a gap); message=%q details=%v",
+			res.Status, res.Message, res.Details)
+	}
+	joined := strings.Join(res.Details, "\n")
+	if !strings.Contains(joined, working.ID) && !strings.Contains(joined, "rig--refinery") {
+		t.Errorf("gap session not named in details:\n%s", joined)
+	}
+	if !strings.Contains(joined, "transcript shows model usage") {
+		t.Errorf("the finding must self-announce the unrecorded usage, got:\n%s", joined)
+	}
+}
