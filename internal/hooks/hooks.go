@@ -1434,14 +1434,10 @@ func upgradeClaudeFile(existing []byte) ([]byte, bool, error) {
 		if !ok {
 			continue
 		}
-		for _, entry := range entriesArr {
-			entryMap, ok := entry.(map[string]any)
-			if !ok {
-				continue
-			}
-			if upgradeClaudeHookEntry(event, entryMap) {
-				changed = true
-			}
+		upgraded, eventChanged := upgradeClaudeHookEntries(event, entriesArr)
+		if eventChanged {
+			hooks[event] = upgraded
+			changed = true
 		}
 	}
 	if !changed {
@@ -1454,26 +1450,65 @@ func upgradeClaudeFile(existing []byte) ([]byte, bool, error) {
 	return data, true, nil
 }
 
+// upgradeClaudeHookEntries applies upgradeClaudeHookEntry to each entry in a
+// single hook event's array, in order. When a SessionStart entry mixes a
+// managed command with a user-owned one, upgradeClaudeHookEntry returns a new
+// source-agnostic entry carrying the managed commands; that entry is spliced in
+// immediately after the (now user-only) original. Returns the possibly
+// lengthened entry slice and whether any upgrade applied.
+func upgradeClaudeHookEntries(event string, entriesArr []any) ([]any, bool) {
+	changed := false
+	result := make([]any, 0, len(entriesArr))
+	for _, entry := range entriesArr {
+		entryMap, ok := entry.(map[string]any)
+		if !ok {
+			result = append(result, entry)
+			continue
+		}
+		split, entryChanged := upgradeClaudeHookEntry(event, entryMap)
+		if entryChanged {
+			changed = true
+		}
+		result = append(result, entryMap)
+		if split != nil {
+			result = append(result, split)
+		}
+	}
+	return result, changed
+}
+
 // upgradeClaudeHookEntry applies event-aware upgrades to a single
-// {matcher, hooks: [...]} entry under one of the hook event arrays.
+// {matcher, hooks: [...]} entry under one of the hook event arrays. It mutates
+// entry in place and, for a mixed SessionStart entry (see below), returns a new
+// source-agnostic entry the caller must splice into the same event array; the
+// returned entry is nil when no split is needed. The bool reports whether any
+// upgrade applied (an in-place command or matcher rewrite, or a split).
 //
-// Upgrade applies only when the entry is identifiable as a GC-managed
-// legacy entry — at least one hook command must match a known legacy
-// form via isLegacyGCManagedCommand. User-authored entries that happen
-// to share an empty matcher or a wrapper that prefixes "gc prime --hook"
-// are left untouched.
-func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
+// Upgrade applies only when the entry is identifiable as GC-managed — at least
+// one hook command must match a known legacy form via isLegacyGCManagedCommand.
+// User-authored entries that happen to share an empty matcher or a wrapper that
+// prefixes "gc prime --hook" are left untouched.
+//
+// The canonical managed SessionStart matcher is "" — the source-agnostic form
+// that fires on resume/clear/compact/fork as well as startup, so gc prime
+// --hook's session-key handling runs on every session source, not only a fresh
+// launch. A legacy "startup" entry whose commands are all managed is rewritten
+// to "" in place. A mixed entry — managed commands alongside a user-owned one —
+// is split instead: the managed commands move onto the returned "" entry and
+// the user's commands keep their "startup" matcher, so promoting the managed
+// hook never drags a user-owned command onto every session source.
+func upgradeClaudeHookEntry(event string, entry map[string]any) (map[string]any, bool) {
 	hookCmds, ok := entry["hooks"].([]any)
 	if !ok {
-		return false
+		return nil, false
 	}
 
-	// First pass: identify whether this entry has the GC-managed legacy
-	// shape (via at least one recognizable legacy command body), and
-	// upgrade any commands that match a known legacy form.
+	// First pass: record which commands are GC-managed (by their pre-upgrade
+	// body, so recognition is independent of the rewrite that follows) and
+	// upgrade any command that matches a known legacy form.
 	changed := false
-	hasManagedCommand := false
-	for _, h := range hookCmds {
+	var managedIdx []int
+	for i, h := range hookCmds {
 		hMap, ok := h.(map[string]any)
 		if !ok {
 			continue
@@ -1483,7 +1518,7 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 			continue
 		}
 		if isLegacyGCManagedCommand(event, cmd) {
-			hasManagedCommand = true
+			managedIdx = append(managedIdx, i)
 		}
 		if upgraded, didUpgrade := upgradeClaudeHookCommand(event, cmd); didUpgrade {
 			hMap["command"] = upgraded
@@ -1491,20 +1526,38 @@ func upgradeClaudeHookEntry(event string, entry map[string]any) bool {
 		}
 	}
 
-	// Second pass: normalize matcher only when the entry is identifiably
-	// GC-managed. The canonical managed SessionStart matcher is "" — the
-	// source-agnostic form that fires on resume/clear/compact/fork as well as
-	// startup, so gc prime --hook's session-key handling runs on every session
-	// source, not only a fresh launch. Rewrite the legacy "startup" form back to
-	// "". User-authored SessionStart entries with a "startup" matcher are left
-	// untouched by the hasManagedCommand gate.
-	if event == "SessionStart" && hasManagedCommand {
-		if matcher, ok := entry["matcher"].(string); ok && matcher == "startup" {
-			entry["matcher"] = ""
-			changed = true
+	// Second pass: normalize the SessionStart matcher, but only for GC-managed
+	// commands and only for the legacy "startup" form.
+	if event == "SessionStart" && len(managedIdx) > 0 {
+		if matcher, _ := entry["matcher"].(string); matcher == "startup" {
+			if len(managedIdx) == len(hookCmds) {
+				entry["matcher"] = ""
+				return nil, true
+			}
+			managed, remaining := partitionHookCommands(hookCmds, managedIdx)
+			entry["hooks"] = remaining
+			return map[string]any{"matcher": "", "hooks": managed}, true
 		}
 	}
-	return changed
+	return nil, changed
+}
+
+// partitionHookCommands splits hookCmds into the entries at managedIdx (managed)
+// and the rest (remaining), preserving order. managedIdx holds ascending
+// indices into hookCmds, as produced by the first pass of upgradeClaudeHookEntry.
+func partitionHookCommands(hookCmds []any, managedIdx []int) (managed, remaining []any) {
+	isManaged := make(map[int]bool, len(managedIdx))
+	for _, i := range managedIdx {
+		isManaged[i] = true
+	}
+	for i, h := range hookCmds {
+		if isManaged[i] {
+			managed = append(managed, h)
+		} else {
+			remaining = append(remaining, h)
+		}
+	}
+	return managed, remaining
 }
 
 // canonicalGCPathPrefix is the env-setup prefix gc prepends to every

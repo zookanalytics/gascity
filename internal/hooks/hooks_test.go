@@ -1257,6 +1257,78 @@ func TestInstallClaudeDoesNotNormalizeUserAuthoredStartupMatcher(t *testing.T) {
 	}
 }
 
+// sessionStartMatchersContaining returns the matcher of every SessionStart
+// entry whose hook commands contain substr, in entry order. Used to assert
+// where a given command landed after the mixed-entry matcher split.
+func sessionStartMatchersContaining(entries []claudeHookEntry, substr string) []string {
+	var matchers []string
+	for _, e := range entries {
+		for _, h := range e.Hooks {
+			if strings.Contains(h.Command, substr) {
+				matchers = append(matchers, e.Matcher)
+				break
+			}
+		}
+	}
+	return matchers
+}
+
+// TestInstallClaudeSplitsMixedManagedUserSessionStartEntry guards the
+// mixed-entry case of the source-agnostic SessionStart matcher upgrade. A
+// legacy city can carry the managed gc prime --hook command and a user-owned
+// startup-only command in a single matcher:"startup" SessionStart entry.
+// Promoting the whole entry to matcher:"" — the source-agnostic form the
+// managed hook needs so gc prime --hook runs on resume/clear/compact/fork —
+// would silently make the user's command fire on those sources too. The
+// upgrade must instead move only the managed command onto a matcher:"" entry
+// and leave the user's command on matcher:"startup".
+func TestInstallClaudeSplitsMixedManagedUserSessionStartEntry(t *testing.T) {
+	fs := fsys.NewFake()
+	const managedCmd = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook`
+	const userCmd = `echo user-startup-only`
+	mixed := `{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "` + managedCmd + `"
+          },
+          {
+            "type": "command",
+            "command": "` + userCmd + `"
+          }
+        ]
+      }
+    ]
+  }
+}`
+	fs.Files["/city/.gc/settings.json"] = []byte(mixed)
+
+	if err := Install(fs, "/city", "/work", []string{"claude"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	runtime := fs.Files["/city/.gc/settings.json"]
+	entries := claudeHookEntries(t, runtime, "SessionStart")
+
+	// The user-owned command must stay on "startup" only — never promoted to
+	// the source-agnostic "" matcher, in exactly one entry.
+	userMatchers := sessionStartMatchersContaining(entries, userCmd)
+	if len(userMatchers) != 1 || userMatchers[0] != "startup" {
+		t.Fatalf("user command matchers = %q, want [\"startup\"] — a mixed entry must not promote the user command to the source-agnostic matcher:\n%s", userMatchers, string(runtime))
+	}
+
+	// The managed command must run on every session source via a "" matcher,
+	// and must not be duplicated onto the user's startup entry.
+	managedMatchers := sessionStartMatchersContaining(entries, "gc prime --hook")
+	if len(managedMatchers) != 1 || managedMatchers[0] != "" {
+		t.Fatalf("managed command matchers = %q, want [\"\"] (source-agnostic, exactly once):\n%s", managedMatchers, string(runtime))
+	}
+}
+
 // TestInstallClaudeDoesNotClobberUserSuffixAppendedCommand is the regression
 // test for the suffix-append class of silent rewrites surfaced by Codex's
 // pass-2 review of PR #2072. The pass-1 fixup blocked wrapper prefixes
