@@ -125,8 +125,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   669,
-			BaselineFiles:   194,
+			BaselineCalls:   674,
+			BaselineFiles:   197,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-cp3hwi",
@@ -138,8 +138,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeAll,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   480,
-			BaselineFiles:   172,
+			BaselineCalls:   479,
+			BaselineFiles:   173,
 			ReportedCalls:   447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-cp3hwi",
@@ -166,8 +166,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   451,
-			BaselineFiles:   130,
+			BaselineCalls:   452,
+			BaselineFiles:   132,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-cp3hwi",
@@ -179,7 +179,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   317,
+			BaselineCalls:   315,
 			BaselineFiles:   120,
 			ReportedCalls:   295,
 			ReportedFiles:   114,
@@ -488,8 +488,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceSubprocess,
-			BaselineCalls:   442,
-			BaselineFiles:   124,
+			BaselineCalls:   443,
+			BaselineFiles:   126,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-cp3hwi",
@@ -501,7 +501,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceFixedSleep,
-			BaselineCalls:   317,
+			BaselineCalls:   315,
 			BaselineFiles:   120,
 			ReportedCalls:   287,
 			ReportedFiles:   113,
