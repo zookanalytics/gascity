@@ -123,11 +123,17 @@ minted key whose file is not written yet misses the keyed lookup; an empty key
 skips it outright. Either way the fallback resolves the newest existing sibling.
 The binding is a property of discovery and the memo, not of the key being stale.
 
-A genuinely stale key is possible on the relaunch and crash-adoption paths, where
-`buildPreparedStartWithWorkDirResolver` skips the mint because the key is already
-non-empty (`cmd/gc/session_lifecycle_parallel.go:1147`). Those paths are a
-secondary trigger for the same dead-file bind. The fix below covers every trigger
-because it acts on the reader, not on how the key was set.
+The relaunch and crash-adoption paths do not leave a claude session holding a
+stale, non-empty key whose transcript is absent.
+`buildPreparedStartWithWorkDirResolver` probes the keyed transcript before launch
+(`cmd/gc/session_lifecycle_parallel.go:1124`). When the key is non-empty but its
+file is gone, `clearStaleResumeKeyMetadata` clears the key and the mint block at
+`:1147` generates a fresh one, so the launch reduces to the fresh-wake case above,
+in which a just-minted key has no transcript on disk yet. When the keyed
+transcript is present, the keyed lookup hits and there is no dead-file bind. So
+relaunch and crash-adoption are not a distinct stale-key trigger. The reader-side
+fix below is still trigger-independent: it acts on how the transcript is resolved,
+not on how the key was set.
 
 ## Why deacon is the control
 
@@ -179,8 +185,7 @@ absent. Recommended, smallest first:
 2. **Re-validate a memoized live-sweep path.** When the memoized transcript's tail
    has not advanced past the cursor while a newer transcript exists in the same
    workdir, re-run discovery instead of reading the stale path. This is the
-   defense-in-depth tk-md98fc noted, promoted to a real fix, and it also covers the
-   relaunch and crash-adoption stale-key triggers.
+   defense-in-depth tk-md98fc noted, promoted to a real fix.
 3. **Reset `invocation_usage_cursor` on the fresh-wake conversation reset**, so the
    cursor never names a different conversation than the transcript being read.
 
