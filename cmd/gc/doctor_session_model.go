@@ -97,7 +97,12 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				}
 			}
 		}
-		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" {
+		// "human" is the reserved escalation target, not a configured agent or
+		// named session, so it never resolves through config. Mail recipient
+		// resolution passes "human" through unchanged (internal/mail/resolve.go).
+		// Treat it as a reserved word here too, so a gc.routed_to=human bead does
+		// not trip a false stale-routed-config finding.
+		if routedTo := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]); routedTo != "" && routedTo != "human" {
 			cityName := config.EffectiveCityName(c.cfg, "")
 			if config.FindAgent(c.cfg, routedTo) == nil {
 				if _, ok, _ := resolveNamedSessionSpecForConfigTarget(c.cfg, cityName, routedTo, currentRigContext(c.cfg)); !ok {
