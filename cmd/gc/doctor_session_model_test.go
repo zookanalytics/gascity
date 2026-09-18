@@ -236,3 +236,30 @@ func TestPhase0DoctorDoesNotFalsePositiveOnRigQualifiedSessionName(t *testing.T)
 		})
 	}
 }
+
+// TestSessionModelDoctorExemptsHumanRoutedTarget pins that a bead routed to the
+// reserved escalation target "human" does not trip the session-model
+// "stale-routed-config" finding. "human" is not a configured agent, so the
+// check would otherwise flag it as a missing config target.
+func TestSessionModelDoctorExemptsHumanRoutedTarget(t *testing.T) {
+	cityPath, store := newPhase0DoctorCity(t)
+
+	bead, err := store.Create(beads.Bead{
+		Type:     "task",
+		Status:   "open",
+		Title:    "work routed to human",
+		Metadata: map[string]string{"gc.routed_to": "human"},
+	})
+	if err != nil {
+		t.Fatalf("create routed-to-human bead: %v", err)
+	}
+
+	t.Setenv("GC_CITY", cityPath)
+	var stdout, stderr bytes.Buffer
+	_ = doDoctor(doctorOpts{Verbose: true}, &stdout, &stderr)
+
+	out := stdout.String() + stderr.String()
+	if strings.Contains(out, "stale-routed-config") {
+		t.Fatalf("doctor falsely flagged reserved route target \"human\" as stale config for %s:\n%s", bead.ID, out)
+	}
+}
