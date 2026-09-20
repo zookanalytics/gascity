@@ -2605,6 +2605,11 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	if query.ParentID != "" {
 		filter.ParentID = &query.ParentID
 	}
+	if len(query.IDs) > 0 {
+		// Push the IN-list to SQL so a batch-of-Gets read (ListQuery.IDs) costs
+		// one indexed query instead of a full scan the caller filters in memory.
+		filter.IDs = query.IDs
+	}
 	return filter
 }
 

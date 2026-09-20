@@ -1172,30 +1172,73 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 		return 0
 	}
 
+	members, err := convoyMembersByStore(convoys)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
-		}
-		progress := convoyProgressFromChildren(children)
+	for i, c := range convoys {
+		progress := convoyProgressFromChildren(members[i])
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
 	return 0
 }
 
-func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
-	items := make([]convoySummaryJSON, 0, len(convoys))
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc convoy list: children of %s: %v\n", c.bead.ID, err) //nolint:errcheck // best-effort stderr
-			return 1
+// convoyMembersByStore returns each convoy's members, indexed to match convoys,
+// batching the per-convoy Members reads into a bounded number of store queries
+// per distinct owning store via convoycore.MembersBatch. It replaces the
+// one-Members-call-per-convoy loop the list path used to run, whose per-convoy
+// store round trips made `gc convoy list` superlinear in convoy count.
+//
+// Grouping is by owning store, not by a global id map: convoy ids are unique
+// only within a store, so two stores can mint the same id for different convoys.
+func convoyMembersByStore(convoys []convoyWithStore) ([][]beads.Bead, error) {
+	members := make([][]beads.Bead, len(convoys))
+	type storeGroup struct {
+		store beads.Store
+		idxs  []int
+		ids   []string
+	}
+	var groups []*storeGroup
+	for i, c := range convoys {
+		var g *storeGroup
+		for _, cand := range groups {
+			if convoycore.SameStore(cand.store, c.store) {
+				g = cand
+				break
+			}
 		}
-		item := convoySummaryFromBead(c.bead, children)
+		if g == nil {
+			g = &storeGroup{store: c.store}
+			groups = append(groups, g)
+		}
+		g.idxs = append(g.idxs, i)
+		g.ids = append(g.ids, c.bead.ID)
+	}
+	for _, g := range groups {
+		byID, err := convoycore.MembersBatch(g.store, g.ids, true)
+		if err != nil {
+			return nil, err
+		}
+		for k, idx := range g.idxs {
+			members[idx] = byID[g.ids[k]]
+		}
+	}
+	return members, nil
+}
+
+func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
+	members, err := convoyMembersByStore(convoys)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	items := make([]convoySummaryJSON, 0, len(convoys))
+	for i, c := range convoys {
+		item := convoySummaryFromBead(c.bead, members[i])
 		items = append(items, item)
 	}
 	if err := writeCLIJSONLine(stdout, convoyListResultJSON{
