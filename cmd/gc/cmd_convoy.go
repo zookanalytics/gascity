@@ -1187,11 +1187,11 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 	return 0
 }
 
-// convoyMembersByStore returns each convoy's members, indexed to match convoys,
-// batching the per-convoy Members reads into a bounded number of store queries
-// per distinct owning store via convoycore.MembersBatch. It replaces the
-// one-Members-call-per-convoy loop the list path used to run, whose per-convoy
-// store round trips made `gc convoy list` superlinear in convoy count.
+// convoyMembersByStore returns each convoy's members, indexed to match convoys.
+// It resolves them with one convoycore.MembersBatch call per distinct owning
+// store, keeping store round trips bounded per store: resolving members with a
+// Members read per convoy costs round trips linear in convoy count, which is
+// what makes `gc convoy list` superlinear as convoys grow.
 //
 // Grouping is by owning store, not by a global id map: convoy ids are unique
 // only within a store, so two stores can mint the same id for different convoys.

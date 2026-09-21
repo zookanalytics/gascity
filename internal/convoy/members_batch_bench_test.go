@@ -34,10 +34,11 @@ func seedConvoys(tb testing.TB, convoyCount, membersEach int) (*beads.MemStore, 
 }
 
 // BenchmarkConvoyMembers contrasts the per-convoy read (one Members call per
-// convoy, the shape `gc convoy list` used) against the batched read
-// (MembersBatch, one bounded pass) as the convoy count grows. The per-convoy
-// variant is superlinear because each convoy re-scans the whole store; the
-// batched variant stays roughly linear.
+// convoy) against the batched read (MembersBatch, one bounded pass) as the
+// convoy count grows. `gc convoy list` resolves members across many convoys at
+// once, so it takes the batched path; this contrast measures the cost that
+// motivates it. The per-convoy variant is superlinear because each convoy
+// re-scans the whole store; the batched variant stays roughly linear.
 func BenchmarkConvoyMembers(b *testing.B) {
 	const membersEach = 4
 	for _, n := range []int{50, 100, 200, 400} {

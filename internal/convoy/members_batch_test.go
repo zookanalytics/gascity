@@ -49,7 +49,15 @@ func TestMembersBatchMatchesPerConvoyMembers(t *testing.T) {
 	// Convoy D: no members at all.
 	convoyD, _ := store.Create(beads.Bead{Title: "convoy D", Type: "convoy"})
 
-	ids := []string{convoyA.ID, convoyB.ID, convoyC.ID, convoyD.ID}
+	// Convoy E: an ephemeral (wisp-tier) tracked member. Members resolves each
+	// member through a tier-blind Get, so the batched keyed member read must
+	// span both tiers to return the real bead here rather than the dangling
+	// placeholder a tier-filtered read would leave.
+	convoyE, _ := store.Create(beads.Bead{Title: "convoy E", Type: "convoy"})
+	e1, _ := store.Create(beads.Bead{Title: "e1", Type: "task", Status: "open", Ephemeral: true})
+	trackOrFatal(t, store, convoyE.ID, e1.ID)
+
+	ids := []string{convoyA.ID, convoyB.ID, convoyC.ID, convoyD.ID, convoyE.ID}
 
 	for _, includeClosed := range []bool{true, false} {
 		batch, err := MembersBatch(store, ids, includeClosed)

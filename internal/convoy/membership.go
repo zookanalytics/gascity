@@ -255,7 +255,12 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 	}
 	pool := make(map[string]beads.Bead, len(memberIDs))
 	if len(memberIDs) > 0 {
-		resolved, err := store.List(beads.ListQuery{IDs: memberIDs, IncludeClosed: true})
+		// TierBoth so the keyed read resolves ephemeral tracked members too:
+		// MembersIn resolves each member through a tier-blind Get, and a
+		// zero-value (TierIssues) query drops wisp-tier rows, which would leave
+		// an ephemeral member as a dangling placeholder here but a real bead
+		// there.
+		resolved, err := store.List(beads.ListQuery{IDs: memberIDs, IncludeClosed: true, TierMode: beads.TierBoth})
 		if err != nil {
 			return nil, fmt.Errorf("resolving convoy members: %w", err)
 		}
