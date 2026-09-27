@@ -23,6 +23,7 @@ go_test(
         "graphroute_test.go",
         "session_stamp_test.go",
         "testenv_import_test.go",
+        "unrouted_step_test.go",
     ],
     embed = [":graphroute"],
     deps = [
