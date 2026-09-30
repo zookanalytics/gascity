@@ -3463,6 +3463,15 @@ func sweepProcessTableOrphans(
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
 			continue
 		}
+		// A closed pinned configured named session's still-live runtime must
+		// survive the sweep too: reapRuntimesBoundToClosedBeads spares the same
+		// bead one step earlier in the same tick, and terminating a runtime the
+		// scan happened to report untracked would discard the operator's
+		// in-session context. Only a bead the store returned closed carries the
+		// pin marker; an absent bead (ErrNotFound) is a genuine orphan.
+		if err == nil && pinnedConfiguredNamedSessionBeadKillProtected(bead) {
+			continue
+		}
 		// The store says closed or absent. The snapshot must agree: if it still
 		// lists the bead open, the two reads disagree (a stale cache, a
 		// transient error mapped to not-found, or a bead closed and reopened

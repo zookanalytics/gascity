@@ -8899,6 +8899,40 @@ func TestReapRuntimesBoundToClosedBeadsSkipsPinnedNamedSessionBead(t *testing.T)
 	}
 }
 
+// TestSweepProcessTableOrphansSkipsPinnedNamedSessionBead is the process-table
+// twin of TestReapRuntimesBoundToClosedBeadsSkipsPinnedNamedSessionBead. The
+// controller runs sweepProcessTableOrphans immediately after
+// reapRuntimesBoundToClosedBeads on the same closed bead, so a pinned
+// configured named session that the reaper spared must also survive the sweep:
+// if the process-table scan reports its still-live runtime as untracked (a
+// provider registry loss, a tmux list-running hiccup), terminating it discards
+// the operator's in-session context — the loss the pin guard exists to prevent.
+func TestSweepProcessTableOrphansSkipsPinnedNamedSessionBead(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:     "gm-pinned-closed",
+		Status: "closed",
+		Metadata: map[string]string{
+			"session_name":               "gc-toolkit__mechanik",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gc-toolkit/mechanik",
+			"pin_awake":                  "true",
+		},
+	}}, nil)
+	// Untracked live root whose bead is the closed pinned session above.
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-pinned-closed", PID: 601, IsTracked: false},
+	)
+	// Empty snapshot corroborates that the bead is not open, so nothing but the
+	// pin guard stands between the sweep and TerminateRuntime.
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := sweepProcessTableOrphans(sp, snapshot, store, "", &stderr)
+	if got != 0 || len(sp.terminated) != 0 {
+		t.Fatalf("reaped pinned named session runtime: got=%d terminated=%s stderr=%q", got, terminatedSessionIDs(sp.terminated), stderr.String())
+	}
+}
+
 // TestPinnedConfiguredNamedSessionBeadKillProtected pins the bead-form guard's
 // truth table and its equivalence with the session.Info form: both fire only for
 // a configured named session that is pinned awake.
