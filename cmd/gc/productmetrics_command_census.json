@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 209,
+  "next_id": 211,
   "permanent_ids": [
     {
       "name": "help",
@@ -238,6 +238,21 @@
       "resolver": "group-dispatch",
       "deferred_default": "unknown",
       "id": 3
+    },
+    {
+      "path": "gc beads city migrate-proxied",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-city-migrate-proxied",
+      "owner": "immediate",
+      "id": 208
     },
     {
       "path": "gc beads city use-external",
@@ -2599,6 +2614,21 @@
       "exclusion": "hidden-private"
     },
     {
+      "path": "gc nudge drop",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "nudge-drop",
+      "owner": "immediate",
+      "id": 207
+    },
+    {
       "path": "gc nudge poll",
       "aliases": [],
       "conditional_modes": [],
@@ -2626,7 +2656,7 @@
       "notice_policy": "eligible",
       "classification": "nudge-show",
       "owner": "immediate",
-      "id": 207
+      "id": 209
     },
     {
       "path": "gc nudge status",
@@ -3748,7 +3778,7 @@
       "notice_policy": "eligible",
       "classification": "session-release-name",
       "owner": "immediate",
-      "id": 208
+      "id": 210
     },
     {
       "path": "gc session rename",

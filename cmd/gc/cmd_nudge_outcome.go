@@ -160,11 +160,11 @@ func resolveQueuedNudgeOutcome(cityPath, nudgeID string) (nudgeOutcomeReport, bo
 		}
 	}
 
-	store := openNudgeBeadStore(cityPath)
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(opened) //nolint:errcheck // best-effort
 	if store.Store == nil {
 		return nudgeOutcomeReport{}, false, nil
 	}
-	defer closeBeadStoreHandle(store.Store) //nolint:errcheck // best-effort
 	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		return nudgeOutcomeReport{}, false, err

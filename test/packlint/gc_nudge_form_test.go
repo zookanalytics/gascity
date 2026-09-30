@@ -45,10 +45,11 @@ var nudgeAllowlistFiles = map[string]bool{
 }
 
 // validNudgeSubcommands are the still-supported `gc nudge` subcommands.
-// `gc nudge drain`, `gc nudge status`, `gc nudge show`, and `gc nudge poll`
-// remain valid; the bare positional form does not.
+// `gc nudge drain`, `gc nudge drop`, `gc nudge status`, `gc nudge show`, and
+// `gc nudge poll` remain valid; the bare positional form does not.
 var validNudgeSubcommands = map[string]bool{
 	"drain":  true,
+	"drop":   true,
 	"status": true,
 	"show":   true,
 	"poll":   true,
@@ -113,6 +114,7 @@ func TestViolatesNudgeForm(t *testing.T) {
 		{name: "canonical session form", line: `gc session nudge deacon/ "DOG_DONE: ok"`, violation: false},
 		{name: "canonical templated session form", line: `{{ cmd }} session nudge <target> "message"`, violation: false},
 		{name: "still-valid drain subcommand", line: `gc nudge drain --inject`, violation: false},
+		{name: "still-valid drop subcommand", line: `gc nudge drop nu-123`, violation: false},
 		{name: "still-valid status subcommand", line: `gc nudge status`, violation: false},
 		{name: "still-valid poll subcommand", line: `gc nudge poll --json`, violation: false},
 		{name: "markdown link to status", line: `[gc nudge status](#gc-nudge-status) | Show queued`, violation: false},

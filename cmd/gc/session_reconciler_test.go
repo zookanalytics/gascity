@@ -9,6 +9,7 @@ import (
 	"io"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1712,7 +1713,7 @@ func TestConfirmDrainAckRuntimeDeadTokenFenceStopsOnReplacement(t *testing.T) {
 	}
 
 	var stderr synchronizedBuffer
-	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr)
+	dead := confirmDrainAckRuntimeDead("", store, sp, &config.City{}, "worker", "original-token", []string{"claude"}, &stderr, drainAckStopConfirmDeadTimeout, drainAckStopConfirmDeadPoll)
 	if !dead {
 		t.Fatal("confirm-dead must report the original target dead once a replacement owns the name")
 	}
@@ -9086,6 +9087,12 @@ func TestReconcileSessionBeads_RollsBackPendingCreateWhenConflictingRuntimeAlrea
 	if got.Metadata["state"] != "failed-create" {
 		t.Fatalf("state = %q, want %q", got.Metadata["state"], "failed-create")
 	}
+	if !sp.IsRunning("sky") {
+		t.Fatal("rollback stopped the foreign runtime")
+	}
+	if id, err := sp.GetMeta("sky", "GC_SESSION_ID"); err != nil || id != "different-bead" {
+		t.Fatalf("foreign runtime ownership changed: id=%q err=%v", id, err)
+	}
 }
 
 func TestReconcileSessionBeads_RollsBackAllMismatchesInOneTickAndStillStarts(t *testing.T) {
@@ -10934,269 +10941,6 @@ func TestReconcileSessionBeads_HeartbeatHoldSurvivesDrainTimeout(t *testing.T) {
 		if e.Type == events.SessionIdleKilled {
 			t.Error("SessionIdleKilled must not fire for a heartbeat hold")
 		}
-	}
-}
-
-// TestWithinPoolSpawnClaimGraceInfo pins the spawn-claim grace predicate that
-// both drain-suppression guards share (gc-yi1ig): only a pool-managed session
-// with a parseable last_woke_at inside the startup_timeout+grace window is
-// protected, the window scales with the configured startup_timeout, and a
-// non-pool session is never protected.
-func TestWithinPoolSpawnClaimGraceInfo(t *testing.T) {
-	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
-	cfg := &config.City{} // StartupTimeoutDuration() defaults to 60s
-	window := cfg.Session.StartupTimeoutDuration() + poolSpawnClaimGrace
-	poolInfo := func(lastWoke string) sessionpkg.Info {
-		return sessionpkg.Info{PoolManaged: true, PoolSlot: "1", LastWokeAt: lastWoke}
-	}
-	rfc := func(t time.Time) string { return t.UTC().Format(time.RFC3339) }
-
-	cases := []struct {
-		name string
-		info sessionpkg.Info
-		cfg  *config.City
-		now  time.Time
-		want bool
-	}{
-		{"fresh pool session within grace", poolInfo(rfc(now)), cfg, now, true},
-		{"pool session just inside window", poolInfo(rfc(now.Add(-window + time.Second))), cfg, now, true},
-		{"pool session past window", poolInfo(rfc(now.Add(-window - time.Second))), cfg, now, false},
-		{"non-pool session never in grace", sessionpkg.Info{LastWokeAt: rfc(now)}, cfg, now, false},
-		{"empty last_woke_at", poolInfo(""), cfg, now, false},
-		{"unparseable last_woke_at", poolInfo("not-a-time"), cfg, now, false},
-		{"nil cfg falls back to 60s window", poolInfo(rfc(now.Add(-90 * time.Second))), nil, now, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := withinPoolSpawnClaimGraceInfo(tc.info, tc.cfg, tc.now); got != tc.want {
-				t.Fatalf("withinPoolSpawnClaimGraceInfo = %v, want %v", got, tc.want)
-			}
-		})
-	}
-
-	// The window scales with the configured startup_timeout: a longer budget
-	// keeps a same-aged pool session in grace that the default budget would drop.
-	longCfg := &config.City{Session: config.SessionConfig{StartupTimeout: "10m"}}
-	aged := poolInfo(rfc(now.Add(-5 * time.Minute)))
-	if withinPoolSpawnClaimGraceInfo(aged, cfg, now) {
-		t.Fatal("5m-old pool session must be past the default (60s+grace) window")
-	}
-	if !withinPoolSpawnClaimGraceInfo(aged, longCfg, now) {
-		t.Fatal("5m-old pool session must stay in grace under a 10m startup_timeout")
-	}
-}
-
-// TestReconcileSessionBeads_FreshPoolWorkerSurvivesOrphanDrainWithinGrace guards
-// the pool-orphan spawn-claim grace against the pool-worker crash-loop (gc-yi1ig).
-// A pool worker spawned to serve demand that fluctuated away during its startup
-// leaves the desired set and reaches the orphan/suspended drain phase while it is
-// still alive and pre-claim (it claims its own work during load-context, after
-// startup completes). Without the grace it is force-stopped as "orphaned" before
-// it can claim, orphaning its molecule and re-dispatching onto a fresh worker that
-// hits the same death. The freshly-woken pool worker must survive within its
-// spawn-claim window; once that window elapses with still no claim, the orphan
-// drain proceeds so a genuinely idle over-spawn is not pinned awake.
-func TestReconcileSessionBeads_FreshPoolWorkerSurvivesOrphanDrainWithinGrace(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	// Running pool worker, NOT in the desired set (scale demand fluctuated away)
-	// and holding no assigned work — the pre-claim pool-spawn shape that reaches
-	// the orphan drain phase.
-	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	session := env.createSessionBead("worker", "worker")
-	env.markSessionActive(&session) // sets state=active + last_woke_at=now
-	env.setSessionMetadata(&session, map[string]string{
-		"pool_managed":   "true",
-		"pool_slot":      "1",
-		"session_origin": "ephemeral",
-	})
-
-	// Tick 1: freshly woken (last_woke_at == now). The orphan drain must be
-	// suppressed so the worker can run load-context and claim.
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
-	if ds := env.dt.get(session.ID); ds != nil {
-		t.Fatalf("fresh pool worker must not begin a drain within the spawn-claim grace, got reason=%q", ds.reason)
-	}
-	if !env.sp.IsRunning("worker") {
-		t.Fatal("fresh pool worker must stay running within the spawn-claim grace")
-	}
-	if strings.Contains(env.stdout.String(), "Draining session") {
-		t.Fatalf("fresh pool worker must not be drained; stdout=%q", env.stdout.String())
-	}
-
-	// Advance well past the spawn-claim window with still no claim. The worker
-	// genuinely left the desired set and never claimed, so the orphan drain
-	// proceeds.
-	env.stdout.Reset()
-	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
-	got, err = env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
-	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "orphaned" {
-		t.Fatalf("pool worker past the spawn-claim grace must begin an orphan drain, got %+v", ds)
-	}
-}
-
-// TestReconcileSessionBeads_WorkingPoolWorkerSurvivesOrphanDrainPastGrace covers
-// gc-rxqp7: a pool worker that HAS claimed work must never be orphan-drained, no
-// matter how long it has been awake. The spawn-claim grace above only bridges the
-// pre-claim window; once it lapses the assigned-work guard is the only thing
-// keeping a working pool session alive, because a pool session's dynamic name is
-// never in configuredNames and demand leaves the desired set as soon as the work
-// is claimed and no longer ready. Draining here kills the agent mid-molecule and
-// strands the step bead in_progress with its assignee cleared.
-func TestReconcileSessionBeads_WorkingPoolWorkerSurvivesOrphanDrainPastGrace(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	session := env.createSessionBead("worker", "worker")
-	env.markSessionActive(&session)
-	env.setSessionMetadata(&session, map[string]string{
-		"pool_managed":   "true",
-		"pool_slot":      "1",
-		"session_origin": "ephemeral",
-	})
-
-	// The worker claimed its routed work during load-context: a step bead now
-	// sits in_progress assigned to the session's runtime name.
-	if _, err := env.store.Create(beads.Bead{
-		Title:    "Implement the solution",
-		Type:     "task",
-		Status:   "in_progress",
-		Assignee: session.Metadata["session_name"],
-	}); err != nil {
-		t.Fatalf("Create assigned work bead: %v", err)
-	}
-
-	// Well past the spawn-claim window, and out of the desired set (the claimed
-	// work is no longer ready, so it generates no scale demand).
-	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
-
-	if ds := env.dt.get(session.ID); ds != nil {
-		t.Fatalf("working pool worker must not be orphan-drained, got drain state %+v", ds)
-	}
-	if strings.Contains(env.stdout.String(), "Draining session 'worker': orphaned") {
-		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
-	}
-}
-
-// TestReconcileSessionBeads_WorkingCrossRigPoolWorkerSurvivesOrphanDrainPastGrace
-// is the cross-rig arm of gc-rxqp7: the pool worker's session bead lives in the
-// city store while the work it claimed lives in a RIG store. The guard must scan
-// the rig stores too, or a working cross-rig pool polecat is orphan-drained
-// mid-molecule.
-func TestReconcileSessionBeads_WorkingCrossRigPoolWorkerSurvivesOrphanDrainPastGrace(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	if err := env.sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	session := env.createSessionBead("worker", "worker")
-	env.markSessionActive(&session)
-	env.setSessionMetadata(&session, map[string]string{
-		"pool_managed":   "true",
-		"pool_slot":      "1",
-		"session_origin": "ephemeral",
-	})
-
-	rigStore := beads.NewMemStore()
-	if _, err := rigStore.Create(beads.Bead{
-		Title:    "Implement the solution",
-		Type:     "task",
-		Status:   "in_progress",
-		Assignee: session.Metadata["session_name"],
-	}); err != nil {
-		t.Fatalf("Create rig work bead: %v", err)
-	}
-	rigStores := map[string]beads.Store{"some-rig": rigStore}
-
-	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-
-	reconcileSessionBeadsAtPath(
-		context.Background(), "", []beads.Bead{got}, env.desiredState,
-		configuredSessionNames(env.cfg, "", env.store), env.cfg, env.sp, env.store,
-		newFakeDrainOps(), nil, rigStores, nil, env.dt, map[string]int{}, false, nil, "",
-		nil, env.clk, env.rec, 0, 0, &env.stdout, &env.stderr,
-	)
-
-	if ds := env.dt.get(session.ID); ds != nil {
-		t.Fatalf("working cross-rig pool worker must not be orphan-drained, got drain state %+v", ds)
-	}
-	if strings.Contains(env.stdout.String(), "Draining session 'worker': orphaned") {
-		t.Fatalf("expected no orphan drain log, got stdout:\n%s", env.stdout.String())
-	}
-}
-
-// TestReconcileSessionBeads_FreshPoolWorkerSurvivesNoWakeDrainWithinGrace guards
-// the no-wake-reason spawn-claim grace against the pool-worker crash-loop
-// (gc-yi1ig). A pool worker still in the desired set but with no scale demand
-// attributed to it (over-spawn: poolDesired < live count) reaches the wake/drain
-// phase with ShouldWake=false and would otherwise be "no-wake-reason" drained
-// before it can claim its routed work during load-context. It must survive within
-// its spawn-claim window; once that window elapses with still no claim, the drain
-// proceeds.
-func TestReconcileSessionBeads_FreshPoolWorkerSurvivesNoWakeDrainWithinGrace(t *testing.T) {
-	env := newReconcilerTestEnv()
-	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	// Desired (so it reaches the wake/drain phase) and running, but with no scale
-	// demand (poolDesired empty) and no assigned work — the over-spawn shape.
-	env.addDesired("worker", "worker", true)
-	session := env.createSessionBead("worker", "worker")
-	env.markSessionActive(&session) // sets state=active + last_woke_at=now
-	env.setSessionMetadata(&session, map[string]string{
-		"pool_managed":   "true",
-		"pool_slot":      "1",
-		"session_origin": "ephemeral",
-	})
-
-	// Tick 1: freshly woken (last_woke_at == now). The no-wake-reason drain must
-	// be suppressed so the worker can run load-context and claim.
-	got, err := env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
-	if ds := env.dt.get(session.ID); ds != nil {
-		t.Fatalf("fresh pool worker must not begin a drain within the spawn-claim grace, got reason=%q", ds.reason)
-	}
-	if !env.sp.IsRunning("worker") {
-		t.Fatal("fresh pool worker must stay running within the spawn-claim grace")
-	}
-	if strings.Contains(env.stdout.String(), "no-wake-reason") {
-		t.Fatalf("fresh pool worker must not be no-wake-reason drained; stdout=%q", env.stdout.String())
-	}
-
-	// Advance well past the spawn-claim window with still no claim. The worker
-	// genuinely has no reason to be awake now, so the no-wake-reason drain
-	// proceeds.
-	env.stdout.Reset()
-	env.clk.Time = env.clk.Now().Add(10 * time.Minute)
-	got, err = env.store.Get(session.ID)
-	if err != nil {
-		t.Fatalf("Get(%s): %v", session.ID, err)
-	}
-	env.reconcileWithPoolDesired([]beads.Bead{got}, map[string]int{})
-	if ds := env.dt.get(session.ID); ds == nil || ds.reason != "no-wake-reason" {
-		t.Fatalf("pool worker past the spawn-claim grace must begin a no-wake-reason drain, got %+v", ds)
 	}
 }
 
@@ -13551,16 +13295,15 @@ func TestFailedCreateIsKnownState(t *testing.T) {
 	}
 }
 
-// TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName
-// pins the retry shape ga-vcjr9 turned into a pod leak. A failed create no
-// longer frees its slot by handing the replacement a NEW runtime name — the
-// name is a pure function of the slot identity, so the replacement addresses
-// the same box. That makes the pending-create lease load-bearing: while the
-// failed bead is still open it holds the identity, and the pool waits one tick
-// rather than running two beads under one name. Once the lease expires and the
-// reconciler closes the bead, the next tick allocates a fresh bead under the
-// same runtime name.
-func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntimeName(t *testing.T) {
+// TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderAFreshBeadScopedName
+// pins the retry shape ga-vcjr9 turned into a pod leak. Each generation of an
+// unaliased pool slot runs under its own <template>-<beadID> name, so the
+// pending-create lease is load-bearing: while the failed bead is still open it
+// holds the slot's identity and the pool waits rather than minting a second
+// generation beside it. Once the lease expires and the reconciler tears down
+// and closes the bead, the next tick allocates a fresh bead under a fresh
+// bead-scoped name.
+func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderAFreshBeadScopedName(t *testing.T) {
 	cases := []struct {
 		name             string
 		startedAt        time.Time
@@ -13598,14 +13341,12 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntime
 				Type:   sessionBeadType,
 				Labels: []string{sessionBeadLabel, "agent:worker-1"},
 				Metadata: map[string]string{
-					// A transient pool slot's runtime session_name steps aside from
-					// the bare slot identity ("worker-1") onto "worker-1-pool" so the
-					// slot never reaches GC_AGENT (#5241). agent_name/pool_slot stay
-					// the identity, exactly as the create path (derivePoolSessionName
-					// with TransientSlot) persists it; the replacement re-derives the
-					// same "worker-1-pool" and fails closed on the open lease, so the
-					// slot still holds its identity for one tick.
-					"session_name":              "worker-1-pool",
+					// The runtime session_name is bead-scoped (worker-<id>), so it is
+					// never the bare slot and never reaches GC_AGENT (#5241).
+					// agent_name/pool_slot stay the identity, exactly as the create
+					// path persists them; the replacement fails closed on the open
+					// row's identity lease, so the slot holds for one tick.
+					"session_name":              "worker-placeholder", // rewritten to worker-<id> below
 					"agent_name":                "worker-1",
 					"template":                  "worker",
 					"state":                     string(sessionpkg.StateFailedCreate),
@@ -13621,7 +13362,10 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntime
 			if err != nil {
 				t.Fatalf("Create failed-create bead: %v", err)
 			}
-			runtimeName := failedBead.Metadata["session_name"]
+			runtimeName := PoolSessionName("worker", failedBead.ID)
+			if err := store.SetMetadata(failedBead.ID, "session_name", runtimeName); err != nil {
+				t.Fatalf("SetMetadata session_name: %v", err)
+			}
 
 			var stdout, stderr bytes.Buffer
 			firstTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &stderr)
@@ -13663,25 +13407,220 @@ func TestReconcileSessionBeads_FailedCreatePoolSlotIsReplacedUnderTheSameRuntime
 
 			var secondTickStderr bytes.Buffer
 			secondTick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, &secondTickStderr)
-			tp, planned := secondTick.State[runtimeName]
 			if gotFailed.Status == "open" {
-				if planned {
-					t.Fatalf("second tick planned %q while the failed-create lease is still open; stderr:\n%s", runtimeName, secondTickStderr.String())
+				if len(secondTick.State) != 0 {
+					t.Fatalf("second tick planned %#v while the failed-create lease is still open; stderr:\n%s", secondTick.State, secondTickStderr.String())
 				}
 			} else {
-				if !planned {
-					t.Fatalf("second tick did not replace the closed failed-create slot under %q; state=%#v stderr:\n%s", runtimeName, secondTick.State, secondTickStderr.String())
+				if len(secondTick.State) != 1 {
+					t.Fatalf("second tick planned %d sessions, want exactly one replacement; state=%#v stderr:\n%s", len(secondTick.State), secondTick.State, secondTickStderr.String())
 				}
-				if got := tp.Env["GC_SESSION_ID"]; got == failedBead.ID {
-					t.Fatalf("replacement reused the failed-create bead %s; a fresh bead must back the reused runtime name", failedBead.ID)
-				}
-				if tp.SessionName != runtimeName {
-					t.Fatalf("replacement session name = %q, want the slot's stable runtime name %q", tp.SessionName, runtimeName)
+				for sn, tp := range secondTick.State {
+					replacementID := tp.Env["GC_SESSION_ID"]
+					if replacementID == "" || replacementID == failedBead.ID {
+						t.Fatalf("replacement GC_SESSION_ID = %q; a fresh bead must back the slot", replacementID)
+					}
+					if want := PoolSessionName("worker", replacementID); sn != want || tp.SessionName != want {
+						t.Fatalf("replacement session name = %q/%q, want bead-scoped %q", sn, tp.SessionName, want)
+					}
 				}
 			}
 
 			if strings.Contains(stderr.String(), "unknown state") {
 				t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
+			}
+		})
+	}
+}
+
+// poolTeardownHoldCity is a single-slot unaliased pool ("claude", max=1,
+// scale_check=1), the shape the fresh-init Tier C test spawns. Its runtime name
+// is claude-<beadID>.
+func poolTeardownHoldCity() *config.City {
+	return &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "claude",
+			StartCommand:      "true",
+			MaxActiveSessions: intPtr(1),
+			ScaleCheck:        "printf 1",
+		}},
+	}
+}
+
+// createPoolTeardownHoldRow persists an unconfirmed pool create for the claude
+// singleton under its bead-scoped runtime name, with an expired pending-create
+// lease and no live runtime. state selects the reconciler path: "creating" is
+// the lease-expired attemptRollbackPendingCreate, "failed-create" is the open
+// failed-create close.
+func createPoolTeardownHoldRow(t *testing.T, store beads.Store, state sessionpkg.State, startedAt time.Time) (beads.Bead, string) {
+	t.Helper()
+	row, err := store.Create(beads.Bead{
+		Title:  "claude",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:claude"},
+		Metadata: map[string]string{
+			"session_name":              "claude-placeholder", // rewritten to claude-<id> below
+			"agent_name":                "claude",
+			"alias":                     "claude",
+			"template":                  "claude",
+			"state":                     string(state),
+			"pool_slot":                 "1",
+			"pending_create_claim":      boolMetadata(true),
+			"pending_create_started_at": pendingCreateStartedAtNow(startedAt),
+			poolManagedMetadataKey:      boolMetadata(true),
+			"live_hash":                 runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":                "1",
+			"continuation_epoch":        "1",
+			"instance_token":            "held-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create held row: %v", err)
+	}
+	runtimeName := PoolSessionName("claude", row.ID)
+	if err := store.SetMetadata(row.ID, "session_name", runtimeName); err != nil {
+		t.Fatalf("SetMetadata session_name: %v", err)
+	}
+	return row, runtimeName
+}
+
+// runPoolTeardownHoldTick runs one planner pass plus one reconcile pass, the way
+// the city loop does, and returns the planner's desired state.
+func runPoolTeardownHoldTick(t *testing.T, cfg *config.City, sp runtime.Provider, store beads.Store, clk *clock.Fake, stderr *bytes.Buffer) map[string]TemplateParams {
+	t.Helper()
+	tick := buildDesiredState(cfg.EffectiveCityName(), t.TempDir(), clk.Now().UTC(), cfg, sp, store, stderr)
+	sessions, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	cfgNames := configuredSessionNames(cfg, cfg.EffectiveCityName(), store)
+	poolDesired := PoolDesiredCounts(ComputePoolDesiredStates(cfg, tick.AssignedWorkBeads, sessionInfosFromBeads(sessions), tick.ScaleCheckCounts))
+	if poolDesired == nil {
+		poolDesired = make(map[string]int)
+	}
+	mergeNamedSessionDemand(poolDesired, tick.NamedSessionDemand, cfg)
+	var stdout bytes.Buffer
+	reconcileSessionBeads(
+		context.Background(), sessions, tick.State, cfgNames,
+		cfg, sp, store, nil, tick.AssignedWorkBeads, nil, newDrainTracker(), poolDesired,
+		tick.StoreQueryPartial, nil, cfg.EffectiveCityName(),
+		nil, clk, events.Discard, 0, 0, &stdout, stderr,
+	)
+	return tick.State
+}
+
+func sessionBeadIDs(t *testing.T, store beads.Store) []string {
+	t.Helper()
+	all, err := store.ListByLabel(sessionBeadLabel, 0, beads.IncludeClosed)
+	if err != nil {
+		t.Fatalf("ListByLabel: %v", err)
+	}
+	ids := make([]string, 0, len(all))
+	for _, b := range all {
+		ids = append(ids, b.ID)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+func fakeStartNames(sp *runtime.Fake) []string {
+	var names []string
+	for _, c := range sp.Calls {
+		if c.Method == "Start" {
+			names = append(names, c.Name)
+		}
+	}
+	return names
+}
+
+// TestReconcileSessionBeads_PoolTeardownFailureHoldsUnconfirmedCreate is the
+// reconciler-level pin for the ga-vcjr9 leak guard on bead-scoped pool names.
+// Both reconciler paths that close an unconfirmed pool create — the
+// lease-expired pending-create rollback and the open failed-create close — must
+// tear the row's runtime down by name first. When that Stop fails the row stays
+// OPEN in its pending state: no start or wake that tick, and no successor bead
+// on later ticks (the slot is stalled, not leaked). Once Stop succeeds the row
+// closes and the next tick backs the slot with a fresh bead under a fresh
+// claude-<beadID> name.
+func TestReconcileSessionBeads_PoolTeardownFailureHoldsUnconfirmedCreate(t *testing.T) {
+	cases := []struct {
+		name  string
+		state sessionpkg.State
+	}{
+		{name: "lease-expired pending-create rollback", state: sessionpkg.StateCreating},
+		{name: "open failed-create close", state: sessionpkg.StateFailedCreate},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+			sp := runtime.NewFake()
+			cfg := poolTeardownHoldCity()
+			held, runtimeName := createPoolTeardownHoldRow(t, store, tc.state, clk.Now().Add(-(pendingCreateNeverStartedTimeout + time.Minute)))
+			sp.StopErrors[runtimeName] = errors.New("apiserver unreachable")
+
+			for tick := 1; tick <= 3; tick++ {
+				var stderr bytes.Buffer
+				runPoolTeardownHoldTick(t, cfg, sp, store, clk, &stderr)
+				got, err := store.Get(held.ID)
+				if err != nil {
+					t.Fatalf("tick %d: Get held row: %v", tick, err)
+				}
+				if got.Status != "open" {
+					t.Fatalf("tick %d: held row status = %q, want open while its runtime teardown fails; stderr:\n%s", tick, got.Status, stderr.String())
+				}
+				if got.Metadata["state"] != string(tc.state) {
+					t.Fatalf("tick %d: held row state = %q, want %q (held rows stay in their pending state)", tick, got.Metadata["state"], tc.state)
+				}
+				if got.Metadata["session_name"] != runtimeName {
+					t.Fatalf("tick %d: held row session_name = %q, want %q kept so the teardown can be retried", tick, got.Metadata["session_name"], runtimeName)
+				}
+				if !strings.Contains(stderr.String(), "holding pool session "+held.ID+" open") {
+					t.Fatalf("tick %d: stderr does not name the held row; stderr:\n%s", tick, stderr.String())
+				}
+				if starts := fakeStartNames(sp); len(starts) != 0 {
+					t.Fatalf("tick %d: started %v while the unconfirmed row is held", tick, starts)
+				}
+				if ids := sessionBeadIDs(t, store); len(ids) != 1 {
+					t.Fatalf("tick %d: session beads = %v, want only the held row (no successor while the slot is held)", tick, ids)
+				}
+			}
+
+			// The backend recovers: the level-triggered pass retries the
+			// teardown, the row closes, and the next tick mints a successor
+			// under a fresh bead-scoped name.
+			delete(sp.StopErrors, runtimeName)
+			var stderr bytes.Buffer
+			runPoolTeardownHoldTick(t, cfg, sp, store, clk, &stderr)
+			got, err := store.Get(held.ID)
+			if err != nil {
+				t.Fatalf("Get held row after recovery: %v", err)
+			}
+			if got.Status != "closed" {
+				t.Fatalf("held row status after recovery = %q, want closed; stderr:\n%s", got.Status, stderr.String())
+			}
+			if want := sessionpkg.CanonicalCloseReason(string(sessionpkg.StateFailedCreate)); got.Metadata["close_reason"] != want {
+				t.Fatalf("close_reason = %q, want %q", got.Metadata["close_reason"], want)
+			}
+
+			stderr.Reset()
+			state := runPoolTeardownHoldTick(t, cfg, sp, store, clk, &stderr)
+			if len(state) != 1 {
+				t.Fatalf("post-recovery tick planned %d sessions, want one replacement; state=%#v stderr:\n%s", len(state), state, stderr.String())
+			}
+			for sn, tp := range state {
+				replacementID := tp.Env["GC_SESSION_ID"]
+				if replacementID == "" || replacementID == held.ID {
+					t.Fatalf("replacement GC_SESSION_ID = %q; a fresh bead must back the slot", replacementID)
+				}
+				want := "claude-" + replacementID
+				if sn != want || tp.SessionName != want {
+					t.Fatalf("replacement session name = %q/%q, want %q", sn, tp.SessionName, want)
+				}
+				if starts := fakeStartNames(sp); len(starts) != 1 || starts[0] != want {
+					t.Fatalf("starts = %v, want exactly [%s]", starts, want)
+				}
 			}
 		})
 	}
@@ -14250,4 +14189,85 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_RespawnsCanonicalNextTic
 	if gotWork.Assignee != identity {
 		t.Fatalf("work assignee = %q, want %q (the respawned canonical must find its work)", gotWork.Assignee, identity)
 	}
+}
+
+// TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode is the
+// upgrade guard for the startup-health re-key. An rc-era build ran the claude
+// canonical singleton under the bare name "claude" and keyed its episode there;
+// v1.5.0 keys it on "claude-pool". Without clearing the legacy key on a
+// successful start, a tripped "claude" episode would stay in gc doctor's
+// startup-health report forever although the pool starts fine.
+func TestReconcileSessionBeads_PoolSuccessClearsLegacyStartupHealthEpisode(t *testing.T) {
+	seedTripped := func(t *testing.T, is *sessionpkg.Store, key string, now time.Time) {
+		t.Helper()
+		if err := is.SaveStartupHealthEpisode(sessionpkg.StartupHealthEpisode{
+			SessionName:      key,
+			ConsecutiveCount: defaultMaxWakeAttempts,
+			FirstFailureAt:   now.Add(-time.Hour),
+			LastFailureAt:    now.Add(-time.Minute),
+			Kind:             sessionpkg.FailureKindOther,
+			QuarantinedUntil: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("SaveStartupHealthEpisode: %v", err)
+		}
+	}
+
+	t.Run("successful start clears the rc-era bare-identity episode", func(t *testing.T) {
+		store := beads.NewMemStore()
+		clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+		sp := runtime.NewFake()
+		cfg := poolTeardownHoldCity()
+		is := sessionpkg.NewStore(beads.SessionStore{Store: store})
+		seedTripped(t, is, "claude", clk.Now())
+
+		var stderr bytes.Buffer
+		for tick := 0; tick < 3 && len(fakeStartNames(sp)) == 0; tick++ {
+			runPoolTeardownHoldTick(t, cfg, sp, store, clk, &stderr)
+		}
+		starts := fakeStartNames(sp)
+		if len(starts) != 1 || !strings.HasPrefix(starts[0], "claude-") || starts[0] == "claude-pool" {
+			t.Fatalf("starts = %v, want one bead-scoped claude-<beadID> start; stderr:\n%s", starts, stderr.String())
+		}
+		ep, err := is.LoadStartupHealthEpisode("claude")
+		if err != nil {
+			t.Fatalf("LoadStartupHealthEpisode: %v", err)
+		}
+		if ep.ConsecutiveCount != 0 || !ep.QuarantinedUntil.IsZero() {
+			t.Fatalf("legacy episode after a successful start = %+v, want cleared", ep)
+		}
+	})
+
+	t.Run("episode of a non-pool session with that name is kept", func(t *testing.T) {
+		store := beads.NewMemStore()
+		now := time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)
+		is := sessionpkg.NewStore(beads.SessionStore{Store: store})
+		seedTripped(t, is, "claude", now)
+		named, err := store.Create(beads.Bead{
+			Title:    "claude",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: map[string]string{"session_name": "claude", "template": "claude"},
+		})
+		if err != nil {
+			t.Fatalf("Create named holder: %v", err)
+		}
+		if err := store.Close(named.ID); err != nil {
+			t.Fatalf("Close named holder: %v", err)
+		}
+		info := sessionpkg.Info{
+			ID:                  "gc-new",
+			Template:            "claude",
+			AgentName:           "claude",
+			SessionNameMetadata: PoolSessionName("claude", "gc-new"),
+			PoolManaged:         true,
+		}
+		clearLegacyPoolStartupHealthEpisode(info, info.SessionNameMetadata, is, io.Discard)
+		ep, err := is.LoadStartupHealthEpisode("claude")
+		if err != nil {
+			t.Fatalf("LoadStartupHealthEpisode: %v", err)
+		}
+		if ep.ConsecutiveCount != defaultMaxWakeAttempts {
+			t.Fatalf("episode owned by a non-pool session was cleared: %+v", ep)
+		}
+	})
 }

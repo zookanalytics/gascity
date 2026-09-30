@@ -104,7 +104,7 @@ func TestResolveQueuedNudgeOutcome_PendingInFlightAndDropped(t *testing.T) {
 
 	pending := newQueuedNudgeWithOptions("worker", "still queued", "session", now, queuedNudgeOptions{ID: "n-pending"})
 	claimed := newQueuedNudgeWithOptions("worker", "being delivered", "session", now, queuedNudgeOptions{ID: "n-claimed"})
-	dropped := newQueuedNudgeWithOptions("worker", "fenced out", nudgeSourceWait, now, queuedNudgeOptions{ID: "n-dropped"})
+	dropped := newQueuedNudgeWithOptions("worker", "fenced out", "wait", now, queuedNudgeOptions{ID: "n-dropped"})
 	for _, item := range []queuedNudge{pending, claimed, dropped} {
 		if err := enqueueQueuedNudge(dir, item); err != nil {
 			t.Fatalf("enqueueQueuedNudge(%s): %v", item.ID, err)
@@ -207,7 +207,7 @@ func TestResolveQueuedNudgeOutcome_DroppedFromTerminalShadowBead(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	dir := t.TempDir()
 
-	item := newQueuedNudgeWithOptions("worker", "withdrawn reminder", nudgeSourceWait, time.Now().Add(-time.Minute), queuedNudgeOptions{ID: "n-withdrawn"})
+	item := newQueuedNudgeWithOptions("worker", "withdrawn reminder", "wait", time.Now().Add(-time.Minute), queuedNudgeOptions{ID: "n-withdrawn"})
 	if err := enqueueQueuedNudge(dir, item); err != nil {
 		t.Fatalf("enqueueQueuedNudge: %v", err)
 	}
