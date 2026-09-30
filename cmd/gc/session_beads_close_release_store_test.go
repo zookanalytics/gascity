@@ -318,10 +318,10 @@ func TestCloseSessionBeadIfReachableStoreUnassignedLeavesUnreachableStoreWorkAlo
 // the release into a no-op.
 //
 // The release identity set is strictly broader than the gate's — the gate matches
-// {ID, session_name, configured_named_identity} while the release also matches
-// the session's alias and alias history — so work assigned to a reachable-store
-// bead under the alias passes the gate unseen and is exactly what the release
-// still has to clean up.
+// {ID, session_name, configured_named_identity, stable alias} while the release
+// also matches the session's alias history — so work assigned to a
+// reachable-store bead under a since-rotated alias passes the gate unseen and is
+// exactly what the release still has to clean up.
 func TestCloseSessionBeadIfReachableStoreUnassignedReleasesInsideProvenScope(t *testing.T) {
 	cityPath, cfg := newReachableCloseCity(t)
 	cityStore := beads.NewMemStore()
@@ -333,17 +333,18 @@ func TestCloseSessionBeadIfReachableStoreUnassignedReleasesInsideProvenScope(t *
 		Type:   sessionBeadType,
 		Labels: []string{sessionBeadLabel},
 		Metadata: map[string]string{
-			"session_name": "worker-session",
-			"template":     "riga/worker",
-			"state":        "active",
-			"alias":        "worker-alias",
+			"session_name":  "worker-session",
+			"template":      "riga/worker",
+			"state":         "active",
+			"alias":         "worker-alias",
+			"alias_history": "worker-old-alias",
 		},
 	})
 	if err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
 
-	reachableWork := newCloseReleaseWork(t, rigA, "riga work", "worker-alias", "in_progress")
+	reachableWork := newCloseReleaseWork(t, rigA, "riga work", "worker-old-alias", "in_progress")
 
 	var stderr bytes.Buffer
 	if !closeSessionBeadIfReachableStoreUnassigned(

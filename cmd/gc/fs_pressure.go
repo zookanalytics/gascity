@@ -136,61 +136,42 @@ func fsPressureTraceFields(trigger string, status fsPressureStatus, consecutiveS
 	}
 }
 
-// fsPressureEpisode is one shedding episode's counters. Each loop that sheds
-// under IO pressure owns its own: the reconciler tick and the order-dispatch
-// loop run on separate goroutines and shed independently, so sharing counters
-// between them would both race and let one loop's skips force the other's tick.
-type fsPressureEpisode struct {
-	consecutiveSkips int
-	episodeLogged    bool
-}
-
-func (ep *fsPressureEpisode) reset() {
-	ep.consecutiveSkips = 0
-	ep.episodeLogged = false
-}
-
 func (cr *CityRuntime) resetFSPressureEpisode() {
-	cr.tickFSPressure.reset()
+	cr.fsPressureConsecutiveSkips = 0
+	cr.fsPressureEpisodeLogged = false
 }
 
 // shouldSkipTickForFSPressure gates only the patrol/poke tick path after
-// config reload and before managed-Dolt preflight, session sync, demand build,
-// and reconciliation. Pressure-skipped ticks still drain already queued
-// convergence requests; nudge-dispatch, control-dispatcher, socket-driven
-// convergence requests, and manual reload refreshes are separate high-priority
-// paths and are not covered by this gate. Order dispatch is gated too, but by
-// its own episode on its own goroutine — see orderDispatchLoop.
+// config reload and before managed-Dolt preflight, session sync, demand
+// build, and reconciliation. Order dispatch runs on its own lane and applies
+// the same gate there (ordersLaneShouldSkipForFSPressureLocked). Pressure-skipped
+// ticks still drain already queued convergence requests; nudge-dispatch,
+// control-dispatcher, socket-driven convergence requests, and manual reload
+// refreshes are separate high-priority paths and are not covered by this gate.
 func (cr *CityRuntime) shouldSkipTickForFSPressure(trace *sessionReconcilerTraceCycle, trigger string) bool {
-	return cr.shouldSkipForFSPressure(&cr.tickFSPressure, trace, trigger)
-}
-
-// shouldSkipForFSPressure applies the shedding policy to one caller's episode.
-// ep must be owned by the calling goroutine.
-func (cr *CityRuntime) shouldSkipForFSPressure(ep *fsPressureEpisode, trace *sessionReconcilerTraceCycle, trigger string) bool {
 	status, ok := currentFSPressureStatus(cr.stderr)
 	if !ok || !status.High {
-		ep.reset()
+		cr.resetFSPressureEpisode()
 		return false
 	}
 
-	if ep.consecutiveSkips >= maxConsecutiveFSPressureSkips {
+	if cr.fsPressureConsecutiveSkips >= maxConsecutiveFSPressureSkips {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "supervisor: FS pressure high (some avg60=%.2f > threshold=%.1f), forcing tick after %d skipped ticks\n", //nolint:errcheck // best-effort stderr
-				status.Avg60, status.Threshold, ep.consecutiveSkips)
+				status.Avg60, status.Threshold, cr.fsPressureConsecutiveSkips)
 		}
-		recordFSPressureForcedTickTrace(trace, trigger, status, ep.consecutiveSkips)
-		recordFSPressureSkippedTickEvent(cr.rec, cr.cityName, trigger, status, ep.consecutiveSkips, fsPressureOutcomeForced)
-		ep.reset()
+		recordFSPressureForcedTickTrace(trace, trigger, status, cr.fsPressureConsecutiveSkips)
+		recordFSPressureSkippedTickEvent(cr.rec, cr.cityName, trigger, status, cr.fsPressureConsecutiveSkips, fsPressureOutcomeForced)
+		cr.resetFSPressureEpisode()
 		return false
 	}
 
-	ep.consecutiveSkips++
-	if !ep.episodeLogged {
+	cr.fsPressureConsecutiveSkips++
+	if !cr.fsPressureEpisodeLogged {
 		logFSPressureSkip(cr.stderr, status)
 	}
-	ep.episodeLogged = true
-	recordFSPressureSkippedTickTrace(trace, trigger, status, ep.consecutiveSkips)
-	recordFSPressureSkippedTickEvent(cr.rec, cr.cityName, trigger, status, ep.consecutiveSkips, fsPressureOutcomeSkipped)
+	cr.fsPressureEpisodeLogged = true
+	recordFSPressureSkippedTickTrace(trace, trigger, status, cr.fsPressureConsecutiveSkips)
+	recordFSPressureSkippedTickEvent(cr.rec, cr.cityName, trigger, status, cr.fsPressureConsecutiveSkips, fsPressureOutcomeSkipped)
 	return true
 }

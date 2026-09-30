@@ -138,15 +138,7 @@ func (cr *CityRuntime) infraSessionLedger() beads.SessionStore {
 // Returned as the strongly-typed beads.MailStore so the messaging class stays
 // statically visible; the wrapper carries the same underlying store value.
 func (cr *CityRuntime) mailBeadStore() beads.MailStore {
-	return cr.mailBeadStoreForConfig(cr.cfg)
-}
-
-// mailBeadStoreForConfig is mailBeadStore against a config the caller already
-// holds. cr.cfg belongs to the reconciler, which swaps it on reload, so a
-// caller on another goroutine passes the snapshot it read under
-// serviceStateMu instead of reading the field again.
-func (cr *CityRuntime) mailBeadStoreForConfig(cfg *config.City) beads.MailStore {
-	return beads.MailStore{Store: resolveMailMessagesStore(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)}
+	return beads.MailStore{Store: resolveMailMessagesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // nudgesBeadStore returns the runtime's nudge bead store: the configured nudges
@@ -155,13 +147,7 @@ func (cr *CityRuntime) mailBeadStoreForConfig(cfg *config.City) beads.MailStore 
 // strongly-typed beads.NudgesStore so the nudges class stays statically visible;
 // the wrapper carries the same underlying store value.
 func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
-	return cr.nudgesBeadStoreForConfig(cr.cfg)
-}
-
-// nudgesBeadStoreForConfig is nudgesBeadStore against a config the caller
-// already holds, for the same reason mailBeadStoreForConfig exists.
-func (cr *CityRuntime) nudgesBeadStoreForConfig(cfg *config.City) beads.NudgesStore {
-	return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)}
+	return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
 }
 
 // ordersBeadStore returns the runtime's order-tracking bead store for the given
@@ -181,14 +167,9 @@ func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
 // controller-side twin of relocatedOrdersClassStore (order_store.go), resolved
 // through the routes this process opened at boot rather than the one-shot CLI
 // funnel. nil is what keeps a federation on a single-store city byte-identical:
-// there is no second store to add.
-func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
-	return cr.relocatedOrdersStoreForConfig(cr.cfg)
-}
-
-// relocatedOrdersStoreForConfig is relocatedOrdersStore against a config the
-// caller already holds, for the same reason mailBeadStoreForConfig exists.
-func (cr *CityRuntime) relocatedOrdersStoreForConfig(cfg *config.City) beads.Store {
+// there is no second store to add. Its caller runs on the orders lane, so it
+// resolves from that pass's config snapshot, never cr.cfg.
+func (cr *CityRuntime) relocatedOrdersStore(cfg *config.City) beads.Store {
 	return resolveOrderStore(cr.storageRoutes, nil, cfg, cr.cityPath, cr.rec)
 }
 
