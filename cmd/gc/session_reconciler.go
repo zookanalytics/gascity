@@ -5968,6 +5968,17 @@ func pinnedConfiguredNamedSessionKillProtected(info sessionpkg.Info) bool {
 	return isNamedSessionInfo(info) && strings.TrimSpace(info.PinAwake) == "true"
 }
 
+// pinnedConfiguredNamedSessionBeadKillProtected is the beads.Bead twin of
+// pinnedConfiguredNamedSessionKillProtected, for the reconciler paths that hold a
+// raw session bead rather than a session.Info projection: the session-bead sync
+// close/retire arms and the closed-bead runtime reaper. It reads the same two
+// markers — the configured_named_session flag via isNamedSessionBead and the raw
+// pin_awake metadata — so it answers identically to the Info form for the same
+// session.
+func pinnedConfiguredNamedSessionBeadKillProtected(b beads.Bead) bool {
+	return isNamedSessionBead(b) && strings.TrimSpace(b.Metadata["pin_awake"]) == "true"
+}
+
 // shouldDeferNamedSessionConfigDrift threads typed session.Info end to end
 // (WI-6 R3): the active-use reason reads its pending-interaction deferral off
 // Info via namedSessionActiveUseReasonInfo (the runtime activity probes inside it

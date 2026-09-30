@@ -640,6 +640,13 @@ func retireDuplicateConfiguredNamedSessionBeads(
 				continue
 			}
 			b := openBeads[idx]
+			// A pinned configured named session must never be a duplicate-repair
+			// victim: the retire arm below stops its runtime before archiving,
+			// which would lose the operator's in-session context. Skip it entirely
+			// so its runtime and identity persist until a deliberate restart.
+			if pinnedConfiguredNamedSessionBeadKillProtected(b) {
+				continue
+			}
 			oldSessionName := strings.TrimSpace(b.Metadata["session_name"])
 			if oldSessionName != "" && oldSessionName != winnerSessionName &&
 				!stopRuntimeBeforeSessionBeadMutation(store, sp, cfg, b, "duplicate named session", stderr) {
@@ -1795,6 +1802,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			if strings.TrimSpace(b.Metadata["session_name"]) == spec.SessionName {
 				continue
 			}
+			// A pinned session returns false from the close helper (it declines to
+			// recycle a pinned named session), so this arm also marks the identity
+			// blocked and the desired-state loop below skips spawning a fresh
+			// session under the re-derived name.
 			if !closeSessionBeadIfRuntimeStoppedAndUnassigned(cityPath, store, rigStores, sp, cfg, b, "reconfigured", "reconfigured named session", now, stderr) {
 				blockedReconfiguredNamedIdentities[identity] = true
 				continue
@@ -3329,6 +3340,14 @@ func reapRuntimesBoundToClosedBeads(
 			continue
 		}
 
+		// Belt-and-suspenders: the close/retire arms never close a pinned
+		// configured named session's bead, but if one nonetheless reached here
+		// closed, do not reap its still-live runtime — that is exactly the context
+		// loss the guard exists to prevent.
+		if pinnedConfiguredNamedSessionBeadKillProtected(bead) {
+			continue
+		}
+
 		// Teardown ordering for draining beads belongs to the drainTracker.
 		if dt != nil && dt.get(liveID) != nil {
 			continue
@@ -3498,6 +3517,15 @@ func closeSessionBeadIfRuntimeStoppedAndUnassigned(
 ) bool {
 	if stderr == nil {
 		stderr = io.Discard
+	}
+	// A pinned configured named session is an operator-declared critical
+	// conversation. This reconcile cleanup close must never recycle it: the helper
+	// stops the runtime before closing, and the closed-bead reaper would finish
+	// any runtime that outlived the close — either path loses all in-session
+	// context. Decline before the stop so the runtime and its stale bead persist
+	// until the operator deliberately restarts the session.
+	if pinnedConfiguredNamedSessionBeadKillProtected(b) {
+		return false
 	}
 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, b)
 	if err != nil {

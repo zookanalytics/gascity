@@ -2180,6 +2180,141 @@ func TestRetireDuplicateConfiguredNamedSessionBeads_DoesNotStopWinnerSharingSess
 	}
 }
 
+// TestRetireDuplicateConfiguredNamedSessionBeads_SkipsPinnedLoser guards the
+// pinned-named-session invariant. When a loser's session_name differs from the
+// winner's, the duplicate-repair pass stops the loser's runtime before archiving
+// it. A pinned
+// configured named session must never be that victim — stopping its runtime loses
+// the operator's in-session context — so a pinned loser is skipped entirely: its
+// runtime keeps running and its bead is left active with its session_name intact.
+func TestRetireDuplicateConfiguredNamedSessionBeads_SkipsPinnedLoser(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "reviewer", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "mayor", Template: "reviewer", Mode: "on_demand"},
+		},
+	}
+	winnerName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "mayor")
+	loserName := "s-gc-pinned-drift"
+	if err := sp.Start(context.Background(), winnerName, runtime.Config{}); err != nil {
+		t.Fatalf("start winner session %s: %v", winnerName, err)
+	}
+	if err := sp.Start(context.Background(), loserName, runtime.Config{}); err != nil {
+		t.Fatalf("start pinned loser session %s: %v", loserName, err)
+	}
+
+	// Lower generation makes the pinned bead the loser deterministically; its
+	// drifted session_name is what would trigger the retire-with-stop arm.
+	loser, err := store.Create(beads.Bead{
+		Title:  "mayor pinned",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               loserName,
+			"template":                   "reviewer",
+			"generation":                 "1",
+			"state":                      "active",
+			"pin_awake":                  "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create pinned loser: %v", err)
+	}
+	winner, err := store.Create(beads.Bead{
+		Title:  "mayor",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               winnerName,
+			"template":                   "reviewer",
+			"generation":                 "2",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "mayor",
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create winner: %v", err)
+	}
+	openBeads := []beads.Bead{loser, winner}
+	bySessionName := map[string]beads.Bead{loserName: loser, winnerName: winner}
+	indexBySessionName := map[string]int{loserName: 0, winnerName: 1}
+
+	retired := retireDuplicateConfiguredNamedSessionBeads(
+		"", store, nil, sp, cfg, "test-city", openBeads, bySessionName, indexBySessionName, time.Now().UTC(), io.Discard,
+	)
+
+	if !sp.IsRunning(loserName) {
+		t.Fatalf("pinned loser runtime %q was stopped by duplicate repair", loserName)
+	}
+	if retired[0].Metadata["state"] != "active" {
+		t.Fatalf("pinned loser state = %q, want active (not archived)", retired[0].Metadata["state"])
+	}
+	if retired[0].Metadata["session_name"] != loserName {
+		t.Fatalf("pinned loser session_name = %q, want %q preserved", retired[0].Metadata["session_name"], loserName)
+	}
+	gotLoser, err := store.Get(loser.ID)
+	if err != nil {
+		t.Fatalf("Get(loser): %v", err)
+	}
+	if gotLoser.Metadata["state"] != "active" {
+		t.Fatalf("persisted pinned loser state = %q, want active", gotLoser.Metadata["state"])
+	}
+}
+
+// TestCloseSessionBeadIfUnassigned_PreservesPinnedNamedSession pins the
+// centralized guard in the duplicate-close helper: it declines to
+// recycle a pinned configured named session, so the bead stays open and the
+// closed-bead reaper never gets a chance to kill the runtime. The
+// runtime-stopped helper's twin guard is covered end-to-end by
+// TestSyncSessionBeads_PinnedNamedSessionSurvivesConfigDrift.
+func TestCloseSessionBeadIfUnassigned_PreservesPinnedNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{
+		Title:  "mechanik",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "gc-toolkit__mechanik",
+			"state":                      "active",
+			"pin_awake":                  "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gc-toolkit/mechanik",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create pinned bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	if closeSessionBeadIfUnassigned("", store, nil, nil, b, "duplicate", now, &stderr) {
+		t.Fatal("closeSessionBeadIfUnassigned recycled a pinned named session")
+	}
+	got, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", b.ID, err)
+	}
+	if got.Status != "open" {
+		t.Fatalf("status = %q, want open", got.Status)
+	}
+	if got.Metadata["close_reason"] != "" {
+		t.Fatalf("close_reason = %q, want empty", got.Metadata["close_reason"])
+	}
+}
+
 func TestRetireDuplicateConfiguredNamedSessionBeads_StopFailureKeepsRuntimeOwner(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -2781,6 +2916,91 @@ func TestSyncSessionBeads_ReconfiguredNamedSessionStopFailureKeepsOldBeadOpen(t 
 	for _, b := range allSessionBeads(t, store) {
 		if b.ID != oldBead.ID && strings.TrimSpace(b.Metadata["session_name"]) == expectedName {
 			t.Fatalf("created replacement bead %s while old runtime %q still has an open owner", b.ID, oldName)
+		}
+	}
+}
+
+// TestSyncSessionBeads_PinnedNamedSessionSurvivesConfigDrift covers the primary
+// behavior: a pinned configured named session whose derived spec.SessionName
+// drifts on a config reload must NOT have its bead closed. The close arm feeds
+// the closed-bead reaper, which kills the live runtime and loses all Claude Code
+// context. Instead the stale session_name persists until the operator
+// deliberately restarts the session, and no fresh session is spawned under the
+// re-derived name. Same fixture as the stop-failure sibling above, but the bead
+// is pinned and the stop is never attempted.
+func TestSyncSessionBeads_PinnedNamedSessionSurvivesConfigDrift(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "witness", Dir: "myrig", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "witness", Dir: "myrig"},
+		},
+	}
+	identity := "myrig/witness"
+	expectedName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, identity)
+	oldName := "s-gc-old"
+
+	oldBead, err := store.Create(beads.Bead{
+		Title:  identity,
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               oldName,
+			"alias":                      identity,
+			"template":                   identity,
+			"state":                      "active",
+			"pin_awake":                  "true",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating pinned drifted bead: %v", err)
+	}
+	if err := sp.Start(context.Background(), oldName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("starting pinned runtime: %v", err)
+	}
+
+	ds := map[string]TemplateParams{
+		expectedName: {
+			TemplateName:            identity,
+			InstanceName:            identity,
+			Alias:                   identity,
+			Command:                 "true",
+			ConfiguredNamedIdentity: identity,
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+
+	gotOld, err := store.Get(oldBead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", oldBead.ID, err)
+	}
+	if gotOld.Status != "open" {
+		t.Fatalf("pinned bead status = %q, want open across config drift", gotOld.Status)
+	}
+	if gotOld.Metadata["session_name"] != oldName {
+		t.Fatalf("pinned bead session_name = %q, want stale %q preserved", gotOld.Metadata["session_name"], oldName)
+	}
+	if gotOld.Metadata["close_reason"] != "" {
+		t.Fatalf("pinned bead close_reason = %q, want empty", gotOld.Metadata["close_reason"])
+	}
+	if !sp.IsRunning(oldName) {
+		t.Fatalf("pinned runtime %q was stopped across config drift", oldName)
+	}
+	for _, b := range allSessionBeads(t, store) {
+		if b.ID != oldBead.ID && strings.TrimSpace(b.Metadata["session_name"]) == expectedName {
+			t.Fatalf("spawned fresh session bead %s under re-derived name %q while pinned session still open", b.ID, expectedName)
 		}
 	}
 }
@@ -8646,6 +8866,71 @@ func TestReapRuntimesBoundToClosedBeadsSkipsActiveDrain(t *testing.T) {
 	got := reapRuntimesBoundToClosedBeads(store, snapshot, dt, sp, &stderr)
 	if got != 0 || sp.stopCalls["mayor"] != 0 {
 		t.Fatalf("reaped a draining runtime: got=%d stopCalls=%d", got, sp.stopCalls["mayor"])
+	}
+}
+
+// TestReapRuntimesBoundToClosedBeadsSkipsPinnedNamedSessionBead: defense in
+// depth. The close arms must never close a pinned configured named
+// session's bead, but if one nonetheless reached the reaper closed, its live
+// runtime must not be reaped out from under the operator's pinned conversation.
+func TestReapRuntimesBoundToClosedBeadsSkipsPinnedNamedSessionBead(t *testing.T) {
+	sp := newDeadRuntimeArtifactProvider()
+	sp.visible["gc-toolkit__mechanik"] = true
+	if err := sp.SetMeta("gc-toolkit__mechanik", "GC_SESSION_ID", "gm-pinned-closed"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID:     "gm-pinned-closed",
+		Status: "closed",
+		Metadata: map[string]string{
+			"session_name":               "gc-toolkit__mechanik",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "gc-toolkit/mechanik",
+			"pin_awake":                  "true",
+		},
+	}}, nil)
+	snapshot := newSessionBeadSnapshot(nil)
+
+	var stderr bytes.Buffer
+	got := reapRuntimesBoundToClosedBeads(store, snapshot, nil, sp, &stderr)
+	if got != 0 || sp.stopCalls["gc-toolkit__mechanik"] != 0 {
+		t.Fatalf("reaped pinned named session runtime: got=%d stopCalls=%d stderr=%q", got, sp.stopCalls["gc-toolkit__mechanik"], stderr.String())
+	}
+}
+
+// TestPinnedConfiguredNamedSessionBeadKillProtected pins the bead-form guard's
+// truth table and its equivalence with the session.Info form: both fire only for
+// a configured named session that is pinned awake.
+func TestPinnedConfiguredNamedSessionBeadKillProtected(t *testing.T) {
+	cases := []struct {
+		name  string
+		named bool
+		pin   string
+		want  bool
+	}{
+		{"named and pinned", true, "true", true},
+		{"named not pinned", true, "", false},
+		{"named pin false", true, "false", false},
+		{"named pin padded true", true, "  true  ", true},
+		{"pinned but not named", false, "true", false},
+		{"neither", false, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{"pin_awake": tc.pin}
+			if tc.named {
+				meta[namedSessionMetadataKey] = "true"
+			}
+			b := beads.Bead{ID: "gm-x", Metadata: meta}
+			if got := pinnedConfiguredNamedSessionBeadKillProtected(b); got != tc.want {
+				t.Fatalf("bead guard = %v, want %v", got, tc.want)
+			}
+			info := session.Info{ConfiguredNamedSession: tc.named, PinAwake: tc.pin}
+			if got := pinnedConfiguredNamedSessionKillProtected(info); got != tc.want {
+				t.Fatalf("info guard = %v, want %v (must match bead form)", got, tc.want)
+			}
+		})
 	}
 }
 

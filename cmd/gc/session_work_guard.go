@@ -35,6 +35,14 @@ func closeSessionBeadIfUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
+	// A pinned configured named session is an operator-declared critical
+	// conversation. This reconcile cleanup close must never recycle it: closing
+	// its bead lets the closed-bead reaper kill the still-live runtime and lose
+	// all in-session context. Decline the close; the bead persists until the
+	// operator deliberately restarts the session.
+	if pinnedConfiguredNamedSessionBeadKillProtected(session) {
+		return false
+	}
 	hasAssignedWork, err := sessionHasOpenAssignedWorkForConfig(cityPath, cfg, store, rigStores, session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking assigned work for %s: %v\n", session.ID, err) //nolint:errcheck
