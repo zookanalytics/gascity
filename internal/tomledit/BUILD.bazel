@@ -1,0 +1,26 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tomledit",
+    srcs = ["tomledit.go"],
+    importpath = "github.com/gastownhall/gascity/internal/tomledit",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "tomledit_test",
+    srcs = [
+        "testenv_import_test.go",
+        "tomledit_test.go",
+    ],
+    embed = [":tomledit"],
+    deps = ["//internal/testenv"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"], allow_empty = True),
+    visibility = ["//visibility:public"],
+)

@@ -70,6 +70,7 @@ go_library(
         "template-fragments/claim-protocol.template.md",
         "assets/scripts/order_outcome.sh",
         "assets/scripts/scope_bd.sh",
+        "assets/scripts/_list-helpers.sh",
     ],
     importpath = "github.com/gastownhall/gascity/internal/bootstrap/packs/core",
     visibility = ["//:__subpackages__"],
@@ -78,6 +79,7 @@ go_library(
 go_test(
     name = "core_test",
     srcs = [
+        "cascade_nudge_script_test.go",
         "escalate_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",
@@ -94,6 +96,7 @@ go_test(
     deps = [
         "//internal/orders",
         "//internal/testenv",
+        "//internal/testpolicy/shellpipeline",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
