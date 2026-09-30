@@ -158,16 +158,16 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 			}, nil
 		}
 	}
-	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {
 		return execStoreTarget{}, fmt.Errorf("rig %q not found in %s", a.Rig, filepath.Join(cityPath, "city.toml"))
 	}
-	if strings.TrimSpace(rig.Path) == "" {
+	rigPath := resolvedRigPath(cityPath, rig.Path)
+	if rigPath == "" {
 		return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before dispatching rig-scoped orders", rig.Name, rig.Name)
 	}
 	return execStoreTarget{
-		ScopeRoot: rig.Path,
+		ScopeRoot: rigPath,
 		ScopeKind: "rig",
 		Prefix:    rig.EffectivePrefix(),
 		RigName:   rig.Name,
@@ -591,14 +591,14 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 		label:  "city",
 	}}
 	if cfg != nil {
-		resolveRigPaths(cityPath, cfg.Rigs)
 		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) == "" {
+			rigPath := resolvedRigPath(cityPath, rig.Path)
+			if rigPath == "" {
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{
 				target: execStoreTarget{
-					ScopeRoot: rig.Path,
+					ScopeRoot: rigPath,
 					ScopeKind: "rig",
 					Prefix:    rig.EffectivePrefix(),
 					RigName:   rig.Name,
