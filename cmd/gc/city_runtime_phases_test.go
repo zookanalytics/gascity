@@ -251,6 +251,28 @@ func storeWrites(ops []string) []string {
 	return writes
 }
 
+// canonicalLiveListRuns sorts every run of consecutive live List records. A
+// SeatWork loads its legs concurrently, one live List per status
+// (seat_work.go load), so the records of one load have no fixed order; the
+// run is compared as a set in sequence, the rest of the recording as-is.
+func canonicalLiveListRuns(lines []string) []string {
+	out := append([]string(nil), lines...)
+	isLive := func(l string) bool { return strings.HasPrefix(l, "List ") && strings.HasSuffix(l, " live=true") }
+	for i := 0; i < len(out); {
+		if !isLive(out[i]) {
+			i++
+			continue
+		}
+		j := i
+		for j < len(out) && isLive(out[j]) {
+			j++
+		}
+		sort.Strings(out[i:j])
+		i = j
+	}
+	return out
+}
+
 func assertLinesEqual(t *testing.T, what string, got, want []string) {
 	t.Helper()
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -451,6 +473,13 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"Get gc-1",
 				"SetMetadataBatch gc-1 state",
 				"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+				// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+				// the no-wake-reason drain path before it is drained: the tick's
+				// SeatWork loads its legs on that first question, one live List per
+				// status (seat_work.go load), concurrently, so the two land in no
+				// fixed order and canonicalLiveListRuns sorts the run.
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
 				"Get gc-1",
 				"Get gc-1",
 				"List status=open type=session label= metadata= include_closed=false live=false",
@@ -541,6 +570,13 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"Get gc-1",
 				"SetMetadataBatch gc-1 state",
 				"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+				// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+				// the no-wake-reason drain path before it is drained: the tick's
+				// SeatWork loads its legs on that first question, one live List per
+				// status (seat_work.go load), concurrently, so the two land in no
+				// fixed order and canonicalLiveListRuns sorts the run.
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
 				"Get gc-1",
 				"Get gc-1",
 				"List status=open type=session label= metadata= include_closed=false live=false",
@@ -557,7 +593,7 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 			gotStore := store.recorded()
 			gotOps := tickOperationRecords(t, cr)
 			assertLinesEqual(t, "tick operation records", gotOps, tc.wantOps)
-			assertLinesEqual(t, "tick store calls", gotStore, tc.wantStore)
+			assertLinesEqual(t, "tick store calls", canonicalLiveListRuns(gotStore), canonicalLiveListRuns(tc.wantStore))
 		})
 	}
 }
@@ -653,7 +689,7 @@ func TestCityRuntimeStartupLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"controller.tick.phase bead_reconcile.nudge_dispatch_tick",
 		"controller.tick.phase bead_reconcile.nudge_stalled_pool_claims",
 	})
-	assertLinesEqual(t, "startup store calls", store.recorded(), []string{
+	assertLinesEqual(t, "startup store calls", canonicalLiveListRuns(store.recorded()), canonicalLiveListRuns([]string{
 		"List status=open type=session label= metadata= include_closed=false live=false",
 		"List status=open type= label=gc:session metadata= include_closed=false live=false",
 		"List status=open type=session label= metadata= include_closed=false live=false",
@@ -670,6 +706,13 @@ func TestCityRuntimeStartupLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"Get gc-1",
 		"SetMetadataBatch gc-1 state",
 		"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+		// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+		// the no-wake-reason drain path before it is drained: the tick's
+		// SeatWork loads its legs on that first question, one live List per
+		// status (seat_work.go load), concurrently, so the two land in no
+		// fixed order and canonicalLiveListRuns sorts the run.
+		"List status=in_progress type= label= metadata= include_closed=false live=true",
+		"List status=open type= label= metadata= include_closed=false live=true",
 		"Get gc-1",
 		"Get gc-1",
 		"List status=open type=session label= metadata= include_closed=false live=false",
@@ -677,7 +720,7 @@ func TestCityRuntimeStartupLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"List status=open type= label=session:gc-1 metadata= include_closed=false live=false",
 		"List status= type=session label= metadata= include_closed=false live=false",
 		"List status= type= label=gc:session metadata= include_closed=false live=false",
-	})
+	}))
 	if got := passCompletion(records, "startup"); got != TraceCompletionCompleted {
 		t.Errorf("startup trace completion = %q, want %q", got, TraceCompletionCompleted)
 	}
