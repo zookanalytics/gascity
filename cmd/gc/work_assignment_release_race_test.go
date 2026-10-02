@@ -702,3 +702,70 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 		}
 	})
 }
+
+// staleInProgressListStore answers the tier-2 verification List with a stale
+// in_progress view of a bead that has in fact CLOSED, while Get (the
+// authoritative live handle liveBeadRead reads) tells the truth. This is the
+// cache divergence behind gc-7j2nz: the on-session-close release path walks a
+// cache-served assigned-work list, so a completed step still reads as
+// in_progress there after it closed. The verification List re-confirms that
+// stale view, so only an authoritative live read of the bead itself catches the
+// close.
+type staleInProgressListStore struct {
+	*beads.MemStore
+	snapshot beads.Bead
+}
+
+func (s *staleInProgressListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "in_progress" {
+		return []beads.Bead{s.snapshot}, nil
+	}
+	return s.MemStore.List(q)
+}
+
+// TestReleaseWorkBead_DoesNotReopenClosedStep is the gc-7j2nz regression: a
+// graph.v2 step that already closed with a passing outcome must never be written
+// back to open and re-pooled when its owning session closes. The tier-2
+// verification passes against a stale in_progress list, and item.Status is
+// in_progress, so without the terminal-status guard the unconditional write
+// resurrects the finished step.
+func TestReleaseWorkBead_DoesNotReopenClosedStep(t *testing.T) {
+	mem := beads.NewMemStore()
+	claimed := seedClaimedBead(t, mem, "retired-session")
+	// A graph.v2 step carries a continuation group, which forces the single-write
+	// tier-2 path — the one whose re-read is not terminal-aware.
+	if err := mem.SetMetadata(claimed.ID, beadmeta.ContinuationGroupMetadataKey, "grp-1"); err != nil {
+		t.Fatalf("seed continuation group: %v", err)
+	}
+	// The step completes: closed with a passing outcome, assignee retained (the
+	// close does not clear it), exactly as the reopened beads were in gc-7j2nz.
+	closed := "closed"
+	if err := mem.Update(claimed.ID, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	if err := mem.SetMetadata(claimed.ID, beadmeta.OutcomeMetadataKey, beadmeta.OutcomePass); err != nil {
+		t.Fatalf("stamp outcome: %v", err)
+	}
+
+	// The caller's (cache-served) snapshot still shows the step in_progress.
+	stale := claimed
+	stale.Status = "in_progress"
+	stale.Metadata = map[string]string{beadmeta.ContinuationGroupMetadataKey: "grp-1"}
+	store := &staleInProgressListStore{MemStore: mem, snapshot: stale}
+
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	if err := wa.ReleaseWorkBead(stale, ""); err != nil {
+		t.Fatalf("ReleaseWorkBead: %v", err)
+	}
+
+	got, err := mem.Get(claimed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — a completed step must never be reopened and re-pooled", got.Status)
+	}
+	if got.Assignee != "retired-session" {
+		t.Fatalf("assignee = %q, want retired-session unchanged — nothing should have been written to a closed step", got.Assignee)
+	}
+}

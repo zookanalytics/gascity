@@ -451,6 +451,18 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"Get gc-1",
 				"SetMetadataBatch gc-1 state",
 				"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+				// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+				// the no-wake-reason drain path before it is drained: sessionHasOpen-
+				// AssignedWorkForReachableStore reads open then in_progress, for each of
+				// the seat's identifiers (bead ID, session name), across both tiers.
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
 				"Get gc-1",
 				"Get gc-1",
 				"List status=open type=session label= metadata= include_closed=false live=false",
@@ -541,6 +553,18 @@ func TestCityRuntimeTickPhasesMatchLegacyTickRecordsAndStoreOps(t *testing.T) {
 				"Get gc-1",
 				"SetMetadataBatch gc-1 state",
 				"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+				// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+				// the no-wake-reason drain path before it is drained: sessionHasOpen-
+				// AssignedWorkForReachableStore reads open then in_progress, for each of
+				// the seat's identifiers (bead ID, session name), across both tiers.
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=open type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
+				"List status=in_progress type= label= metadata= include_closed=false live=true",
 				"Get gc-1",
 				"Get gc-1",
 				"List status=open type=session label= metadata= include_closed=false live=false",
@@ -670,6 +694,18 @@ func TestCityRuntimeStartupLegacyPhaseSequenceUnchanged(t *testing.T) {
 		"Get gc-1",
 		"SetMetadataBatch gc-1 state",
 		"SetMetadataBatch gc-1 effective_sleep_after_idle,requested_sleep_after_idle,sleep_capability,sleep_policy_source",
+		// The held-work keep-alive (#6168, gc-7kea9) probes a live pool seat on
+		// the no-wake-reason drain path before it is drained: sessionHasOpen-
+		// AssignedWorkForReachableStore reads open then in_progress, for each of
+		// the seat's identifiers (bead ID, session name), across both tiers.
+		"List status=open type= label= metadata= include_closed=false live=true",
+		"List status=open type= label= metadata= include_closed=false live=true",
+		"List status=open type= label= metadata= include_closed=false live=true",
+		"List status=open type= label= metadata= include_closed=false live=true",
+		"List status=in_progress type= label= metadata= include_closed=false live=true",
+		"List status=in_progress type= label= metadata= include_closed=false live=true",
+		"List status=in_progress type= label= metadata= include_closed=false live=true",
+		"List status=in_progress type= label= metadata= include_closed=false live=true",
 		"Get gc-1",
 		"Get gc-1",
 		"List status=open type=session label= metadata= include_closed=false live=false",
