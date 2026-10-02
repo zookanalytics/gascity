@@ -456,7 +456,12 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
-// AgentSessionsCheck verifies non-suspended agents have running sessions.
+// AgentSessionsCheck verifies that each resident agent's canonical session is
+// running. A resident is an agent that backs a mode="always" named session —
+// the only population the controller keeps alive under a single canonical
+// session name. Every other agent is an on-demand pool or worker identity
+// whose liveness is a numbered pool/wisp session, not the canonical name, so
+// it is not expected here.
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
@@ -472,26 +477,57 @@ func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, s
 // Name returns the check identifier.
 func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 
-// Run checks that each non-suspended agent has a running session.
+// Run checks that each resident agent's canonical session is running. The
+// resident population is the set of agents backing a mode="always" named
+// session; the controller reconciles each such session under the name
+// config.NamedSessionRuntimeName derives from the named session's identity. An
+// on-demand pool or worker identity never runs under that canonical name — its
+// work runs as numbered pool/wisp sessions — so a missing canonical session
+// for it is expected and is skipped, not reported. A down resident surfaces as
+// an advisory warning: it is worth an operator's attention but must not gate
+// the `gc doctor` exit code.
 func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if c.cfg == nil {
+		r.Status = StatusOK
+		r.Message = "no config; nothing to check"
+		return r
+	}
+
+	// Map each agent template backing a mode="always" named session to that
+	// named session's identity — the identity the runtime session name is
+	// derived from.
+	residentIdentity := map[string]string{}
+	for i := range c.cfg.NamedSessions {
+		ns := &c.cfg.NamedSessions[i]
+		if ns.ModeOrDefault() == "always" {
+			residentIdentity[ns.TemplateQualifiedName()] = ns.QualifiedName()
+		}
+	}
+
 	var missing []string
-	for _, a := range c.cfg.Agents {
+	for i := range c.cfg.Agents {
+		a := &c.cfg.Agents[i]
 		if a.Suspended {
 			continue
 		}
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
+		identity, ok := residentIdentity[a.QualifiedName()]
+		if !ok {
+			continue
+		}
+		sn := agent.SessionNameFor(c.cityName, identity, c.sessionTemplate)
 		if !c.sp.IsRunning(sn) {
 			missing = append(missing, a.QualifiedName())
 		}
 	}
 	if len(missing) == 0 {
 		r.Status = StatusOK
-		r.Message = "all agent sessions running"
+		r.Message = "all resident agent sessions running"
 		return r
 	}
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d agent(s) without sessions", len(missing))
+	r.Severity = SeverityAdvisory
+	r.Message = fmt.Sprintf("%d resident agent(s) without sessions", len(missing))
 	r.Details = missing
 	r.FixHint = "run gc start to reconcile sessions"
 	return r

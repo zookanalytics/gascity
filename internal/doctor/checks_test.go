@@ -814,6 +814,21 @@ func TestBinaryCheck_VersionNotFoundStillError(t *testing.T) {
 }
 
 // --- AgentSessionsCheck ---
+//
+// agent-sessions only expects a persistent canonical session for agents that
+// back a mode="always" named session — the controller-managed residents. An
+// on-demand pool or worker identity materializes as a numbered pool/wisp
+// session, never the canonical name, so its absence is not a finding.
+
+// residentCity returns a City where agentName is a resident: it backs a
+// mode="always" named session, so the controller keeps its canonical session
+// alive.
+func residentCity(agentName string) *config.City {
+	return &config.City{
+		Agents:        []config.Agent{{Name: agentName}},
+		NamedSessions: []config.NamedSession{{Template: agentName, Mode: "always"}},
+	}
+}
 
 func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	sp := runtime.NewFake()
@@ -821,10 +836,7 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(residentCity("mayor"), "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -833,29 +845,80 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 
 func TestAgentSessionsCheck_Missing(t *testing.T) {
 	sp := runtime.NewFake()
-	// Don't start any sessions.
+	// Don't start any sessions: the resident is genuinely down.
 
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "mayor"}},
-	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(residentCity("mayor"), "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	// A down resident surfaces, but the finding is advisory: leaving Severity
+	// at its SeverityBlocking zero value would mislabel a benign liveness
+	// warning as blocking in `gc doctor --json`.
+	if r.Severity != SeverityAdvisory {
+		t.Errorf("severity = %d, want SeverityAdvisory", r.Severity)
 	}
 }
 
 func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	sp := runtime.NewFake()
-	// Suspended agent has no session — that's fine.
-
-	cfg := &config.City{
-		Agents: []config.Agent{{Name: "worker", Suspended: true}},
-	}
+	// A suspended resident has no session — that's fine; the reconciler does
+	// not spawn it.
+	cfg := residentCity("mayor")
+	cfg.Agents[0].Suspended = true
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (suspended skipped); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestAgentSessionsCheck_IgnoresPoolAgent guards the on-demand population: a
+// non-suspended agent that backs no mode="always" named session is an
+// on-demand pool/worker identity whose liveness is a numbered pool session, so
+// its missing canonical session must not be flagged.
+func TestAgentSessionsCheck_IgnoresPoolAgent(t *testing.T) {
+	sp := runtime.NewFake()
+	// No session started, and no named session backs the agent.
+	cfg := &config.City{Agents: []config.Agent{{Name: "polecat"}}}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (pool agent is not a resident); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestAgentSessionsCheck_IgnoresOnDemandNamedSession: a mode="on_demand" named
+// session is materialized only when work requires it, so the agent backing it
+// is not expected to hold a persistent canonical session.
+func TestAgentSessionsCheck_IgnoresOnDemandNamedSession(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "refinery"}},
+		NamedSessions: []config.NamedSession{{Template: "refinery", Mode: "on_demand"}},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (on_demand named session is not a resident); msg = %s", r.Status, r.Message)
+	}
+}
+
+// TestAgentSessionsCheck_OnlyResidentSurfaces: with a down resident and a pool
+// agent that holds no session, only the resident is reported.
+func TestAgentSessionsCheck_OnlyResidentSurfaces(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "witness"}, {Name: "polecat"}},
+		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "always"}},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 || r.Details[0] != "witness" {
+		t.Errorf("details = %v, want exactly [witness] (the pool agent must not surface)", r.Details)
 	}
 }
 
