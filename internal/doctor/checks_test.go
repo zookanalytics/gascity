@@ -1169,6 +1169,111 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 }
 
+// TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned reproduces gc-8kwa5:
+// an on-demand pool template materializes concrete member sessions whose names
+// derive from the agent's canonical name — a numbered instance slot
+// ("<canonical>-1"), the warm-bind pool session ("<canonical>-pool"), and
+// ephemeral wisps ("<canonical>-<prefix>-wisp-<leaf>"). None equals the bare
+// canonical name, so building the expected set from one canonical name per
+// agent flagged every live member as orphaned. A pool agent's own members
+// belong to it and must not surface.
+func TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, name := range []string{
+		"polecat",               // canonical identity (always expected)
+		"polecat-1",             // numbered instance slot
+		"polecat-pool",          // warm-bind pool runtime name
+		"polecat-lx-wisp-x8gkz", // ephemeral wisp
+	} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	maxSessions := 5
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", MaxActiveSessions: &maxSessions}},
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusOK {
+		t.Errorf("status = %d, want OK (pool members are not orphans); msg = %s, details = %v", r.Status, r.Message, r.Details)
+	}
+}
+
+// TestOrphanSessionsCheck_WarningIsAdvisory: a genuine orphaned session is a
+// benign liveness observation, not a dispatch gate. Leaving Severity at its
+// SeverityBlocking zero value mislabeled the finding as blocking in
+// `gc doctor --json` (gc-8kwa5, the severity defect shared with gc-tobpf).
+func TestOrphanSessionsCheck_WarningIsAdvisory(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "ghost-role", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if r.Severity != SeverityAdvisory {
+		t.Errorf("severity = %d, want SeverityAdvisory", r.Severity)
+	}
+}
+
+// TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool proves the
+// population fix does not blind the check: with a live pool agent present, its
+// wisp member is spared, but a session no configured agent owns (a removed
+// agent's leftover) still surfaces as an orphan.
+func TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "polecat-lx-wisp-abc", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "removed-role-xyz", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	maxSessions := 5
+	cfg := &config.City{Agents: []config.Agent{{Name: "polecat", MaxActiveSessions: &maxSessions}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (the dead-owner session must surface); msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 || r.Details[0] != "removed-role-xyz" {
+		t.Errorf("details = %v, want exactly [removed-role-xyz] (the pool member must not surface)", r.Details)
+	}
+}
+
+// TestOrphanSessionsCheck_FixSparesPoolMembers guards the hazard behind the
+// report: Fix stops every session it considers orphaned, so the population bug
+// made `gc doctor --fix` kill live pool/wisp sessions. Fix must spare a pool
+// member and stop only the genuine orphan.
+func TestOrphanSessionsCheck_FixSparesPoolMembers(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "polecat-lx-wisp-abc", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "removed-role-xyz", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	maxSessions := 5
+	cfg := &config.City{Agents: []config.Agent{{Name: "polecat", MaxActiveSessions: &maxSessions}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if !sp.IsRunning("polecat-lx-wisp-abc") {
+		t.Error("Fix killed a live pool member session")
+	}
+	if sp.IsRunning("removed-role-xyz") {
+		t.Error("orphan session still running after fix")
+	}
+}
+
 // --- BeadsStoreCheck ---
 
 func TestBeadsStoreCheck_OK(t *testing.T) {
