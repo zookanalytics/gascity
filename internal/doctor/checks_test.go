@@ -1169,14 +1169,12 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 }
 
-// TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned reproduces gc-8kwa5:
-// an on-demand pool template materializes concrete member sessions whose names
-// derive from the agent's canonical name — a numbered instance slot
-// ("<canonical>-1"), the warm-bind pool session ("<canonical>-pool"), and
-// ephemeral wisps ("<canonical>-<prefix>-wisp-<leaf>"). None equals the bare
-// canonical name, so building the expected set from one canonical name per
-// agent flagged every live member as orphaned. A pool agent's own members
-// belong to it and must not surface.
+// TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned: a pool agent
+// materializes concrete member sessions whose names derive from its canonical
+// name rather than equal it — a numbered instance slot ("<canonical>-1"), the
+// warm-bind pool session ("<canonical>-pool"), and ephemeral wisps
+// ("<canonical>-<prefix>-wisp-<leaf>"). All belong to the agent, so none is an
+// orphan.
 func TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned(t *testing.T) {
 	sp := runtime.NewFake()
 	for _, name := range []string{
@@ -1202,9 +1200,8 @@ func TestOrphanSessionsCheck_PoolAndWispSessionsNotOrphaned(t *testing.T) {
 }
 
 // TestOrphanSessionsCheck_WarningIsAdvisory: a genuine orphaned session is a
-// benign liveness observation, not a dispatch gate. Leaving Severity at its
-// SeverityBlocking zero value mislabeled the finding as blocking in
-// `gc doctor --json` (gc-8kwa5, the severity defect shared with gc-tobpf).
+// benign liveness observation, not a dispatch gate, so the finding is reported
+// at SeverityAdvisory rather than the SeverityBlocking zero value.
 func TestOrphanSessionsCheck_WarningIsAdvisory(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
@@ -1224,10 +1221,10 @@ func TestOrphanSessionsCheck_WarningIsAdvisory(t *testing.T) {
 	}
 }
 
-// TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool proves the
-// population fix does not blind the check: with a live pool agent present, its
-// wisp member is spared, but a session no configured agent owns (a removed
-// agent's leftover) still surfaces as an orphan.
+// TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool: attribution must
+// not blind the check. With a live pool agent present, its wisp member is
+// attributed to it, but a session no configured agent owns (a removed agent's
+// leftover) still surfaces as an orphan.
 func TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "polecat-lx-wisp-abc", runtime.Config{}); err != nil {
@@ -1248,10 +1245,9 @@ func TestOrphanSessionsCheck_GenuineOrphanSurfacesAlongsidePool(t *testing.T) {
 	}
 }
 
-// TestOrphanSessionsCheck_FixSparesPoolMembers guards the hazard behind the
-// report: Fix stops every session it considers orphaned, so the population bug
-// made `gc doctor --fix` kill live pool/wisp sessions. Fix must spare a pool
-// member and stop only the genuine orphan.
+// TestOrphanSessionsCheck_FixSparesPoolMembers: Fix stops every session it
+// considers orphaned, so it must share Run's attribution — a live pool/wisp
+// member is spared and only the genuine orphan is stopped.
 func TestOrphanSessionsCheck_FixSparesPoolMembers(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "polecat-lx-wisp-abc", runtime.Config{}); err != nil {
@@ -1268,6 +1264,65 @@ func TestOrphanSessionsCheck_FixSparesPoolMembers(t *testing.T) {
 	}
 	if !sp.IsRunning("polecat-lx-wisp-abc") {
 		t.Error("Fix killed a live pool member session")
+	}
+	if sp.IsRunning("removed-role-xyz") {
+		t.Error("orphan session still running after fix")
+	}
+}
+
+// TestOrphanSessionsCheck_NamepoolThemedSessionNotOrphaned covers the namepool
+// slot shape: a namepool agent's members take their themed names directly
+// (e.g. "furiosa"), so the runtime starts each under a session name built from
+// its themed instance identity rather than a "<canonical>-<slot>" derivative.
+// A live themed member belongs to its agent and must not surface, while a
+// session no configured agent owns still does.
+func TestOrphanSessionsCheck_NamepoolThemedSessionNotOrphaned(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "furiosa", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "removed-role-xyz", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	maxSessions := 5
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "polecat",
+		MaxActiveSessions: &maxSessions,
+		NamepoolNames:     []string{"furiosa", "max"},
+	}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (the dead-owner session must surface); msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 || r.Details[0] != "removed-role-xyz" {
+		t.Errorf("details = %v, want exactly [removed-role-xyz] (the themed namepool member must not surface)", r.Details)
+	}
+}
+
+// TestOrphanSessionsCheck_FixSparesNamepoolThemedSession: Fix shares Run's
+// attribution, so a live themed namepool member is spared and only the genuine
+// orphan is stopped.
+func TestOrphanSessionsCheck_FixSparesNamepoolThemedSession(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "furiosa", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(context.Background(), "removed-role-xyz", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	maxSessions := 5
+	cfg := &config.City{Agents: []config.Agent{{
+		Name:              "polecat",
+		MaxActiveSessions: &maxSessions,
+		NamepoolNames:     []string{"furiosa", "max"},
+	}}}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	if err := c.Fix(&CheckContext{}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if !sp.IsRunning("furiosa") {
+		t.Error("Fix killed a live themed namepool member")
 	}
 	if sp.IsRunning("removed-role-xyz") {
 		t.Error("orphan session still running after fix")

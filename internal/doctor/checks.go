@@ -638,12 +638,19 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // configured agent. It matches when the name is the agent's canonical session
 // name (agent.SessionNameFor), or — for an agent that runs expanded concrete
 // identities (config.Agent.SupportsExpandedSessionIdentities, e.g. a namepool
-// or a multi-slot pool) — a member session the runtime derives from that
-// canonical name as "<canonical>-<suffix>": a numbered instance slot, the
-// "-pool" warm-bind session, or a "<prefix>-wisp-<leaf>" ephemeral wisp. An
-// agent that runs only its canonical identity (a singleton pool or a
-// named-session agent) offers no prefix match, so a genuinely orphaned session
-// — one whose owning agent is no longer in config — has no claimant and
+// or a multi-slot pool) — one of the member sessions that agent materializes:
+//
+//   - a "<canonical>-<suffix>" derivative of the canonical name: a numbered
+//     instance slot, the "-pool" warm-bind session, or a
+//     "<prefix>-wisp-<leaf>" ephemeral wisp; or
+//   - a namepool slot, whose runtime name is built from its themed instance
+//     identity (QualifiedInstanceName) and so is not derived from the
+//     canonical name — the prefix test never reaches it, so each themed member
+//     is matched against the session name the runtime starts it under.
+//
+// An agent that runs only its canonical identity (a singleton pool or a
+// named-session agent) offers no such match, so a genuinely orphaned session —
+// one whose owning agent is no longer in config — has no claimant and
 // surfaces. Suspended agents remain configured, so their sessions are
 // attributed too.
 func (c *OrphanSessionsCheck) sessionAttributable(name string) bool {
@@ -653,8 +660,16 @@ func (c *OrphanSessionsCheck) sessionAttributable(name string) bool {
 		if name == canonical {
 			return true
 		}
-		if a.SupportsExpandedSessionIdentities() && strings.HasPrefix(name, canonical+"-") {
+		if !a.SupportsExpandedSessionIdentities() {
+			continue
+		}
+		if strings.HasPrefix(name, canonical+"-") {
 			return true
+		}
+		for _, themed := range a.NamepoolNames {
+			if name == agent.SessionNameFor(c.cityName, a.QualifiedInstanceName(themed), c.sessionTemplate) {
+				return true
+			}
 		}
 	}
 	return false
