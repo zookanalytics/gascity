@@ -456,7 +456,11 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // --- Session checks (skipped when controller is running) ---
 
-// AgentSessionsCheck verifies non-suspended agents have running sessions.
+// AgentSessionsCheck verifies that each resident named session's canonical
+// session is running. A resident is a mode="always" named session — the only
+// population the controller keeps alive under a single canonical session name.
+// On-demand pool and worker identities run as numbered pool/wisp sessions, not
+// under a canonical name, so they are not expected here.
 type AgentSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
@@ -472,26 +476,56 @@ func NewAgentSessionsCheck(cfg *config.City, cityName, sessionTemplate string, s
 // Name returns the check identifier.
 func (c *AgentSessionsCheck) Name() string { return "agent-sessions" }
 
-// Run checks that each non-suspended agent has a running session.
+// Run checks that every resident named session has its canonical session
+// running. A resident is a mode="always" named session; the controller
+// reconciles each one under the name config.NamedSessionRuntimeName derives
+// from the session's identity. Several residents may share one backing agent
+// template, so each session's identity is checked directly — collapsing by
+// template would let a running sibling mask a down resident. A session whose
+// backing agent is suspended or absent is skipped, and on-demand identities
+// never run under a canonical name, so neither is reported. A down resident
+// surfaces as an advisory warning: it is worth an operator's attention but
+// must not gate the `gc doctor` exit code. A nil config checks nothing.
 func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
+	if c.cfg == nil {
+		r.Status = StatusOK
+		r.Message = "no config; nothing to check"
+		return r
+	}
+
+	// Agents present and not suspended. A resident whose backing agent is
+	// suspended or absent is not expected to be running.
+	eligible := map[string]bool{}
+	for i := range c.cfg.Agents {
+		a := &c.cfg.Agents[i]
+		if !a.Suspended {
+			eligible[a.QualifiedName()] = true
+		}
+	}
+
 	var missing []string
-	for _, a := range c.cfg.Agents {
-		if a.Suspended {
+	for i := range c.cfg.NamedSessions {
+		ns := &c.cfg.NamedSessions[i]
+		if ns.ModeOrDefault() != "always" {
 			continue
 		}
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
+		if !eligible[ns.TemplateQualifiedName()] {
+			continue
+		}
+		sn := agent.SessionNameFor(c.cityName, ns.QualifiedName(), c.sessionTemplate)
 		if !c.sp.IsRunning(sn) {
-			missing = append(missing, a.QualifiedName())
+			missing = append(missing, ns.QualifiedName())
 		}
 	}
 	if len(missing) == 0 {
 		r.Status = StatusOK
-		r.Message = "all agent sessions running"
+		r.Message = "all resident sessions running"
 		return r
 	}
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("%d agent(s) without sessions", len(missing))
+	r.Severity = SeverityAdvisory
+	r.Message = fmt.Sprintf("%d resident session(s) not running", len(missing))
 	r.Details = missing
 	r.FixHint = "run gc start to reconcile sessions"
 	return r
