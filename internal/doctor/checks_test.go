@@ -832,11 +832,11 @@ func residentCity(agentName string) *config.City {
 
 func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	sp := runtime.NewFake()
-	if err := sp.Start(context.Background(), "mayor", runtime.Config{}); err != nil {
+	if err := sp.Start(context.Background(), "resident-a", runtime.Config{}); err != nil {
 		t.Fatal(err)
 	}
 
-	c := NewAgentSessionsCheck(residentCity("mayor"), "test", "", sp)
+	c := NewAgentSessionsCheck(residentCity("resident-a"), "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -847,7 +847,7 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	sp := runtime.NewFake()
 	// Don't start any sessions: the resident is genuinely down.
 
-	c := NewAgentSessionsCheck(residentCity("mayor"), "test", "", sp)
+	c := NewAgentSessionsCheck(residentCity("resident-a"), "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -864,7 +864,7 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	sp := runtime.NewFake()
 	// A suspended resident has no session — that's fine; the reconciler does
 	// not spawn it.
-	cfg := residentCity("mayor")
+	cfg := residentCity("resident-a")
 	cfg.Agents[0].Suspended = true
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -880,7 +880,7 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 func TestAgentSessionsCheck_IgnoresPoolAgent(t *testing.T) {
 	sp := runtime.NewFake()
 	// No session started, and no named session backs the agent.
-	cfg := &config.City{Agents: []config.Agent{{Name: "polecat"}}}
+	cfg := &config.City{Agents: []config.Agent{{Name: "pool-worker"}}}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
@@ -894,8 +894,8 @@ func TestAgentSessionsCheck_IgnoresPoolAgent(t *testing.T) {
 func TestAgentSessionsCheck_IgnoresOnDemandNamedSession(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{
-		Agents:        []config.Agent{{Name: "refinery"}},
-		NamedSessions: []config.NamedSession{{Template: "refinery", Mode: "on_demand"}},
+		Agents:        []config.Agent{{Name: "on-demand-agent"}},
+		NamedSessions: []config.NamedSession{{Template: "on-demand-agent", Mode: "on_demand"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
@@ -909,16 +909,45 @@ func TestAgentSessionsCheck_IgnoresOnDemandNamedSession(t *testing.T) {
 func TestAgentSessionsCheck_OnlyResidentSurfaces(t *testing.T) {
 	sp := runtime.NewFake()
 	cfg := &config.City{
-		Agents:        []config.Agent{{Name: "witness"}, {Name: "polecat"}},
-		NamedSessions: []config.NamedSession{{Template: "witness", Mode: "always"}},
+		Agents:        []config.Agent{{Name: "resident-a"}, {Name: "pool-worker"}},
+		NamedSessions: []config.NamedSession{{Template: "resident-a", Mode: "always"}},
 	}
 	c := NewAgentSessionsCheck(cfg, "test", "", sp)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
 	}
-	if len(r.Details) != 1 || r.Details[0] != "witness" {
-		t.Errorf("details = %v, want exactly [witness] (the pool agent must not surface)", r.Details)
+	if len(r.Details) != 1 || r.Details[0] != "resident-a" {
+		t.Errorf("details = %v, want exactly [resident-a] (the pool agent must not surface)", r.Details)
+	}
+}
+
+// TestAgentSessionsCheck_SharedTemplateChecksEveryResident is the regression
+// for the collapse bug: several mode="always" named sessions may name one
+// backing agent template, and each is an independent resident with its own
+// canonical session. Here resident-a and resident-b both back the
+// "shared-template" agent and only resident-b is running, so the down
+// resident-a must still surface — mapping the template to a single identity
+// would hide it behind its running sibling.
+func TestAgentSessionsCheck_SharedTemplateChecksEveryResident(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "resident-b", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "shared-template"}},
+		NamedSessions: []config.NamedSession{
+			{Name: "resident-a", Template: "shared-template", Mode: "always"},
+			{Name: "resident-b", Template: "shared-template", Mode: "always"},
+		},
+	}
+	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning (resident-a is down); msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 1 || r.Details[0] != "resident-a" {
+		t.Errorf("details = %v, want exactly [resident-a] (resident-b is running)", r.Details)
 	}
 }
 
