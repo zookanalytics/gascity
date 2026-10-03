@@ -253,6 +253,21 @@ func (w workAssignment) ReleaseWorkBead(item beads.Bead, runTargetFallback strin
 		log.Printf("ReleaseWorkBead: skipping release for %s: assignment changed between snapshot and release write", item.ID)
 		return nil
 	}
+	// Terminal-status guard (gascity#6362, gc-7j2nz): never reopen a step that
+	// has already completed. The re-read above lists by the SNAPSHOT status, so a
+	// stale in_progress view — the cache-served list the on-session-close release
+	// path (releaseWorkFromClosedSessionBeadExcept) walks — passes the assignee
+	// check while the bead has in fact closed (gc.outcome=pass). Writing
+	// status=open then resurrects a finished step and re-pools it, respawning a
+	// polecat to re-run completed work. The cache does not retain closed history,
+	// so this reads the authoritative live handle, which List cannot be trusted to
+	// reflect here. A closed bead is already detached from its session, so there
+	// is nothing to release; a read error leaves the existing write path untouched
+	// rather than block a legitimate release.
+	if live, liveErr := liveBeadRead(store, item.ID); liveErr == nil && live.Status == "closed" {
+		log.Printf("ReleaseWorkBead: skipping release for %s: bead is closed (terminal); not reopening", item.ID)
+		return nil
+	}
 	empty := ""
 	update := beads.UpdateOpts{
 		Assignee: &empty,
