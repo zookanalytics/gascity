@@ -567,7 +567,12 @@ func (c *ZombieSessionsCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// OrphanSessionsCheck finds sessions with the city prefix not in config.
+// OrphanSessionsCheck finds running sessions that belong to no configured
+// agent. It accounts for the concrete member sessions a pool or
+// instance-expanding agent runs — numbered slots, the warm-bind pool session,
+// and ephemeral wisps — which are derived from the agent's canonical name
+// rather than being that name, so they are attributed to their agent and not
+// flagged.
 type OrphanSessionsCheck struct {
 	cfg             *config.City
 	cityName        string
@@ -583,7 +588,12 @@ func NewOrphanSessionsCheck(cfg *config.City, cityName, sessionTemplate string, 
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run finds sessions with the city prefix that don't match any configured agent.
+// Run finds running sessions that belong to no configured agent. A session is
+// attributed to an agent by sessionAttributable — its canonical session name,
+// or a pool/instance/wisp member derived from that name — and only a session
+// no agent claims is reported. The finding is advisory: a leftover session is
+// worth surfacing but must not gate dispatch or the `gc doctor` exit code,
+// which SeverityBlocking (the zero value) would do.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city
@@ -595,16 +605,9 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	// Build set of expected session names.
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
-
 	var orphans []string
 	for _, s := range running {
-		if !expected[s] {
+		if !c.sessionAttributable(s) {
 			orphans = append(orphans, s)
 		}
 	}
@@ -612,6 +615,7 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	if len(orphans) == 0 {
 		if partialList {
 			r.Status = StatusWarning
+			r.Severity = SeverityAdvisory
 			r.Message = fmt.Sprintf("listing sessions partially failed: %v", err)
 			return r
 		}
@@ -620,6 +624,7 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 	r.Status = StatusWarning
+	r.Severity = SeverityAdvisory
 	if partialList {
 		r.Message = fmt.Sprintf("listing sessions partially failed: %v (%d visible orphaned session(s))", err, len(orphans))
 	} else {
@@ -627,6 +632,47 @@ func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	}
 	r.Details = orphans
 	return r
+}
+
+// sessionAttributable reports whether a running session name belongs to some
+// configured agent. It matches when the name is the agent's canonical session
+// name (agent.SessionNameFor), or — for an agent that runs expanded concrete
+// identities (config.Agent.SupportsExpandedSessionIdentities, e.g. a namepool
+// or a multi-slot pool) — one of the member sessions that agent materializes:
+//
+//   - a "<canonical>-<suffix>" derivative of the canonical name: a numbered
+//     instance slot, the "-pool" warm-bind session, or a
+//     "<prefix>-wisp-<leaf>" ephemeral wisp; or
+//   - a namepool slot, whose runtime name is built from its themed instance
+//     identity (QualifiedInstanceName) and so is not derived from the
+//     canonical name — the prefix test never reaches it, so each themed member
+//     is matched against the session name the runtime starts it under.
+//
+// An agent that runs only its canonical identity (a singleton pool or a
+// named-session agent) offers no such match, so a genuinely orphaned session —
+// one whose owning agent is no longer in config — has no claimant and
+// surfaces. Suspended agents remain configured, so their sessions are
+// attributed too.
+func (c *OrphanSessionsCheck) sessionAttributable(name string) bool {
+	for i := range c.cfg.Agents {
+		a := &c.cfg.Agents[i]
+		canonical := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
+		if name == canonical {
+			return true
+		}
+		if !a.SupportsExpandedSessionIdentities() {
+			continue
+		}
+		if strings.HasPrefix(name, canonical+"-") {
+			return true
+		}
+		for _, themed := range a.NamepoolNames {
+			if name == agent.SessionNameFor(c.cityName, a.QualifiedInstanceName(themed), c.sessionTemplate) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // CanFix returns true — orphan sessions can be killed.
@@ -647,13 +693,8 @@ func (c *OrphanSessionsCheck) Fix(ctx *CheckContext) error {
 	if err != nil {
 		return err
 	}
-	expected := make(map[string]bool)
-	for _, a := range c.cfg.Agents {
-		sn := agent.SessionNameFor(c.cityName, a.QualifiedName(), c.sessionTemplate)
-		expected[sn] = true
-	}
 	for _, s := range running {
-		if !expected[s] {
+		if !c.sessionAttributable(s) {
 			if err := c.sp.Stop(s); err != nil {
 				return fmt.Errorf("killing orphan session %q: %w", s, err)
 			}
