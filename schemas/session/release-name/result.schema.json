@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "x-gc-jsonl": {},
+  "type": "object",
+  "properties": {
+    "schema_version": { "const": "1" },
+    "ok": { "const": true },
+    "command": { "const": "session release-name" },
+    "action": { "const": "release-name" },
+    "identity": { "type": "string", "minLength": 1 },
+    "count": { "type": "integer", "minimum": 0 },
+    "session_id": { "type": "string", "minLength": 1 }
+  },
+  "required": ["schema_version", "ok", "command", "action", "identity", "count"],
+  "additionalProperties": true
+}

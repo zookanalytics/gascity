@@ -219,7 +219,9 @@
               "storage-preflight",
               "nudge-drop",
               "beads-city-migrate-proxied",
-              "storage-repair-sequence"
+              "storage-repair-sequence",
+              "nudge-show",
+              "session-release-name"
             ]
           },
           "event_id": {
