@@ -1,40 +1,20 @@
 load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
-    name = "graphroute",
-    srcs = ["graphroute.go"],
-    importpath = "github.com/gastownhall/gascity/internal/graphroute",
+    name = "tomledit",
+    srcs = ["tomledit.go"],
+    importpath = "github.com/gastownhall/gascity/internal/tomledit",
     visibility = ["//:__subpackages__"],
-    deps = [
-        "//internal/agentutil",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/session",
-        "//internal/storeref",
-    ],
 )
 
 go_test(
-    name = "graphroute_test",
+    name = "tomledit_test",
     srcs = [
-        "cook_rig_context_repro_test.go",
-        "graphroute_test.go",
-        "session_stamp_test.go",
         "testenv_import_test.go",
-        "unrouted_step_test.go",
+        "tomledit_test.go",
     ],
-    embed = [":graphroute"],
-    deps = [
-        "//internal/agentutil",
-        "//internal/beadmeta",
-        "//internal/beads",
-        "//internal/config",
-        "//internal/formula",
-        "//internal/session",
-        "//internal/testenv",
-    ],
+    embed = [":tomledit"],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
