@@ -33,6 +33,30 @@ description: The shortest path for new contributors to get productive in Gas Cit
   PR — what the contributor is owed and how credit is recorded
 - [Maintainer Environment](maintainer-environment.md) for maintainers on the
   shared build hosts or the internal bd ledger — contributors can skip it
+- [Upstream sync 2026-10-07](upstream-sync-2026-10-07.md) — the carried-commit
+  ledger for the fork: every commit kept, dropped, reworked or regenerated when
+  rebasing onto upstream, with the upstream evidence behind each drop
+- [Upstream sync 2026-10-13](upstream-sync-2026-10-13.md) — the next ledger:
+  the 398-commit upstream catch-up (Actor verbs, SeatWork, issueops read
+  roles, ChildrenOfAny), the five drops with their verification, and the
+  reworks that followed upstream's direction
+- [Upstream sync 2026-10-15](upstream-sync-2026-10-15.md) — the 65-commit
+  catch-up: one drop (a supervisor test flake upstream fixed), the
+  `gc nudge show` and pre-commit lint reworks onto upstream's typed nudge
+  outcomes and hook fallback, and the census v3 regeneration
+- [Upstream sync 2026-10-24](upstream-sync-2026-10-24.md) — the 134-commit
+  catch-up (opjournal lanes, work ladder, reconciler v2 default): no whole
+  drop, four absorbed hunks, the BdStore and order-timeout reworks, and the
+  consolidation of patch commits into the commits they patched
+- [Upstream sync 2026-11-05](upstream-sync-2026-11-05.md) — the 367-commit
+  catch-up (typed stores and the storeclass lint, v2 reconciler hardening,
+  API read routing, Dolt 2.6): four drops, the shed of the convoy-pour carry
+  down to its load-context gate, the storeclass baseline as a new
+  regenerated artifact, and the cutover notes
+- [Upstream sync 2026-11-10](upstream-sync-2026-11-10.md) — the 121-commit
+  catch-up and the carry reduction: three drops upstream covers, eighteen
+  commits shed on the operator's ruling, four trimmed, 92 carried commits
+  down to 71, and every message rewritten as a conventional commit
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
