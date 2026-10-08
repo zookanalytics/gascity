@@ -366,6 +366,151 @@ func TestEnsureSessionNameAvailable_RejectsLiveNamedSessionByIdentity(t *testing
 	}
 }
 
+// legacyClosedNameClaim stores a CLOSED session bead in the pre-ga841 phantom
+// shape from the live 40h refinery outage: it reserves a configured named
+// session's runtime name while recording its identity only through the
+// alias / agent_name / canonical-identity mirrors — no configured_named_session
+// flag and no configured_named_identity.
+func legacyClosedNameClaim(t *testing.T, store beads.Store, runtimeName, identity string) {
+	t.Helper()
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":                "runtime-name-placeholder",
+			"alias":                       identity,
+			"agent_name":                  identity,
+			CanonicalInstanceNameMetadata: identity,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{"session_name": runtimeName}}); err != nil {
+		t.Fatalf("Update(session_name): %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// TestEnsureSessionNameAvailableForOwner_ReleasesClosedLegacyIdentityClaim
+// reproduces the outage where a CLOSED session bead permanently bricked an
+// on_demand agent's alias, so the agent could never be spawned again.
+//
+// The named-session start path already clears its cfg-aware pre-check
+// (EnsureSessionNameAvailableWithConfigForOwner's legacy bypass), then
+// Manager.CreateSession re-checks the same name through this cfg-less helper.
+// Recognition here was owner-AGNOSTIC (wasConfiguredNamedSession), so the
+// pre-ga841 phantom shape — identity carried only by alias/agent_name — fell
+// through to ErrSessionNameExists and the inner check vetoed what the outer
+// check had just allowed. Every documented lever (nudge, wake, kill, prune,
+// new) then rejected the bead for being closed, leaving no CLI escape.
+func TestEnsureSessionNameAvailableForOwner_ReleasesClosedLegacyIdentityClaim(t *testing.T) {
+	store := beads.NewMemStore()
+	const (
+		runtimeName = "shutupandlisten--gc-toolkit__refinery"
+		identity    = "shutupandlisten/gc-toolkit.refinery"
+	)
+	legacyClosedNameClaim(t, store, runtimeName, identity)
+
+	if err := ensureSessionNameAvailableForSelfAndOwner(store, runtimeName, "", identity); err != nil {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy claim, owning identity) = %v, want nil", err)
+	}
+}
+
+// TestEnsureSessionNameAvailableForOwner_RejectsClosedLegacyClaimForOtherOwner
+// is the ownership guard: the release above is scoped to the configured
+// identity that OWNS the reserved name. A different identity claiming the same
+// runtime name is still rejected, so the fix cannot hand one agent's name to
+// another.
+func TestEnsureSessionNameAvailableForOwner_RejectsClosedLegacyClaimForOtherOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "shutupandlisten--gc-toolkit__refinery"
+	legacyClosedNameClaim(t, store, runtimeName, "shutupandlisten/gc-toolkit.refinery")
+
+	err := ensureSessionNameAvailableForSelfAndOwner(store, runtimeName, "", "signal-loom/gc-toolkit.refinery")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy claim, other identity) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
+// TestEnsureSessionNameAvailableForOwner_RejectsClosedLegacyClaimWithoutOwner
+// pins the ownerless case: a caller that asserts no configured identity cannot
+// attribute the closed holder to itself, so the permanent-identity rule for
+// ad-hoc explicit session names still holds.
+func TestEnsureSessionNameAvailableForOwner_RejectsClosedLegacyClaimWithoutOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	const runtimeName = "shutupandlisten--gc-toolkit__refinery"
+	legacyClosedNameClaim(t, store, runtimeName, "shutupandlisten/gc-toolkit.refinery")
+
+	err := ensureSessionNameAvailableForSelfAndOwner(store, runtimeName, "", "")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(closed legacy claim, no owner) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
+// TestEnsureSessionNameAvailableForOwner_RejectsLiveLegacyClaimForOwner is the
+// liveness guard: only CLOSED holders release. An open bead for the same
+// identity still owns its runtime name so two live sessions cannot collide.
+func TestEnsureSessionNameAvailableForOwner_RejectsLiveLegacyClaimForOwner(t *testing.T) {
+	store := beads.NewMemStore()
+	const (
+		runtimeName = "shutupandlisten--gc-toolkit__refinery"
+		identity    = "shutupandlisten/gc-toolkit.refinery"
+	)
+	if _, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name":                runtimeName,
+			"alias":                       identity,
+			"agent_name":                  identity,
+			CanonicalInstanceNameMetadata: identity,
+		},
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	err := ensureSessionNameAvailableForSelfAndOwner(store, runtimeName, "", identity)
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailableForSelfAndOwner(live legacy claim) = %v, want %v", err, ErrSessionNameExists)
+	}
+}
+
+// TestEnsureSessionNameAvailable_NameExistsErrorIsActionable pins the
+// diagnostic half of the outage: the operator saw only "already belongs to
+// <id>" with no hint that the holder was CLOSED and no remedy, so the deadlock
+// took ~40h and metadata surgery to break. The message must name the holder's
+// terminal status and point at the release lever.
+func TestEnsureSessionNameAvailable_NameExistsErrorIsActionable(t *testing.T) {
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Type:   BeadType,
+		Labels: []string{LabelSession},
+		Metadata: map[string]string{
+			"session_name": "my-custom-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.Close(bead.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err = ensureSessionNameAvailable(store, "my-custom-session")
+	if !errors.Is(err, ErrSessionNameExists) {
+		t.Fatalf("ensureSessionNameAvailable(closed ad-hoc) = %v, want %v", err, ErrSessionNameExists)
+	}
+	msg := err.Error()
+	for _, want := range []string{bead.ID, "closed", "gc session release-name"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q does not mention %q", msg, want)
+		}
+	}
+}
+
 func TestEnsureAliasAvailableWithConfig_AllowsLiveAliasHistoryReuse(t *testing.T) {
 	store := beads.NewMemStore()
 	_, err := store.Create(beads.Bead{
