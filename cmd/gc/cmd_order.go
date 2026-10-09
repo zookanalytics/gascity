@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -871,6 +870,17 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
+	// The run's evidence rides the root's create, the same stamp the
+	// controller's dispatch makes, in whichever store materializes the
+	// molecule. cachedOrderStoresResolver reads that binding back, so
+	// `gc order check` still finds this run.
+	var cursor *orders.EventCursor
+	if a.Trigger == "event" && ep != nil {
+		c := orders.EventCursor(headSeq)
+		cursor = &c
+	}
+	stampOrderRunEvidence(recipe, scoped, cursor, pool)
+
 	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -885,29 +895,6 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: moleculeStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
 			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
 		}
-	}
-
-	// Track the spawned root in the same store that created it so manual runs
-	// stay provider-aware and do not fall back to ambient bd CLI state. The
-	// order-run / order: / seq: labels are the run's evidence and they have to
-	// ride the bead they describe, which is resident wherever the molecule was
-	// materialized. cachedOrderStoresResolver reads that binding back, so
-	// `gc order check` still finds this run.
-	update := beads.UpdateOpts{
-		Labels: []string{"order-run:" + scoped},
-	}
-	if a.Trigger == "event" && ep != nil {
-		update.Labels = append(update.Labels,
-			"order:"+scoped,
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
-	if a.Pool != "" {
-		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
-	}
-	if err := moleculeStore.Update(rootID, update); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 
 	// Record the run in the order-tracking history index so a manual formula

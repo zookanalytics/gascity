@@ -2642,44 +2642,234 @@ func TestRedactOrderEnvErrorUsesProcessEnv(t *testing.T) {
 	}
 }
 
-func TestOrderDispatchFormulaLabelFailureLabelsTrackingBead(t *testing.T) {
-	store := beads.NewMemStore()
-	var rec memRecorder
-	var stderr bytes.Buffer
+// orderWispRoots returns every root the named formula poured into store, open or
+// closed. It finds roots by their formula Ref rather than by the order-run
+// label, so a root that does not carry its label still counts.
+func orderWispRoots(t *testing.T, store beads.Store, formulaName string) []beads.Bead {
+	t.Helper()
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	var roots []beads.Bead
+	for _, b := range all {
+		if b.Ref == formulaName && b.ParentID == "" && !orders.IsTrackingBead(b) {
+			roots = append(roots, b)
+		}
+	}
+	return roots
+}
 
+// TestOrderDispatchWispRootCarriesRunLabelFromCreation pins that a dispatched
+// root is created carrying its order-run label. The store refuses every Update
+// that would stamp an order-run label, so a root labeled by a write after its
+// creation is left unlabeled: the open-work gate cannot attribute the running
+// wisp to its order, and once the cooldown elapses the order pours a second
+// wisp over the first one's open step.
+func TestOrderDispatchWispRootCarriesRunLabelFromCreation(t *testing.T) {
+	base := beads.NewMemStore()
 	aa := []orders.Order{{
-		Name:         "fail-label",
+		Name:         "digest",
 		Trigger:      "cooldown",
 		Interval:     "2m",
 		Formula:      "test-formula",
+		Pool:         "worker",
 		FormulaLayer: sharedTestFormulaDir,
 	}}
-	ad := buildOrderDispatcherFromList(aa, selectiveUpdateFailStore{Store: store}, nil)
+	ad := buildOrderDispatcherFromList(aa, selectiveUpdateFailStore{Store: base}, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityPath := t.TempDir()
+	start := time.Now()
+
+	ad.dispatch(context.Background(), cityPath, start)
+	ad.drain(context.Background())
+
+	// The first wisp's step is still open. Past the cooldown the order is due
+	// again, and the open-work gate is all that stands between it and a second
+	// wisp.
+	ad.dispatch(context.Background(), cityPath, start.Add(3*time.Minute))
+	ad.drain(context.Background())
+
+	roots := orderWispRoots(t, base, "test-formula")
+	if len(roots) != 1 {
+		t.Fatalf("roots after a due tick over the open wisp = %d, want 1 (a second pour is a duplicate dispatch)", len(roots))
+	}
+	if !slicesContain(roots[0].Labels, "order-run:digest") {
+		t.Errorf("root labels = %v, want order-run:digest", roots[0].Labels)
+	}
+	if got := roots[0].Metadata[beadmeta.RoutedToMetadataKey]; got != "worker" {
+		t.Errorf("root gc.routed_to = %q, want worker", got)
+	}
+	runs := trackingBeads(t, base, "order-run:digest")
+	var outcomes []string
+	for _, b := range runs {
+		if orders.IsTrackingBead(b) {
+			outcomes = append(outcomes, b.Labels...)
+		}
+	}
+	if !slicesContain(outcomes, "wisp") || slicesContain(outcomes, "wisp-failed") {
+		t.Errorf("tracking labels = %v, want the run recorded as a wisp, not a failure", outcomes)
+	}
+}
+
+// TestOrderDispatchWispRootHoldsCooldownWithoutTrackingRecord pins that the root
+// alone holds a daily order's cooldown. The run finished, its tracking record is
+// gone, and a restarted controller has no cache of the run, so the root's
+// order-run label is the only evidence left that the order ran. Fifteen minutes
+// into the cooldown, as in the reported double pour, the order must not fire
+// again.
+func TestOrderDispatchWispRootHoldsCooldownWithoutTrackingRecord(t *testing.T) {
+	base := beads.NewMemStore()
+	store := selectiveUpdateFailStore{Store: base}
+	aa := []orders.Order{{
+		Name:         "distiller",
+		Trigger:      "cooldown",
+		Interval:     "24h",
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	cityPath := t.TempDir()
+	start := time.Now()
+
+	first := buildOrderDispatcherFromList(aa, store, nil)
+	first.dispatch(context.Background(), cityPath, start)
+	first.drain(context.Background())
+
+	all, err := base.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("listing beads: %v", err)
+	}
+	for _, b := range all {
+		switch {
+		case orders.IsTrackingBead(b):
+			if err := base.Delete(b.ID); err != nil {
+				t.Fatalf("pruning tracking bead %s: %v", b.ID, err)
+			}
+		case b.Status != "closed":
+			if err := base.Close(b.ID); err != nil {
+				t.Fatalf("finishing %s: %v", b.ID, err)
+			}
+		}
+	}
+
+	restarted := buildOrderDispatcherFromList(aa, store, nil)
+	restarted.dispatch(context.Background(), cityPath, start.Add(15*time.Minute))
+	restarted.drain(context.Background())
+
+	if roots := orderWispRoots(t, base, "test-formula"); len(roots) != 1 {
+		t.Fatalf("roots 15m into a 24h cooldown = %d, want 1 (the order fired again inside its cooldown)", len(roots))
+	}
+}
+
+// TestOrderDispatchEventWispRootCarriesCursorFromCreation pins that an
+// event-triggered root is created carrying its event cursor, so the events the
+// run consumed are recorded on the run itself. The store refuses every Update
+// that would stamp a cursor label.
+func TestOrderDispatchEventWispRootCarriesCursorFromCreation(t *testing.T) {
+	base := beads.NewMemStore()
+	eventLog := events.NewFake()
+	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+	headSeq, err := eventLog.LatestSeq()
+	if err != nil {
+		t.Fatalf("LatestSeq(): %v", err)
+	}
+	aa := []orders.Order{{
+		Name:         "release-watch",
+		Trigger:      "event",
+		On:           events.BeadClosed,
+		Formula:      "test-formula",
+		FormulaLayer: sharedTestFormulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, eventCursorUpdateFailStore{Store: base}, eventLog)
 	if ad == nil {
 		t.Fatal("expected non-nil dispatcher")
 	}
 
-	mad := ad.(*memoryOrderDispatcher)
-	mad.rec = &rec
-	mad.stderr = &stderr
-
 	ad.dispatch(context.Background(), t.TempDir(), time.Now())
 	ad.drain(context.Background())
 
-	all := trackingBeads(t, store, "order-run:fail-label")
-	hasFailed := false
-	for _, b := range all {
-		for _, l := range b.Labels {
-			if l == "wisp-failed" {
-				hasFailed = true
-			}
+	roots := orderWispRoots(t, base, "test-formula")
+	if len(roots) != 1 {
+		t.Fatalf("roots = %d, want 1", len(roots))
+	}
+	for _, want := range []string{"order-run:release-watch", "order:release-watch", fmt.Sprintf("seq:%d", headSeq)} {
+		if !slicesContain(roots[0].Labels, want) {
+			t.Errorf("root labels = %v, want %s", roots[0].Labels, want)
 		}
 	}
-	if !hasFailed {
-		t.Error("tracking bead missing wisp-failed label after label failure")
+}
+
+// failFirstCreateTitledStore refuses the first Create of a bead titled title,
+// the shape of a pour that dies part-way through instantiation.
+type failFirstCreateTitledStore struct {
+	beads.Store
+	title string
+
+	mu     sync.Mutex
+	failed bool
+}
+
+func (s *failFirstCreateTitledStore) Create(b beads.Bead) (beads.Bead, error) {
+	s.mu.Lock()
+	fail := !s.failed && b.Title == s.title
+	if fail {
+		s.failed = true
 	}
-	if !rec.hasType(events.OrderFailed) {
-		t.Error("missing order.failed event")
+	s.mu.Unlock()
+	if fail {
+		return beads.Bead{}, fmt.Errorf("creating %q: injected failure", b.Title)
+	}
+	return s.Store.Create(b)
+}
+
+// TestOrderDispatchFailedPourDoesNotHoldGate pins that a root its own
+// instantiation marked molecule_failed is not in-flight work. A pour that dies
+// after the root and its first step exist leaves a labeled root with an open
+// step behind. That dispatch already recorded its failure, and the order's next
+// due tick pours again rather than waiting on a molecule nothing will finish.
+func TestOrderDispatchFailedPourDoesNotHoldGate(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeFile(t, filepath.Join(formulaDir, "two-step.toml"), `formula = "two-step"
+version = 1
+
+[[steps]]
+id = "first"
+title = "First"
+
+[[steps]]
+id = "second"
+title = "Second"
+`)
+	base := beads.NewMemStore()
+	aa := []orders.Order{{
+		Name:         "digest",
+		Trigger:      "cooldown",
+		Interval:     "2m",
+		Formula:      "two-step",
+		FormulaLayer: formulaDir,
+	}}
+	ad := buildOrderDispatcherFromList(aa, &failFirstCreateTitledStore{Store: base, title: "Second"}, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityPath := t.TempDir()
+	start := time.Now()
+
+	ad.dispatch(context.Background(), cityPath, start)
+	ad.drain(context.Background())
+
+	roots := orderWispRoots(t, base, "two-step")
+	if len(roots) != 1 || roots[0].Metadata[beadmeta.MoleculeFailedMetadataKey] != "true" {
+		t.Fatalf("roots after the failed pour = %#v, want one root marked molecule_failed", roots)
+	}
+
+	ad.dispatch(context.Background(), cityPath, start.Add(3*time.Minute))
+	ad.drain(context.Background())
+
+	if roots := orderWispRoots(t, base, "two-step"); len(roots) != 2 {
+		t.Fatalf("roots after the next due tick = %d, want 2 (the failed pour held the gate shut)", len(roots))
 	}
 }
 
