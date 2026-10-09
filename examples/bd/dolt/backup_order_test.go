@@ -550,15 +550,24 @@ exit %d
 	return logPath
 }
 
+// writeRecordingTimeout installs a fake bounded-execution helper in binDir
+// and returns the path of its log. Each call logs the name it was invoked
+// by and its arguments, then runs the wrapped command unbounded. The fake
+// is installed as both gtimeout and timeout because _bounded.sh prefers
+// gtimeout: on a host where Homebrew coreutils puts a real gtimeout on
+// PATH, run_bounded would otherwise bypass the fake.
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s %%s\n' "${0##*/}" "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	for _, name := range []string{"gtimeout", "timeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), script)
+	}
 	return logPath
 }
 
