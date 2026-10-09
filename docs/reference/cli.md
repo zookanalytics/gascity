@@ -3392,6 +3392,10 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
+When agents from two different packs share a bare agent-name, that name
+matches neither of them. gc prime then warns and outputs the default
+prompt. Use the qualified name to pick one, for example
+gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of silently falling
 back to the default prompt. Strict errors on:
@@ -3400,6 +3404,7 @@ back to the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
+  - agent name shared by agents from different packs (use a qualified name)
   - agent's prompt_template points at a file that cannot be read
 
 Strict does NOT error on agents whose config intentionally lacks a
