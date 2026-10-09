@@ -469,17 +469,13 @@ func retirePoolSlotAtDrainDeadline(
 
 	// Pool worktrees are transient by design; the deadline path preempts the
 	// pool-freeable close, which is the only other site that reclaims them.
-	// The liveness inputs are gathered here rather than once per pass because
-	// a deadline retirement is rare: the process-table walk is only paid when
-	// a seat actually retires, and only when auto-prune is enabled (the prune
-	// is a no-op otherwise and never consults the inputs). An indeterminate
-	// scan makes the prune fail closed (gc-k6uu6).
+	// The liveness inputs are built only when auto-prune is enabled (the prune
+	// is a no-op otherwise and never consults them), and the process-table
+	// scan inside them runs only if this seat's worktree reaches the liveness
+	// gate. An indeterminate scan makes the prune fail closed (gc-k6uu6).
 	var pruneLiveness worktreeLivenessInputs
 	if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() {
-		pruneLiveness = worktreeLivenessInputs{
-			live:        collectLiveWorktreeStateFn(),
-			sessionDirs: liveSessionWorktreeDirs(snapshot),
-		}
+		pruneLiveness = newWorktreeLivenessInputs(snapshot)
 	}
 	poolSlotRetireWorktreePrune(info, cityPath, cfg, pruneLiveness, stderr)
 

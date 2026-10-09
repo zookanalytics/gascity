@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -34,20 +35,35 @@ var newGitProbe = func(workDir string) gitProbe { return git.New(workDir) }
 // worktreeLivenessInputs bundles the liveness signals the worker_dir auto-prune
 // consults before removing a closed session's worktree: the authoritative
 // process-table scan (live) and the recorded working directories of every open
-// session (sessionDirs). The reconciler gathers both once per pass and shares
-// the same value across every prune decision in that pass, matching the
-// closed-bead reaper's own once-per-pass gather — the process-table walk is far
-// more expensive than the per-worktree git probes.
+// session (sessionDirs). The scan enumerates every process on the host, which
+// costs far more than the per-worktree git probes; where /proc is absent it is
+// an lsof subprocess. So live is a deferred call rather than a value, and the
+// liveness gate calls it only for a worktree that has passed the structural
+// checks. A nil live reads as an indeterminate scan.
 type worktreeLivenessInputs struct {
-	live        liveWorktreeState
+	live        func() liveWorktreeState
 	sessionDirs []string
+}
+
+// newWorktreeLivenessInputs builds the liveness inputs a caller shares across
+// its prune decisions. sessionDirs is read from snapshot now. The process-table
+// scan runs on the first call to live, and every later call returns that same
+// result, so the decisions share one scan and a caller whose decisions never
+// reach the liveness gate never runs it.
+func newWorktreeLivenessInputs(snapshot *sessionBeadSnapshot) worktreeLivenessInputs {
+	return worktreeLivenessInputs{
+		live:        sync.OnceValue(collectLiveWorktreeStateFn),
+		sessionDirs: liveSessionWorktreeDirs(snapshot),
+	}
 }
 
 // worktreeLivenessBlocksPrune reports whether the pass's liveness snapshot
 // forbids removing workerDir, logging the reason to stderr when it does. It is
 // the shared gate both prune forms consult before the git-state probes, so a
 // clean tree — the normal resting state of a healthy agent between commits —
-// can no longer read as prunable while a process is running in it.
+// can no longer read as prunable while a process is running in it. It is the
+// one caller of liveness.live, so the process-table scan runs here and only
+// for a worktree that has already passed the structural checks.
 //
 // selfSessionDirs are the retired session's own recorded worktree dirs. They
 // are dropped from the active-session cross-check before it runs: the pass
@@ -59,25 +75,29 @@ type worktreeLivenessInputs struct {
 // adoption, a reaped-but-live runtime) is a real liveness signal and still
 // blocks — so only the recorded-metadata signal is self-filtered.
 //
-// It fails closed: an indeterminate scan (scanned=false) blocks removal,
-// because a scan that observed nothing running is indistinguishable from one
-// that could not run at all. A live process cwd, or a different open session
-// recorded as working at or beneath workerDir, also blocks. This is the same
-// shared boundary (bead_worktree_liveness.go) the closed-bead reaper and the
-// doctor prune check read; liveness is a fact about which directory a running
-// process occupies and names no role.
+// It fails closed: an indeterminate scan (scanned=false, or no scan supplied)
+// blocks removal, because a scan that observed nothing running is
+// indistinguishable from one that could not run at all. A live process cwd, or
+// a different open session recorded as working at or beneath workerDir, also
+// blocks. This is the same shared boundary (bead_worktree_liveness.go) the
+// closed-bead reaper and the doctor prune check read; liveness is a fact about
+// which directory a running process occupies and names no role.
 //
 // No .worktree-stale marker is written for a liveness block: unlike the
 // git-state gates, liveness is transient and self-resolving once the process
 // exits, and writing into a tree a process is actively using would race that
 // process.
 func worktreeLivenessBlocksPrune(workerDir string, liveness worktreeLivenessInputs, selfSessionDirs []string, stderr io.Writer) bool {
-	if !liveness.live.scanned {
+	var live liveWorktreeState
+	if liveness.live != nil {
+		live = liveness.live()
+	}
+	if !live.scanned {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: liveness scan unavailable (failing closed)\n", workerDir) //nolint:errcheck
 		return true
 	}
 	sessionDirs := excludeNormalizedDirs(liveness.sessionDirs, selfSessionDirs)
-	if isLive, why := worktreeIsLive(workerDir, liveness.live, sessionDirs); isLive {
+	if isLive, why := worktreeIsLive(workerDir, live, sessionDirs); isLive {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, why) //nolint:errcheck
 		return true
 	}
@@ -143,9 +163,10 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // reclaim. Pool sessions are transient by design — their worktrees were never
 // meant to outlive the session bead.
 //
-// liveness is the pass's once-gathered liveness snapshot (the /proc cwd scan
-// plus the open sessions' recorded working directories); the caller gathers it
-// once and shares it across every prune decision in the pass.
+// liveness carries the pass's liveness inputs (the deferred process-table scan
+// plus the open sessions' recorded working directories), shared across every
+// prune decision in the pass. The scan runs only if this decision reaches the
+// liveness gate.
 //
 // No-op when:
 //   - cfg.Daemon.AutoPruneWorkerDir is false

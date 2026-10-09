@@ -4216,20 +4216,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	})
 
 	phaseStart = time.Now()
-	// Liveness inputs for the worker_dir auto-prune below, gathered once for
-	// the whole pass and shared across every prune decision: the process-table
-	// walk is far more expensive than the per-session git probes, and the
-	// closed-bead reaper gathers the same way. Only gathered when auto-prune is
-	// enabled, since pruneAgentHomeWorktreeIfSafeInfo is a no-op otherwise and
-	// never consults the (zero-value, unscanned) inputs. When it IS enabled and
-	// the scan comes back indeterminate, that unscanned value makes the prune
-	// fail closed, which is the intended protection.
+	// Liveness inputs for the worker_dir auto-prune below, shared across every
+	// prune decision in the pass. The process-table scan inside them runs at
+	// most once per pass, and only when a decision reaches the liveness gate,
+	// so a pass in which no decision gets that far never enumerates the host's
+	// processes. Only built when auto-prune is enabled, since
+	// pruneAgentHomeWorktreeIfSafeInfo is a no-op otherwise and never consults
+	// the (zero-value) inputs. When it IS enabled and the scan comes back
+	// indeterminate, the prune fails closed, which is the intended protection.
 	var pruneLiveness worktreeLivenessInputs
 	if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() {
-		pruneLiveness = worktreeLivenessInputs{
-			live:        collectLiveWorktreeStateFn(),
-			sessionDirs: liveSessionWorktreeDirs(snapshot),
-		}
+		pruneLiveness = newWorktreeLivenessInputs(snapshot)
 	}
 	for _, target := range wakeTargets {
 		if ctx != nil && ctx.Err() != nil {
