@@ -2112,18 +2112,17 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 		}
 		return
 	}
-	// Sweep stale tracking beads for ALL orders (nil filter), not just
-	// order-tracking-sweep's own. The old narrow scope only swept the sweep
-	// order's tracking so that order could bootstrap and clean the rest — a
-	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
-	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
-	// Closed-history retention is intentionally left to the maintenance exec
-	// order or the gc order sweep-tracking CLI; the watchdog only recovers
-	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	// Sweep stale tracking beads for ALL orders (nil filter), so a jammed
+	// order recovers without depending on any one order, such as
+	// order-tracking-sweep, being scheduled to clean the rest. The open
+	// tracking bead is each order's single-flight gate, so a run still in
+	// flight keeps it until the bead is orderTrackingSweepWatchdogStaleAfter
+	// past the order's dispatch timeout, by which time the dispatcher has
+	// killed the run. Every other open tracking bead is closed at
+	// orderTrackingSweepWatchdogStaleAfter. Closed-history retention is left
+	// to the maintenance exec order or the gc order sweep-tracking CLI; the
+	// watchdog only recovers stale open tracking beads.
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, cr.orderRunTimeouts(cfg))
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr

@@ -291,13 +291,20 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Close stale and prune closed order-tracking beads",
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
-This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+This is intended for maintenance exec orders. It closes open tracking beads
+older than --stale-after, whatever their order's timeout, so a --stale-after
+longer than every order's timeout leaves in-flight runs alone.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
+
+The controller's watchdog also closes stale open tracking beads, at most every
+30s, independent of this command and of --stale-after. A run still in flight
+keeps its tracking bead until the bead is 2m older than the order's dispatch
+timeout (its timeout, capped by [orders].max_timeout). Any other open tracking
+bead is closed once it is 2m old.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -317,7 +324,7 @@ operator acknowledgement.`,
 		},
 		ValidArgsFunction: completeOrderNames,
 	}
-	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for this command to close an open tracking bead")
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")

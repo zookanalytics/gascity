@@ -3048,18 +3048,23 @@ func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter t
 }
 
 func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
-func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+//
+// runTimeouts holds the dispatch timeout of each order the caller dispatches,
+// keyed by scoped name (orderTrackingRunTimeouts). A run of one of those
+// orders that is still in flight keeps its tracking bead until the bead is
+// staleAfter older than the order's timeout. Nil applies staleAfter alone.
+func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, runTimeouts map[string]time.Duration) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, runTimeouts)
 }
 
 func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -3091,7 +3096,7 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // and multiply the reported count. When it is itself one of the swept stores the
 // loop has already covered it, and the hoisted pass is skipped for the same
 // count-once reason.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, runTimeouts map[string]time.Duration) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3112,7 +3117,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, runTimeouts)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -3163,14 +3168,14 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, nil)
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, nil)
 }
 
-func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, runTimeouts map[string]time.Duration) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3198,6 +3203,9 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 			if _, ok := onlyOrders[run.Scoped]; !ok {
 				continue
 			}
+		}
+		if orderTrackingRunInsideTimeout(run, cutoff, runTimeouts) {
+			continue
 		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
@@ -3235,6 +3243,21 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 		}
 	}
 	return result, nil
+}
+
+// orderTrackingRunInsideTimeout reports whether a stale sweep with the given
+// cutoff must leave run's tracking bead open: the run has no outcome yet, its
+// order has a dispatch timeout in runTimeouts, and the bead is not yet older
+// than that timeout plus the sweep window. Until then the dispatcher may still
+// be running it, and closing the bead would reopen the order's single-flight
+// gate under the live run. A bead that records an outcome has no run behind
+// it, so only the sweep window applies to it.
+func orderTrackingRunInsideTimeout(run orders.OrderRun, cutoff time.Time, runTimeouts map[string]time.Duration) bool {
+	if run.Outcome != orders.RunOutcomeNone {
+		return false
+	}
+	timeout, ok := runTimeouts[run.Scoped]
+	return ok && run.CreatedAt.After(cutoff.Add(-timeout))
 }
 
 func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
@@ -3931,6 +3954,21 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// orderTrackingRunTimeouts maps each order's scoped name to its dispatch
+// timeout (effectiveTimeout): how long the dispatcher lets a run of the order
+// go before killing it. When two orders share a scoped name, the longer
+// timeout wins, because a sweep cannot tell their runs apart.
+func orderTrackingRunTimeouts(set []orders.Order, maxTimeout time.Duration) map[string]time.Duration {
+	timeouts := make(map[string]time.Duration, len(set))
+	for _, a := range set {
+		scoped := a.ScopedName()
+		if timeout := effectiveTimeout(a, maxTimeout); timeout > timeouts[scoped] {
+			timeouts[scoped] = timeout
+		}
+	}
+	return timeouts
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in
