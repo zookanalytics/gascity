@@ -212,11 +212,11 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 	}
 
 	// Legacy parent-child children for every convoy in one read, not one read
-	// per convoy: a per-convoy ParentID read costs a store round trip each, and
-	// on the served-Dolt backend that is ~0.5s apiece — the per-convoy cost this
-	// batch exists to remove. ParentIDs is a pushdown-only hint the in-memory
-	// query filter does not enforce (unlike ParentID and IDs), so the read is
-	// scan-authorized and the parent match is made here against the convoy set.
+	// per convoy: a per-convoy ParentID read costs a store round trip each. The
+	// native Dolt store answers ParentIDs from the parent-child edges that
+	// target the convoys. The query contract lets a store that does not push
+	// ParentIDs down return a superset instead, so the read is scan-authorized
+	// and the parent match is made here against the convoy set.
 	convoySet := make(map[string]bool, len(convoyIDs))
 	for _, id := range convoyIDs {
 		convoySet[id] = true

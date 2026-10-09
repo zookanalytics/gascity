@@ -1013,6 +1013,264 @@ func TestNativeDoltStoreListTierWispsIncludesNoHistoryAndEphemeralRows(t *testin
 	}
 }
 
+// dependentReadingStorageSpy is the storage spy plus the target-keyed dependents
+// read a Dolt-backed storage exposes (beadslib.DependentQuerier). It answers
+// from edges and records the target ids each batched read asked for.
+type dependentReadingStorageSpy struct {
+	*nativeDoltStorageSpy
+	edges   map[string][]*beadslib.Dependency
+	err     error
+	targets [][]string
+}
+
+var _ beadslib.DependentQuerier = (*dependentReadingStorageSpy)(nil)
+
+func (s *dependentReadingStorageSpy) GetDependentRecords(context.Context, string, string, int, string) ([]*beadslib.Dependency, error) {
+	return nil, errors.New("unexpected paged dependents read")
+}
+
+func (s *dependentReadingStorageSpy) GetDependentRecordsForIssues(_ context.Context, targetIDs []string) (map[string][]*beadslib.Dependency, error) {
+	s.targets = append(s.targets, append([]string(nil), targetIDs...))
+	if s.err != nil {
+		return nil, s.err
+	}
+	out := make(map[string][]*beadslib.Dependency)
+	for _, id := range targetIDs {
+		if deps := s.edges[id]; len(deps) > 0 {
+			out[id] = deps
+		}
+	}
+	return out, nil
+}
+
+func (s *dependentReadingStorageSpy) CountDependentRecords(context.Context, string, string) (int, error) {
+	return 0, errors.New("unexpected dependents count")
+}
+
+func nativeParentChildEdge(child, parent string) *beadslib.Dependency {
+	return &beadslib.Dependency{IssueID: child, DependsOnID: parent, Type: beadslib.DepParentChild}
+}
+
+// nativeChildIssue is an issue whose parent-child edge points at parent, the
+// shape SearchIssues hydrates when IncludeDependencies is set.
+func nativeChildIssue(id, parent string, status beadslib.Status, createdAt time.Time) *beadslib.Issue {
+	issue := &beadslib.Issue{ID: id, Title: id, Status: status, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt}
+	if parent != "" {
+		issue.Dependencies = []*beadslib.Dependency{nativeParentChildEdge(id, parent)}
+	}
+	return issue
+}
+
+// searchByIDsForTest answers a search from issues, honoring the filter shapes
+// the parent pushdown sends: an id IN-list and the tier flag.
+func searchByIDsForTest(issues []*beadslib.Issue, searched *[]beadslib.IssueFilter) func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+	return func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+		*searched = append(*searched, filter)
+		var out []*beadslib.Issue
+		for _, issue := range issues {
+			if len(filter.IDs) > 0 && !slices.Contains(filter.IDs, issue.ID) {
+				continue
+			}
+			if filter.Ephemeral != nil && issue.Ephemeral != *filter.Ephemeral {
+				continue
+			}
+			out = append(out, cloneNativeIssueForTest(issue))
+		}
+		return out, nil
+	}
+}
+
+// TestNativeDoltStoreListByParentReadsChildrenThroughEdges pins the parent
+// pushdown: a ParentID list reads the edges that target the parent, then
+// searches only the children those edges name, by id. The upstream parent
+// filter is never sent; Dolt answers it by scanning every issue row. Edge types
+// other than parent-child name no child, and the status filter still applies.
+func TestNativeDoltStoreListByParentReadsChildrenThroughEdges(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	var searched []beadslib.IssueFilter
+	storage := &dependentReadingStorageSpy{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
+			nativeChildIssue("gc-c2", "gc-p", beadslib.StatusClosed, t0.Add(time.Minute)),
+			nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0),
+			nativeChildIssue("gc-blocked", "", beadslib.StatusOpen, t0),
+		}, &searched)},
+		edges: map[string][]*beadslib.Dependency{
+			"gc-p": {
+				nativeParentChildEdge("gc-c1", "gc-p"),
+				nativeParentChildEdge("gc-c2", "gc-p"),
+				{IssueID: "gc-blocked", DependsOnID: "gc-p", Type: beadslib.DepBlocks},
+			},
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{ParentID: "gc-p", IncludeClosed: true, Sort: SortCreatedAsc, Limit: 10})
+	if err != nil {
+		t.Fatalf("List(ParentID): %v", err)
+	}
+	if want := [][]string{{"gc-p"}}; !reflect.DeepEqual(storage.targets, want) {
+		t.Fatalf("dependents reads = %v, want %v", storage.targets, want)
+	}
+	if len(searched) != 1 {
+		t.Fatalf("searches = %d, want 1", len(searched))
+	}
+	if searched[0].ParentID != nil {
+		t.Fatalf("search sent the upstream parent filter %q; the children must be searched by id", *searched[0].ParentID)
+	}
+	if want := []string{"gc-c1", "gc-c2"}; !reflect.DeepEqual(searched[0].IDs, want) {
+		t.Fatalf("search ids = %v, want the parent-child children %v", searched[0].IDs, want)
+	}
+	if searched[0].Limit != 0 {
+		t.Fatalf("search limit = %d, want 0: the limit applies after Matches", searched[0].Limit)
+	}
+	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1", "gc-c2"}) {
+		t.Fatalf("List(ParentID) = %v, want [gc-c1 gc-c2]", ids)
+	}
+
+	open, err := store.List(ListQuery{ParentID: "gc-p", Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List(ParentID, open): %v", err)
+	}
+	if ids := beadIDsOf(open); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
+		t.Fatalf("List(ParentID, open) = %v, want only the open child", ids)
+	}
+}
+
+// TestNativeDoltStoreListByParentIDsIsExact pins the batched form: one
+// dependents read for every distinct parent, one search for all their children,
+// and a result holding exactly the beads whose ParentID is a listed parent. A
+// bead with a parent-child edge to a listed parent whose ParentID is another
+// bead (its first parent-child edge) is not a child of the listed parent, as
+// Matches already decides for ParentID.
+func TestNativeDoltStoreListByParentIDsIsExact(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	twoParents := nativeChildIssue("gc-c3", "gc-other", beadslib.StatusOpen, t0.Add(2*time.Minute))
+	twoParents.Dependencies = append(twoParents.Dependencies, nativeParentChildEdge("gc-c3", "gc-p1"))
+	var searched []beadslib.IssueFilter
+	storage := &dependentReadingStorageSpy{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
+			nativeChildIssue("gc-c1", "gc-p1", beadslib.StatusOpen, t0),
+			nativeChildIssue("gc-c2", "gc-p2", beadslib.StatusOpen, t0.Add(time.Minute)),
+			twoParents,
+		}, &searched)},
+		edges: map[string][]*beadslib.Dependency{
+			"gc-p1": {nativeParentChildEdge("gc-c1", "gc-p1"), nativeParentChildEdge("gc-c3", "gc-p1")},
+			"gc-p2": {nativeParentChildEdge("gc-c2", "gc-p2")},
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{ParentIDs: []string{"gc-p1", "gc-p2", "gc-p1", ""}, IncludeClosed: true, AllowScan: true, Sort: SortCreatedAsc})
+	if err != nil {
+		t.Fatalf("List(ParentIDs): %v", err)
+	}
+	if want := [][]string{{"gc-p1", "gc-p2"}}; !reflect.DeepEqual(storage.targets, want) {
+		t.Fatalf("dependents reads = %v, want one read of the distinct parents %v", storage.targets, want)
+	}
+	if len(searched) != 1 {
+		t.Fatalf("searches = %d, want 1", len(searched))
+	}
+	if want := []string{"gc-c1", "gc-c3", "gc-c2"}; !reflect.DeepEqual(searched[0].IDs, want) {
+		t.Fatalf("search ids = %v, want %v", searched[0].IDs, want)
+	}
+	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1", "gc-c2"}) {
+		t.Fatalf("List(ParentIDs) = %v, want exactly the children [gc-c1 gc-c2]", ids)
+	}
+}
+
+// TestNativeDoltStoreListByParentWithNoChildrenSearchesNothing pins the empty
+// case: a parent no parent-child edge targets has no children, and the search
+// is skipped rather than sent with an empty id list, which matches every row.
+func TestNativeDoltStoreListByParentWithNoChildrenSearchesNothing(t *testing.T) {
+	var searched []beadslib.IssueFilter
+	storage := &dependentReadingStorageSpy{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(nil, &searched)},
+		edges: map[string][]*beadslib.Dependency{
+			"gc-p": {{IssueID: "gc-blocked", DependsOnID: "gc-p", Type: beadslib.DepBlocks}},
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{ParentID: "gc-p", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List(ParentID): %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("List(ParentID) = %#v, want an empty non-nil slice", got)
+	}
+	if len(searched) != 0 {
+		t.Fatalf("searches = %+v, want none", searched)
+	}
+}
+
+// TestNativeDoltStoreListByParentIntersectsIDs pins a parent query that also
+// names ids: only the children in that id list are searched.
+func TestNativeDoltStoreListByParentIntersectsIDs(t *testing.T) {
+	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
+	var searched []beadslib.IssueFilter
+	storage := &dependentReadingStorageSpy{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
+			nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0),
+			nativeChildIssue("gc-c2", "gc-p", beadslib.StatusOpen, t0),
+		}, &searched)},
+		edges: map[string][]*beadslib.Dependency{
+			"gc-p": {nativeParentChildEdge("gc-c1", "gc-p"), nativeParentChildEdge("gc-c2", "gc-p")},
+		},
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{ParentID: "gc-p", IDs: []string{"gc-c2", "gc-unrelated"}})
+	if err != nil {
+		t.Fatalf("List(ParentID, IDs): %v", err)
+	}
+	if len(searched) != 1 || !reflect.DeepEqual(searched[0].IDs, []string{"gc-c2"}) {
+		t.Fatalf("searches = %+v, want one search of [gc-c2]", searched)
+	}
+	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c2"}) {
+		t.Fatalf("List(ParentID, IDs) = %v, want [gc-c2]", ids)
+	}
+}
+
+// TestNativeDoltStoreListByParentKeepsUpstreamFilterWithoutDependentsRead pins
+// the fallback: a storage with no target-keyed dependents read is searched with
+// the upstream parent filter.
+func TestNativeDoltStoreListByParentKeepsUpstreamFilterWithoutDependentsRead(t *testing.T) {
+	var searched []beadslib.IssueFilter
+	storage := &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
+		nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)),
+	}, &searched)}
+	store := newNativeDoltStoreForTest(storage)
+
+	got, err := store.List(ListQuery{ParentID: "gc-p"})
+	if err != nil {
+		t.Fatalf("List(ParentID): %v", err)
+	}
+	if len(searched) != 1 || searched[0].ParentID == nil || *searched[0].ParentID != "gc-p" {
+		t.Fatalf("searches = %+v, want one search with the upstream parent filter", searched)
+	}
+	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
+		t.Fatalf("List(ParentID) = %v, want [gc-c1]", ids)
+	}
+}
+
+// TestNativeDoltStoreListByParentReturnsEdgeReadError pins that a failed
+// dependents read fails the list instead of degrading to an empty child set.
+func TestNativeDoltStoreListByParentReturnsEdgeReadError(t *testing.T) {
+	var searched []beadslib.IssueFilter
+	storage := &dependentReadingStorageSpy{
+		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(nil, &searched)},
+		err:                  errors.New("dependents read refused"),
+	}
+	store := newNativeDoltStoreForTest(storage)
+
+	if _, err := store.List(ListQuery{ParentID: "gc-p"}); err == nil || !strings.Contains(err.Error(), "dependents read refused") {
+		t.Fatalf("List(ParentID) err = %v, want the dependents read failure", err)
+	}
+	if len(searched) != 0 {
+		t.Fatalf("searches = %+v, want none after the edge read failed", searched)
+	}
+}
+
 func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
 	updateCalled := false
 	storage := &nativeDoltStorageSpy{
