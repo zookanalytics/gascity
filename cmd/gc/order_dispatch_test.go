@@ -10488,8 +10488,10 @@ func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
-	idx.entries[storeKey+"\x00history"] = map[string]orderTrackingSummary{
-		"order-hit": {lastRun: indexed},
+	if _, err := idx.sharedRead(storeKey+"\x00history", func() (map[string]orderTrackingSummary, error) {
+		return map[string]orderTrackingSummary{"order-hit": {lastRun: indexed}}, nil
+	}); err != nil {
+		t.Fatalf("seeding the history index: %v", err)
 	}
 
 	fallbackCalls := 0

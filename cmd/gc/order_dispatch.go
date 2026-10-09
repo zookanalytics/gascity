@@ -339,16 +339,17 @@ type memoryOrderDispatcher struct {
 }
 
 type orderDispatchTrackingIndex struct {
-	// mu guards entries and errs. dispatch shares ONE index across every
-	// order's open-work gate, and gateOpenWorkBounded runs each gate in a
-	// goroutine it abandons on timeout/ctx-cancel (#2893) — so multiple gate
-	// goroutines touch these maps concurrently. The lock is held only around
-	// the map reads/writes below, never across the RecentRunsAll/OpenRuns bd
-	// calls, so one slow or contended store read cannot stall sibling gates (the
-	// property gateOpenWorkBounded exists to preserve).
-	mu      sync.Mutex
-	entries map[string]map[string]orderTrackingSummary
-	errs    map[string]error
+	// mu guards reads. dispatch shares ONE index across every order's
+	// open-work gate, and gateOpenWorkBounded runs each gate in a goroutine it
+	// abandons on timeout/ctx-cancel (#2893) — so multiple gate goroutines
+	// reach this map concurrently. The lock is held only to find or register a
+	// store's read, never across the bd call or the wait for it, so a slow read
+	// of one store cannot stall the gates reading another (the property
+	// gateOpenWorkBounded exists to preserve). A gate on the slow store waits
+	// for that store's read inside its own gate goroutine, where
+	// gateOpenWorkBounded still bounds it.
+	mu    sync.Mutex
+	reads map[string]*orderIndexRead
 
 	// stderr carries the ONE line a failed index read emits, once per store per
 	// tick. Without it a store whose index read fails would fall back to the
@@ -1164,10 +1165,54 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 
 func newOrderDispatchTrackingIndex(stderr io.Writer) *orderDispatchTrackingIndex {
 	return &orderDispatchTrackingIndex{
-		entries: make(map[string]map[string]orderTrackingSummary),
-		errs:    make(map[string]error),
-		stderr:  stderr,
+		reads:  make(map[string]*orderIndexRead),
+		stderr: stderr,
 	}
+}
+
+// orderIndexRead is one store read of the pass, shared by every caller that
+// asks for its key. The first caller performs it, and every later caller gets
+// its result, waiting on done while the read is still in flight.
+//
+// The wait is what keeps a slow store from being read once per order. A gate
+// abandoned at its bound leaves its read running, and the next order's gate on
+// the same store asks for the same key before that read lands. Reading again
+// would add a scan of the already-slow store for every order on it, each
+// starting later than the read already running. Waiting lets that one read,
+// when it lands, answer every gate still waiting on it. A waiting gate stays
+// bounded, because it waits inside its own gate goroutine.
+//
+// entries and err are written once, before done is closed, and are read only
+// after it is.
+type orderIndexRead struct {
+	done    chan struct{}
+	entries map[string]orderTrackingSummary
+	err     error
+}
+
+// sharedRead returns the pass's read for key. The first caller performs it with
+// read; a later caller gets the same entries and error, after waiting for the
+// read if it is still in flight. A failed read stays failed for the rest of the
+// pass, since each store is read once per pass, and every caller handles its
+// error as its own.
+func (idx *orderDispatchTrackingIndex) sharedRead(key string, read func() (map[string]orderTrackingSummary, error)) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
+	r, started := idx.reads[key]
+	if !started {
+		r = &orderIndexRead{done: make(chan struct{})}
+		idx.reads[key] = r
+	}
+	idx.mu.Unlock()
+	if started {
+		<-r.done
+		return r.entries, r.err
+	}
+	// close is not deferred: a read that panics publishes nothing, so a caller
+	// waiting on it keeps waiting, as it would on a read still in flight,
+	// rather than reading an empty index as "no open work".
+	r.entries, r.err = read()
+	close(r.done)
+	return r.entries, r.err
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenTracking(
@@ -1315,24 +1360,17 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 }
 
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
-	key := storeKey + "\x00history"
-	idx.mu.Lock()
-	if err, ok := idx.errs[key]; ok {
-		idx.mu.Unlock()
-		return nil, err
-	}
-	if entries, ok := idx.entries[key]; ok {
-		idx.mu.Unlock()
-		return entries, nil
-	}
-	idx.mu.Unlock()
+	return idx.sharedRead(storeKey+"\x00history", func() (map[string]orderTrackingSummary, error) {
+		return readOrderRunHistory(store)
+	})
+}
+
+// readOrderRunHistory reads one store's order-run history, the read
+// historyEntriesForStore shares across the pass.
+func readOrderRunHistory(store beads.Store) (map[string]orderTrackingSummary, error) {
 	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).RecentRunsAll(orderTrackingHistoryIndexLimit)
 	if err != nil {
-		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
-		idx.mu.Lock()
-		idx.errs[key] = wrapped
-		idx.mu.Unlock()
-		return nil, wrapped
+		return nil, fmt.Errorf("listing order-tracking history: %w", err)
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, run := range runs {
@@ -1342,25 +1380,18 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		}
 		entries[run.Scoped] = summary
 	}
-	// A sibling gate goroutine may have populated this key while we listed;
-	// both computed the same result from the same store, so last writer wins.
-	idx.mu.Lock()
-	idx.entries[key] = entries
-	idx.mu.Unlock()
 	return entries, nil
 }
 
 func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
-	idx.mu.Lock()
-	if err, ok := idx.errs[storeKey]; ok {
-		idx.mu.Unlock()
-		return nil, err
-	}
-	if entries, ok := idx.entries[storeKey]; ok {
-		idx.mu.Unlock()
-		return entries, nil
-	}
-	idx.mu.Unlock()
+	return idx.sharedRead(storeKey, func() (map[string]orderTrackingSummary, error) {
+		return idx.readOrderRunIndex(store, storeKey)
+	})
+}
+
+// readOrderRunIndex reads one store's order-run index, the read entriesForStore
+// shares across the pass.
+func (idx *orderDispatchTrackingIndex) readOrderRunIndex(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
 	// ONE read per store per tick, for every order at once.
 	//
 	// The label-per-order queries this replaces could not be batched — a
@@ -1388,13 +1419,7 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-run beads: %w", err)
-		idx.mu.Lock()
-		_, seen := idx.errs[storeKey]
-		idx.errs[storeKey] = wrapped
-		idx.mu.Unlock()
-		if !seen {
-			logDispatchError(idx.stderr, "gc: order dispatch: order-run index for store %s unavailable, falling back to one live gate read per order: %v", storeKey, wrapped)
-		}
+		logDispatchError(idx.stderr, "gc: order dispatch: order-run index for store %s unavailable, falling back to one live gate read per order: %v", storeKey, wrapped)
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
@@ -1421,11 +1446,6 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 			entries[scoped] = summary
 		}
 	}
-	// A sibling gate goroutine may have populated this key while we listed;
-	// both computed the same result from the same store, so last writer wins.
-	idx.mu.Lock()
-	idx.entries[storeKey] = entries
-	idx.mu.Unlock()
 	return entries, nil
 }
 
