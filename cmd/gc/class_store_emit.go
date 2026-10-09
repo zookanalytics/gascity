@@ -833,6 +833,13 @@ func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead,
 	return getter.GetExactBatch(ids)
 }
 
+// ChildrenOfAny forwards the batched children read. Emission has nothing to
+// say about a read, so the answer passes through; an inner store without the
+// capability is read one exact Children per parent (beads.ChildrenOfAny).
+func (s *emittingClassStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return beads.ChildrenOfAny(s.Store, parentIDs, opts...)
+}
+
 // DepListBatch forwards the batched dep-edge read.
 //
 // It emits nothing because it writes nothing — but it has to exist, because the

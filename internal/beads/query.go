@@ -398,6 +398,22 @@ func applyListQuery(items []Bead, q ListQuery) []Bead {
 	return ApplyListQuery(items, q)
 }
 
+// distinctNonEmpty returns the distinct non-empty entries of ids in the order
+// they first appear. An empty entry names no bead, and an id is compared
+// exactly, never trimmed.
+func distinctNonEmpty(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 // SortBeads sorts items into the canonical (created_at, id) total order for
 // the given direction. SortDefault leaves the slice order unchanged. Callers
 // that merge results across stores use this to impose one deterministic

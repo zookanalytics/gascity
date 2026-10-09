@@ -58,6 +58,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"Get":            nativeStoreRead,
 	"GetExactBatch":  nativeStoreRead,
 	"DepListBatch":   nativeStoreRead,
+	"ChildrenOfAny":  nativeStoreRead,
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,

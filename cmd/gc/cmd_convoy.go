@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -534,17 +535,52 @@ func convoyChecksLackChildIDs(checks []api.ConvoyCheckView) bool {
 	return false
 }
 
-// fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
-// returns a parallel slice of progress views. Returns the first fallbackable
-// error encountered so the caller can surface it for the whole operation.
+// convoyProgressConcurrency bounds the /convoy/{id}/check requests
+// fetchConvoyProgress keeps in flight. The supervisor answers check requests in
+// parallel, so the fan-out divides the progress reads' wall time by about this
+// bound, and the bound keeps one `gc convoy list` from flooding the server with
+// a request per open convoy at once.
+const convoyProgressConcurrency = 8
+
+// fetchConvoyProgress calls /convoy/{id}/check for each convoy in list, at most
+// convoyProgressConcurrency at a time, and returns a parallel slice of progress
+// views. Once a check fails no further check starts, and the error returned is
+// the failed check earliest in list order, so the caller can surface it for the
+// whole operation.
 func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheckView, error) {
 	out := make([]api.ConvoyCheckView, len(convoys))
+	errs := make([]error, len(convoys))
+	slots := make(chan struct{}, convoyProgressConcurrency)
+	var (
+		wg     sync.WaitGroup
+		failed atomic.Bool
+	)
 	for i, convoy := range convoys {
-		cr, err := c.CheckConvoy(convoy.ID)
+		slots <- struct{}{}
+		if failed.Load() {
+			<-slots
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				<-slots
+				wg.Done()
+			}()
+			cr, err := c.CheckConvoy(convoy.ID)
+			if err != nil {
+				errs[i] = err
+				failed.Store(true)
+				return
+			}
+			out[i] = cr.Body
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		out[i] = cr.Body
 	}
 	return out, nil
 }
@@ -1499,17 +1535,61 @@ func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, 
 }
 
 // convoyListRows reads each convoy's members from the store it was listed
-// from and summarizes it as a gc convoy list row.
+// from and summarizes it as a gc convoy list row. The members of every convoy
+// one store holds are read together (convoyMembersByStore).
 func convoyListRows(convoys []convoyWithStore) ([]convoySummaryJSON, error) {
+	members, err := convoyMembersByStore(convoys)
+	if err != nil {
+		return nil, err
+	}
 	rows := make([]convoySummaryJSON, 0, len(convoys))
-	for _, c := range convoys {
-		children, err := listConvoyChildren(c.store, c.bead.ID, true)
-		if err != nil {
-			return nil, fmt.Errorf("children of %s: %w", c.bead.ID, err)
-		}
-		rows = append(rows, convoySummaryFromBead(c.bead, children))
+	for i, c := range convoys {
+		rows = append(rows, convoySummaryFromBead(c.bead, members[i]))
 	}
 	return rows, nil
+}
+
+// convoyMembersByStore returns each convoy's members, indexed to match convoys.
+// It resolves them with one convoycore.MembersBatch call per distinct owning
+// store, keeping store round trips bounded per store: resolving members with a
+// MembersIn read per convoy costs round trips linear in convoy count, which is
+// what makes `gc convoy list` superlinear as convoys grow.
+//
+// Grouping is by owning store, not by a global id map: convoy ids are unique
+// only within a store, so two stores can mint the same id for different convoys.
+func convoyMembersByStore(convoys []convoyWithStore) ([][]beads.Bead, error) {
+	members := make([][]beads.Bead, len(convoys))
+	type storeGroup struct {
+		store beads.Store
+		idxs  []int
+		ids   []string
+	}
+	var groups []*storeGroup
+	for i, c := range convoys {
+		var g *storeGroup
+		for _, cand := range groups {
+			if beads.SameStore(cand.store, c.store) {
+				g = cand
+				break
+			}
+		}
+		if g == nil {
+			g = &storeGroup{store: c.store}
+			groups = append(groups, g)
+		}
+		g.idxs = append(g.idxs, i)
+		g.ids = append(g.ids, c.bead.ID)
+	}
+	for _, g := range groups {
+		byID, err := convoycore.MembersBatch(beads.WorkStore{Store: g.store}, g.ids, true)
+		if err != nil {
+			return nil, fmt.Errorf("members of %d convoy(s) starting at %s: %w", len(g.ids), g.ids[0], err)
+		}
+		for k, idx := range g.idxs {
+			members[idx] = byID[g.ids[k]]
+		}
+	}
+	return members, nil
 }
 
 // writeConvoyList prints gc convoy list's rows: the schema-v1 JSON result, or
