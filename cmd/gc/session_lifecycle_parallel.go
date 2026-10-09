@@ -9,6 +9,7 @@ import (
 	"log"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1146,7 +1148,7 @@ func buildPreparedStartWithWorkDirResolver(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, store); err != nil {
 		return nil, candidate.info, err
 	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" && preparedTaskWorkDirLaunchable(candidate, cityPath, preOverrideWorkDir, wd, store) {
 		agentCfg.WorkDir = wd
 	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
 		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
@@ -1545,6 +1547,11 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
+// resolvePreparedTaskWorkDir returns the task work_dir a starting candidate
+// would launch in, or "" when no task names one. It tries the trigger bead's
+// drain source, then workDirResolver, then the beads in progress under the
+// candidate's identities. buildPreparedStartWithWorkDirResolver launches there
+// only when preparedTaskWorkDirLaunchable accepts the directory.
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
 	cityPath string,
@@ -1569,6 +1576,81 @@ func resolvePreparedTaskWorkDir(
 		}
 	}
 	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+}
+
+// preparedTaskWorkDirLaunchable reports whether the candidate may launch in
+// taskWorkDir. Launching inside another open session's own work directory
+// makes the candidate a second writer in a checkout a live agent owns, so it
+// refuses a directory preparedTaskWorkDirOwner assigns to another session. It
+// also refuses when the session list cannot be read, because nothing then
+// shows that the directory is clear of every other session. A refusal is
+// logged, and the caller launches the candidate in its own work directory.
+func preparedTaskWorkDirLaunchable(candidate startCandidate, cityPath, configuredWorkDir, taskWorkDir string, store beads.Store) bool {
+	snapshot, err := loadSessionBeadSnapshot(store)
+	if err != nil {
+		log.Printf("session %s: launching in its own work dir, not task work_dir %q: listing sessions to find the directory's owner: %v",
+			candidate.name(), taskWorkDir, err)
+		return false
+	}
+	ownDirs := append([]string{configuredWorkDir}, sessionRecordedWorktreeDirs(candidate.info)...)
+	owner, ownerDir, found := preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidate.info.ID, ownDirs, snapshot.OpenInfos())
+	if !found {
+		return true
+	}
+	log.Printf("session %s: launching in its own work dir, not task work_dir %q: it is inside session %s's work dir %q",
+		candidate.name(), taskWorkDir, owner.ID, ownerDir)
+	return false
+}
+
+// preparedTaskWorkDirOwner returns the open session, other than the launching
+// candidate, whose own work directory contains taskWorkDir, and that
+// directory.
+//
+// A directory inside another open session's own work directory is that
+// session's checkout. The core pack's workspace-setup steps create a worker's
+// per-bead worktrees there ($(pwd)/worktrees/<bead>), and the work_dir they
+// stamp stays on the bead when it is handed to another agent; a drain item
+// step resolves to its source member's work_dir the same way. A session
+// directory that also contains one of the candidate's own directories is a
+// shared root, such as the city or a rig checkout, and makes no session an
+// owner.
+//
+// Recorded directories are resolved against cityPath, and one that is still
+// relative is skipped.
+func preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidateID string, ownDirs []string, sessions []sessionpkg.Info) (sessionpkg.Info, string, bool) {
+	normalize := func(dir string) string {
+		dir = resolveWorkDirAgainstCity(cityPath, strings.TrimSpace(dir))
+		if dir == "" || !filepath.IsAbs(dir) {
+			return ""
+		}
+		return pathutil.NormalizePathForCompare(dir)
+	}
+	target := normalize(taskWorkDir)
+	if target == "" {
+		return sessionpkg.Info{}, "", false
+	}
+	own := make([]string, 0, len(ownDirs))
+	for _, dir := range ownDirs {
+		if normalized := normalize(dir); normalized != "" {
+			own = append(own, normalized)
+		}
+	}
+	for _, info := range sessions {
+		if info.ID == candidateID {
+			continue
+		}
+		for _, recorded := range sessionRecordedWorktreeDirs(info) {
+			dir := normalize(recorded)
+			if dir == "" || !pathAtOrUnder(dir, target) {
+				continue
+			}
+			if slices.ContainsFunc(own, func(ownDir string) bool { return pathAtOrUnder(dir, ownDir) }) {
+				continue
+			}
+			return info, dir, true
+		}
+	}
+	return sessionpkg.Info{}, "", false
 }
 
 // generatedPreStartPrefixes are the exact command prefixes
