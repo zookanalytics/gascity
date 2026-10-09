@@ -199,12 +199,37 @@ the tick never waits on order gates.
   `orders lane still running; skipping order dispatcher drain` and skips
   the drain rather than block on the pass or race it. Tracking beads left
   open are closed by the orphaned-tracking sweep on the next start.
+- **Dispatch budget.** `[orders] max_dispatches_per_tick` (default 4) caps
+  how many clock-driven orders (cooldown, cron and event triggers) a pass
+  dispatches; due condition orders are outside it. The cap is a rate over
+  the patrol interval. A pass may dispatch the cap once for each patrol
+  interval since the previous pass began, never less than the cap and never
+  more than four intervals' worth, and only the fraction of a dispatch
+  carries to the next pass. A pass's length is store latency, the
+  maintenance arms and the duty cycle, none of which the cap is about, and a
+  cap spent once per pass would let a slow stretch cut the dispatch rate for
+  every order at once. When more orders are due than a pass may dispatch,
+  the pass serves them in a rotation that resumes after the last order it
+  dispatched, so each due order waits at most one rotation: the due orders
+  divided by the dispatch rate. A reload or rescan that rebuilds the
+  dispatcher resumes the rotation at the same order, found by name, and
+  keeps the budget accruing. A pass the lane skips for FS pressure or a
+  suspended city restarts the accrual, so the pass that resumes dispatches
+  the plain cap rather than a burst.
 - **Visibility.** Each tick that wakes the lane (so not a pressure-skipped
   or canceled tick) records a `wake_orders_lane` operation whose
   `backstop_ran`, `backstop_age_seconds` and `backstop_last_reason` fields
   give the age and trigger of the lane's last pass that reached dispatch.
   Passes the FS gate skips do not count, so an age that keeps growing means
-  the lane is stuck or starved by pressure.
+  the lane is stuck or starved by pressure. Each pass's `dispatch_orders`
+  operation splits the pass into its arms (`rescan_ms`, `install_ms`,
+  `tracking_sweep_ms`, `tracking_retention_ms`, `nudge_mail_sweep_ms`,
+  `dispatch_ms`) and records what the dispatch did: its `budget`, the
+  orders it `dispatched`, the budgeted orders the rotation left `unreached`,
+  and the orders each gate held back (`gated_open_tracking`,
+  `gated_open_work`, `gate_failed_closed`, `gate_backoff`). A pass that
+  keeps leaving orders unreached is short of budget; a pass whose gates
+  hold orders back is waiting on earlier dispatches or on a slow store.
 
 **Trigger evaluation and dispatch (on each lane pass):**
 
