@@ -37,6 +37,7 @@ var (
 	_ Store                            = (*ProxiedStore)(nil)
 	_ AtomicTxStore                    = (*ProxiedStore)(nil)
 	_ BatchDeleter                     = (*ProxiedStore)(nil)
+	_ ChildrenBatchLister              = (*ProxiedStore)(nil)
 	_ ConditionalAssignmentReleaser    = (*ProxiedStore)(nil)
 	_ ConditionalWriterHandleProvider  = (*ProxiedStore)(nil)
 	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)

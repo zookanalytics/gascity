@@ -641,6 +641,13 @@ func (s *ProxiedStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 	return beads, s.classifyReadError(err)
 }
 
+// ChildrenOfAny reads every parent's children on the current read leaf: the
+// leaf's batch when it offers one, one exact Children per parent otherwise.
+func (s *ProxiedStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	beads, err := ChildrenOfAny(s.readLeaf(), parentIDs, opts...)
+	return beads, s.classifyReadError(err)
+}
+
 // ListByLabel reads beads carrying an exact label.
 func (s *ProxiedStore) ListByLabel(label string, limit int, opts ...QueryOpt) ([]Bead, error) {
 	beads, err := s.readLeaf().ListByLabel(label, limit, opts...)

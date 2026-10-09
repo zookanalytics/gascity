@@ -397,6 +397,19 @@ func TestProxiedStoreRelocatedClassReadsRefuseLikeBdStore(t *testing.T) {
 		t.Errorf("the guard let %d bd fork(s) through; it must refuse before anything is spent", forks)
 	}
 
+	t.Run("the exact batch read leaves a relocated id to Get", func(t *testing.T) {
+		found, unresolved, err := store.GetExactBatch([]string{"gcg-1234", "prx-1"})
+		if err != nil {
+			t.Fatalf("GetExactBatch: %v", err)
+		}
+		if len(found) != 0 || !reflect.DeepEqual(unresolved, []string{"gcg-1234", "prx-1"}) {
+			t.Fatalf("GetExactBatch = %v, unresolved %v; want both ids left to Get, whose refusal names the relocation", found, unresolved)
+		}
+		if forks != 0 {
+			t.Fatalf("the batch read spent %d bd fork(s)", forks)
+		}
+	})
+
 	t.Run("an id this ledger does serve is untouched", func(t *testing.T) {
 		// A plain miss, not a refusal — and H1's wisp fallback is what spends the
 		// one bd fork here, which is the documented cost of a miss.

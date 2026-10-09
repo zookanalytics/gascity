@@ -1757,7 +1757,7 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			"StrandsAbsentTargets",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
-			"ConditionalWritesModeSource", "Count",
+			"ChildrenOfAny", "ConditionalWritesModeSource", "Count",
 			// CreatedForm over a SQLite binding returns the bead as it is: the
 			// store round-trips every field, as its absence says. And
 			// AcceptsDanglingDep answers true: SQLite keeps every edge.
