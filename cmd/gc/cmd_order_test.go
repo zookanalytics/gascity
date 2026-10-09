@@ -1150,10 +1150,10 @@ func TestOrderRun(t *testing.T) {
 }
 
 // orderRunGraphApplySpy is a graph-apply-capable store that records whether
-// ApplyGraphPlan was invoked. Unlike graphApplySpyStore it creates real beads
-// in the embedded MemStore so the manual order-run path can label the wisp root
-// and record its tracking bead after instantiation. It implements
-// beads.GraphApplyStore.
+// ApplyGraphPlan was invoked. Unlike graphApplySpyStore it creates real beads,
+// labels and metadata included, in the embedded MemStore, so the manual
+// order-run path's wisp root exists with its run evidence and its tracking bead
+// is recorded after instantiation. It implements beads.GraphApplyStore.
 type orderRunGraphApplySpy struct {
 	*beads.MemStore
 	applied bool
@@ -1203,6 +1203,35 @@ func TestOrderRunUsesGraphApplyThroughOrdersStore(t *testing.T) {
 	}
 	if !spy.applied {
 		t.Fatal("ApplyGraphPlan was not invoked — graph apply capability lost through the beads.OrdersStore wrapper")
+	}
+}
+
+// TestOrderRunWispRootCarriesRunLabelFromCreation pins that a manual
+// `gc order run` creates its root carrying the order-run label, so the order's
+// own dispatcher attributes the manual run's molecule to the order from the
+// moment it exists. The store refuses every Update that would stamp an
+// order-run label.
+func TestOrderRunWispRootCarriesRunLabelFromCreation(t *testing.T) {
+	aa := []orders.Order{
+		{Name: "digest", Formula: "mol-digest", Trigger: "cooldown", Interval: "24h", Pool: "dog", FormulaLayer: sharedTestFormulaDir},
+	}
+	base := beads.NewMemStore()
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRun(aa, "digest", "", "/city", beads.OrdersStore{Store: selectiveUpdateFailStore{Store: base}}, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRun = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	roots := orderWispRoots(t, base, "mol-digest")
+	if len(roots) != 1 {
+		t.Fatalf("roots = %d, want 1", len(roots))
+	}
+	if !slicesContain(roots[0].Labels, "order-run:digest") {
+		t.Errorf("root labels = %v, want order-run:digest", roots[0].Labels)
+	}
+	if got := roots[0].Metadata[beadmeta.RoutedToMetadataKey]; got != "dog" {
+		t.Errorf("root gc.routed_to = %q, want dog", got)
 	}
 }
 

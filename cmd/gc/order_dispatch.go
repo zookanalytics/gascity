@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2031,6 +2032,40 @@ func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
 	}
 }
 
+// stampOrderRunEvidence puts a run's evidence on the recipe's root step, so the
+// root is created carrying it: the order-run label, the event cursor of an
+// event-triggered run (nil for every other trigger), and the pool route (empty
+// for an order with no pool).
+//
+// Every reader that keeps an order single-flight finds a run by the order-run
+// label on its root: the open-work gate, the cooldown clock's last-run
+// fallback, the stale-wisp sweep and `gc order history`. A root that gets the
+// label from a write after its create is, until that write lands, a running
+// molecule none of them can attribute to its order, and it stays one for good
+// if the write fails, so a non-idempotent order fires again over it. Stamped
+// here, the root exists with its evidence or not at all.
+func stampOrderRunEvidence(recipe *formula.Recipe, scoped string, cursor *orders.EventCursor, pool string) {
+	if recipe == nil || len(recipe.Steps) == 0 {
+		return
+	}
+	root := &recipe.Steps[0]
+	labels := []string{orders.RunLabel(scoped)}
+	if cursor != nil {
+		labels = append(labels, "order:"+scoped, fmt.Sprintf("seq:%d", uint64(*cursor)))
+	}
+	for _, label := range labels {
+		if !slices.Contains(root.Labels, label) {
+			root.Labels = append(root.Labels, label)
+		}
+	}
+	if pool != "" {
+		if root.Metadata == nil {
+			root.Metadata = make(map[string]string)
+		}
+		root.Metadata[beadmeta.RoutedToMetadataKey] = pool
+	}
+}
+
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
 	if strings.TrimSpace(a.Pool) == "" || formula.RecipeHasReadySurface(recipe) {
 		return ""
@@ -2397,6 +2432,16 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
+	// The root carries the run's evidence from its create, in the store that
+	// holds it; orders.Store's mixed orders+graph reads union it with the
+	// tracking bead's own order-run evidence.
+	var cursor *orders.EventCursor
+	if a.Trigger == "event" && m.ep != nil {
+		c := orders.EventCursor(headSeq)
+		cursor = &c
+	}
+	stampOrderRunEvidence(recipe, scoped, cursor, pool)
+
 	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
 	if err != nil {
 		m.rec.Record(events.Event{
@@ -2419,34 +2464,6 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: executionEmitStore(store, cityPath)}, rootID, "order-dispatch"); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: projecting execution facts for %s: %v", scoped, rootID, err)
 		}
-	}
-
-	// Stamp the created wisp through the store contract rather than a raw
-	// bd subprocess so controller dispatch stays provider-aware. The label goes
-	// to the store that holds the root; orders.Store's mixed orders+graph reads
-	// are what union it back with the tracking bead's own order-run evidence.
-	update := beads.UpdateOpts{Labels: []string{"order-run:" + scoped}}
-	if a.Trigger == "event" && m.ep != nil {
-		update.Labels = append(update.Labels,
-			fmt.Sprintf("order:%s", scoped),
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
-	if a.Pool != "" {
-		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
-	}
-	if err := graphStore.Update(rootID, update); err != nil {
-		// Label failure is critical for duplicate-dispatch prevention.
-		// Log and emit an event so operators can investigate.
-		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
-		m.rec.Record(events.Event{
-			Type:    events.OrderFailed,
-			Actor:   "controller",
-			Subject: scoped,
-			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
-		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
-		return
 	}
 
 	m.rec.Record(events.Event{
@@ -2541,10 +2558,19 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 // open order-run:<scoped> bead that is NOT an order-tracking bead, it decides
 // whether the wisp/molecule root still has open work. A root-only wisp counts as
 // in-flight; a molecule root counts only if its subtree still has open
-// descendants. It stays in the controller because the subtree walk is graph
-// residual (molecule membership + graph traversal).
+// descendants; a root its own instantiation marked molecule_failed never counts.
+// It stays in the controller because the subtree walk is graph residual
+// (molecule membership + graph traversal).
 func (m *memoryOrderDispatcher) wispRootHasOpenWork(store beads.Store, b beads.Bead) (bool, error) {
 	if !isOrderWispRootCandidate(b) {
+		return false, nil
+	}
+	// A pour that died part-way leaves a root that carries its order-run label
+	// from the create, with some of its steps open. The dispatch already
+	// recorded that run as failed. Sling and the dispatch drain close a
+	// molecule_failed root and molecule recovery skips one, so it does not hold
+	// the order shut here either.
+	if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 		return false, nil
 	}
 	if isOrderRootOnlyWispCandidate(b) {

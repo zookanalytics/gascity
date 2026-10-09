@@ -221,10 +221,12 @@ the tick never waits on order gates.
    - **Exec**: `dispatchExec()` runs the shell command via `ExecRunner`,
      labels the tracking bead with `exec` (or `exec-failed`), and
      records `order.completed` or `order.failed`.
-   - **Formula**: `dispatchWisp()` calls `instantiateWisp()` (which
-     delegates to `store.MolCook()`), labels the wisp root bead with
-     `order-run:<scopedName>` and `pool:<qualifiedPool>`, and
-     records `order.completed` or `order.failed`.
+   - **Formula**: `dispatchWisp()` compiles the formula, stamps the run's
+     evidence onto the recipe's root step (`order-run:<scopedName>`, the
+     `order:`/`seq:` event cursor for an event trigger, and the
+     `gc.routed_to` pool route), instantiates it with
+     `molecule.Instantiate()`, and records `order.completed` or
+     `order.failed`.
 
 **Scanning (`orders.Scan()`):**
 
@@ -283,6 +285,16 @@ Violations indicate bugs.
   in the main dispatch loop. This prevents the cooldown trigger from
   re-firing on the next lane pass while the dispatch goroutine is
   still running.
+
+- **A dispatched root is created carrying its run evidence**: The
+  open-work gate, the cooldown clock's last-run fallback, the stale-wisp
+  sweep and `gc order history` find a formula order's run by the
+  `order-run:<scopedName>` label on its molecule root. Both writers of
+  that root, `dispatchWisp()` and `gc order run`, stamp the label (with the
+  event cursor and the pool route) onto the recipe before instantiation,
+  so the root exists with its evidence or not at all. A root labeled by a
+  later write is a running molecule those readers cannot attribute to its
+  order, and a non-idempotent order fires again over it.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
