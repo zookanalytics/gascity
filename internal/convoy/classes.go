@@ -238,6 +238,15 @@ func isNilStore(s beads.Store) bool {
 	}
 }
 
+// SameStore reports whether two store handles are the same physical store. It
+// is the exported form of the handle-identity check convoy membership uses to
+// prove a bead's residence, for callers that must group work by its owning store
+// before a per-store batch read — the ids MembersBatch takes are unique only
+// within a store, so grouping is by store, never by a global id map.
+func SameStore(a, b beads.Store) bool {
+	return sameHandle(a, b)
+}
+
 // sameHandle reports whether two named handles are the same physical store.
 // Interface comparison panics when both hold the same non-comparable dynamic
 // type, so comparability is checked first; two handles that cannot be compared
