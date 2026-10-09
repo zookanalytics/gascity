@@ -135,6 +135,15 @@ type Formula struct {
 	// tracking is worth the DB overhead. Patrol formulas should NOT set this.
 	Pour bool `json:"pour,omitempty"`
 
+	// RetainInputRoutes declares that a started workflow reacts to its input
+	// without driving it. Starting a graph.v2 workflow normally retires the pool
+	// claim route (gc.routed_to) on the bead it was attached to and on every
+	// member of its input convoy, so the workflow is the only live dispatch
+	// surface for that work. A formula that sets this leaves those routes in
+	// place. The compiler records it on the workflow root as
+	// gc.retain_input_routes. Graph-only; monotonic through extends, like Pour.
+	RetainInputRoutes bool `json:"retain_input_routes,omitempty" toml:"retain_input_routes,omitempty"`
+
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
 
@@ -991,6 +1000,9 @@ func requiresExplicitGraphContract(f *Formula) bool {
 func requiresExplicitGraphCompilerRequirement(f *Formula) bool {
 	if f == nil || UsesGraphCompiler(f) {
 		return false
+	}
+	if f.RetainInputRoutes {
+		return true
 	}
 	if stepsRequireGraphCompiler(f.Steps) {
 		return true

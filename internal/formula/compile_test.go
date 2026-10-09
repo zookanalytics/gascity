@@ -684,6 +684,127 @@ extends = ` + tc.extends + `
 	}
 }
 
+// writeFormulaFiles writes each name -> content pair into dir.
+func writeFormulaFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// The sling that starts a workflow reads retain_input_routes from the workflow
+// root, so the compiler records the declaration there and records nothing for a
+// formula that does not declare it.
+func TestCompileRetainInputRoutesStampsWorkflowRoot(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeFormulaFiles(t, dir, map[string]string{
+		"reaction.toml": `
+formula = "reaction"
+retain_input_routes = true
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "react"
+title = "React"
+`,
+		"work.toml": `
+formula = "work"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "build"
+title = "Build"
+`,
+	})
+
+	for name, want := range map[string]string{"reaction": "true", "work": ""} {
+		recipe, err := Compile(context.Background(), name, []string{dir}, nil)
+		if err != nil {
+			t.Fatalf("Compile(%s): %v", name, err)
+		}
+		root := recipe.RootStep()
+		if root == nil {
+			t.Fatalf("Compile(%s): root step missing", name)
+		}
+		if got := root.Metadata[beadmeta.RetainInputRoutesMetadataKey]; got != want {
+			t.Errorf("%s root %s = %q, want %q", name, beadmeta.RetainInputRoutesMetadataKey, got, want)
+		}
+	}
+}
+
+// retain_input_routes follows extends the way pour does: an ancestor's
+// declaration sticks on the child.
+func TestCompileExtendsInheritsRetainInputRoutes(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeFormulaFiles(t, dir, map[string]string{
+		"reaction-base.toml": `
+formula = "reaction-base"
+retain_input_routes = true
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "react"
+title = "React"
+`,
+		"reaction.toml": `
+formula = "reaction"
+extends = ["reaction-base"]
+
+[[steps]]
+id = "dispose"
+title = "Dispose"
+needs = ["react"]
+`,
+	})
+
+	recipe, err := Compile(context.Background(), "reaction", []string{dir}, nil)
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := recipe.RootStep().Metadata[beadmeta.RetainInputRoutesMetadataKey]; got != "true" {
+		t.Fatalf("root %s = %q, want %q inherited from reaction-base", beadmeta.RetainInputRoutesMetadataKey, got, "true")
+	}
+}
+
+// Only a started graph.v2 workflow retires the routes on its input, so a formula
+// that declares retain_input_routes without the v2 declaration fails to compile
+// instead of carrying a declaration nothing reads.
+func TestCompileRetainInputRoutesRequiresExplicitGraphCompiler(t *testing.T) {
+	enableV2ForTest(t)
+
+	dir := t.TempDir()
+	writeFormulaFiles(t, dir, map[string]string{
+		"implicit-v1-reaction.toml": `
+formula = "implicit-v1-reaction"
+retain_input_routes = true
+
+[[steps]]
+id = "react"
+title = "React"
+`,
+	})
+
+	_, err := Compile(context.Background(), "implicit-v1-reaction", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile succeeded, want the explicit graph compiler requirement error")
+	}
+	if !strings.Contains(err.Error(), `formula_compiler = ">=2.0.0"`) {
+		t.Fatalf("Compile error = %v, want formula_compiler guidance", err)
+	}
+}
+
 func TestCompileCheckSyntaxWithoutRequirementFailsClosed(t *testing.T) {
 	enableV2ForTest(t)
 

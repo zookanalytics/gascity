@@ -283,6 +283,7 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		Template:    nil,
 		Compose:     nil,
 	}
+	merged.RetainInputRoutes = formula.RetainInputRoutes
 
 	// Apply each parent in order
 	for _, parentName := range formula.Extends {
@@ -323,6 +324,12 @@ func (p *Parser) Resolve(formula *Formula) (*Formula, error) {
 		// explicit child opt-out but isn't worth the complexity for this flag.
 		if !merged.Pour {
 			merged.Pour = parent.Pour
+		}
+
+		// RetainInputRoutes escalates the same way: a declaration on the child
+		// or on any parent carries to the merged formula.
+		if !merged.RetainInputRoutes {
+			merged.RetainInputRoutes = parent.RetainInputRoutes
 		}
 
 		// Merge parent metadata with child and earlier parents taking

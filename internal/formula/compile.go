@@ -351,6 +351,11 @@ func toRecipeWithGraph(f *Formula, graphWorkflow bool) (*Recipe, error) {
 	if graphWorkflow {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}
 		rootStep.Metadata[beadmeta.FormulaContractMetadataKey] = beadmeta.FormulaContractGraphV2
+		// The sling that starts the workflow reads this off the root to decide
+		// whether to retire the pool routes on the workflow's input.
+		if f.RetainInputRoutes {
+			rootStep.Metadata[beadmeta.RetainInputRoutesMetadataKey] = "true"
+		}
 	} else if rootOnly {
 		rootStep.Metadata = map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}
 	}
