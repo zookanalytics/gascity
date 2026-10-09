@@ -25,6 +25,8 @@ go_test(
         "classes_test.go",
         "convoy_fields_test.go",
         "convoy_test.go",
+        "members_batch_bench_test.go",
+        "members_batch_test.go",
         "testenv_import_test.go",
     ],
     embed = [":convoy"],
