@@ -335,6 +335,7 @@ type hookClaimJSONResult struct {
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+	StepReminder         string   `json:"step_reminder,omitempty"`
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -1240,6 +1241,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	result.StepReminder = hookClaimStepReminder(bead)
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
@@ -1276,15 +1278,35 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	return 0
 }
 
-// writeHookClaimResultLine writes the one line that carries a claim result to
-// its consumer, and — unlike the plain-text path it replaces — reports whether
-// that write actually landed. The non-JSON form used to discard the error, which
-// is precisely the shape a dead tool pipe takes.
+// hookClaimStepReminder renders the claimed bead as the step its work result
+// carries. A session that wakes holding a claim has no memory of making it, so
+// the reply to the claim has to say what the work is. The reminder is rendered
+// from the bead the result names, never from a step resolved off the session's
+// identity, so it cannot describe a bead other than bead_id, and it costs no
+// store read: every tier hands this function the full bead. It goes through
+// formatWispStepReminder, the renderer behind the step gc nudge and
+// gc prime --hook inject, so a session reads the same text on every channel. A
+// bead with no description renders nothing; it carries no instruction beyond
+// its title, and an empty reminder leaves the result byte-identical to one
+// without the field.
+func hookClaimStepReminder(bead beads.Bead) string {
+	if strings.TrimSpace(bead.Description) == "" {
+		return ""
+	}
+	return formatWispStepReminder(&bead)
+}
+
+// writeHookClaimResultLine writes a claim result to its consumer in one write,
+// and — unlike the plain-text path it replaces — reports whether that write
+// actually landed. The non-JSON form used to discard the error, which is
+// precisely the shape a dead tool pipe takes. The JSON form is one line. The
+// non-JSON form is the bead id alone on its first line, followed by the step
+// reminder when the result carries one.
 func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout io.Writer) error {
 	if jsonOut {
 		return writeCLIJSONLine(stdout, result)
 	}
-	_, err := fmt.Fprintln(stdout, result.BeadID)
+	_, err := io.WriteString(stdout, result.BeadID+"\n"+result.StepReminder)
 	return err
 }
 
