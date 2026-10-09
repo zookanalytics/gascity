@@ -215,8 +215,10 @@ func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []
 }
 
 var (
-	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
-	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+	_ beads.ExactBatchGetter    = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter    = (*beadPolicyGraphStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyGraphStore)(nil)
 )
 
 var (

@@ -1746,8 +1746,8 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			"SequenceFloor", "SetSequenceFloor", "StoreHealthPath",
 		},
 		reflect.TypeOf(&beads.SQLiteStore{}): {
-			"ConditionalWritesModeSource", "Count", "DepListBatch",
-			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
+			"ChildrenOfAny", "ConditionalWritesModeSource", "Count", "DepListBatch",
+			"EventsJournalActive", "GetExactBatch", "NamespaceCensusHandle", "ReadEventsJournalPage",
 			// ReadyOrdered over a SQLite binding delegates to beads.ReadyOrdered,
 			// which reads a store without the capability whole and reports
 			// ordered=false: the path a caller takes when the wrapper lacks it.

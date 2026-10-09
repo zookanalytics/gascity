@@ -24,6 +24,7 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.DepListBatch":                          "read",
 	"CachingStore.DepMetadata":                           "read",
 	"CachingStore.Get":                                   "read",
+	"CachingStore.GetExactBatch":                         "read",
 	"CachingStore.GetLocalString":                        "read",
 	"CachingStore.IDPrefix":                              "read",
 	"CachingStore.IsLive":                                "read",
