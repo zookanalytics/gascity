@@ -3033,8 +3033,8 @@ gc order sweep-nudge-mail [flags]
 Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It closes open tracking beads
-older than --stale-after, whatever their order's timeout, so a --stale-after
-longer than every order's timeout leaves in-flight runs alone.
+older than --stale-after, whatever timeout their run was started with, so a
+--stale-after longer than every order's timeout leaves in-flight runs alone.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -3043,9 +3043,10 @@ use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 The controller's watchdog also closes stale open tracking beads, at most every
 30s, independent of this command and of --stale-after. A run still in flight
-keeps its tracking bead until the bead is 2m older than the order's dispatch
-timeout (its timeout, capped by [orders].max_timeout). Any other open tracking
-bead is closed once it is 2m old.
+keeps its tracking bead until the bead is 2m older than the timeout the run was
+started with (the order's timeout, capped by [orders].max_timeout), which the
+bead records. A later config reload does not change that timeout. Any other
+open tracking bead is closed once it is 2m old.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one

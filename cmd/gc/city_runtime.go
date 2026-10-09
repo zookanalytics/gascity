@@ -2117,12 +2117,13 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// order-tracking-sweep, being scheduled to clean the rest. The open
 	// tracking bead is each order's single-flight gate, so a run still in
 	// flight keeps it until the bead is orderTrackingSweepWatchdogStaleAfter
-	// past the order's dispatch timeout, by which time the dispatcher has
-	// killed the run. Every other open tracking bead is closed at
+	// past the timeout the run was launched with, which the bead records. By
+	// then the run has been killed, whatever timeout a later reload gave the
+	// order. Every other open tracking bead is closed at
 	// orderTrackingSweepWatchdogStaleAfter. Closed-history retention is left
 	// to the maintenance exec order or the gc order sweep-tracking CLI; the
 	// watchdog only recovers stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, cr.orderRunTimeouts(cfg))
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, true)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr

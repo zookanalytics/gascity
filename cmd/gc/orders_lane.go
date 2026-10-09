@@ -391,20 +391,6 @@ func (cr *CityRuntime) installPendingOrderDispatcherLocked(ctx context.Context) 
 	cr.replaceOrderDispatcher(next)
 }
 
-// orderRunTimeouts returns the dispatch timeout of each order in the staged or
-// live order set, keyed by scoped name and capped by cfg's [orders]
-// max_timeout (orderTrackingRunTimeouts).
-func (cr *CityRuntime) orderRunTimeouts(cfg *config.City) map[string]time.Duration {
-	var maxTimeout time.Duration
-	if cfg != nil {
-		maxTimeout = cfg.Orders.MaxTimeoutDuration()
-	}
-	lane := cr.ordersLaneOf()
-	lane.setMu.Lock()
-	defer lane.setMu.Unlock()
-	return orderTrackingRunTimeouts(cr.orderSet, maxTimeout)
-}
-
 // orderRescanDue reports whether the periodic order rescan should run.
 func (cr *CityRuntime) orderRescanDue(now time.Time) bool {
 	lane := cr.ordersLaneOf()

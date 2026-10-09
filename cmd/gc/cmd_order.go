@@ -292,8 +292,8 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It closes open tracking beads
-older than --stale-after, whatever their order's timeout, so a --stale-after
-longer than every order's timeout leaves in-flight runs alone.
+older than --stale-after, whatever timeout their run was started with, so a
+--stale-after longer than every order's timeout leaves in-flight runs alone.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -302,9 +302,10 @@ use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 The controller's watchdog also closes stale open tracking beads, at most every
 30s, independent of this command and of --stale-after. A run still in flight
-keeps its tracking bead until the bead is 2m older than the order's dispatch
-timeout (its timeout, capped by [orders].max_timeout). Any other open tracking
-bead is closed once it is 2m old.
+keeps its tracking bead until the bead is 2m older than the timeout the run was
+started with (the order's timeout, capped by [orders].max_timeout), which the
+bead records. A later config reload does not change that timeout. Any other
+open tracking bead is closed once it is 2m old.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -978,8 +979,9 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
-	// (#3570).
-	run, err := front.CreateRun(scoped, orders.RunOpts{})
+	// (#3570). The bead records the run's timeout, so the controller's
+	// watchdog keeps it open while the run may still be going.
+	run, err := front.CreateRun(scoped, orders.RunOpts{Timeout: orderRunTimeout(a, cfg)})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1018,13 +1020,18 @@ type orderRunExecResult struct {
 	failureLabel string
 }
 
-func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+// orderRunTimeout is how long `gc order run` lets an exec run of a go before
+// killing it: the order's timeout, capped by cfg's [orders].max_timeout.
+func orderRunTimeout(a orders.Order, cfg *config.City) time.Duration {
 	var maxTimeout time.Duration
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
-	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return effectiveTimeout(a, maxTimeout)
+}
+
+func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+	ctx, cancel := context.WithTimeout(context.Background(), orderRunTimeout(a, cfg))
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
