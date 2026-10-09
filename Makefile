@@ -1026,21 +1026,31 @@ install-tools: golangci-lint-pinned install-oapi-codegen install-oasdiff
 ## silent no-op there. Comparing the binary's reported version against the pin
 ## also replaces one installed out of band.
 ##
+## The pin covers the Go that builds the binary too: the Go the lint targets run
+## it under (LINT_GOTOOLCHAIN, go.mod's unless overridden). golangci-lint's
+## formatters are compiled into it and format as that Go's gofmt does, so a
+## binary a newer host Go built can flag files that CI's linter, built with
+## go.mod's Go, accepts.
+##
 ## An explicitly supplied GOLANGCI_LINT is used as given -- only the binary this
 ## target installs itself is version-managed.
 golangci-lint-pinned:
 	@if [ "$(GOLANGCI_LINT)" != "$(GOLANGCI_LINT_DEFAULT)" ]; then exit 0; fi; \
-	installed=$$($(GOLANGCI_LINT) version 2>/dev/null | sed -n 's/.*has version \([^ ]*\).*/\1/p'); \
-	if [ "$$installed" = "$(GOLANGCI_LINT_VERSION)" ]; then exit 0; fi; \
+	lint_go=$$(GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) go env GOVERSION) && [ -n "$$lint_go" ] || { \
+		echo "ERROR: cannot resolve the Go that GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) selects to build golangci-lint; set LINT_GOTOOLCHAIN to a Go this host can run" >&2; \
+		exit 1; \
+	}; \
+	installed=$$($(GOLANGCI_LINT) version 2>/dev/null | sed -n 's/.*has version \([^ ]*\) built with \([^ ]*\).*/\1 built with \2/p'); \
+	if [ "$$installed" = "$(GOLANGCI_LINT_VERSION) built with $$lint_go" ]; then exit 0; fi; \
 	if [ -n "$$installed" ]; then \
-		echo "golangci-lint $$installed does not match pin v$(GOLANGCI_LINT_VERSION); reinstalling..."; \
+		echo "golangci-lint $$installed does not match pin v$(GOLANGCI_LINT_VERSION) built with $$lint_go; reinstalling..."; \
 	else \
-		echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION)..."; \
+		echo "Installing golangci-lint v$(GOLANGCI_LINT_VERSION) built with $$lint_go..."; \
 	fi; \
 	attempt=1; max_attempts=5; delay=2; \
 	while [ $$attempt -le $$max_attempts ]; do \
 		echo "golangci-lint install attempt $$attempt/$$max_attempts"; \
-		if GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
+		if GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) GOBIN=$(BIN_DIR) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v$(GOLANGCI_LINT_VERSION); then \
 			exit 0; \
 		fi; \
 		if [ $$attempt -lt $$max_attempts ]; then \
