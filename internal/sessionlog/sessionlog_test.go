@@ -1431,6 +1431,139 @@ func TestProjectSlug(t *testing.T) {
 	}
 }
 
+// --- Capture discovery and Claude's transcript store ---
+
+// captureDiscoveryProviders are the families whose workdir fallback scans
+// capture roots for a file whose recorded cwd matches the session's workdir.
+var captureDiscoveryProviders = []string{"cursor", "auggie", "grok", "amp"}
+
+// writeClaudeStoreTranscript writes a Claude transcript recorded in workDir
+// into Claude's store under home, in the store's <slug>/<session>.jsonl
+// layout. Its system and user lines carry the cwd, as Claude's do.
+func writeClaudeStoreTranscript(t *testing.T, home, workDir string) string {
+	t.Helper()
+	const sessionID = "5f0d9c1e-6a2b-4c3d-8e4f-1a2b3c4d5e6f"
+	path := filepath.Join(home, ".claude", "projects", ProjectSlug(workDir), sessionID+".jsonl")
+	writeFile(t, path, strings.Join([]string{
+		`{"type":"system","subtype":"turn_duration","cwd":` + jsonString(workDir) + `,"sessionId":"` + sessionID + `"}`,
+		`{"type":"user","cwd":` + jsonString(workDir) + `,"sessionId":"` + sessionID + `","message":{"role":"user","content":"hello"}}`,
+	}, "\n")+"\n")
+	return path
+}
+
+// writeCaptureFixture writes a capture recorded in workDir, in the stream
+// shape the provider's reader parses.
+func writeCaptureFixture(t *testing.T, root, provider, workDir string) string {
+	t.Helper()
+	var line string
+	switch provider {
+	case "cursor":
+		line = `{"type":"system","subtype":"init","cwd":` + jsonString(workDir) + `,"session_id":"cursor-session"}`
+	case "amp":
+		line = `{"type":"system","subtype":"init","cwd":` + jsonString(workDir) + `,"session_id":"T-session","tools":[],"mcp_servers":[]}`
+	case "auggie", "grok":
+		line = `{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":` + jsonString(workDir) + `}}`
+	default:
+		t.Fatalf("no capture fixture for provider %q", provider)
+	}
+	path := filepath.Join(root, provider+"-session.jsonl")
+	writeFile(t, path, line+"\n")
+	return path
+}
+
+// TestCaptureDiscoveryIgnoresClaudeTranscriptStore pins that no workdir
+// fallback for a capture provider reads Claude's transcript store. The search
+// paths callers share across providers include that store, and Claude's
+// transcript lines record the cwd the session ran in. A capture scan that
+// reached the store would open each Claude transcript on the host in turn and
+// could return one recorded in the session's workdir as this provider's.
+func TestCaptureDiscoveryIgnoresClaudeTranscriptStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	writeClaudeStoreTranscript(t, home, workDir)
+	searchPaths := MergeSearchPaths(nil)
+
+	for _, provider := range captureDiscoveryProviders {
+		t.Run(provider, func(t *testing.T) {
+			if got := FindSessionFileForProvider(searchPaths, provider, workDir); got != "" {
+				t.Fatalf("FindSessionFileForProvider(%s) = %q, want no transcript from Claude's store", provider, got)
+			}
+			if got := FindProviderFallbackSessionFile(searchPaths, provider, workDir); got != "" {
+				t.Fatalf("FindProviderFallbackSessionFile(%s) = %q, want no transcript from Claude's store", provider, got)
+			}
+		})
+	}
+}
+
+// TestCaptureDiscoveryFindsConfiguredCaptureBesideClaudeTranscriptStore pins
+// that a capture under a configured search path is still found next to Claude's
+// store. The scan returns the newest cwd match, so a scan that reached the store
+// would return a newer same-workdir Claude transcript ahead of the capture.
+func TestCaptureDiscoveryFindsConfiguredCaptureBesideClaudeTranscriptStore(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	workDir := t.TempDir()
+	claudeTranscript := writeClaudeStoreTranscript(t, home, workDir)
+	newer := time.Now().Add(time.Hour)
+	if err := os.Chtimes(claudeTranscript, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, provider := range captureDiscoveryProviders {
+		t.Run(provider, func(t *testing.T) {
+			captureRoot := t.TempDir()
+			want := writeCaptureFixture(t, captureRoot, provider, workDir)
+			searchPaths := MergeSearchPaths([]string{captureRoot})
+			if got := FindSessionFileForProvider(searchPaths, provider, workDir); got != want {
+				t.Fatalf("FindSessionFileForProvider(%s) = %q, want configured capture %q", provider, got, want)
+			}
+		})
+	}
+}
+
+// TestCaptureDiscoveryIgnoresClaudeTranscriptStoreUnderOtherSpellings pins
+// that a search path naming Claude's store in a spelling DefaultSearchPaths does
+// not produce is not a capture root either: the store's resolved path when HOME
+// reaches it through a symlink, or a project directory inside the store.
+func TestCaptureDiscoveryIgnoresClaudeTranscriptStoreUnderOtherSpellings(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	resolvedStore := filepath.Join(t.TempDir(), "claude-projects")
+	if err := os.MkdirAll(resolvedStore, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(resolvedStore, filepath.Join(home, ".claude", "projects")); err != nil {
+		t.Fatal(err)
+	}
+	workDir := t.TempDir()
+	writeClaudeStoreTranscript(t, home, workDir)
+
+	for _, tt := range []struct {
+		name string
+		path string
+	}{
+		{name: "resolved store", path: resolvedStore},
+		{name: "project dir inside the store", path: filepath.Join(resolvedStore, ProjectSlug(workDir))},
+	} {
+		searchPaths := MergeSearchPaths([]string{tt.path})
+		for _, provider := range captureDiscoveryProviders {
+			t.Run(tt.name+"/"+provider, func(t *testing.T) {
+				if got := FindSessionFileForProvider(searchPaths, provider, workDir); got != "" {
+					t.Fatalf("FindSessionFileForProvider(%s) with search path %q = %q, want no transcript from Claude's store", provider, tt.path, got)
+				}
+			})
+		}
+	}
+}
+
 // --- ReadFile with pagination ---
 
 func TestReadFileWithPagination(t *testing.T) {
