@@ -40,6 +40,12 @@ Violating any fails the build; full rationale is in the architecture docs.
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Client list reads walk every keyset page.** A `Client` function
+  that calls a keyset-paginated list endpoint (a generated method
+  whose params carry `Cursor`) reads `next_cursor`, normally through
+  `walkKeysetPages`. One request holds only the server's first page,
+  100 rows by default, and reads as the complete list. Enforced by
+  `TestClientKeysetListCallsFollowNextCursor`.
 
 ## Worker boundary exception
 
