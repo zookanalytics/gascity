@@ -445,8 +445,20 @@ func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cf
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	return scanOrderSetSnapshotFSWith(fs, cityPath, cfg, stderr, cmdName, nil)
+}
+
+// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS with the handler for a
+// registration the scan drops for its rig scope. A nil handler logs every one
+// the scan reports.
+func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, onUnbound orderdiscovery.UnboundRigScopedHandler) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
+	}
+	if onUnbound == nil {
+		onUnbound = func(orderName string, boundRigs []string) {
+			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+		}
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		FS: fs,
@@ -462,10 +474,8 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
 			return nil
 		},
-		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
-			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
-		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		OnUnboundRigScoped: onUnbound,
+		ValidateOrder:      validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err
@@ -474,6 +484,38 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),
 	}, nil
+}
+
+// unboundRigScopedLog logs a registration the order scan drops for its rig
+// scope the first time a scan reports it, and again only when its warning
+// changes. The drop is expected for a rig-scoped order in a pack every rig
+// imports, and the order set is rescanned by the orders lane every
+// orderRescanInterval and by every same-revision config reload, so an
+// unchanged warning repeated on each rescan buries the log; a changed one is
+// news.
+type unboundRigScopedLog struct {
+	mu   sync.Mutex
+	last map[string]string // order name -> the warning last logged for it
+}
+
+// handler returns the scan handler that logs through l, prefixed with
+// cmdName.
+func (l *unboundRigScopedLog) handler(stderr io.Writer, cmdName string) orderdiscovery.UnboundRigScopedHandler {
+	return func(orderName string, boundRigs []string) {
+		msg := orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)
+		l.mu.Lock()
+		repeat := l.last[orderName] == msg
+		if !repeat {
+			if l.last == nil {
+				l.last = make(map[string]string)
+			}
+			l.last[orderName] = msg
+		}
+		l.mu.Unlock()
+		if !repeat {
+			logDispatchError(stderr, "%s: %s", cmdName, msg)
+		}
+	}
 }
 
 func orderSetSignature(aa []orders.Order) string {

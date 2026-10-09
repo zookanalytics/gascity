@@ -202,6 +202,9 @@ type CityRuntime struct {
 
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
+	// unboundRigScoped keeps scanOrderSet from repeating an unchanged
+	// dropped-registration warning on every rescan.
+	unboundRigScoped unboundRigScopedLog
 	// afterReloadStagesOrders, when set (tests), runs right after a config
 	// reload stages its order dispatcher.
 	afterReloadStagesOrders func()

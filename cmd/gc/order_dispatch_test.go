@@ -154,6 +154,81 @@ interval = "1m"
 	}
 }
 
+// TestUnboundRigScopedLogRepeatsOnlyAChangedWarning: a rig-scoped order in a
+// pack every rig imports reports its dropped city registration on every scan,
+// and the order set is rescanned every orderRescanInterval and on every
+// same-revision config reload. The warning is logged when a scan first reports
+// it and again only when it changes.
+func TestUnboundRigScopedLogRepeatsOnlyAChangedWarning(t *testing.T) {
+	var stderr bytes.Buffer
+	var l unboundRigScopedLog
+	report := l.handler(&stderr, "gc patrol: order scan")
+	report("sweep", []string{"alpha", "beta"})
+	report("sweep", []string{"alpha", "beta"})
+	report("other", []string{"alpha"})
+	report("sweep", []string{"alpha"})
+	report("sweep", []string{"alpha", "beta"})
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	want := []struct{ order, rigs string }{
+		{"sweep", "alpha, beta"},
+		{"other", "alpha"},
+		{"sweep", "alpha"},
+		{"sweep", "alpha, beta"},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("logged %d warnings, want %d (an unchanged repeat is not logged):\n%s", len(lines), len(want), stderr.String())
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(lines[i], `gc patrol: order scan: order "`+w.order+`" declares scope = "rig"`) ||
+			!strings.HasSuffix(lines[i], "(still registered on rig(s) "+w.rigs+")") {
+			t.Errorf("warning %d = %q, want order %q still registered on %s", i, lines[i], w.order, w.rigs)
+		}
+	}
+}
+
+// TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce: the orders lane's
+// periodic rescan and the same-revision config reload both scan through
+// CityRuntime.scanOrderSet, so a dropped rig-scope registration is logged
+// once, not on every rescan.
+func TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	cityLayer := filepath.Join(cityPath, "formulas")
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	for _, dir := range []string{cityLayer, filepath.Join(packDir, "formulas"), filepath.Join(packDir, "orders")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(packDir, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr}
+
+	for i := 0; i < 3; i++ {
+		snapshot, err := cr.scanOrderSet(cityPath, cfg, "gc patrol: order scan")
+		if err != nil {
+			t.Fatalf("scan %d: %v", i, err)
+		}
+		if !orderSnapshotHasName(snapshot.Orders, "sweep") {
+			t.Fatalf("scan %d dropped the rig-bound registration too: %#v", i, snapshot.Orders)
+		}
+	}
+	if n := strings.Count(stderr.String(), `order "sweep" declares scope = "rig"`); n != 1 {
+		t.Fatalf("dropped-registration warnings across three scans = %d, want 1:\n%s", n, stderr.String())
+	}
+}
+
 func orderSnapshotByName(aa []orders.Order, name string) orders.Order {
 	for _, a := range aa {
 		if a.Name == name {
