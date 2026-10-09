@@ -60,6 +60,18 @@ func assertSameTestPath(t *testing.T, got, want string) {
 	testutil.AssertSamePath(t, got, want)
 }
 
+// withoutTempRoot returns out with the test temp root replaced by "<tmp>",
+// both as os.TempDir names it and in canonical form. The root sits under the
+// TMPDIR the test binary inherited, and whoever launched the run picked that
+// name. A work dir named after a bead whose id starts with a digit contains a
+// sequential test-store id: gc-2xyz-work contains gc-2. Scrub output that
+// prints a temp path before asserting that it names or omits such an id.
+func withoutTempRoot(out string) string {
+	root := filepath.Clean(os.TempDir())
+	out = strings.ReplaceAll(out, canonicalTestPath(root), "<tmp>")
+	return strings.ReplaceAll(out, root, "<tmp>")
+}
+
 func shortSocketTempDir(t *testing.T, prefix string) string {
 	t.Helper()
 	return testutil.ShortTempDir(t, prefix)
