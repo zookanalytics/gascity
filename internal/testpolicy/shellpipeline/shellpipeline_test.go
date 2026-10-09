@@ -17,7 +17,7 @@ func TestFindPipefailGrepQPipelines(t *testing.T) {
 		{name: "git diff into grep -q", body: pipefail + `git diff --name-only a b -- '*.go' 2>/dev/null | grep -q .`, want: 1},
 		{name: "here-string grep -q is safe", body: pipefail + `grep -q foo <<<"$x"`},
 		{name: "here-string grep -Fxq is safe", body: pipefail + `grep -Fxq -- "$n" <<<"$x"`},
-		{name: "list_contains_line is safe", body: pipefail + `list_contains_line "$x" "$n"`},
+		{name: "logical-or into here-string grep -q is not a pipe", body: pipefail + `[ "$c" -gt 0 ] || grep -Fxq -- keep <<<"$x" || [ "$s" != closed ]`},
 		{name: "capture then test is safe", body: pipefail + "out=$(git diff --name-only a b)\nif [ -n \"$out\" ]; then :; fi"},
 		{name: "not gated without pipefail", body: `echo "$x" | grep -q foo`},
 		{name: "full-line comment is ignored", body: pipefail + `  # bad: echo "$x" | grep -q foo`},

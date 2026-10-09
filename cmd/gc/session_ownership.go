@@ -99,7 +99,7 @@ func sessionOwnsLiveClaim(
 	// next leg. Without this a finished worker whose stamp names a closed bead
 	// would read every remaining leg on every tick.
 	held := false
-	_, _, err = assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+	_, err = assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		work, err := liveBeadRead(s, claimID)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {

@@ -29,8 +29,11 @@ var (
 	pipefailDeclPattern = regexp.MustCompile(`(?m)^[ \t]*set\b[^\n]*\bpipefail\b`)
 	// A writer piped into `grep` with a `-q` (quiet) flag, in any flag
 	// cluster: -q, -qF, -Fxq, -qiE, -Eq, -qsF, ... The here-string form
-	// (`grep -q ... <<<"$x"`) has no pipe and is not matched.
-	pipedGrepQPattern = regexp.MustCompile(`\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*q[A-Za-z]*\b`)
+	// (`grep -q ... <<<"$x"`) has no pipe and is not matched; neither is a
+	// logical `|| grep -q`, which is a list operator, not a pipe. Group 1
+	// is the character before the pipe, so the pipe itself sits at the end
+	// of the group.
+	pipedGrepQPattern = regexp.MustCompile(`(^|[^|])\|[[:space:]]*grep[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*q[A-Za-z]*\b`)
 )
 
 // FindPipefailGrepQPipelines returns the byte offsets of `writer | grep -q`
@@ -45,8 +48,8 @@ func FindPipefailGrepQPipelines(data []byte) []int {
 	pos := 0
 	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
 		if trimmed := bytes.TrimLeft(line, " \t"); len(trimmed) == 0 || trimmed[0] != '#' {
-			if loc := pipedGrepQPattern.FindIndex(line); loc != nil {
-				offsets = append(offsets, pos+loc[0])
+			if loc := pipedGrepQPattern.FindSubmatchIndex(line); loc != nil {
+				offsets = append(offsets, pos+loc[3])
 			}
 		}
 		pos += len(line)
@@ -56,7 +59,7 @@ func FindPipefailGrepQPipelines(data []byte) []int {
 
 // Remedy is the guidance every caller's failure message should carry, so the
 // fix is described identically wherever the class is caught.
-const Remedy = "under `set -o pipefail`, piping into `grep -q` SIGPIPEs the writer on grep's early exit and reports a present match as absent — capture the output once and test it (`out=$(...)`; `[ -n \"$out\" ]`), use a here-string (`grep -q ... <<<\"$out\"`), or use list_contains_line from _list-helpers.sh"
+const Remedy = "under `set -o pipefail`, piping into `grep -q` SIGPIPEs the writer on grep's early exit and reports a present match as absent — capture the output once and test it (`out=$(...)`; `[ -n \"$out\" ]`), or use a here-string (`grep -q ... <<<\"$out\"`; `grep -Fxq -- \"$needle\" <<<\"$list\"` for exact-line membership)"
 
 // DescribeLine returns the 1-based line number and the trimmed source line
 // containing offset, for use in a caller's failure message.

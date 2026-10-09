@@ -591,9 +591,12 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 		label:  "city",
 	}}
 	if cfg != nil {
+		// A suspended rig is left untouched: a bd read restarts its retired
+		// proxy, and nothing dispatches orders into it while it is suspended.
+		suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
 		for _, rig := range cfg.Rigs {
 			rigPath := resolvedRigPath(cityPath, rig.Path)
-			if rigPath == "" {
+			if rigPath == "" || suspended[rig.Name] {
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{

@@ -57,10 +57,13 @@ func newCloseReleaseWork(t *testing.T, store beads.Store, title, assignee, statu
 // gc-d9qnh: a pool session whose session bead lives in the city store but whose
 // work lives in a RIG store. Before the fix, releaseWorkFromClosedSessionBead
 // scanned only the store the session bead came from, found nothing, and ran none
-// of its recovery — leaving the work in_progress with a cleared assignee and no
-// route. Nothing picked it up (the pool demand probe keys on gc.routed_to, and
+// of its recovery — leaving the work in_progress against a closed session with
+// no route. Nothing picked it up (the pool demand probe keys on gc.routed_to, and
 // releaseOrphanedPoolAssignments skips empty-routed beads), so the parent
 // workflow stayed in_progress forever.
+//
+// The scope carries the rig map as a resolver INPUT: with no city path and no
+// cfg the sweep plan is the session store plus every non-nil rig store.
 func TestCloseBeadReleasesInProgressWorkInRigStore(t *testing.T) {
 	store := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -71,8 +74,9 @@ func TestCloseBeadReleasesInProgressWorkInRigStore(t *testing.T) {
 	// an empty gc.routed_to — the shape releaseOrphanedPoolAssignments skips.
 	work := newCloseReleaseWork(t, rigStore, "rig-store step bead", sessionBead.ID, "in_progress")
 
+	scope := closeReleaseScope{rigStores: map[string]beads.Store{"gascity": rigStore}}
 	var stderr bytes.Buffer
-	if !closeBead(store, workAssignmentStores(store, map[string]beads.Store{"gascity": rigStore}), sessionBead.ID, "orphaned", time.Now().UTC(), &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), scope, "orphaned", time.Now().UTC(), &stderr) {
 		t.Fatalf("closeBead() = false, want true; stderr=%q", stderr.String())
 	}
 
@@ -107,8 +111,9 @@ func TestCloseBeadReleasesWorkAcrossEveryRigStore(t *testing.T) {
 	rigAWork := newCloseReleaseWork(t, rigA, "rig-a work", sessionBead.ID, "in_progress")
 	rigBWork := newCloseReleaseWork(t, rigB, "rig-b work", "worker-3", "open")
 
+	scope := closeReleaseScope{rigStores: map[string]beads.Store{"a": rigA, "b": rigB}}
 	var stderr bytes.Buffer
-	if !closeBead(store, workAssignmentStores(store, map[string]beads.Store{"a": rigA, "b": rigB}), sessionBead.ID, "orphaned", time.Now().UTC(), &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), scope, "orphaned", time.Now().UTC(), &stderr) {
 		t.Fatalf("closeBead() = false, want true; stderr=%q", stderr.String())
 	}
 
@@ -137,7 +142,9 @@ func TestCloseBeadReleasesWorkAcrossEveryRigStore(t *testing.T) {
 
 // TestCloseBeadReleasesSameBeadIDInTwoStores pins the per-store dedupe key. Bead
 // IDs are only unique within a store, so two stores can hand back the same ID;
-// a bare-ID dedupe would release the first and silently skip the second.
+// a bare-ID dedupe would release the first and silently skip the second. (The
+// resolver dedupes same-STORE legs, not same-ID beads, so this is still the
+// release's own job.)
 func TestCloseBeadReleasesSameBeadIDInTwoStores(t *testing.T) {
 	store := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -155,8 +162,9 @@ func TestCloseBeadReleasesSameBeadIDInTwoStores(t *testing.T) {
 		t.Fatalf("fixture did not produce an id collision: city=%q rig=%q", cityWork.ID, rigWork.ID)
 	}
 
+	scope := closeReleaseScope{rigStores: map[string]beads.Store{"gascity": rigStore}}
 	var stderr bytes.Buffer
-	if !closeBead(store, workAssignmentStores(store, map[string]beads.Store{"gascity": rigStore}), sessionBead.ID, "orphaned", time.Now().UTC(), &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), scope, "orphaned", time.Now().UTC(), &stderr) {
 		t.Fatalf("closeBead() = false, want true; stderr=%q", stderr.String())
 	}
 
@@ -170,8 +178,8 @@ func TestCloseBeadReleasesSameBeadIDInTwoStores(t *testing.T) {
 }
 
 // TestCloseBeadWithoutRigStoresReleasesCityWorkUnchanged pins the single-store
-// city: with no rigs attached the release scope collapses to the city store
-// alone, and the release behaves exactly as it did before the fan-out was added.
+// city: the zero scope collapses to the session bead's own store alone, and the
+// release behaves exactly as it did before the fan-out was added.
 func TestCloseBeadWithoutRigStoresReleasesCityWorkUnchanged(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -179,7 +187,7 @@ func TestCloseBeadWithoutRigStoresReleasesCityWorkUnchanged(t *testing.T) {
 	work := newCloseReleaseWork(t, store, "city work", sessionBead.ID, "in_progress")
 
 	var stderr bytes.Buffer
-	if !closeBead(store, workAssignmentStores(store, nil), sessionBead.ID, "orphaned", time.Now().UTC(), &stderr) {
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), closeReleaseScope{}, "orphaned", time.Now().UTC(), &stderr) {
 		t.Fatalf("closeBead() = false, want true; stderr=%q", stderr.String())
 	}
 
@@ -224,8 +232,9 @@ func TestReleaseWorkFromClosedSessionBeadSkipsRigSessionBeads(t *testing.T) {
 		t.Fatalf("mark rig session bead in_progress: %v", err)
 	}
 
+	scope := closeReleaseScope{rigStores: map[string]beads.Store{"gascity": rigStore}}
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBead(workAssignmentStores(store, map[string]beads.Store{"gascity": rigStore}), sessionBead, &stderr)
+	releaseWorkFromClosedSessionBead(store, scope, sessionBead, &stderr)
 
 	got, err := rigStore.Get(rigSessionBead.ID)
 	if err != nil {
@@ -240,13 +249,15 @@ func TestReleaseWorkFromClosedSessionBeadSkipsRigSessionBeads(t *testing.T) {
 }
 
 // newReachableCloseCity builds a two-rig city whose "worker" agent is scoped to
-// riga. reachableStoresForSessionInfo therefore resolves a riga/worker session's
-// assigned-work scope to the riga store alone — the city store and the rigb store
-// are UNREACHABLE for it.
+// riga, with no relocated class binding. assignedWorkPlanForSessionInfo
+// therefore resolves a riga/worker session's reachable plan to the riga store
+// alone — the rigb store is UNREACHABLE for it.
 func newReachableCloseCity(t *testing.T) (string, *config.City) {
 	t.Helper()
 	cityPath := t.TempDir()
+	seedNoRoutes(t, cityPath)
 	return cityPath, &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
 		Rigs: []config.Rig{
 			{Name: "riga", Path: filepath.Join(cityPath, "riga")},
 			{Name: "rigb", Path: filepath.Join(cityPath, "rigb")},
@@ -258,14 +269,19 @@ func newReachableCloseCity(t *testing.T) (string, *config.City) {
 // TestCloseSessionBeadIfReachableStoreUnassignedLeavesUnreachableStoreWorkAlone
 // pins the close-release scope to the gate's proof scope.
 //
-// closeSessionBeadIfReachableStoreUnassigned only proves that the ONE store the
-// session's configured agent can query holds no work assigned to it; that is the
+// closeSessionBeadIfReachableStoreUnassigned proves only that the legs the
+// session's configured agent can query hold no work assigned to it; that is the
 // whole point of the reachable-store gate, which deliberately lets a rig-scoped
-// session close while work in other stores stays put because that work may be
-// unrelated and merely share an assignment token. Handing the close-release scan
-// the full city+rig fan-out broke that: it cleared the assignee, reset
-// in_progress -> open and stamped the closing session's pool route onto beads
-// nobody proved it owned.
+// session close while work in an unrelated rig stays put because that work may
+// merely share an assignment token. Handing the close-release the full city+rig
+// fan-out broke that: it cleared the assignee, reset in_progress -> open and
+// stamped the closing session's pool route onto beads nobody proved it owned.
+//
+// The session bead's OWN store is part of the release scope even for a
+// rig-bound session: that store is where the single-store release always
+// reached, and a rig-bound session's claims may land on the leading work arm
+// through the hook fan-out (openSessionReachableStoreRefInfo). So the city-store
+// row is released, and only the foreign rig's row is left alone.
 func TestCloseSessionBeadIfReachableStoreUnassignedLeavesUnreachableStoreWorkAlone(t *testing.T) {
 	cityPath, cfg := newReachableCloseCity(t)
 	cityStore := beads.NewMemStore()
@@ -274,9 +290,10 @@ func TestCloseSessionBeadIfReachableStoreUnassignedLeavesUnreachableStoreWorkAlo
 
 	sessionBead := newCloseReleaseSessionBead(t, cityStore, "worker-session", "riga/worker")
 
-	// Work in the two stores this riga-scoped session cannot query, assigned
-	// under the same token. riga — the reachable store — stays empty, so the
-	// gate sees no assigned work and the close proceeds.
+	// Work assigned under the same token in the session bead's own store and in
+	// the rig this riga-scoped session cannot query. riga — the reachable
+	// store — stays empty, so the gate sees no assigned work and the close
+	// proceeds.
 	cityWork := newCloseReleaseWork(t, cityStore, "city work", sessionBead.ID, "in_progress")
 	rigBWork := newCloseReleaseWork(t, rigB, "rig-b work", sessionBead.ID, "in_progress")
 
@@ -289,27 +306,29 @@ func TestCloseSessionBeadIfReachableStoreUnassignedLeavesUnreachableStoreWorkAlo
 		t.Fatalf("closeSessionBeadIfReachableStoreUnassigned() = false, want true; stderr=%q", stderr.String())
 	}
 
-	for _, tc := range []struct {
-		name  string
-		store beads.Store
-		id    string
-	}{
-		{"city-store", cityStore, cityWork.ID},
-		{"rigb-store", rigB, rigBWork.ID},
-	} {
-		got, err := tc.store.Get(tc.id)
-		if err != nil {
-			t.Fatalf("get %s work: %v", tc.name, err)
-		}
-		if got.Assignee != sessionBead.ID {
-			t.Errorf("%s work assignee = %q, want %q — close-release must not reach a store the gate never proved", tc.name, got.Assignee, sessionBead.ID)
-		}
-		if got.Status != "in_progress" {
-			t.Errorf("%s work status = %q, want in_progress — close-release must not reopen unproven work", tc.name, got.Status)
-		}
-		if got.Metadata[beadmeta.RunTargetMetadataKey] != "" {
-			t.Errorf("%s work gc.run_target = %q, want empty — the closing session's pool route must not be stamped onto unproven work", tc.name, got.Metadata[beadmeta.RunTargetMetadataKey])
-		}
+	gotB, err := rigB.Get(rigBWork.ID)
+	if err != nil {
+		t.Fatalf("get rigb work: %v", err)
+	}
+	if gotB.Assignee != sessionBead.ID {
+		t.Errorf("rigb work assignee = %q, want %q — close-release must not reach a store the gate never proved", gotB.Assignee, sessionBead.ID)
+	}
+	if gotB.Status != "in_progress" {
+		t.Errorf("rigb work status = %q, want in_progress — close-release must not reopen unproven work", gotB.Status)
+	}
+	if gotB.Metadata[beadmeta.RunTargetMetadataKey] != "" {
+		t.Errorf("rigb work gc.run_target = %q, want empty — the closing session's pool route must not be stamped onto unproven work", gotB.Metadata[beadmeta.RunTargetMetadataKey])
+	}
+
+	gotCity, err := cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("get city work: %v", err)
+	}
+	if gotCity.Assignee != "" || gotCity.Status != "open" {
+		t.Errorf("city work assignee=%q status=%q, want empty/open — the session bead's own store is always inside the release scope", gotCity.Assignee, gotCity.Status)
+	}
+	if gotCity.Metadata[beadmeta.RunTargetMetadataKey] != "riga/worker" {
+		t.Errorf("city work gc.run_target = %q, want riga/worker", gotCity.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 }
 
@@ -371,9 +390,9 @@ func TestCloseSessionBeadIfReachableStoreUnassignedReleasesInsideProvenScope(t *
 }
 
 // TestReleaseWorkFromClosedSessionBeadToleratesNilRigStoreEntry guards the
-// scan's nil-entry filter: a rig whose store failed to open reaches the release
-// scope as a nil element, and the scan must skip it and keep going rather than
-// panic and drop every store behind it.
+// scope against a rig whose store failed to open: it reaches the resolver as a
+// nil map entry, and the walk must drop it and keep going rather than panic and
+// lose every store behind it.
 func TestReleaseWorkFromClosedSessionBeadToleratesNilRigStoreEntry(t *testing.T) {
 	store := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
@@ -381,8 +400,9 @@ func TestReleaseWorkFromClosedSessionBeadToleratesNilRigStoreEntry(t *testing.T)
 	sessionBead := newCloseReleaseSessionBead(t, store, "worker-1", "pool/worker")
 	work := newCloseReleaseWork(t, rigStore, "rig work", sessionBead.ID, "in_progress")
 
+	scope := closeReleaseScope{rigStores: map[string]beads.Store{"a": nil, "b": rigStore}}
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBead([]beads.Store{store, nil, rigStore}, sessionBead, &stderr)
+	releaseWorkFromClosedSessionBead(store, scope, sessionBead, &stderr)
 
 	got, err := rigStore.Get(work.ID)
 	if err != nil {
@@ -390,5 +410,41 @@ func TestReleaseWorkFromClosedSessionBeadToleratesNilRigStoreEntry(t *testing.T)
 	}
 	if got.Status != "open" || got.Assignee != "" {
 		t.Errorf("rig work assignee=%q status=%q, want empty/open — a nil rig store must not abort the fan-out", got.Assignee, got.Status)
+	}
+}
+
+// TestCloseBeadSweepScopeReleasesABindingResidentClaim is the split-city
+// control, and the reason the release scope is resolved through
+// internal/storeref rather than built from the rig map: on a city whose
+// infrastructure classes are relocated into a binding, claim-time routing writes
+// graph steps THERE, and a close whose release read only the session store and
+// the rigs would never see them. It mirrors
+// TestRetiredSessionSweepReleasesABindingResidentClaim for the close lane — the
+// unconditional closers (dead-runtime corpse, stale reap) hand closeBead the
+// sweep scope, so the binding is one of its legs.
+func TestCloseBeadSweepScopeReleasesABindingResidentClaim(t *testing.T) {
+	cityPath := t.TempDir()
+	binding := beads.NewMemStore()
+	seedSplitRoutes(t, cityPath, binding)
+	store := beads.NewMemStore()
+	cfg := residencyTestConfig()
+
+	sessionBead := newCloseReleaseSessionBead(t, store, "worker-1", "pool/worker")
+	step := newCloseReleaseWork(t, binding, "graph step claimed by a session that then died", sessionBead.ID, "in_progress")
+
+	var stderr bytes.Buffer
+	if !closeBead(store, decidedSessionInfo(store, sessionBead.ID), sweepCloseReleaseScope(cityPath, cfg, nil), "dead-runtime", time.Now().UTC(), &stderr) {
+		t.Fatalf("closeBead() = false, want true; stderr=%q", stderr.String())
+	}
+
+	got, err := binding.Get(step.ID)
+	if err != nil {
+		t.Fatalf("re-read the step: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("the close left %s as status=%q assignee=%q; a dead session's binding-resident claim has no other automatic reopen lane", step.ID, got.Status, got.Assignee)
+	}
+	if got.Metadata[beadmeta.RunTargetMetadataKey] != "pool/worker" {
+		t.Errorf("gc.run_target = %q, want pool/worker — the owning pool route must be restored in the binding too", got.Metadata[beadmeta.RunTargetMetadataKey])
 	}
 }

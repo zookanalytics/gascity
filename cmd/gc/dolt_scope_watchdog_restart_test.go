@@ -409,6 +409,19 @@ func TestManagedDoltScopeWatchdogDoesNotRestartSignaledServer(t *testing.T) {
 		cleanupManagedDoltTestPID(t, watchdogPID)
 	})
 
+	// The watchdog hands the PID to its parent the moment fork+exec returns,
+	// before /bin/sh has run the fake's first line, so a kill sent straight
+	// away can land before the start record exists. The record is the
+	// evidence the "exactly 1" count below rests on: without it, "0 starts"
+	// would be the kill winning a race, not the watchdog declining to
+	// restart. Wait for the running server to be on record, and pin that
+	// record to the PID the watchdog reported, before signaling it.
+	pids := waitForFakeDoltStarts(t, fakeState, 1, 15*time.Second)
+	if len(pids) != 1 || pids[0] != doltPID {
+		logData, _ := os.ReadFile(logPath)
+		t.Fatalf("fake dolt start records = %v, want exactly [%d] (the supervised server) before the kill; log:\n%s", pids, doltPID, logData)
+	}
+
 	if err := syscall.Kill(doltPID, syscall.SIGKILL); err != nil {
 		t.Fatalf("kill fake dolt: %v", err)
 	}
@@ -417,7 +430,7 @@ func TestManagedDoltScopeWatchdogDoesNotRestartSignaledServer(t *testing.T) {
 		t.Fatalf("watchdog pid %d survived an externally signaled server; log:\n%s", watchdogPID, logData)
 	}
 	// Give a would-be restart every chance to show up before asserting.
-	pids := waitForFakeDoltStarts(t, fakeState, 2, 2*time.Second)
+	pids = waitForFakeDoltStarts(t, fakeState, 2, 2*time.Second)
 	if len(pids) != 1 {
 		logData, _ := os.ReadFile(logPath)
 		t.Fatalf("fake dolt started %d times, want exactly 1 (no restart after an external kill); log:\n%s", len(pids), logData)

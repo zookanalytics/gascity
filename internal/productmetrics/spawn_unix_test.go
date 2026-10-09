@@ -1005,7 +1005,6 @@ func TestPrivateUploaderRequiresMarkerBeforeFilesystemOrNetwork(t *testing.T) {
 }
 
 func TestPrivateUploaderProductionNoWorkReturnsBeforeTransportConstruction(t *testing.T) {
-	neutralizeAmbientOptOutEnvironment(t)
 	t.Setenv(privateUploaderMarkerEnvironment, privateUploaderMarkerValue)
 	home := newMetricsTestHome(t)
 	service, err := OpenProduction(ProductionOptions{

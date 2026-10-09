@@ -316,10 +316,9 @@ func poolSlotRetireHasAssignedWork(
 	info sessionpkg.Info,
 ) (bool, error) {
 	identifiers := poolSlotRetireAssigneeIdentities(info, cfg)
-	_, has, err := assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
+	return assignedWorkExistsForSession(cityPath, cfg, store, rigStores, info, func(s beads.Store) (bool, error) {
 		return sessionHasOpenAssignedWorkInStoreByIdentifiersForCloseGate(s, identifiers)
 	})
-	return has, err
 }
 
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
@@ -374,6 +373,7 @@ func retirePoolSlotAtDrainDeadline(
 	deferClosesOnBoot bool,
 	clk clock.Clock,
 	rec events.Recorder,
+	dt *drainTracker,
 	stderr io.Writer,
 ) (sessionpkg.MetadataPatch, bool) {
 	if store == nil || sp == nil || info.ID == "" || info.Closed {
@@ -412,7 +412,7 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 
-	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, stderr)
+	stopped, performedStop := poolSlotRuntimeStoppedForRetire(cityPath, cfg, sp, store, rigStores, info, name, processNames, dt, clk.Now(), stderr)
 	if !stopped {
 		return nil, false
 	}
@@ -458,7 +458,9 @@ func retirePoolSlotAtDrainDeadline(
 		fmt.Fprintf(stderr, "session reconciler: stamping drain-deadline provenance on %s: %v\n", name, err) //nolint:errcheck
 		return nil, false
 	}
-	if !closeBead(store, workAssignmentStores(store, rigStores), info.ID, "drained", now, stderr) { // residency:allow the gate above is poolSlotRetireHasAssignedWork, which walks the resolver plan but answers with a bool only, so there is no walked leg set to release into; the release takes the whole reachable union the gate covered (gc-d9qnh).
+	// poolSlotRetireHasAssignedWork proved the seat's reachable plan empty;
+	// the release reads that same plan plus the session bead's own store.
+	if !closeBead(store, info, reachableCloseReleaseScope(cityPath, cfg, rigStores), "drained", now, stderr) {
 		if clearErr := sessionFrontDoor(store).ApplyPatch(info.ID, sessionpkg.MetadataPatch{drainFinalizeMetadataKey: ""}); clearErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing drain-deadline provenance after a refused close of %s: %v\n", name, clearErr) //nolint:errcheck
 		}
@@ -532,6 +534,8 @@ func poolSlotRuntimeStoppedForRetire(
 	info sessionpkg.Info,
 	name string,
 	processNames []string,
+	dt *drainTracker,
+	now time.Time,
 	stderr io.Writer,
 ) (confirmedGone bool, performedStop bool) {
 	obs, err := workerObserveSessionTargetWithRuntimeHintsWithConfig(cityPath, store, sp, cfg, info.ID, processNames)
@@ -543,8 +547,13 @@ func poolSlotRuntimeStoppedForRetire(
 		return true, false
 	}
 	if expected := strings.TrimSpace(info.InstanceToken); expected != "" {
-		if actual, _ := sp.GetMeta(name, "GC_INSTANCE_TOKEN"); actual != "" && actual != expected {
+		switch verdict, err := readRuntimeInstanceToken(sp, name, expected); verdict {
+		case runtimeTokenMismatch:
 			fmt.Fprintf(stderr, "session reconciler: drain-deadline retire of %s skipped: instance token mismatch (session was replaced)\n", name) //nolint:errcheck
+			return false, false
+		case runtimeTokenUnverifiable:
+			logStandingCondition(dt, stderr, info.ID, "token_unverifiable.retire", fmt.Sprintf(
+				"session reconciler: drain-deadline retire of %s skipped: instance token unverifiable (token_unverifiable): %v", name, err), now)
 			return false, false
 		}
 	}

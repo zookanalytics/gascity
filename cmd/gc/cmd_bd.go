@@ -324,59 +324,6 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"heartbeat", rest[0]}, nil
 }
 
-// sessionOwnIdentities returns the identity spellings this process's session
-// answers to, in the same set the claim path builds (cmd_hook.go's
-// identityCandidates): the session bead id, the session name, the alias, and
-// the agent. gc hook --claim stamps a bead's assignee as one of these (the
-// session bead id, GC_SESSION_ID), so an owner-only operation must recognize
-// all of them as this session when it decides whether it owns a claim.
-func sessionOwnIdentities() []string {
-	return hookClaimIdentityCandidates(
-		os.Getenv("GC_SESSION_ID"),
-		os.Getenv("GC_SESSION_NAME"),
-		os.Getenv("GC_ALIAS"),
-		os.Getenv("GC_AGENT"),
-	)
-}
-
-// heartbeatActorForOwnedClaim resolves the actor `gc bd heartbeat` must run as
-// and reports whether that differs from the ambient BEADS_ACTOR. bd's heartbeat
-// is owner-only: it refreshes the lease only when the actor matches the bead's
-// assignee exactly. gc hook --claim stamps the assignee as the session's own
-// identity (typically GC_SESSION_ID), while a session's ambient BEADS_ACTOR is
-// usually its runtime name (GC_SESSION_NAME) — so the holder of a claim cannot
-// refresh it under the ambient actor. When the bead's current assignee is one
-// of THIS session's own identities, heartbeat as that assignee, mirroring the
-// claim path (claimFirstReadyHookAssignment uses the bead's current assignee as
-// the claim actor for the same reason). When it is not, the actor is left
-// unchanged so bd refuses a heartbeat this session does not own.
-func heartbeatActorForOwnedClaim(assignee, ambientActor string, identities []string) (string, bool) {
-	assignee = strings.TrimSpace(assignee)
-	if assignee == "" || assignee == strings.TrimSpace(ambientActor) {
-		return "", false
-	}
-	if !hookClaimHasIdentity(assignee, identities) {
-		return "", false
-	}
-	return assignee, true
-}
-
-// resolveHeartbeatActorOverride decides whether a `gc bd heartbeat` command
-// needs its BEADS_ACTOR overridden, and to what. It reuses the bead the
-// exact-ID write guard already fetched into guardBeads, so no second store read
-// is needed. Any command that is not a lone-id heartbeat, or whose bead was not
-// fetched by the guard, is left with the ambient actor.
-func resolveHeartbeatActorOverride(bdArgs []string, guardBeads map[string]beads.Bead) (string, bool) {
-	if len(bdArgs) != 2 || bdArgs[0] != "heartbeat" {
-		return "", false
-	}
-	bead, ok := guardBeads[bdArgs[1]]
-	if !ok {
-		return "", false
-	}
-	return heartbeatActorForOwnedClaim(bead.Assignee, os.Getenv("BEADS_ACTOR"), sessionOwnIdentities())
-}
-
 // bdRigQualifiedMetadataRefusal refuses an outgoing lease owner or route target
 // whose rig segment is absent from the loaded city configuration. These values
 // are opaque to bd, so gc bd is the common admission boundary for stale and
@@ -737,16 +684,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// bd's heartbeat is owner-only and matches the actor to the bead's assignee
-	// exactly. gc hook --claim stamps that assignee as the session bead id while
-	// the ambient BEADS_ACTOR is the session name, so the claim holder cannot
-	// refresh its own lease under the ambient actor. When the assignee is one of
-	// this session's identities, heartbeat as it — reusing the bead the write
-	// guard above already read into guardBeads.
-	if actor, ok := resolveHeartbeatActorOverride(bdArgs, guardBeads); ok {
-		env = append(removeEnvKey(env, "BEADS_ACTOR"), "BEADS_ACTOR="+actor)
-	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	// A session closing or heartbeating work it claimed acts under the identity
+	// the claim recorded, so bd's owner-only assignee check passes without
+	// --force (close) and the lease actually refreshes (heartbeat). Reuses the
+	// beads the write guard above already read into guardBeads.
+	cmd.Env = ownClaimCloseEnv(cmd.Env, bdArgs, guardBeads, os.Getenv)
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
 	// for a new city, and bd cannot call back into gc. gc serves the watch
@@ -854,18 +797,30 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		return nil, false, false
 	}
 
-	// valueFlags is the complete set of flags that consume the next argument as
-	// their value for this subcommand, in both long and short form.
-	// Sourced from `bd <sub> --help` (bd 1.3.1-rc.2, 2026-09-29).
-	valueFlags := bdSubcmdValueFlags(sub)
+	// The flag sets are the complete value-consuming and boolean (no-value)
+	// flags for this subcommand, in both long and short form, sourced from
+	// `bd <sub> --help` (bd 1.3.1, 2026-09-29). Unknown flags not in either set
+	// make the scan ambiguous.
+	ids, ambiguous = bdScanPositionalIDs(args[1:], bdSubcmdValueFlags(sub), bdSubcmdBoolFlags(sub), nil)
+	if ambiguous {
+		return nil, true, true
+	}
+	return ids, true, false
+}
 
-	// boolFlags is the complete set of boolean (no-value) flags. Unknown flags
-	// not in either set trigger ambiguous=true.
-	boolFlags := bdSubcmdBoolFlags(sub)
-
+// bdScanPositionalIDs is the fail-closed argv scan behind bdMutationWriteIDs
+// and bdByIDReadSubjects: it returns the positional tokens of rest — the argv
+// AFTER the subcommand — as the bead ids the invocation addresses.
+//
+// valueFlags and boolFlags are the subcommand's complete flag manifest. A flag
+// in neither set might consume the next token, which would then be read as a
+// bead id, so the scan stops and reports ambiguous instead of guessing.
+// idValueFlags names the value flags whose value is itself an addressed id
+// (`show --id <id>`); nil means no flag value is ever a subject.
+func bdScanPositionalIDs(rest []string, valueFlags, boolFlags, idValueFlags map[string]bool) (ids []string, ambiguous bool) {
 	positional := false // true after "--"
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
 		if positional {
 			if arg != "" {
 				ids = append(ids, arg)
@@ -885,7 +840,10 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Flag token.
 		// --flag=value form: value is embedded, no next-arg consumed.
-		if strings.Contains(arg, "=") {
+		if name, value, inline := strings.Cut(arg, "="); inline {
+			if idValueFlags[name] && value != "" {
+				ids = append(ids, value)
+			}
 			continue
 		}
 		// Strip leading dashes to get the flag name for lookup.
@@ -895,8 +853,12 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		shortForm := "-" + flagName // only meaningful when flagName is 1 char
 
 		if valueFlags[longForm] || (len(flagName) == 1 && valueFlags[shortForm]) {
-			// Known value-consuming flag: skip its value argument.
+			// Known value-consuming flag: skip its value argument, unless the
+			// value is itself an addressed id.
 			i++
+			if idValueFlags[arg] && i < len(rest) && rest[i] != "" {
+				ids = append(ids, rest[i])
+			}
 			continue
 		}
 		if boolFlags[longForm] || (len(flagName) == 1 && boolFlags[shortForm]) {
@@ -905,9 +867,9 @@ func bdMutationWriteIDs(args []string) (ids []string, ok bool, ambiguous bool) {
 		}
 		// Unknown flag. It might consume a value argument that looks like a
 		// bead ID. Fail-closed: report ambiguity so the caller can reject.
-		return nil, true, true
+		return nil, true
 	}
-	return ids, true, false
+	return ids, false
 }
 
 // bdSubcmdValueFlags returns the set of value-consuming flag names (in

@@ -19,8 +19,6 @@ case "${BASH_SOURCE[0]}" in
 esac
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
-# shellcheck disable=SC1091
-. "$__SCRIPT_DIR/_list-helpers.sh"
 
 # Where the recovery summary goes. Cities that staff a coordinator role (e.g.
 # the gastown pack's mayor) can point this at it; "human" is the reserved
@@ -41,7 +39,7 @@ trap 'rm -f "$TMP" "$SESSION_TMP"' EXIT
 RIG_NAMES=""
 RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
 if [ -n "$RIG_LIST" ]; then
-    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false) | .name' 2>/dev/null) || RIG_NAMES=""
+    RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false and (.suspended // false) == false) | .name' 2>/dev/null) || RIG_NAMES=""
 fi
 
 append_session_list() {
@@ -163,39 +161,33 @@ LIVE_SESSION_IDS=$(jq -r -s '
       if has($snake) and .[$snake] != null then .[$snake]
       elif has($pascal) and .[$pascal] != null then .[$pascal]
       else $default end;
-    .[] | .sessions[]?
-    | select(
-        (pick("closed"; "Closed"; false) == false)
-        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
-      )
-    | [
-        pick("id"; "ID"; null),
-        pick("session_name"; "SessionName"; null),
-        pick("alias"; "Alias"; null),
-        pick("agent_name"; "AgentName"; null),
-        pick("template"; "Template"; null),
-        pick("name"; "Name"; null)
-      ]
-    | .[]
-    | select(. != null and . != "")
+    [ .[] | .sessions[]?
+      | select(
+          (pick("closed"; "Closed"; false) == false)
+          and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
+        )
+      | [
+          pick("id"; "ID"; null),
+          pick("session_name"; "SessionName"; null),
+          pick("alias"; "Alias"; null),
+          pick("agent_name"; "AgentName"; null),
+          pick("template"; "Template"; null),
+          pick("name"; "Name"; null)
+        ]
+      | .[]
+      | select(. != null and . != "")
+    ] | unique | .[]
 ' "$SESSION_TMP" 2>/dev/null) || exit 0
 
-# list_contains_line — exact whole-line membership over a newline-delimited
-# list — is defined in _list-helpers.sh (sourced above). It replaces the
-# `printf ... | grep -Fxq` pipeline that d416a0085 (reaper.sh) and gc-d760o
-# (here) fixed: under `set -o pipefail` grep -q's early exit SIGPIPEs the
-# writer and a present candidate reads as absent. The pure-bash test also
-# never confuses "candidate absent" with "the check never ran" — the one
-# direction this sweep must not fail in.
-#
-# agent_exists / live_session_match run in a loop over every in-progress bead
-# and every configured agent, so forking nothing per call matters.
 agent_exists() {
-    list_contains_line "$AGENTS" "$1"
+    local candidate="$1"
+    [ -n "$candidate" ] && grep -Fxq -- "$candidate" <<<"$AGENTS"
 }
 
 live_session_match() {
-    list_contains_line "$LIVE_SESSION_IDS" "$1"
+    local candidate="$1"
+    [ -n "$candidate" ] && [ -n "$LIVE_SESSION_IDS" ] \
+        && grep -Fxq -- "$candidate" <<<"$LIVE_SESSION_IDS"
 }
 
 CURRENT_BEAD_JSON=""

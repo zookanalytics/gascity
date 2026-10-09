@@ -359,6 +359,27 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 	}
 }
 
+// TestMolDoWorkWorkBeadCloseFailsClosed pins that a refused work-bead close
+// (for example, the typed work-record close gate) stops the step instead of
+// falling through to close the formula step over still-open work.
+func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+	closes := 0
+	for _, line := range strings.Split(step, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, `gc bd close "$WORK_BEAD_ID"`) {
+			continue
+		}
+		closes++
+		if !strings.HasSuffix(line, "|| exit 1") {
+			t.Errorf("work-bead close must fail closed with `|| exit 1`: %s", line)
+		}
+	}
+	if closes == 0 {
+		t.Fatal("expected mol-do-work to close $WORK_BEAD_ID in the do-work step")
+	}
+}
+
 // TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup pins the fail-closed
 // duplicate-dispatch gate in every core formula that derives its work bead from
 // an input convoy and then creates a worktree for it.
@@ -374,6 +395,16 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 // session list is not proof that nobody holds the work, and the earlier
 // generation of this check (a bare `gc bd show | jq` capture with no
 // validation) let a transient read failure read as "unowned" and proceed.
+//
+// Holding is a PARK, not a close and not a bare drain. Closing the step with
+// any outcome satisfies workspace-setup's dependency (load-context sits in no
+// scope, so a failed close does not stop the workflow); acknowledging drain
+// with the step still claimed hands it back to the pool, where a fresh session
+// runs it again (upstream #6992, TestCoreFormulaDrainAckStepsCloseTheirOwnStepFirst).
+// `status=blocked` is the one state every consumer already refuses to advance:
+// dependency resolution (not closed), the hook claim (blocked candidates are
+// filtered), and the drain-ack release (in_progress claims only). The session
+// then leaves through the worker's own claim loop instead of idling.
 func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
 		t.Run(file, func(t *testing.T) {
@@ -388,9 +419,6 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 			if !strings.Contains(step, "WORK_STATUS=unknown") {
 				t.Error("an unreadable work bead must be treated as blocked, not as unowned")
 			}
-			if !strings.Contains(step, "gc runtime drain-ack") {
-				t.Error("the held session must drain rather than idle on a pool slot it cannot use")
-			}
 			// The gate resolves an assignee against the session list, so it has
 			// to match the form the claim path actually writes. `bd update
 			// --claim` sets assignee to the session NAME
@@ -403,10 +431,35 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 			if !strings.Contains(step, "session_name") {
 				t.Error("the owner-liveness query must match the assignee against .session_name; that is the form --claim writes, and the session record has no .name field")
 			}
-			// Holding means the step bead stays open: closing it is what advances
-			// the workflow into workspace-setup.
-			if !strings.Contains(step, "NOT closed") && !strings.Contains(step, "NOT close this step") {
-				t.Error("load-context must say explicitly that the step bead stays OPEN when the gate trips")
+			// Holding means the step bead is parked, never closed: closing it
+			// is what advances the workflow into workspace-setup.
+			if !strings.Contains(step, "NOT close this step") {
+				t.Error("load-context must say explicitly that the step bead is not closed when the gate trips")
+			}
+			// The park is the session's OWN step, resolved from its claim, and it
+			// is fail-closed: an unparked step must not fall through to the
+			// escalation and the exit.
+			claimAt := strings.Index(step, `STEP_BEAD_ID=$(gc hook current --id-only) || exit 1`)
+			parkAt := strings.Index(step, `gc bd update "$STEP_BEAD_ID" --status=blocked || exit 1`)
+			if claimAt < 0 || parkAt < 0 || parkAt < claimAt {
+				t.Error("the gate must park the claimed step (`gc hook current --id-only` then `gc bd update \"$STEP_BEAD_ID\" --status=blocked || exit 1`) before anything else")
+			}
+			// A bare drain acknowledgement releases every in_progress claim the
+			// session holds, so a step acked while still claimed is re-pooled
+			// to a fresh session; upstream's drain-ack contract requires the
+			// session's own step to be CLOSED before any `gc runtime drain-ack`,
+			// which is exactly the write this gate must not perform. The gate
+			// therefore never acks from inside the step: it parks, and leaves
+			// through the claim loop, which drains only when nothing else is
+			// claimable.
+			if strings.Contains(step, "gc runtime drain-ack") {
+				t.Error("load-context must not run `gc runtime drain-ack`: with the step parked rather than closed, an ack would release it back to the pool")
+			}
+			leaveAt := strings.Index(step, "gc hook --claim --drain-ack --json")
+			if leaveAt < 0 {
+				t.Error("the held session must leave through the claim loop (`gc hook --claim --drain-ack --json`) rather than idle on a pool slot it cannot use")
+			} else if parkAt >= 0 && leaveAt < parkAt {
+				t.Error("the gate must park its step before leaving through the claim loop")
 			}
 			// The gate is worthless if the agent has already made the branch.
 			ownerAt := strings.Index(step, "OWNER_LIVE")

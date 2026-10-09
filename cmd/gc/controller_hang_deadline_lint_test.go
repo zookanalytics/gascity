@@ -27,9 +27,9 @@ var rawHangDeadlinePattern = regexp.MustCompile(`time\.After\([0-9]|time\.Now\(\
 // are 1-indexed.
 var controllerTestExcludedHangDeadlineLines = map[int]string{
 	430:  "input the test feeds a fake server to define the scenario, not a hang detector",
-	886:  "negative-assertion window (asserts no watcher poke arrives)",
-	936:  "negative-assertion window (asserts no watcher poke arrives, loop body)",
-	1465: "bounded best-effort probe with no assertion on either branch",
+	870:  "negative-assertion window (asserts no watcher poke arrives)",
+	916:  "negative-assertion window (asserts no watcher poke arrives, loop body)",
+	1429: "bounded best-effort probe with no assertion on either branch",
 }
 
 func controllerTestPath(t *testing.T) string {

@@ -94,15 +94,46 @@ case "$WORK_OWNER" in
     fi ;;
 esac
 if [ "$OWNER_LIVE" != "0" ]; then
-  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER (convoy {{convoy_id}}). Held at load-context; no workspace touched."
-  gc runtime drain-ack
+  # Park THIS step before anything else. status=blocked is the one state that
+  # holds the workflow here: dependency resolution never satisfies it (it is
+  # not closed, so workspace-setup never becomes ready), `gc hook` never serves
+  # it (blocked candidates are filtered out of every claim), and a drain never
+  # releases it (a drain acknowledgement sweeps in_progress claims only). No
+  # fresh session can pick this step up and run it again.
+  STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+  gc bd update "$STEP_BEAD_ID" --status=blocked || exit 1
+  ROOT_BEAD_ID=$(gc bd show "$STEP_BEAD_ID" --json | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
+  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER (convoy {{convoy_id}}). Workflow ${ROOT_BEAD_ID:-unknown} parked at step $STEP_BEAD_ID (status=blocked); no workspace touched."
+  gc mail send human -s "ESCALATION: duplicate dispatch on $WORK_BEAD_ID [HIGH]" -m "Work bead: $WORK_BEAD_ID
+Convoy: {{convoy_id}}
+Already held by: $WORK_OWNER (session still live), status=$WORK_STATUS
+This session: $GC_SESSION_NAME
+Duplicate workflow: ${ROOT_BEAD_ID:-unknown}, parked at step $STEP_BEAD_ID (status=blocked). No workspace was touched.
+Resolve by cancelling the duplicate run (POST /runs/${ROOT_BEAD_ID:-<root>}/cancel via the API or dashboard).
+Only if $WORK_OWNER is truly gone: gc bd update $STEP_BEAD_ID --status=open, and this gate re-checks."
+  # Nothing else in this workflow is yours to run. Leave through the claim
+  # loop: the parked step is filtered out of the claim, so this either picks
+  # up unrelated work or acknowledges drain and ends the session, instead of
+  # idling on a pool slot it cannot use.
+  gc hook --claim --drain-ack --json
   exit 1
 fi
 ```
 
-Do NOT close this step when the check trips. Closing it advances the workflow
-into `workspace-setup`; leaving it open holds the workflow, which is the safe
-state, and the note on the work bead is the durable record of why.
+**Do NOT close this step when the check trips — park it.** Closing it, with
+any outcome, satisfies `workspace-setup`'s dependency and advances the workflow
+into the branch-recreating step that destroys the live worker's uncommitted
+work; load-context sits outside the `body` scope, so a failed close does not
+stop the workflow either. A step parked as `status=blocked` holds the workflow
+in the safe state until the escalation above is resolved: it is never served to
+a worker, never released by a drain, and never satisfies a dependency. The note
+on the work bead and the mail are the durable record of why.
+
+Do not acknowledge drain while this step is still claimed, either: an
+acknowledgement hands every in_progress claim the session holds back to the
+pool, where a fresh session would run this step again. Park first — the
+`|| exit 1` above refuses to go on otherwise — then leave through the claim
+loop.
 
 Liveness is the gate, not staleness: an idle worker between claims is
 indistinguishable from an abandoned one, so only a session absent from

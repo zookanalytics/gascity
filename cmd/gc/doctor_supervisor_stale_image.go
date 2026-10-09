@@ -61,13 +61,15 @@ func newSupervisorStaleImageCheck(pid int) *supervisorStaleImageCheck {
 }
 
 // liveSupervisorBuildID queries the running supervisor's /health for the build
-// identity it was compiled from.
+// identity it was compiled from. It goes through supervisorHealthStatusHook,
+// the same probe the supervisor binary-mismatch check uses, so the two
+// diagnostics read the supervisor's identity the same way.
 func liveSupervisorBuildID(ctx context.Context) (string, error) {
 	baseURL, err := supervisorAPIBaseURLHook()
 	if err != nil {
 		return "", err
 	}
-	status, err := newHTTPSupervisorClient(baseURL).Status(ctx)
+	status, err := supervisorHealthStatusHook(ctx, baseURL)
 	if err != nil {
 		return "", err
 	}
@@ -160,15 +162,8 @@ func supervisorBuildDrifted(localBuildID, supervisorBuildID string, queryErr err
 	if queryErr != nil {
 		return false, false
 	}
-	if !knownBuildID(localBuildID) || !knownBuildID(supervisorBuildID) {
+	if !knownGCBuildID(localBuildID) || !knownGCBuildID(supervisorBuildID) {
 		return false, false
 	}
 	return DetectBinaryDrift(localBuildID, SupervisorStatus{BuildID: supervisorBuildID}), true
-}
-
-// knownBuildID reports whether a build identity is usable for comparison.
-// The build-metadata defaults leave "unknown" in place when neither ldflags
-// nor embedded VCS info supplied a revision, so it is not a real identity.
-func knownBuildID(id string) bool {
-	return id != "" && id != "unknown"
 }

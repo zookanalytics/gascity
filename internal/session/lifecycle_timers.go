@@ -96,14 +96,16 @@ type TimerFacts struct {
 	Blocker string
 	// Pending is the pending-interaction fact, gathered on demand.
 	Pending PendingFact
-	// Attached reports whether a human terminal is currently connected to
-	// the session (runtime.Provider.IsAttached). Unlike Pending and
-	// AssignedWork it is a definite, always-cheap fact — the provider
-	// returns a concrete bool on the same observation as last-activity, and
-	// providers that cannot report attachment return false — so the caller
-	// supplies it up front rather than through a gather round-trip. Only the
-	// idle-timeout ladder consults it; the zero value (false) preserves the
-	// prior behavior for callers that do not set it.
+	// Attached reports whether the idle stop must hold for a human terminal:
+	// a client is attached to the session, or the attachment probe could not
+	// answer. The caller derives it per runtime.AttachProbeHolds — only a
+	// confirmed "no client" (or a vanished session) reads as false, so a
+	// probe failure fails closed instead of reaping a watched session.
+	// Unlike Pending and AssignedWork it is a definite, always-cheap fact —
+	// the provider answers on the same observation as last-activity — so the
+	// caller supplies it up front rather than through a gather round-trip.
+	// Only the idle-timeout ladder consults it; the zero value (false)
+	// preserves the prior behavior for callers that do not set it.
 	Attached bool
 	// AssignedWork is the open-assigned-work fact, gathered on demand.
 	// Both the max-session-age and idle-timeout ladders consult it.

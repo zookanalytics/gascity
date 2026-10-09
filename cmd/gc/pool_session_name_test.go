@@ -1947,6 +1947,213 @@ func TestReleaseOrphanedPoolAssignments_ReopensStaleDirectAssigneeForNamedBacked
 	}
 }
 
+// TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing
+// is the gascity#6362 regression: a replacement session (new session bead,
+// new identity — no alias/session_name/named-identity in common with the
+// predecessor) adopts a predecessor's assigned work without going through a
+// fresh gc hook --claim, so the work bead's own Assignee is still stamped
+// with the drained predecessor's raw session ID. No identity form recognizes
+// the replacement as the owner, so without the currently_processing_bead_id
+// escape hatch this sweep would reopen/reclaim work the replacement is
+// actively executing.
+func TestReleaseOrphanedPoolAssignments_SkipsWhenReplacementSessionReportsCurrentlyProcessing(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "adopted work",
+		Assignee: "th-mw3l9", // the drained predecessor's raw session ID
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	replacement := beads.Bead{
+		ID:     "th-ryrfv",
+		Title:  "replacement session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-ryrfv",
+			"template":               "worker",
+			session.CurrentBeadIDKey: work.ID,
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{replacement}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none — replacement session reports actively processing this bead", released)
+	}
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", got.Status)
+	}
+	if got.Assignee != "th-mw3l9" {
+		t.Fatalf("assignee = %q, want th-mw3l9 (unchanged — this test only checks release is skipped)", got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead
+// proves the new currently_processing_bead_id check does not over-protect: an
+// open session that is actively processing a DIFFERENT bead must not shield
+// an unrelated stale assignment from release.
+func TestReleaseOrphanedPoolAssignments_ReleasesWhenOpenSessionReportsDifferentCurrentBead(t *testing.T) {
+	store := beads.NewMemStore()
+	work, err := store.Create(beads.Bead{
+		Title:    "stale work",
+		Assignee: "th-mw3l9",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create work bead: %v", err)
+	}
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set work status: %v", err)
+	}
+	work, err = store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Reload work bead: %v", err)
+	}
+
+	unrelatedSession := beads.Bead{
+		ID:     "th-other",
+		Title:  "unrelated live session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-other",
+			"template":               "worker",
+			session.CurrentBeadIDKey: "some-other-bead",
+		},
+	}
+
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(store, cfg, "", []beads.Bead{unrelatedSession}, []beads.Bead{work}, nil, nil, nil)
+	if len(released) != 1 || released[0].ID != work.ID {
+		t.Fatalf("released = %v, want [%s] — no live session reports processing this bead", released, work.ID)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_ReleasesSameIDCrossStoreDespiteCurrentlyProcessing
+// proves the currently_processing_bead_id retain guard is store-scoped.
+// Independent city and rig stores can carry the same bead ID
+// (storeScopedBeadKey), so a live session processing gc-dup in the store it can
+// reach must not shield a genuinely orphaned gc-dup in a store it cannot. The
+// same sweep protects the same-store copy and releases the cross-store one.
+func TestReleaseOrphanedPoolAssignments_ReleasesSameIDCrossStoreDespiteCurrentlyProcessing(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Same-store copy: lives in the store the session can reach, routed city-side.
+	// Its assignee is a drained predecessor, so the currently_processing guard is
+	// the only thing that can protect it.
+	cityWork, err := cityStore.Create(beads.Bead{
+		Title:    "same-store currently-processed work",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create city work bead: %v", err)
+	}
+	if err := cityStore.Update(cityWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set city work status: %v", err)
+	}
+	cityWork, err = cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("Reload city work bead: %v", err)
+	}
+
+	// Cross-store copy: same bead ID, lives in the rig store the session cannot
+	// reach.
+	rigWork, err := rigStore.Create(beads.Bead{
+		Title:    "cross-store orphan sharing the ID",
+		Assignee: "worker-dead",
+		Metadata: map[string]string{"gc.routed_to": "repo/worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig work bead: %v", err)
+	}
+	if err := rigStore.Update(rigWork.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig work status: %v", err)
+	}
+	rigWork, err = rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("Reload rig work bead: %v", err)
+	}
+	if cityWork.ID != rigWork.ID {
+		t.Fatalf("test setup expected overlapping city/rig IDs, got city %q rig %q", cityWork.ID, rigWork.ID)
+	}
+
+	// A live, store-scoped session reachable only to the city store, reporting the
+	// shared ID as its current anchor.
+	session := beads.Bead{
+		ID:     "th-live",
+		Title:  "live worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Metadata: map[string]string{
+			"session_name":           "worker-live",
+			"template":               "worker",
+			"agent_name":             "worker",
+			poolManagedMetadataKey:   boolMetadata(true),
+			session.CurrentBeadIDKey: cityWork.ID,
+		},
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		cityStore,
+		&config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		},
+		cityPath,
+		[]beads.Bead{session},
+		[]beads.Bead{cityWork, rigWork},
+		[]beads.Store{cityStore, rigStore},
+		[]string{"", "repo"},
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 1 || released[0].Index != 1 {
+		t.Fatalf("released = %v, want exactly the cross-store rig copy (index 1) — the live session only reaches the city store", released)
+	}
+
+	gotCity, err := cityStore.Get(cityWork.ID)
+	if err != nil {
+		t.Fatalf("Get city work bead: %v", err)
+	}
+	if gotCity.Status != "in_progress" || gotCity.Assignee != "worker-dead" {
+		t.Fatalf("city work = status %q assignee %q, want in_progress/worker-dead (same-store copy stays protected)", gotCity.Status, gotCity.Assignee)
+	}
+	gotRig, err := rigStore.Get(rigWork.ID)
+	if err != nil {
+		t.Fatalf("Get rig work bead: %v", err)
+	}
+	if gotRig.Status != "open" || gotRig.Assignee != "" {
+		t.Fatalf("rig work = status %q assignee %q, want open/unassigned (cross-store orphan released)", gotRig.Status, gotRig.Assignee)
+	}
+}
+
 func TestReleaseOrphanedPoolAssignments_PreservesCanonicalNamedIdentity(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{
@@ -2165,21 +2372,23 @@ func TestReleaseOrphanedPoolAssignments_PreservesNamedIdentityForSameStore(t *te
 
 // conditionalReleaseProbeStore wraps a MemStore for the orphan-release TOCTOU
 // tests. It records the store writes the release path performs, can report the
-// conditional release unsupported (forcing the recheck fallback), and can
-// inject a concurrent re-claim at controlled points: right after the
-// pre-release live-work gate (a claim landing between the staleness check and
-// the release write) or right after the release write (a claim that survives
-// the race and should be observable in the verify-after read).
+// conditional release unsupported (forcing the fenced fallback), can withhold
+// its conditional writer (a store that cannot fence, such as BdStore without
+// --if-revision), and can inject a concurrent re-claim at controlled points:
+// right after the pre-release live-work gate (a claim landing between the
+// staleness check and the release write) or right before the release write
+// lands (a claim between the fallback's re-read and its write).
 type conditionalReleaseProbeStore struct {
 	beads.Store
 	t   *testing.T
 	mem *beads.MemStore
 
 	releaseUnsupported bool
+	casUnsupported     bool
 	claimID            string
 	claimAssignee      string
 	claimAfterLiveGate bool
-	claimAfterWrite    bool
+	claimBeforeRelease bool
 
 	releaseCalls      []releaseProbeCall
 	assignmentUpdates []beads.UpdateOpts
@@ -2256,13 +2465,42 @@ func (s *conditionalReleaseProbeStore) List(query beads.ListQuery) ([]beads.Bead
 func (s *conditionalReleaseProbeStore) Update(id string, opts beads.UpdateOpts) error {
 	if opts.Assignee != nil || opts.Status != nil {
 		s.assignmentUpdates = append(s.assignmentUpdates, opts)
+		s.reclaimBeforeRelease(opts)
 	}
-	err := s.Store.Update(id, opts)
-	if err == nil && s.claimAfterWrite && opts.Assignee != nil && *opts.Assignee == "" {
-		s.claimAfterWrite = false
+	return s.Store.Update(id, opts)
+}
+
+// ConditionalWriterHandle exposes the MemStore's conditional writer through a
+// recorder, unless casUnsupported withholds it.
+func (s *conditionalReleaseProbeStore) ConditionalWriterHandle() (beads.ConditionalWriter, bool) {
+	if s.casUnsupported {
+		return nil, false
+	}
+	return releaseProbeWriter{ConditionalWriter: s.mem, probe: s}, true
+}
+
+// releaseProbeWriter records fenced assignment writes exactly as the probe's
+// Update records plain ones.
+type releaseProbeWriter struct {
+	beads.ConditionalWriter
+	probe *conditionalReleaseProbeStore
+}
+
+func (w releaseProbeWriter) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if opts.Assignee != nil || opts.Status != nil {
+		w.probe.assignmentUpdates = append(w.probe.assignmentUpdates, opts)
+		w.probe.reclaimBeforeRelease(opts)
+	}
+	return w.ConditionalWriter.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// reclaimBeforeRelease injects the concurrent re-claim once, right before a
+// release write (assignee cleared) reaches the store.
+func (s *conditionalReleaseProbeStore) reclaimBeforeRelease(opts beads.UpdateOpts) {
+	if s.claimBeforeRelease && opts.Assignee != nil && *opts.Assignee == "" {
+		s.claimBeforeRelease = false
 		s.reclaim()
 	}
-	return err
 }
 
 func (s *conditionalReleaseProbeStore) reclaim() {
@@ -2414,29 +2652,135 @@ func TestReleaseOrphanedPoolAssignments_UnsupportedStoreRechecksBeforeWrite(t *t
 	}
 }
 
-func TestReleaseOrphanedPoolAssignments_UnsupportedStoreLogsRacedClaimAfterRelease(t *testing.T) {
+// TestReleaseOrphanedPoolAssignments_FallbackFencesAClaimAfterTheReRead is the
+// stale-read regression for the release fallback. The re-read passes, and a
+// fresh worker claims the bead before the release write lands. Before the fix
+// that write was unconditional and un-assigned the new claim; the verify-after
+// read could not even see it, because the clobbered claim read back empty.
+// The write is now fenced on the re-read's revision, so the claim survives.
+func TestReleaseOrphanedPoolAssignments_FallbackFencesAClaimAfterTheReRead(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "conditional release unsupported"},
+		{name: "continuation group", extra: map[string]string{"gc.root_bead_id": "root-1", "gc.continuation_group": "grp-1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, work := newConditionalReleaseProbeStoreWithMetadata(t, tc.extra)
+			store.releaseUnsupported = true
+			store.claimBeforeRelease = true
+
+			released := releaseProbeAssignments(store, work)
+			if len(released) != 0 {
+				t.Fatalf("released = %v, want none when a claim lands after the re-read", released)
+			}
+			got, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Get work bead: %v", err)
+			}
+			if got.Status != "in_progress" || got.Assignee != "worker-live" {
+				t.Fatalf("work = status %q assignee %q, want the concurrent claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+			}
+		})
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_FallbackRefusesWithoutAConditionalWrite
+// pins the store-without-CAS contract: a snapshot ReleaseIfCurrent cannot take
+// is never released by an unconditional write. The release is refused and
+// logged, and the bead stays assigned for an operator or a capable store.
+func TestReleaseOrphanedPoolAssignments_FallbackRefusesWithoutAConditionalWrite(t *testing.T) {
 	store, work := newConditionalReleaseProbeStore(t)
 	store.releaseUnsupported = true
-	store.claimAfterWrite = true
+	store.casUnsupported = true
 
 	var buf bytes.Buffer
 	restore := captureLogOutput(&buf)
 	defer restore()
 
 	released := releaseProbeAssignments(store, work)
-	if len(released) != 1 || released[0].ID != work.ID {
-		t.Fatalf("released = %v, want [%s]", released, work.ID)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none on a store that cannot fence the release", released)
 	}
-	if !strings.Contains(buf.String(), "raced the orphan release") {
-		t.Fatalf("log output = %q, want a loud raced-claim detection after the release write", buf.String())
+	if len(store.assignmentUpdates) != 0 {
+		t.Fatalf("assignment-shaped writes = %+v, want none", store.assignmentUpdates)
 	}
-
+	if !strings.Contains(buf.String(), "cannot release it conditionally") {
+		t.Fatalf("log output = %q, want the refusal logged", buf.String())
+	}
 	got, err := store.Get(work.ID)
 	if err != nil {
 		t.Fatalf("Get work bead: %v", err)
 	}
-	if got.Status != "in_progress" || got.Assignee != "worker-live" {
-		t.Fatalf("work = status %q assignee %q, want the surviving claim preserved (in_progress/worker-live)", got.Status, got.Assignee)
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" {
+		t.Fatalf("work = status %q assignee %q, want it left as it was", got.Status, got.Assignee)
+	}
+}
+
+// TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence is
+// the BdStore-shaped "unsupported" path: the store hands out a conditional
+// writer, but the writer refuses at call time (conditional writes disabled,
+// as on a bd without --if-revision), and there is no guarded update either.
+// The release must stop at the refused fenced write, never follow it with a
+// blind one.
+func TestReleaseOrphanedPoolAssignments_FallbackRefusesAWriterThatCannotFence(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	store.mem.DisableConditionalWrites = true
+	if _, ok := beads.ConditionalWriterForTarget(store); !ok {
+		t.Fatal("probe store hands out no conditional writer; the case needs one that refuses at call time")
+	}
+
+	var buf bytes.Buffer
+	restore := captureLogOutput(&buf)
+	defer restore()
+
+	released := releaseProbeAssignments(store, work)
+	if len(released) != 0 {
+		t.Fatalf("released = %v, want none when the writer cannot fence", released)
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want only the refused fenced attempt, no blind follow-up", store.assignmentUpdates)
+	}
+	if !strings.Contains(buf.String(), "cannot release it conditionally") {
+		t.Fatalf("log output = %q, want the refusal logged", buf.String())
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "worker-dead" || got.Metadata["gc.session_affinity"] != "require" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want it left as it was", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
+	}
+}
+
+// TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget
+// releases through a wrapper that declares its conditional-writes resolution
+// target instead of promoting the capability, as the cmd/gc policy store and
+// the typed class wrappers do. The fenced fallback must find the writer
+// behind it; looking only at the wrapper itself would refuse every release
+// made through one.
+func TestReleaseOrphanedPoolAssignment_FencedFallbackFollowsAResolveTarget(t *testing.T) {
+	store, work := newConditionalReleaseProbeStore(t)
+	store.releaseUnsupported = true
+	wrapper := beads.WorkStore{Store: store}
+	if _, ok := beads.ConditionalWriterFor(wrapper); ok {
+		t.Fatal("the wrapper promotes the writer itself; the case needs one that only declares a target")
+	}
+
+	if !releaseOrphanedPoolAssignment(wrapper, work, false) {
+		t.Fatal("release through the wrapper = false, want the fenced release to land on its target")
+	}
+	if len(store.assignmentUpdates) != 1 {
+		t.Fatalf("assignment-shaped writes = %+v, want exactly the fenced release", store.assignmentUpdates)
+	}
+	got, err := store.mem.Get(work.ID)
+	if err != nil {
+		t.Fatalf("Get work bead: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" || got.Metadata["gc.session_affinity"] != "" {
+		t.Fatalf("work = status %q assignee %q affinity %q, want released with affinity cleared", got.Status, got.Assignee, got.Metadata["gc.session_affinity"])
 	}
 }
 
@@ -2453,10 +2797,10 @@ func TestReleaseOrphanedPoolAssignments_UnsupportedStoreReleasesNormalOrphan(t *
 		t.Fatalf("released = %v, want [%s]", released, work.ID)
 	}
 	if len(store.assignmentUpdates) != 1 {
-		t.Fatalf("assignment-shaped Update calls = %+v, want exactly the release write", store.assignmentUpdates)
+		t.Fatalf("assignment-shaped writes = %+v, want exactly the release write", store.assignmentUpdates)
 	}
-	if strings.Contains(buf.String(), "raced the orphan release") {
-		t.Fatalf("log output = %q, want no raced-claim detection for an uncontended release", buf.String())
+	if strings.Contains(buf.String(), "skipping release") {
+		t.Fatalf("log output = %q, want no skip for an uncontended release", buf.String())
 	}
 
 	got, err := store.Get(work.ID)

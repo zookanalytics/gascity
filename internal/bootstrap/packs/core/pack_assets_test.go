@@ -126,7 +126,6 @@ func TestFindBareBDCommands(t *testing.T) {
 func TestCoreMaintenanceExecAssets(t *testing.T) {
 	required := []string{
 		"assets/scripts/_bd_trace.sh",
-		"assets/scripts/_list-helpers.sh",
 		"assets/scripts/escalate.sh",
 		"assets/scripts/jsonl-export.sh",
 		"assets/scripts/order_outcome.sh",
@@ -153,6 +152,23 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
 			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
+		}
+	}
+}
+
+func TestReaperScriptUsesUTCTimestampForAgeGates(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/reaper.sh")
+	if err != nil {
+		t.Fatalf("core pack missing reaper.sh: %v", err)
+	}
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	localNow := regexp.MustCompile(`\bNOW[ \t]*\(`)
+	for i, line := range strings.Split(string(data), "\n") {
+		if commentLine.MatchString(line) {
+			continue
+		}
+		if localNow.MatchString(line) {
+			t.Errorf("reaper.sh:%d compares against server-local NOW() but bead timestamps are UTC; use UTC_TIMESTAMP(): %s", i+1, strings.TrimSpace(line))
 		}
 	}
 }

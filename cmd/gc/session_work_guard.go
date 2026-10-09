@@ -44,9 +44,9 @@ func closeSessionBeadIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionBead(session) {
-		return closeFailedCreateBead(sessionFrontDoor(store), session.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), sessionInfoFromBead(session), now, stderr)
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), session.ID, reason, now, stderr) // residency:allow the gate above (sessionHasOpenAssignedWorkForConfig) walks the resolver's assignedWorkSweepPlan, but this path holds a RAW BEAD and gets back only a bool — there is no walked leg set to release into, so the release takes the whole reachable union the gate covered.
+	return closeBead(store, sessionInfoFromBead(session), sweepCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }
 
 // closeSessionInfoIfUnassigned is the session.Info form of
@@ -78,9 +78,9 @@ func closeSessionInfoIfUnassigned(
 		return false
 	}
 	if isFailedCreateSessionInfo(info) {
-		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, workAssignmentStores(store, rigStores), info.ID, reason, now, stderr) // residency:allow same shape as closeSessionBeadIfUnassigned: sessionHasOpenAssignedWorkForConfigInfo walks the resolver plan but answers with a bool only, so the release scope is the reachable union rather than the legs the walk visited.
+	return closeBead(store, info, sweepCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }
 
 // closeSessionBeadIfReachableStoreUnassigned closes a session bead only when
@@ -100,13 +100,6 @@ func closeSessionInfoIfUnassigned(
 // Pass true ONLY from the drain-ack finalize path; every
 // other caller (failed-create close, generic idle/config-drift close) passes
 // false to keep its existing behavior unchanged.
-//
-// Unlike closeSessionBeadIfUnassigned, this gate deliberately ignores work in
-// stores the session's agent cannot reach: that work may be unrelated and merely
-// share an assignment token. The close therefore hands closeBead the reachable
-// scope it just proved, NOT the full city+rig fan-out — releasing outside the
-// proven scope would clear assignees, reopen in_progress work and stamp this
-// session's pool route onto beads the gate was never allowed to judge.
 func closeSessionBeadIfReachableStoreUnassigned(
 	cityPath string,
 	cfg *config.City,
@@ -121,7 +114,11 @@ func closeSessionBeadIfReachableStoreUnassigned(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	reachableStores, hasAssignedWork, err := reachableAssignedWorkScope(cityPath, cfg, store, rigStores, info, excludeOwnDrainStep)
+	assignedWorkProbe := sessionHasOpenAssignedWorkForReachableStore
+	if excludeOwnDrainStep {
+		assignedWorkProbe = sessionHasOpenAssignedWorkForReachableStoreForCloseGate
+	}
+	hasAssignedWork, err := assignedWorkProbe(cityPath, cfg, store, rigStores, info)
 	if err != nil {
 		fmt.Fprintf(stderr, "session work guard: checking reachable assigned work for %s: %v\n", info.ID, err) //nolint:errcheck
 		return false
@@ -130,7 +127,11 @@ func closeSessionBeadIfReachableStoreUnassigned(
 		return false
 	}
 	if isFailedCreateSessionInfo(info) {
-		return closeFailedCreateBead(sessionFrontDoor(store), info.ID, now, stderr)
+		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr)
 	}
-	return closeBead(store, reachableStores, info.ID, reason, now, stderr)
+	// The release reads the same reachable plan the gate just proved empty
+	// (plus the session bead's own store), so a claim the gate's narrower
+	// identity set could not see — one under a rotated alias — is still
+	// released, and a store the gate never read is left alone (gc-d9qnh).
+	return closeBead(store, info, reachableCloseReleaseScope(cityPath, cfg, rigStores), reason, now, stderr)
 }

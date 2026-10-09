@@ -19,8 +19,10 @@
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
-# metadata edit). Subscribing to bead.closed fires once, exactly on the
-# transition this order cares about.
+# metadata edit), so subscribing to bead.closed fires on the transition
+# this order cares about. Delivery is at least once: one close can reach
+# the bus twice (from the closing process and from the controller's
+# cache), and the blocker list and the per-pair dedup absorb the repeat.
 #
 # Cross-rig blocker chains within a city are supported via a prefix->rig
 # lookup so `gc bd dep list` and `gc session nudge` are scoped to the rig that
@@ -76,6 +78,7 @@ RIGS_JSON="$(gc rig list --json 2>/dev/null || true)"
 set_rig_args() {
     RIG_ARG1=""
     RIG_ARG2=""
+    RIG_SUSPENDED=""
     [ -n "$RIGS_JSON" ] || return 0
     _prefix="${1%%-*}"
     [ -n "$_prefix" ] && [ "$_prefix" != "$1" ] || return 0
@@ -89,6 +92,12 @@ set_rig_args() {
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
         RIG_ARG2="$_rig"
+    fi
+    # A suspended rig is left cold: any bd read restarts its retired proxy.
+    # RIG_SUSPENDED tells the caller to leave the bead until the rig resumes.
+    if [ -n "$_rig" ] && printf '%s' "$RIGS_JSON" \
+        | jq -e --arg r "$_rig" '(.rigs // [])[] | select(.name == $r and .suspended == true)' >/dev/null 2>&1; then
+        RIG_SUSPENDED=1
     fi
 }
 
@@ -111,6 +120,7 @@ while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
     set_rig_args "$blocker"
+    [ -z "$RIG_SUSPENDED" ] || continue
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
@@ -131,6 +141,7 @@ while IFS= read -r blocker; do
             continue
         fi
         set_rig_args "$dep_id"
+        [ -z "$RIG_SUSPENDED" ] || continue
 
         # Fire only on a TRUE ready-transition. A dependent with N blockers
         # surfaces here when the FIRST of them closes, but "may be unblocked" is
