@@ -41,8 +41,9 @@ Every other all-status root-id lookup feeds a caller that uses the closed rows:
 it emits completion facts for them, deletes them, walks through them, or shows
 them. Excluding closed beads there would change behavior. The largest live one
 is the completion backstop, filed as gc-0mue2i. The control dispatcher's
-`DirectMembers` callers are filed as gc-ho0oag. The schema-level remedy, an
-indexed `gc.root_bead_id` column, belongs to gc-ofr2iz.
+`DirectMembers` callers are filed as gc-ho0oag. The schema-level remedy, a
+functional index on hot metadata keys such as `gc.root_bead_id`, is filed as
+gc-a75mwa.
 
 ## Measurements
 
@@ -124,7 +125,8 @@ and backs it off for 24 seconds. The membership lookup alone took longer than
 The processlist share after the change. The controller and the core order run
 the installed `gc` binary, which is built from main, so the new query shape
 appears in live samples only after this change lands and the city binary is
-rebuilt. gc-ofr2iz ranks the hot query shapes and owns that re-measurement.
+rebuilt. gc-52sf3i tracks that re-measurement, and gc-ofr2iz ranks the hot
+query shapes.
 
 What the attribution predicts, as a projection and not a measurement: the
 lookups attributed to the retention sweep's guard (63 of 118 in window A, and
