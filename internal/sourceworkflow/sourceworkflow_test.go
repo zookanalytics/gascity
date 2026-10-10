@@ -842,6 +842,92 @@ func TestCloseSpecSidecarsForRootClosesOnlyOpenSpecs(t *testing.T) {
 	}
 }
 
+// TestCloseSpecSidecarsForRootListsOnlyOpenMembers pins the sidecar lookup to
+// open beads. A closed sidecar has nothing left to close, so a lookup that
+// includes closed members only buys a scan of every closed row's metadata.
+func TestCloseSpecSidecarsForRootListsOnlyOpenMembers(t *testing.T) {
+	store := &rootIDQueryRecordingStore{MemStore: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{
+		Title: "root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	openSpec, err := store.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(open spec): %v", err)
+	}
+	doneSpec, err := store.Create(beads.Bead{
+		Title: "Step spec for build",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "build",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(closed spec): %v", err)
+	}
+	if err := store.Close(doneSpec.ID); err != nil {
+		t.Fatalf("Close(closed spec): %v", err)
+	}
+
+	closed, err := CloseSpecSidecarsForRoot(store, root.ID, "")
+	if err != nil {
+		t.Fatalf("CloseSpecSidecarsForRoot: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("CloseSpecSidecarsForRoot closed %d beads, want 1", closed)
+	}
+	specAfter, err := store.Get(openSpec.ID)
+	if err != nil {
+		t.Fatalf("Get(open spec): %v", err)
+	}
+	if specAfter.Status != "closed" {
+		t.Fatalf("open spec status = %q, want closed", specAfter.Status)
+	}
+	if len(store.rootIDQueries) == 0 {
+		t.Fatal("CloseSpecSidecarsForRoot issued no gc.root_bead_id query")
+	}
+	for _, q := range store.rootIDQueries {
+		if q.IncludeClosed {
+			t.Errorf("sidecar query %+v includes closed beads; the caller discards them, so it must ask for open beads only", q)
+		}
+		if q.TierMode != beads.TierBoth {
+			t.Errorf("sidecar query TierMode = %v, want TierBoth so wisp-tier sidecars still close", q.TierMode)
+		}
+	}
+}
+
+// rootIDQueryRecordingStore records every List query that filters on
+// gc.root_bead_id, so a test can pin the status scope a membership lookup asks
+// for.
+type rootIDQueryRecordingStore struct {
+	*beads.MemStore
+	rootIDQueries []beads.ListQuery
+}
+
+func (s *rootIDQueryRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Metadata["gc.root_bead_id"] != "" {
+		s.rootIDQueries = append(s.rootIDQueries, query)
+	}
+	return s.MemStore.List(query)
+}
+
 func TestListWorkflowBeadsQueriesBothTiersForRootOwnedDescendants(t *testing.T) {
 	store := &workflowTierAssertingStore{MemStore: beads.NewMemStore()}
 	root, err := store.Create(beads.Bead{

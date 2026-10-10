@@ -723,6 +723,27 @@ func writeExecutable(t *testing.T, path, content string) {
 	}
 }
 
+// writeOfflineBrew writes a brew into binDir that knows no formula and never
+// touches the network. On macOS the Makefile and the shard runners ask
+// `brew --prefix icu4c` for the ICU paths, and under a fixture's fresh HOME
+// the real brew first downloads Homebrew's API data into that HOME, tens of
+// megabytes whose download can take longer than a fixture's whole wait budget.
+// With binDir ahead of the real brew on PATH, the CGO flags stay exactly what
+// the fixture passes in.
+func writeOfflineBrew(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "brew"), "#!/bin/sh\nexit 1\n")
+}
+
+// offlineBrewDir returns a new directory holding only writeOfflineBrew's brew,
+// for a fixture whose PATH has no fake-tool directory of its own.
+func offlineBrewDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeOfflineBrew(t, dir)
+	return dir
+}
+
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
