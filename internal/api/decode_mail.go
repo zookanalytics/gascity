@@ -15,11 +15,12 @@ type MailCountView struct {
 	PartialErrors []string
 }
 
-// MailListView is the CLI-facing shape for `gc mail check`. It mirrors the
-// mail-list response body so callers can distinguish authoritative empty
-// mailboxes from partial aggregate reads.
-type MailListView struct {
-	Items         []mail.Message
+// MailInboxSummaryView is the CLI-facing shape for `gc mail check`: how many
+// unread messages the inbox holds (Total), and whether the read was partial
+// because a mail provider failed (Partial, with one PartialErrors entry per
+// failed provider), so callers can tell an authoritative empty inbox from a
+// degraded read.
+type MailInboxSummaryView struct {
 	Total         int
 	Partial       bool
 	PartialErrors []string
@@ -59,30 +60,13 @@ func mailMessageFromGen(g genclient.Message) mail.Message {
 // []mail.Message. Returns an empty slice (never nil) when the body is missing
 // or holds no items so callers can uniformly format the empty case.
 func mailMessagesFromGenList(body *genclient.MailListBody) []mail.Message {
-	return mailListFromGen(body).Items
-}
-
-// mailListFromGen translates the genclient list body into a MailListView.
-// A nil body decodes to an empty, non-nil Items slice.
-func mailListFromGen(body *genclient.MailListBody) MailListView {
-	out := MailListView{Items: []mail.Message{}}
-	if body == nil {
-		return out
-	}
-	out.Total = int(body.Total)
-	if body.Partial != nil {
-		out.Partial = *body.Partial
-	}
-	if body.PartialErrors != nil {
-		out.PartialErrors = append([]string(nil), *body.PartialErrors...)
-	}
-	if body.Items == nil {
-		return out
+	if body == nil || body.Items == nil {
+		return []mail.Message{}
 	}
 	items := *body.Items
-	out.Items = make([]mail.Message, 0, len(items))
+	out := make([]mail.Message, 0, len(items))
 	for _, item := range items {
-		out.Items = append(out.Items, mailMessageFromGen(item))
+		out = append(out, mailMessageFromGen(item))
 	}
 	return out
 }
