@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -9,10 +10,11 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 // packScriptCancelGrace is how long an abandoned check's script has to exit
-// after SIGTERM before it is killed.
+// after SIGTERM before its process group is killed.
 const packScriptCancelGrace = 5 * time.Second
 
 // PackScriptCheck implements Check by running a script shipped with
@@ -27,10 +29,14 @@ const packScriptCancelGrace = 5 * time.Second
 //	GC_CITY_PATH    — absolute path to the city root
 //	GC_PACK_DIR — absolute path to the pack directory
 //
-// A check script still running when the doctor runner abandons its check at
-// the per-check timeout is sent SIGTERM, and killed if it is still running
-// packScriptCancelGrace later, so it issues no further calls. A fix script is
-// never stopped this way.
+// A check script runs as the leader of its own process group. When the doctor
+// runner abandons the check at the per-check timeout, it sends the whole group
+// SIGTERM before it moves on. The command the script is blocked on, such as a
+// store read through `gc bd`, therefore stops along with the shell, and any of
+// the group still running packScriptCancelGrace later is killed. Because the
+// group is the script's own, a signal sent to the doctor's process group, such
+// as Ctrl-C at a terminal, does not reach a running check script. A fix script
+// runs in the doctor's process group and is never stopped this way.
 //
 // When FixScript is non-empty, the check also supports `gc doctor --fix`:
 // the fix script is dispatched with the same environment contract as
@@ -104,18 +110,14 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	runCtx, cancel := ctx.runContext()
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, c.Script) //nolint:gosec // script path from pack config
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	cmd.WaitDelay = packScriptCancelGrace
+	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,
 		"GC_PACK_DIR="+c.PackDir,
 	)
 
-	out, err := cmd.CombinedOutput()
+	out, err := runScriptGroup(ctx, cmd)
 	exitCode := 0
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -152,6 +154,39 @@ func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
 		Message: message,
 		Details: details,
 	}
+}
+
+// runScriptGroup runs cmd as the leader of a new process group and returns its
+// combined output. If the runner abandons the check, the group is stopped (see
+// stopScriptGroup), so Run returns once the group has exited instead of
+// waiting out the script.
+func runScriptGroup(ctx *CheckContext, cmd *exec.Cmd) ([]byte, error) {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	processgroup.StartCommandInNewGroup(cmd)
+	// A process that left the group can still hold the output pipe after the
+	// script exits. WaitDelay bounds how long Wait waits on it.
+	cmd.WaitDelay = packScriptCancelGrace
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	release := ctx.onAbandon(func() { stopScriptGroup(cmd.Process.Pid) })
+	err := cmd.Wait()
+	release()
+	return out.Bytes(), err
+}
+
+// stopScriptGroup sends SIGTERM to the process group pgid leads, then kills
+// whatever of it is still running packScriptCancelGrace later. Only the
+// SIGTERM is sent before it returns, so the runner can call it without
+// waiting. Errors are dropped because nothing reads an abandoned check's
+// result.
+func stopScriptGroup(pgid int) {
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	go func() {
+		_ = processgroup.Terminate(pgid, packScriptCancelGrace, processgroup.Options{})
+	}()
 }
 
 // parseScriptOutput splits script output into a message (first line)

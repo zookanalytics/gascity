@@ -361,22 +361,58 @@ func TestParseScriptOutput(t *testing.T) {
 	}
 }
 
-// TestPackScriptCheckStopsScriptOnceAbandoned: a pack script still running
-// when the runner abandons its check is stopped, so it issues no further calls,
-// and Run returns without waiting out the script.
-func TestPackScriptCheckStopsScriptOnceAbandoned(t *testing.T) {
+// TestPackScriptCheckStopsForegroundCommandOnceAbandoned: abandoning a pack
+// check stops the command its script is blocked on, not only the shell. A
+// check script reads the store through a foreground `gc bd`, and a signal to
+// the shell alone leaves that command running as an orphan.
+func TestPackScriptCheckStopsForegroundCommandOnceAbandoned(t *testing.T) {
+	done := make(chan struct{})
+	script := startBlockedScript(t, "", done)
+
+	close(done)
+	script.waitStopped(t, 10*time.Second)
+}
+
+// TestPackScriptCheckKillsScriptIgnoringTerm: a script that ignores SIGTERM,
+// along with the command it is blocked on, is killed packScriptCancelGrace
+// after the check is abandoned.
+func TestPackScriptCheckKillsScriptIgnoringTerm(t *testing.T) {
+	done := make(chan struct{})
+	script := startBlockedScript(t, "trap '' TERM\n", done)
+
+	close(done)
+	script.waitStopped(t, packScriptCancelGrace+10*time.Second)
+}
+
+// blockedScript is a pack check whose script is blocked on a foreground
+// command standing in for a store read. The command records a call in calls
+// every tenth of a second and writes nothing to the check's output.
+type blockedScript struct {
+	calls   string
+	results chan *CheckResult
+}
+
+// startBlockedScript runs the check under a context whose Done is done, after
+// the script runs prologue, and returns once the command is running.
+func startBlockedScript(t *testing.T, prologue string, done <-chan struct{}) *blockedScript {
+	t.Helper()
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
 	if err := syscall.Mkfifo(started, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// The loop is bounded so a regression cannot leave it running past the test.
-	script := writeCheckScript(t, dir, "#!/bin/sh\necho started > '"+started+"'\ni=0\nwhile [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\necho finished\n")
-	c := &PackScriptCheck{CheckName: "topo:long", Script: script, PackDir: dir, PackName: "topo"}
+	b := &blockedScript{calls: filepath.Join(dir, "calls"), results: make(chan *CheckResult, 1)}
+	// The loop is bounded so a regression cannot leave it running long past
+	// the test.
+	command := filepath.Join(dir, "command.sh")
+	commandBody := "#!/bin/sh\necho started > '" + started + "'\ni=0\nwhile [ $i -lt 100 ]; do echo call >> '" + b.calls + "'; sleep 0.1; i=$((i+1)); done\n"
+	if err := os.WriteFile(command, []byte(commandBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := writeCheckScript(t, dir, "#!/bin/sh\n"+prologue+"'"+command+"'\necho finished\n")
+	c := &PackScriptCheck{CheckName: "topo:blocked", Script: script, PackDir: dir, PackName: "topo"}
 
-	done := make(chan struct{})
-	results := make(chan *CheckResult, 1)
-	go func() { results <- c.Run(&CheckContext{CityPath: dir, Done: done}) }()
+	go func() { b.results <- c.Run(&CheckContext{CityPath: dir, Done: done}) }()
 	running := make(chan error, 1)
 	go func() {
 		_, err := os.ReadFile(started)
@@ -385,19 +421,38 @@ func TestPackScriptCheckStopsScriptOnceAbandoned(t *testing.T) {
 	select {
 	case err := <-running:
 		if err != nil {
-			t.Fatalf("reading the script's start signal: %v", err)
+			t.Fatalf("reading the command's start signal: %v", err)
 		}
-	case result := <-results:
+	case result := <-b.results:
 		t.Fatalf("script exited before the check was abandoned: %+v", result)
 	}
+	return b
+}
 
-	close(done)
+// waitStopped fails unless Run returns within limit and the command records
+// no call in the second after it does.
+func (b *blockedScript) waitStopped(t *testing.T, limit time.Duration) {
+	t.Helper()
 	select {
-	case result := <-results:
+	case result := <-b.results:
 		if result.Message == "finished" {
 			t.Fatalf("result = %+v, want the script stopped before it finished", result)
 		}
-	case <-time.After(packScriptCancelGrace + 10*time.Second):
-		t.Fatal("the abandoned check's script is still running")
+	case <-time.After(limit):
+		t.Fatalf("Run still waiting on the abandoned check's script after %s", limit)
 	}
+	before := countLines(t, b.calls)
+	time.Sleep(time.Second)
+	if after := countLines(t, b.calls); after != before {
+		t.Fatalf("the command the script was blocked on made %d calls in the second after Run returned; want none", after-before)
+	}
+}
+
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Count(data, []byte("\n"))
 }

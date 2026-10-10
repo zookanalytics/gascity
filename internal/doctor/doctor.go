@@ -161,15 +161,18 @@ func (r *Report) tally(result *CheckResult) {
 // goroutine is abandoned with its private buffer, so a still-running check
 // can never interleave writes with — or race against — the rest of the run,
 // and the check's CheckContext.Done is closed so it can stop issuing I/O.
+// The stops the check registered through onAbandon are called before
+// boundedRun returns.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
 		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
-	abandoned := make(chan struct{})
+	abandon := newAbandonment()
 	checkCtx := *ctx
 	checkCtx.Output = &buf
-	checkCtx.Done = abandoned
+	checkCtx.Done = abandon.done
+	checkCtx.abandon = abandon
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {
@@ -183,7 +186,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 		}
 		return result
 	case <-time.After(d.CheckTimeout):
-		close(abandoned)
+		abandon.abandonRun()
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusError,
