@@ -1,6 +1,6 @@
 ---
 name: Who reads the whole session history on the city store, and what gc-k0n2xi changed
-description: Attributes the closed-inclusive session-bead enumeration on the city store to its callers, using the controller's own trace and read-only processlist sampling on 2026-10-10. The supervisor's per-pass issuer is the demand pass's closed named-session index, not mail recipient resolution. The stream re-issued at the read deadline came from the hourly doctor sweep. A third, label-only stream is not attributed. Records the evidence, the three changes, and the open work with the beads filed for it.
+description: Attributes the closed-inclusive session-bead enumeration on the city store to its callers, using the controller's own trace and read-only processlist sampling on 2026-10-10. The supervisor's per-pass issuer is the demand pass's closed named-session index, not mail recipient resolution. The stream re-issued at the read deadline came from the hourly doctor sweep. A third, label-only stream is not attributed. Records the evidence, the changes, and the open work with the beads filed for it.
 ---
 
 # gc-k0n2xi: who reads the whole session history
@@ -107,10 +107,15 @@ recovered from what was kept.
 - **The controller keeps the closed named-session index between passes.**
   `closedNamedIndexCache` (`cmd/gc/allocator_demand_reads.go`) is created once
   per controller in `supervisorBuildAgentsFnWithSessionBeads` and
-  `standaloneBuildAgentsFnWithSessionBeads`. It answers from the last complete
-  build until a named session it saw open leaves the pass's open-session
-  snapshot, the store changes, the snapshot is degraded or absent, or the index
-  is ten minutes old. A failed build reaches its pass unchanged and is not kept.
+  `standaloneBuildAgentsFnWithSessionBeads`. The control-dispatcher tick keeps
+  its own on the `CityRuntime`. That tick narrows the config to the dispatcher
+  agents but keeps every named session, so an `on_demand` one sends each of its
+  desired-state builds to the index as well. It builds without a trace, so its
+  index builds are not among the ones the trace counted. Each cache answers
+  from the last complete build until a named session it saw open leaves the
+  pass's open-session snapshot, the store changes, the snapshot is degraded or
+  absent, or the index is ten minutes old. A failed build reaches its pass
+  unchanged and is not kept.
   The index only adds runtime-name assignees for on_demand identities, so a
   stale entry costs one extra ready probe, and the open-set check catches the
   change that would hide demand, a named session closing.

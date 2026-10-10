@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -1114,5 +1115,71 @@ func TestControllerDemandPassReadsClosedSessionHistoryOnceAcrossPasses(t *testin
 	}
 	if got := cityStore.historyReads(); got != perPass {
 		t.Fatalf("closed session history reads over three passes sharing one cache = %d, want one pass's worth (%d)", got, perPass)
+	}
+}
+
+// Kills: a control-dispatcher tick that reads the city's whole session history
+// on every tick. The tick narrows the config to the dispatcher agents but keeps
+// every named session, so an on_demand one makes each tick's desired-state
+// build consult the closed named-session index.
+func TestControlDispatcherTickReadsClosedSessionHistoryOnceAcrossTicks(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv(fsPressureThresholdEnv, "100")
+	cityPath := t.TempDir()
+	cityStore := &closedSessionHistoryStore{MemStore: beads.NewMemStore()}
+	one := 1
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{
+				Name:              config.ControlDispatcherAgentName,
+				BindingName:       "core",
+				StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+				MaxActiveSessions: &one,
+			},
+			{Name: "patrol", StartCommand: "true"},
+		},
+		NamedSessions: []config.NamedSession{{Template: "patrol", Mode: "on_demand"}},
+	}
+	sp := runtime.NewFake()
+	cr := &CityRuntime{
+		cityPath:          cityPath,
+		cityName:          "test-city",
+		cfg:               cfg,
+		sp:                sp,
+		dops:              newDrainOps(sp),
+		rec:               events.Discard,
+		sessionDrains:     newDrainTracker(),
+		logPrefix:         "gc test",
+		stdout:            io.Discard,
+		stderr:            io.Discard,
+		managedDoltHealth: func(string) error { return nil },
+	}
+	cr.setControllerState(&controllerState{
+		cfg:           cfg,
+		sp:            sp,
+		beadStores:    map[string]beads.Store{},
+		cityBeadStore: cityStore,
+		eventProv:     events.NewFake(),
+		cityName:      "test-city",
+		cityPath:      cityPath,
+	})
+	tick := func() {
+		t.Helper()
+		cr.controlDispatcherTick(context.Background())
+		if !cr.waitForAsyncStarts() {
+			t.Fatal("async starts did not settle after a control-dispatcher tick")
+		}
+	}
+
+	tick()
+	firstTick := cityStore.historyReads()
+	if firstTick == 0 {
+		t.Fatal("a control-dispatcher tick read no closed session history; the fixture no longer exercises the closed named-session index")
+	}
+	tick()
+	tick()
+	if got := cityStore.historyReads(); got != firstTick {
+		t.Fatalf("closed session history reads over three control-dispatcher ticks = %d, want the first tick's only (%d)", got, firstTick)
 	}
 }

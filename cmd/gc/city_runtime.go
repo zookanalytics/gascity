@@ -178,6 +178,12 @@ type CityRuntime struct {
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
 
+	// controlDispatcherClosedNamed carries the closed named-session index from
+	// one control-dispatcher tick to the next. Created on first use so a
+	// directly-constructed runtime needs no wiring.
+	controlDispatcherClosedNamed     *closedNamedIndexCache
+	controlDispatcherClosedNamedOnce sync.Once
+
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
 	// clocks below; created on first use.
@@ -4033,6 +4039,15 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	}
 }
 
+// controlDispatcherClosedNamedIndex is the closed named-session index cache the
+// control-dispatcher tick's desired-state builds share. The tick narrows the
+// config to the dispatcher agents but keeps every named session, so a city
+// with an on_demand named session consults the index on every tick.
+func (cr *CityRuntime) controlDispatcherClosedNamedIndex() *closedNamedIndexCache {
+	cr.controlDispatcherClosedNamedOnce.Do(func() { cr.controlDispatcherClosedNamed = newClosedNamedIndexCache() })
+	return cr.controlDispatcherClosedNamed
+}
+
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
@@ -4059,7 +4074,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
-	wfcResult := buildDesiredStateWithSessionBeadsAt(
+	wfcResult := buildDesiredStateWithClosedNamedIndexAt(
 		cr.cityName,
 		cr.cityPath,
 		tickTime,
@@ -4071,6 +4086,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sessionBeads,
 		nil,
 		cr.stderr,
+		cr.controlDispatcherClosedNamedIndex(),
 	)
 	desiredState := wfcResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)
