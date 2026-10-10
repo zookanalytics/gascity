@@ -2596,13 +2596,18 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // every descendant created by any growth path (initial pour, convoy Attach,
 // fanout fragments, retry attempts) carries gc.root_bead_id == rootID, an
 // invariant enforced in internal/molecule. A single metadata-filtered List
-// therefore returns the whole membership set in one store round-trip, instead
-// of the O(tree) per-node ParentID/DepList walk that spawned a bd subprocess
-// per node and blew past the dispatch gate's time bound under Dolt write
-// contention (#2893). The membership query's ownership predicate is exactly
-// the walk's orderWispGraphDependentOwnedByRoot, so it is strictly at least as
+// therefore returns every open member in one store round-trip, instead of the
+// O(tree) per-node ParentID/DepList walk that spawned a bd subprocess per node
+// and blew past the dispatch gate's time bound under Dolt write contention
+// (#2893). The membership query's ownership predicate is exactly the walk's
+// orderWispGraphDependentOwnedByRoot, so it is strictly at least as
 // conservative as the walk — it can only ever report MORE open work, never
 // less, and single-flight is never weakened.
+//
+// The membership List excludes closed beads. A closed member is never
+// reported, and a Dolt-backed store answers a metadata filter that includes
+// closed beads by reading the metadata of every row, closed history included,
+// where excluding them confines the read to the non-closed rows.
 //
 // When skip is non-nil, an open member for which skip returns true is not
 // treated as blocking open work — the gate passes isTransientNotificationBead so
@@ -2610,17 +2615,16 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // descendant view (e.g. the stale-wisp sweeper) pass nil. Both the membership
 // fast path and the walk fallback honor skip.
 //
-// When the fast path finds no open member (the membership set is empty,
-// all-closed, or only partially stamped — a molecule can carry gc.root_bead_id
+// When the fast path finds no open member (no stamped member is open, or the
+// molecule is only partially stamped — a molecule can carry gc.root_bead_id
 // on some steps while sibling ParentID-only steps are un-stamped), it falls
 // back to the authoritative tree walk before reporting the root idle, so
 // single-flight is never weakened for un-stamped or partial-stamp data.
 func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
@@ -2638,14 +2642,13 @@ func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Be
 	if len(open) > 0 {
 		return open, nil
 	}
-	// No OPEN stamped member found. An empty or all-closed membership set does
-	// NOT prove the root is idle, because the index may be incomplete for a
-	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
-	// ParentID-only steps do not). Confirm with the authoritative walk before
-	// reporting no open work, keeping single-flight safe. The fast path still
-	// answers the common in-flight case (any open stamped member) in one
-	// query; the walk runs only when no open member is found — i.e. for
-	// orphan/just-completed roots.
+	// No OPEN stamped member found. That does NOT prove the root is idle,
+	// because the index may be incomplete for a partial-stamp molecule (some
+	// steps carry gc.root_bead_id, sibling ParentID-only steps do not).
+	// Confirm with the authoritative walk before reporting no open work,
+	// keeping single-flight safe. The fast path still answers the common
+	// in-flight case (any open stamped member) in one query; the walk runs
+	// only when no open member is found — i.e. for orphan/just-completed roots.
 	id, err := storeFirstOpenDescendantByWalk(store, rootID, skip)
 	if err != nil || id == "" {
 		return nil, err
