@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -6982,6 +6983,179 @@ max = 3
 	}
 	if stdout.String() != promptContent {
 		t.Errorf("stdout = %q, want pool worker prompt %q", stdout.String(), promptContent)
+	}
+}
+
+// writePrimeFixtureFiles writes each file under root, creating parent
+// directories as needed.
+func writePrimeFixtureFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// writeSharedDogPacks writes a city pack whose two imports each define a
+// "dog" agent from dogAgentTOML. bd re-exports a vendored dolt pack, so its
+// dog is re-stamped bd.dog and comes first in config order; toolkit defines
+// toolkit.dog. Each dog's prompt names the pack it came from.
+func writeSharedDogPacks(t *testing.T, cityDir, dogAgentTOML string) {
+	t.Helper()
+	writePrimeFixtureFiles(t, cityDir, map[string]string{
+		"pack.toml": `[pack]
+name = "test-city"
+schema = 2
+
+[imports.bd]
+source = "./packs/bd"
+
+[imports.toolkit]
+source = "./packs/toolkit"
+`,
+		"packs/bd/pack.toml": `[pack]
+name = "bd"
+schema = 2
+
+[imports.dolt]
+source = "./dolt"
+export = true
+`,
+		"packs/bd/dolt/pack.toml":                     "[pack]\nname = \"dolt\"\nschema = 2\n",
+		"packs/bd/dolt/agents/dog/agent.toml":         dogAgentTOML,
+		"packs/bd/dolt/agents/dog/prompt.template.md": "dolt maintenance dog\n",
+		"packs/toolkit/pack.toml":                     "[pack]\nname = \"toolkit\"\nschema = 2\n",
+		"packs/toolkit/agents/dog/agent.toml":         dogAgentTOML,
+		"packs/toolkit/agents/dog/prompt.template.md": "warrant executor dog\n",
+	})
+}
+
+// requireAgentsNamed fails the test unless the city's composed config holds
+// exactly the agents called name with the wanted qualified names.
+func requireAgentsNamed(t *testing.T, cityDir, name string, want ...string) {
+	t.Helper()
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var got []string
+	for _, a := range cfg.Agents {
+		if a.Name == name {
+			got = append(got, a.QualifiedName())
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("fixture agents named %q = %q, want %q", name, got, want)
+	}
+}
+
+func TestDoPrimeBareNameSharedByImportedPacksIsAmbiguous(t *testing.T) {
+	// A bare "dog" names neither imported dog, so gc prime must not render
+	// one of them for it.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeSharedDogPacks(t, dir, "scope = \"city\"\n")
+	writePrimeFixtureFiles(t, dir, map[string]string{
+		"city.toml":     "[workspace]\n",
+		".gc/site.toml": "workspace_name = \"test-city\"\n",
+	})
+	requireAgentsNamed(t, dir, "dog", "bd.dog", "toolkit.dog")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	for _, tc := range []struct{ name, want string }{
+		{"bd.dog", "dolt maintenance dog\n"},
+		{"toolkit.dog", "warrant executor dog\n"},
+	} {
+		var stdout, stderr bytes.Buffer
+		if code := doPrimeWithMode([]string{tc.name}, &stdout, &stderr, false, true); code != 0 {
+			t.Fatalf("gc prime %s --strict = %d, want 0; stderr: %s", tc.name, code, stderr.String())
+		}
+		if stdout.String() != tc.want {
+			t.Errorf("gc prime %s rendered %q, want %q", tc.name, stdout.String(), tc.want)
+		}
+	}
+
+	wantDiagnostic := `agent "dog" is ambiguous: matches bd.dog, toolkit.dog`
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrime([]string{"dog"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc prime dog = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != defaultPrimePrompt {
+		t.Errorf("gc prime dog rendered %q, want the default prompt rather than either dog's", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantDiagnostic) {
+		t.Errorf("gc prime dog stderr = %q, want it to contain %q", stderr.String(), wantDiagnostic)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := doPrimeWithMode([]string{"dog"}, &stdout, &stderr, false, true); code == 0 {
+		t.Fatalf("gc prime dog --strict = 0, want non-zero; stdout: %q", stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("gc prime dog --strict wrote %q to stdout, want nothing", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantDiagnostic) {
+		t.Errorf("gc prime dog --strict stderr = %q, want it to contain %q", stderr.String(), wantDiagnostic)
+	}
+}
+
+func TestDoPrimeBareNameResolvesRigCopiesOfOnePackAgent(t *testing.T) {
+	// Every rig that imports a pack gets its own copy of the pack's
+	// rig-scoped agents. The copies are one agent, so a bare name still
+	// renders its prompt.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeFixtureFiles(t, dir, map[string]string{
+		"city.toml": `[workspace]
+
+[[rigs]]
+name = "alpha"
+
+[rigs.imports.tk]
+source = "./packs/tk"
+
+[[rigs]]
+name = "beta"
+
+[rigs.imports.tk]
+source = "./packs/tk"
+`,
+		".gc/site.toml": `workspace_name = "test-city"
+
+[[rig]]
+name = "alpha"
+path = "./alpha"
+
+[[rig]]
+name = "beta"
+path = "./beta"
+`,
+		"pack.toml":                          "[pack]\nname = \"test-city\"\nschema = 2\n",
+		"alpha/.keep":                        "",
+		"beta/.keep":                         "",
+		"packs/tk/pack.toml":                 "[pack]\nname = \"tk\"\nschema = 2\n",
+		"packs/tk/agents/polecat/agent.toml": "scope = \"rig\"\n",
+		"packs/tk/agents/polecat/prompt.template.md": "tk polecat\n",
+	})
+	requireAgentsNamed(t, dir, "polecat", "alpha/tk.polecat", "beta/tk.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{"polecat"}, &stdout, &stderr, false, true); code != 0 {
+		t.Fatalf("gc prime polecat --strict = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != "tk polecat\n" {
+		t.Errorf("gc prime polecat rendered %q, want %q", stdout.String(), "tk polecat\n")
 	}
 }
 
