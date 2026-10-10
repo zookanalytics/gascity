@@ -93,6 +93,61 @@ case "$WORK_OWNER" in
       [ -z "$OWNER_LIVE" ] && OWNER_LIVE=1
     fi ;;
 esac
+# A session running this workflow never claims the work bead, so the assignee
+# cannot show it. Its tree does: the worktree metadata.work_dir records, which
+# workspace-setup adopts, and the worktree with metadata.branch checked out.
+# A tree outside your own directory is held by the open session whose
+# directory is that tree, or is the directory it was created under
+# (<dir>/worktrees/<bead>).
+HELD_TREE=""
+if [ "$OWNER_LIVE" = "0" ]; then
+  OWN_DIR=$(cd "${GC_DIR:-.}" 2>/dev/null && pwd -P)
+  RECORDED_TREE=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.work_dir // empty')
+  RECORDED_BRANCH=$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.branch // empty')
+  BRANCH_TREE=""
+  if [ -n "$RECORDED_BRANCH" ]; then
+    if WORKTREES=$(git worktree list --porcelain); then
+      BRANCH_TREE=$(printf '%s' "$WORKTREES" | awk -v ref="branch refs/heads/$RECORDED_BRANCH" 'index($0, "worktree ") == 1 { tree = substr($0, 10) } $0 == ref { print tree; exit }')
+    else
+      OWNER_LIVE=1
+      WORK_OWNER="an unidentified session (git could not list the worktrees that may have $RECORDED_BRANCH checked out)"
+    fi
+  fi
+  for TREE in "$RECORDED_TREE" "$BRANCH_TREE"; do
+    [ "$OWNER_LIVE" = "0" ] && [ -n "$TREE" ] || continue
+    TREE_DIR=$(cd "$TREE" 2>/dev/null && pwd -P) || continue   # no tree on disk
+    case "$TREE_DIR/" in "$OWN_DIR"/*) [ -n "$OWN_DIR" ] && continue ;; esac   # your own tree
+    HOLDER_HOME=""
+    [ "$(basename "$(dirname "$TREE_DIR")")" = worktrees ] && HOLDER_HOME=$(dirname "$(dirname "$TREE_DIR")")
+    SESSIONS=$(gc session list --state all --json 2>/dev/null)
+    if ! printf '%s' "$SESSIONS" | jq -e '.sessions | type == "array" and all(.[]; type == "object")' >/dev/null 2>&1; then
+      OWNER_LIVE=1
+      WORK_OWNER="an unidentified session (the session list could not be read)"
+    else
+      # -ef compares the directories themselves, so a symlinked path still matches.
+      HOLDER_DIR=$(printf '%s' "$SESSIONS" | jq -r '.sessions[] | .work_dir // empty' | while IFS= read -r SESSION_DIR; do
+        if [ "$SESSION_DIR" -ef "$TREE_DIR" ] || { [ -n "$HOLDER_HOME" ] && [ "$SESSION_DIR" -ef "$HOLDER_HOME" ]; }; then
+          printf '%s' "$SESSION_DIR"
+          break
+        fi
+      done)
+      if [ -n "$HOLDER_DIR" ]; then
+        OWNER_LIVE=1
+        WORK_OWNER=$(printf '%s' "$SESSIONS" | jq -r --arg d "$HOLDER_DIR" '[.sessions[] | select(.work_dir == $d) | (.session_name // .id)] | join(", ")')
+      elif [ -z "$HOLDER_HOME" ]; then
+        OWNER_LIVE=1
+        WORK_OWNER="an unidentified session (no session directory accounts for the tree)"
+      fi
+    fi
+    if [ "$OWNER_LIVE" != "0" ]; then
+      if TREE_STATUS=$(git -C "$TREE_DIR" status --porcelain 2>/dev/null); then
+        HELD_TREE="$TREE_DIR (uncommitted paths: $(printf '%s' "$TREE_STATUS" | grep -c .))"
+      else
+        HELD_TREE="$TREE_DIR (uncommitted paths: unreadable)"
+      fi
+    fi
+  done
+fi
 if [ "$OWNER_LIVE" != "0" ]; then
   # Park THIS step before anything else. status=blocked is the one state that
   # holds the workflow here: dependency resolution never satisfies it (it is
@@ -103,10 +158,11 @@ if [ "$OWNER_LIVE" != "0" ]; then
   STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
   gc bd update "$STEP_BEAD_ID" --status=blocked || exit 1
   ROOT_BEAD_ID=$(gc bd show "$STEP_BEAD_ID" --json | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
-  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER (convoy {{convoy_id}}). Workflow ${ROOT_BEAD_ID:-unknown} parked at step $STEP_BEAD_ID (status=blocked); no workspace touched."
+  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID ($WORK_STATUS) held by $WORK_OWNER, which is live or not provably gone${HELD_TREE:+, in worktree $HELD_TREE} (convoy {{convoy_id}}). Workflow ${ROOT_BEAD_ID:-unknown} parked at step $STEP_BEAD_ID (status=blocked); no workspace touched."
   gc mail send human -s "ESCALATION: duplicate dispatch on $WORK_BEAD_ID [HIGH]" -m "Work bead: $WORK_BEAD_ID
 Convoy: {{convoy_id}}
-Already held by: $WORK_OWNER (session still live), status=$WORK_STATUS
+Already held by: $WORK_OWNER (live, or not provably gone), status=$WORK_STATUS${HELD_TREE:+
+Held worktree: $HELD_TREE. Salvage its uncommitted and unpushed work before this bead moves.}
 This session: $GC_SESSION_NAME
 Duplicate workflow: ${ROOT_BEAD_ID:-unknown}, parked at step $STEP_BEAD_ID (status=blocked). No workspace was touched.
 Resolve by cancelling the duplicate run (POST /runs/${ROOT_BEAD_ID:-<root>}/cancel via the API or dashboard).
@@ -134,6 +190,19 @@ acknowledgement hands every in_progress claim the session holds back to the
 pool, where a fresh session would run this step again. Park first — the
 `|| exit 1` above refuses to go on otherwise — then leave through the claim
 loop.
+
+The assignee is one owner signal and the work's tree is the other. A session
+running this workflow leaves the work bead unassigned for its whole run, so
+only its tree shows that it holds the work: the worktree `metadata.work_dir`
+records, which `workspace-setup` adopts, and the worktree with
+`metadata.branch` checked out. A tree outside your own directory (`$GC_DIR`) is
+held by the open session whose directory is that tree, or the directory it was
+created under (`<dir>/worktrees/<bead>`). A holder present in the session list
+parks this step the way a live assignee does. A holder absent from it is gone,
+and its tree is yours to adopt. A tree no session directory accounts for, a
+session list that cannot be read, and worktrees git cannot list park the step
+too. The escalation names the tree and counts its uncommitted paths, so the
+holder's work can be salvaged.
 
 Liveness is the gate, not staleness: an idle worker between claims is
 indistinguishable from an abandoned one, so only a session absent from
