@@ -98,6 +98,7 @@ esac
 `, tmpDir, runBody)
 
 	writeExecutable(t, filepath.Join(binDir, "go"), fakeGo)
+	writeOfflineBrew(t, binDir)
 
 	return &reapFixture{repoRoot: root, binDir: binDir, homeDir: homeDir, tmpDir: tmpDir}
 }
