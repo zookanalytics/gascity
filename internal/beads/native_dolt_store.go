@@ -1856,7 +1856,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	listed := nativeListedParentIDs(query)
+	listed := listedParentIDs(query)
 	if len(query.ParentIDs) > 0 && len(listed) == 0 {
 		return []Bead{}, nil
 	}
@@ -1914,8 +1914,8 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	return out, nil
 }
 
-// nativeListedParentIDs returns the distinct non-empty ids in query.ParentIDs.
-func nativeListedParentIDs(query ListQuery) []string {
+// listedParentIDs returns the distinct non-empty ids in query.ParentIDs.
+func listedParentIDs(query ListQuery) []string {
 	seen := make(map[string]bool, len(query.ParentIDs))
 	parents := make([]string, 0, len(query.ParentIDs))
 	for _, id := range query.ParentIDs {

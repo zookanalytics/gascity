@@ -2903,9 +2903,20 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 }
 
 // List returns beads matching the query via bd list and bd query.
+//
+// A query scoped to ParentIDs reads the parent-child edges that target the
+// parents, then only the children those edges name, by id; see listChildren.
+// ParentIDs is answered exactly. IDs reach bd list as an --id filter when bd
+// can carry them (bdListIDFilter).
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
+	}
+	if len(query.ParentIDs) > 0 {
+		return s.listChildren(query)
+	}
+	if namesNoBead(query.IDs) {
+		return []Bead{}, nil
 	}
 
 	found, err := s.listByTier(query)
@@ -2964,6 +2975,9 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
+	}
+	if ids, ok := bdListIDFilter(serverQuery.IDs); ok {
+		args = append(args, "--id="+ids)
 	}
 	if len(serverQuery.Metadata) > 0 {
 		keys := make([]string, 0, len(serverQuery.Metadata))
@@ -3030,9 +3044,9 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs bound the read to one row per id already. An id list that --id
+	// cannot carry (bdListIDFilter) is read unfiltered and matched in Go, where
+	// a bd-side limit would truncate before the matching IDs are fetched.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
@@ -3087,6 +3101,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
 	clauses, serverFilteredOnly = appendBdQueryMetadataClauses(clauses, serverFilteredOnly, serverQuery.Metadata)
+	// A bd query clause names one id, so IDs are matched in Go after the read,
+	// and a bd-side limit would cut the tier before that match.
+	if len(serverQuery.IDs) > 0 {
+		serverFilteredOnly = false
+	}
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {

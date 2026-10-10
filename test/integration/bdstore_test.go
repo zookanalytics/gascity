@@ -484,6 +484,155 @@ func TestBdStoreEphemeralMetadataClauseMatchesGoFilter(t *testing.T) {
 	}
 }
 
+// TestBdStoreParentIDsListReadsTheParentChildEdges proves the ParentIDs and IDs
+// pushdowns against a real bd and Dolt. A ParentIDs list sends one edge read
+// naming every parent and one read of the children by id, never a read of
+// every row, and answers exactly what bd's own one-parent filter answers for
+// each listed parent. An IDs list reaches bd list as --id.
+func TestBdStoreParentIDsListReadsTheParentChildEdges(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, filepath.Join(rootDir, "dolt"))
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitInitWorkspace(t, wsDir)
+	runBDInit(t, env, wsDir, "pq", serverPort)
+
+	runner := isolatedBdStoreCommandRunner(env)
+	var mu sync.Mutex
+	var sent []string
+	store := beads.NewBdStore(wsDir, func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			mu.Lock()
+			sent = append(sent, strings.Join(args, " "))
+			mu.Unlock()
+		}
+		return runner(dir, name, args...)
+	})
+
+	// Every bead here is a wisp, for the reason
+	// TestBdStoreEphemeralMetadataClauseMatchesGoFilter gives: an issues-table
+	// bead keeps the oldest supported bd from running this test.
+	create := func(title, parent string) string {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: title, Type: "task", Ephemeral: true, ParentID: parent})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+		return b.ID
+	}
+	one := create("parent one", "")
+	two := create("parent two", "")
+	unlisted := create("unlisted parent", "")
+	childOfOne := create("child of one", one)
+	childOfTwo := create("child of two", two)
+	grandchild := create("grandchild", childOfOne)
+	create("child of the unlisted parent", unlisted)
+	blocked := create("blocked by parent one", "")
+	if err := store.DepAdd(blocked, one, "blocks"); err != nil {
+		t.Fatalf("DepAdd(%s blocks on %s): %v", blocked, one, err)
+	}
+	if err := store.Close(childOfTwo); err != nil {
+		t.Fatalf("Close(%s): %v", childOfTwo, err)
+	}
+	missing := "pq-missing"
+
+	cases := []struct {
+		name          string
+		parents       []string
+		includeClosed bool
+		want          []string
+	}{
+		{name: "two parents", parents: []string{two, one}, includeClosed: true, want: []string{childOfOne, childOfTwo}},
+		{name: "open children only", parents: []string{one, two}, want: []string{childOfOne}},
+		{name: "lone parent", parents: []string{one}, includeClosed: true, want: []string{childOfOne}},
+		{name: "missing parent beside a real one", parents: []string{one, missing}, includeClosed: true, want: []string{childOfOne}},
+		{name: "lone missing parent", parents: []string{missing}, includeClosed: true},
+		{name: "children of a child", parents: []string{childOfOne}, includeClosed: true, want: []string{grandchild}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			sent = nil
+			mu.Unlock()
+			got, err := store.List(beads.ListQuery{
+				ParentIDs:     tc.parents,
+				IncludeClosed: tc.includeClosed,
+				AllowScan:     true,
+				TierMode:      beads.TierBoth,
+			})
+			if err != nil {
+				t.Fatalf("List(ParentIDs=%v): %v", tc.parents, err)
+			}
+			gotIDs := make([]string, 0, len(got))
+			for _, b := range got {
+				gotIDs = append(gotIDs, b.ID)
+			}
+			if !sameIDSet(gotIDs, tc.want) {
+				t.Fatalf("List(ParentIDs=%v) = %v, want %v", tc.parents, gotIDs, tc.want)
+			}
+			mu.Lock()
+			commands := append([]string(nil), sent...)
+			mu.Unlock()
+			if len(commands) == 0 || !strings.HasPrefix(commands[0], "dep list ") || !strings.Contains(commands[0], "--direction=up --type=parent-child") {
+				t.Fatalf("first bd command = %q, want the parent-child edge read; all: %q", commands, commands)
+			}
+			for _, c := range commands {
+				if strings.HasPrefix(c, "list ") && !strings.Contains(c, " --id=") {
+					t.Fatalf("bd list %q read without an id filter; all: %q", c, commands)
+				}
+			}
+
+			// Control: bd's own filter, asked about one parent at a time,
+			// answers the same beads.
+			var perParent []string
+			for _, parent := range tc.parents {
+				rows, err := store.List(beads.ListQuery{ParentID: parent, IncludeClosed: tc.includeClosed, TierMode: beads.TierBoth})
+				if err != nil {
+					t.Fatalf("List(ParentID=%s): %v", parent, err)
+				}
+				for _, b := range rows {
+					perParent = append(perParent, b.ID)
+				}
+			}
+			if !sameIDSet(gotIDs, perParent) {
+				t.Fatalf("List(ParentIDs=%v) = %v, but bd's one-parent filter answers %v", tc.parents, gotIDs, perParent)
+			}
+		})
+	}
+
+	t.Run("ids", func(t *testing.T) {
+		mu.Lock()
+		sent = nil
+		mu.Unlock()
+		want := []string{childOfOne, grandchild}
+		got, err := store.List(beads.ListQuery{IDs: []string{grandchild, missing, childOfOne}, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List(IDs): %v", err)
+		}
+		gotIDs := make([]string, 0, len(got))
+		for _, b := range got {
+			gotIDs = append(gotIDs, b.ID)
+		}
+		if !sameIDSet(gotIDs, want) {
+			t.Fatalf("List(IDs) = %v, want %v", gotIDs, want)
+		}
+		ids := []string{childOfOne, grandchild, missing}
+		slices.Sort(ids)
+		wantFlag := "--id=" + strings.Join(ids, ",")
+		mu.Lock()
+		commands := append([]string(nil), sent...)
+		mu.Unlock()
+		if !slices.ContainsFunc(commands, func(c string) bool { return strings.HasPrefix(c, "list ") && strings.Contains(c, wantFlag) }) {
+			t.Fatalf("bd commands = %q, want a bd list carrying %s", commands, wantFlag)
+		}
+	})
+}
+
 // sameIDSet reports whether got and want hold the same ids, in any order.
 func sameIDSet(got, want []string) bool {
 	got = slices.Sorted(slices.Values(got))

@@ -3485,15 +3485,16 @@ func TestBdStoreListPushesCallerLimitForIssuesTierDefaultSort(t *testing.T) {
 	}
 }
 
-// TestBdStoreListForcesUnboundedForIDs pins that ListQuery.IDs — a Go-side-
-// only residual filter bd list has no flag for — still forces --limit 0 so a
-// bd-side limit can never truncate before the ID match runs.
+// TestBdStoreListForcesUnboundedForIDs pins that ListQuery.IDs, sent to bd list
+// as --id, still forces --limit 0. The ids bound the read already, and an id
+// list --id cannot carry is matched in Go, where a bd-side limit would
+// truncate before the ID match runs.
 func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 	runner := fakeRunner(map[string]struct {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0 --id=bd-b`: {
 			out: []byte(`[
 				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
