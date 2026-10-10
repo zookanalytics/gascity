@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -882,5 +885,234 @@ func TestProjectControlDispatcherRoutesMatchesLegacyDeferredRows(t *testing.T) {
 	}
 	if rows[0].Metadata[beadmeta.RoutedToMetadataKey] != cityRoute {
 		t.Error("the projection edited its input rows")
+	}
+}
+
+// closedNamedIndexBuilds counts the index builds a closedNamedIndexCache asks
+// for, and fails them while err is set.
+type closedNamedIndexBuilds struct {
+	n   int
+	err error
+}
+
+func (b *closedNamedIndexBuilds) build(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
+	b.n++
+	if b.err != nil {
+		return session.ClosedNamedSessionBeadIndex{}, b.err
+	}
+	return session.BuildClosedNamedSessionBeadIndex(store)
+}
+
+// openNamedSnapshot is a cleanly loaded open-session snapshot holding one open
+// named session per id.
+func openNamedSnapshot(ids ...string) *sessionBeadSnapshot {
+	infos := make([]session.Info, 0, len(ids))
+	for _, id := range ids {
+		infos = append(infos, session.Info{ID: id, ConfiguredNamedIdentity: "identity-" + id})
+	}
+	return newSessionBeadSnapshotFromInfos(infos)
+}
+
+// Kills: a cached closed named-session index kept past a named session's
+// close, past its maximum age, or across a store change; and an index rebuilt
+// on a pass where nothing it answers can have changed.
+func TestClosedNamedIndexCacheBuildsOnlyWhenTheIndexCanHaveChanged(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-closed", "mayor")}, nil)
+	otherStore := beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-closed", "mayor")}, nil)
+	now := time.Date(2026, 10, 9, 17, 5, 0, 0, time.UTC)
+	cache := newClosedNamedIndexCache()
+	cache.now = func() time.Time { return now }
+	var builds closedNamedIndexBuilds
+
+	for _, step := range []struct {
+		name        string
+		advance     time.Duration
+		store       beads.Store
+		open        []string
+		closeKeeper bool // close a bead for the "keeper" identity before the pass
+		wantBuilds  int
+		wantKeeper  bool
+	}{
+		{name: "the first pass builds", store: store, open: []string{"gc-witness"}, wantBuilds: 1},
+		{name: "an unchanged open set reuses the index", advance: time.Minute, store: store, open: []string{"gc-witness"}, wantBuilds: 1},
+		{name: "a named session opening reuses the index", advance: time.Minute, store: store, open: []string{"gc-witness", "gc-keeper"}, wantBuilds: 1},
+		{name: "a named session leaving the open set rebuilds", advance: time.Minute, store: store, open: []string{"gc-witness"}, closeKeeper: true, wantBuilds: 2, wantKeeper: true},
+		{name: "the rebuilt index is reused", advance: time.Minute, store: store, open: []string{"gc-witness"}, wantBuilds: 2, wantKeeper: true},
+		{name: "an index past its maximum age rebuilds", advance: closedNamedIndexMaxAge, store: store, open: []string{"gc-witness"}, wantBuilds: 3, wantKeeper: true},
+		{name: "another store rebuilds", store: otherStore, open: []string{"gc-witness"}, wantBuilds: 4},
+	} {
+		now = now.Add(step.advance)
+		if step.closeKeeper {
+			keeper, err := store.Create(closedNamedSessionBead("gc-keeper", "keeper"))
+			if err != nil {
+				t.Fatalf("%s: creating the keeper bead: %v", step.name, err)
+			}
+			if err := store.Close(keeper.ID); err != nil {
+				t.Fatalf("%s: closing the keeper bead: %v", step.name, err)
+			}
+		}
+		idx, err := cache.get(step.store, openNamedSnapshot(step.open...), builds.build)
+		if err != nil {
+			t.Fatalf("%s: get: %v", step.name, err)
+		}
+		if builds.n != step.wantBuilds {
+			t.Fatalf("%s: index builds = %d, want %d", step.name, builds.n, step.wantBuilds)
+		}
+		if _, ok := idx.Find("mayor"); !ok {
+			t.Errorf("%s: index lost the closed mayor bead", step.name)
+		}
+		if _, ok := idx.Find("keeper"); ok != step.wantKeeper {
+			t.Errorf("%s: index finds the closed keeper bead = %t, want %t", step.name, ok, step.wantKeeper)
+		}
+	}
+}
+
+// Kills: a cache that keeps an index built under a degraded or absent
+// open-session snapshot, or keeps a failed build, either of which would hide
+// a named session's close until the maximum age.
+func TestClosedNamedIndexCacheKeepsOnlyCompleteBuilds(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{closedNamedSessionBead("gc-closed", "mayor")}, nil)
+	cache := newClosedNamedIndexCache()
+	var builds closedNamedIndexBuilds
+	get := func(snap *sessionBeadSnapshot) error {
+		_, err := cache.get(store, snap, builds.build)
+		return err
+	}
+
+	degraded := newSessionBeadSnapshotWithError(errors.New("session snapshot load failed"))
+	for _, snap := range []*sessionBeadSnapshot{degraded, degraded, nil, nil} {
+		if err := get(snap); err != nil {
+			t.Fatalf("get: %v", err)
+		}
+	}
+	if builds.n != 4 {
+		t.Fatalf("index builds under degraded or absent snapshots = %d, want one per pass (4)", builds.n)
+	}
+
+	errIndexDown := errors.New("closed index down")
+	builds.err = errIndexDown
+	for range 2 {
+		if err := get(openNamedSnapshot("gc-witness")); !errors.Is(err, errIndexDown) {
+			t.Fatalf("get with the build failing = %v, want %v", err, errIndexDown)
+		}
+	}
+	if builds.n != 6 {
+		t.Fatalf("index builds while the build fails = %d, want one per pass (6)", builds.n)
+	}
+
+	builds.err = nil
+	for range 2 {
+		if err := get(openNamedSnapshot("gc-witness")); err != nil {
+			t.Fatalf("get after recovery: %v", err)
+		}
+	}
+	if builds.n != 7 {
+		t.Fatalf("index builds after recovery = %d, want one build then reuse (7)", builds.n)
+	}
+}
+
+// closedSessionHistoryStore counts the reads that list every session bead,
+// closed ones included.
+type closedSessionHistoryStore struct {
+	*beads.MemStore
+	mu    sync.Mutex
+	reads int
+}
+
+func (s *closedSessionHistoryStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed && q.Status == "" && len(q.Metadata) == 0 && (q.Type == session.BeadType || q.Label == session.LabelSession) {
+		s.mu.Lock()
+		s.reads++
+		s.mu.Unlock()
+	}
+	return s.MemStore.List(q)
+}
+
+func (s *closedSessionHistoryStore) historyReads() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
+// Kills: a controller demand pass that reads the city's whole session history
+// on every pass, and a cached index that loses the runtime-name demand a
+// closed on_demand named session's work depends on.
+func TestControllerDemandPassReadsClosedSessionHistoryOnceAcrossPasses(t *testing.T) {
+	const identity = "gascity/patrol"
+	runtimeName := config.NamedSessionRuntimeName("gc", config.Workspace{Name: "gc"}, identity)
+	if runtimeName == identity {
+		t.Fatalf("fixture runtime name %q equals the identity; the test could not tell the two forms apart", runtimeName)
+	}
+	setup := func(t *testing.T) (string, *config.City, *closedSessionHistoryStore, beads.Store) {
+		t.Helper()
+		cityPath := t.TempDir()
+		rigPath := filepath.Join(cityPath, "gascity")
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cityStore := &closedSessionHistoryStore{MemStore: beads.NewMemStore()}
+		rigStore := beads.NewMemStore()
+		if _, err := rigStore.Create(beads.Bead{
+			Title:    "patrol work claimed under the runtime session name",
+			Type:     "task",
+			Status:   "open",
+			Assignee: runtimeName,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: identity},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		phantom, err := cityStore.Create(beads.Bead{
+			Type:   session.BeadType,
+			Labels: []string{session.LabelSession},
+			Metadata: map[string]string{
+				"session_name":                       runtimeName,
+				session.NamedSessionMetadataKey:      "true",
+				session.NamedSessionIdentityMetadata: identity,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cityStore.Close(phantom.ID); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.City{
+			Workspace:     config.Workspace{Name: "gc"},
+			Rigs:          []config.Rig{{Name: "gascity", Path: rigPath}},
+			Agents:        []config.Agent{{Name: "patrol", Dir: "gascity", StartCommand: "true", WorkQuery: "printf ''"}},
+			NamedSessions: []config.NamedSession{{Template: "patrol", Dir: "gascity", Mode: "on_demand"}},
+		}
+		return cityPath, cfg, cityStore, rigStore
+	}
+	pass := func(t *testing.T, cityPath string, cfg *config.City, cityStore *closedSessionHistoryStore, rigStore beads.Store, closedNamed *closedNamedIndexCache) {
+		t.Helper()
+		result := buildDesiredStateWithClosedNamedIndexAt(
+			"gc", cityPath, time.Now().UTC(), time.Now().UTC(), cfg, runtime.NewFake(),
+			cityStore, map[string]beads.Store{"gascity": rigStore}, newSessionBeadSnapshotFromInfos(nil), nil, io.Discard,
+			closedNamed,
+		)
+		if !result.NamedSessionDemand[identity] {
+			t.Fatalf("on_demand named session %q has ready work under its runtime name %q and a closed phantom bead, but got no demand (NamedSessionDemand=%v)", identity, runtimeName, result.NamedSessionDemand)
+		}
+	}
+
+	cityPath, cfg, cityStore, rigStore := setup(t)
+	pass(t, cityPath, cfg, cityStore, rigStore, nil)
+	perPass := cityStore.historyReads()
+	if perPass == 0 {
+		t.Fatal("an uncached demand pass read no closed session history; the fixture no longer exercises the closed named-session index")
+	}
+	pass(t, cityPath, cfg, cityStore, rigStore, nil)
+	if got := cityStore.historyReads(); got != 2*perPass {
+		t.Fatalf("closed session history reads over two uncached passes = %d, want %d", got, 2*perPass)
+	}
+
+	cityPath, cfg, cityStore, rigStore = setup(t)
+	closedNamed := newClosedNamedIndexCache()
+	for range 3 {
+		pass(t, cityPath, cfg, cityStore, rigStore, closedNamed)
+	}
+	if got := cityStore.historyReads(); got != perPass {
+		t.Fatalf("closed session history reads over three passes sharing one cache = %d, want one pass's worth (%d)", got, perPass)
 	}
 }

@@ -111,6 +111,103 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(store)
 }
 
+// closedNamedIndexMaxAge bounds how long a controller reuses one closed
+// named-session index. A named session that leaves the open set rebuilds the
+// index on the next pass; this bound covers the changes the open set cannot
+// show, such as another process rewriting a closed bead's reopen eligibility.
+const closedNamedIndexMaxAge = 10 * time.Minute
+
+// closedNamedIndexCache carries a controller's closed named-session index from
+// one demand pass to the next.
+//
+// Building the index reads every session bead, closed ones included, so its
+// cost grows with the city's session history. Its answer changes only when a
+// named session closes, when a closed one is reopened or rewritten, or when the
+// session store is replaced. A named session that closes leaves the open set of
+// the snapshot the pass already holds. The cache therefore builds again when a
+// named session it saw open has left that set, when the store changes, when the
+// snapshot is degraded or absent, or when the index is older than maxAge.
+// Otherwise it answers from the last complete build. A failed build is returned
+// to its pass unchanged and is not kept.
+type closedNamedIndexCache struct {
+	maxAge time.Duration
+	now    func() time.Time
+
+	mu        sync.Mutex
+	built     bool
+	store     beads.Store
+	builtAt   time.Time
+	idx       session.ClosedNamedSessionBeadIndex
+	openNamed map[string]struct{}
+}
+
+// newClosedNamedIndexCache returns an empty cache bounded by
+// closedNamedIndexMaxAge.
+func newClosedNamedIndexCache() *closedNamedIndexCache {
+	return &closedNamedIndexCache{maxAge: closedNamedIndexMaxAge, now: time.Now}
+}
+
+// get returns store's closed named-session index for a pass whose open session
+// snapshot is snap, calling build only when the cached index cannot stand for
+// this pass.
+func (c *closedNamedIndexCache) get(store beads.Store, snap *sessionBeadSnapshot, build func(beads.Store) (session.ClosedNamedSessionBeadIndex, error)) (session.ClosedNamedSessionBeadIndex, error) {
+	openNamed, complete := openNamedSessionIDs(snap)
+	key := demandLabelKey(store)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if complete && c.built && c.store == key && now.Sub(c.builtAt) < c.maxAge && containsEveryID(openNamed, c.openNamed) {
+		c.openNamed = openNamed
+		return c.idx, nil
+	}
+	idx, err := build(store)
+	c.built = complete && err == nil
+	if c.built {
+		c.store, c.builtAt, c.idx, c.openNamed = key, now, idx, openNamed
+	}
+	return idx, err
+}
+
+// openNamedSessionIDs returns the IDs of snap's open sessions that carry a
+// configured named identity, and whether snap loaded completely: a degraded or
+// absent snapshot cannot show which named sessions closed.
+func openNamedSessionIDs(snap *sessionBeadSnapshot) (map[string]struct{}, bool) {
+	if snap == nil || snap.LoadError() != nil {
+		return nil, false
+	}
+	ids := make(map[string]struct{})
+	for _, info := range snap.OpenInfos() {
+		if info.Closed || session.NamedSessionIdentityInfo(info) == "" {
+			continue
+		}
+		ids[info.ID] = struct{}{}
+	}
+	return ids, true
+}
+
+// containsEveryID reports whether have holds every ID in want.
+func containsEveryID(have, want map[string]struct{}) bool {
+	for id := range want {
+		if _, ok := have[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// closedNamedCachedReads is the legacy demand reads with the closed
+// named-session index answered by a controller's closedNamedIndexCache for the
+// pass whose open session snapshot is snap.
+type closedNamedCachedReads struct {
+	legacyDemandReads
+	cache *closedNamedIndexCache
+	snap  *sessionBeadSnapshot
+}
+
+func (r closedNamedCachedReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
+	return r.cache.get(store, r.snap, r.legacyDemandReads.ClosedNamedIndex)
+}
+
 // demandLegCache classifies a demand leg: its CachingStore, behind the
 // bead-policy front door, and whether the leg is exact (the cache's backing
 // declares beads.CachedReadExact). A leg with no CachingStore is not exact.
