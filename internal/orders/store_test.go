@@ -14,10 +14,9 @@ func recordingOrdersStore() (*Store, *beadstest.RecordingStore) {
 	return NewStore(beads.OrdersStore{Store: rec}), rec
 }
 
-// TestCreateRunByteIdenticalToDispatcher proves CreateRun emits exactly the
-// Create the dispatcher's normal pre-dispatch path emits:
-// Title "order:<scoped>", Labels {order-run:<scoped>, order-tracking},
-// NoHistory true.
+// TestCreateRunByteIdenticalToDispatcher proves CreateRun without a run timeout
+// emits Title "order:<scoped>", Labels {order-run:<scoped>, order-tracking},
+// NoHistory true, and no metadata.
 func TestCreateRunByteIdenticalToDispatcher(t *testing.T) {
 	st, rec := recordingOrdersStore()
 
@@ -43,6 +42,59 @@ func TestCreateRunByteIdenticalToDispatcher(t *testing.T) {
 	wantLabels := []string{"order-run:rig/agent", "order-tracking"}
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("labels = %v, want %v", got.Labels, wantLabels)
+	}
+	if len(got.Metadata) != 0 {
+		t.Errorf("metadata = %v, want none", got.Metadata)
+	}
+}
+
+// TestCreateRunRecordsRunTimeout proves a run timeout passed to CreateRun is
+// written to the tracking bead and read back by the stale sweep's read, so the
+// sweep sees the timeout the run was launched with.
+func TestCreateRunRecordsRunTimeout(t *testing.T) {
+	st, rec := recordingOrdersStore()
+
+	run, err := st.CreateRun("rig/agent", RunOpts{Timeout: 5 * time.Minute})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	if run.Timeout != 5*time.Minute {
+		t.Errorf("created run Timeout = %s, want 5m0s", run.Timeout)
+	}
+	if got := rec.CallsForOp("Create")[0].Bead.Metadata["order_run_timeout"]; got != "5m0s" {
+		t.Errorf("created metadata order_run_timeout = %q, want 5m0s", got)
+	}
+
+	stale, err := st.StaleOpenRuns(run.CreatedAt)
+	if err != nil {
+		t.Fatalf("StaleOpenRuns: %v", err)
+	}
+	if len(stale) != 1 || stale[0].ID != run.ID {
+		t.Fatalf("StaleOpenRuns = %+v, want only %s", stale, run.ID)
+	}
+	if stale[0].Timeout != 5*time.Minute {
+		t.Errorf("stored run Timeout = %s, want 5m0s", stale[0].Timeout)
+	}
+}
+
+// TestRunFromTrackingBeadReadsUnusableRunTimeoutAsNone proves a recorded run
+// timeout that is not a positive duration decodes as no timeout, the same as a
+// bead that records none.
+func TestRunFromTrackingBeadReadsUnusableRunTimeoutAsNone(t *testing.T) {
+	for _, value := range []string{"", "soon", "300", "0s", "-5m"} {
+		b := beads.Bead{
+			ID:       "gc-42",
+			Status:   "open",
+			Labels:   []string{"order-tracking", "order-run:rig/agent"},
+			Metadata: map[string]string{"order_run_timeout": value},
+		}
+		run, ok := RunFromTrackingBead(b)
+		if !ok {
+			t.Fatalf("RunFromTrackingBead(order_run_timeout=%q) ok = false, want true", value)
+		}
+		if run.Timeout != 0 {
+			t.Errorf("RunFromTrackingBead(order_run_timeout=%q) Timeout = %s, want 0", value, run.Timeout)
+		}
 	}
 }
 
