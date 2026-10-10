@@ -3,14 +3,18 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -329,6 +333,162 @@ func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	if !found {
 		t.Fatalf("sent bead %s not in BdStore List(TierWisps) under a shared-server HOME; got %d beads total", sent.ID, len(results))
 	}
+}
+
+// TestBdStoreEphemeralMetadataClauseMatchesGoFilter proves the ephemeral
+// leg's metadata pushdown against a real bd and Dolt. For each value shape
+// BdStore sends as a metadata.<key> clause, bd's own answer to the clause holds
+// exactly the wisps the Go-side filter keeps, and a TierBoth list returns them.
+func TestBdStoreEphemeralMetadataClauseMatchesGoFilter(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, filepath.Join(rootDir, "dolt"))
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitInitWorkspace(t, wsDir)
+	runBDInit(t, env, wsDir, "mq", serverPort)
+
+	runner := isolatedBdStoreCommandRunner(env)
+	var mu sync.Mutex
+	var sent []string
+	store := beads.NewBdStore(wsDir, func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" && len(args) > 2 && args[0] == "query" {
+			mu.Lock()
+			sent = append(sent, args[2])
+			mu.Unlock()
+		}
+		return runner(dir, name, args...)
+	})
+
+	// Every bead here is a wisp. Once a workspace holds an issues-table bead,
+	// bd 1.0.4 auto-imports issues.jsonl on its next command and BdStore
+	// refuses that as a silent fallback, so a non-ephemeral bead would keep
+	// this row from running against the oldest supported bd.
+	create := func(title string, metadata map[string]string) string {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: title, Type: "task", Ephemeral: true, Metadata: metadata})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+		return b.ID
+	}
+	routed := create("routed", map[string]string{
+		"gc.routed_to": "gascity/gc-toolkit.polecat",
+		"note":         `say "hi" \ bye`,
+		"body":         "line one\n\tline two",
+	})
+	other := create("other route", map[string]string{"gc.routed_to": "gascity/other"})
+	create("upper-case route", map[string]string{"gc.routed_to": "Gascity/GC-toolkit.polecat"})
+	create("trailing-space route", map[string]string{"gc.routed_to": "gascity/gc-toolkit.polecat "})
+	readString := create("read as a string", map[string]string{"mail.read": "true"})
+	// bd update --set-metadata stores true and false as JSON booleans, where
+	// Create's --metadata stores the string "true".
+	for id, read := range map[string]string{routed: "true", other: "false"} {
+		if err := store.SetMetadata(id, "mail.read", read); err != nil {
+			t.Fatalf("SetMetadata(%s, mail.read=%s): %v", id, read, err)
+		}
+	}
+
+	cases := []struct {
+		name     string
+		metadata map[string]string
+		clause   string
+		want     []string
+	}{
+		{
+			name:     "value with a slash",
+			metadata: map[string]string{"gc.routed_to": "gascity/gc-toolkit.polecat"},
+			clause:   `metadata.gc.routed_to="gascity/gc-toolkit.polecat"`,
+			want:     []string{routed},
+		},
+		{
+			name:     "quote and backslash",
+			metadata: map[string]string{"note": `say "hi" \ bye`},
+			clause:   `metadata.note="say \"hi\" \\ bye"`,
+			want:     []string{routed},
+		},
+		{
+			name:     "newline and tab",
+			metadata: map[string]string{"body": "line one\n\tline two"},
+			clause:   "metadata.body=\"line one\n\tline two\"",
+			want:     []string{routed},
+		},
+		{
+			name:     "true stored as a boolean and as a string",
+			metadata: map[string]string{"mail.read": "true"},
+			clause:   `metadata.mail.read="true"`,
+			want:     []string{routed, readString},
+		},
+		{
+			name:     "false stored as a boolean",
+			metadata: map[string]string{"mail.read": "false"},
+			clause:   `metadata.mail.read="false"`,
+			want:     []string{other},
+		},
+		{
+			name:     "no wisp matches",
+			metadata: map[string]string{"gc.routed_to": "gascity/none"},
+			clause:   `metadata.gc.routed_to="gascity/none"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			sent = nil
+			mu.Unlock()
+			got, err := store.List(beads.ListQuery{Metadata: tc.metadata, TierMode: beads.TierBoth})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			gotIDs := make([]string, 0, len(got))
+			for _, b := range got {
+				gotIDs = append(gotIDs, b.ID)
+			}
+			if !sameIDSet(gotIDs, tc.want) {
+				t.Fatalf("List(TierBoth, %v) = %v, want %v", tc.metadata, gotIDs, tc.want)
+			}
+
+			mu.Lock()
+			queries := append([]string(nil), sent...)
+			mu.Unlock()
+			wantExpr := "ephemeral=true AND " + tc.clause
+			if len(queries) != 1 || queries[0] != wantExpr {
+				t.Fatalf("bd query expressions = %q, want [%q]", queries, wantExpr)
+			}
+			out, err := runner(wsDir, "bd", "query", "--json", wantExpr, "--limit", "0")
+			if err != nil {
+				t.Fatalf("bd query %q: %v\n%s", wantExpr, err, out)
+			}
+			start := bytes.IndexByte(out, '[')
+			if start < 0 {
+				t.Fatalf("bd query %q printed no JSON array:\n%s", wantExpr, out)
+			}
+			var rows []struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(out[start:], &rows); err != nil {
+				t.Fatalf("parsing bd query %q output: %v\n%s", wantExpr, err, out)
+			}
+			bdIDs := make([]string, 0, len(rows))
+			for _, row := range rows {
+				bdIDs = append(bdIDs, row.ID)
+			}
+			if !sameIDSet(bdIDs, tc.want) {
+				t.Fatalf("bd query %q = %v, want exactly %v", wantExpr, bdIDs, tc.want)
+			}
+		})
+	}
+}
+
+// sameIDSet reports whether got and want hold the same ids, in any order.
+func sameIDSet(got, want []string) bool {
+	got = slices.Sorted(slices.Values(got))
+	want = slices.Sorted(slices.Values(want))
+	return slices.Equal(got, want)
 }
 
 func configureCustomTypes(t *testing.T, env []string, wsDir string, customTypes []string) {
