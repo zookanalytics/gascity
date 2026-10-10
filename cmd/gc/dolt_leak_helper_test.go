@@ -1,15 +1,19 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/doltorphan"
 )
 
 // testReporter is the subset of *testing.T methods that
@@ -741,7 +745,7 @@ func TestDoltLeakGuardedTestingMFinalSnapshotRunsBeforeRegistryReap(t *testing.T
 		}
 		return []DoltProcInfo{leaked}, nil
 	}
-	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g := newDoltLeakGuardedTestingM(nil, tempRoot, hostTempRoots{})
 
 	code := g.runWith(
 		func() int { return 0 },
@@ -770,7 +774,7 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 	// runs at test-suite startup, alongside the existing stale-process
 	// sweep, before the tests themselves run.
 	tempRoot := filepath.Join(t.TempDir(), "gct-current")
-	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g := newDoltLeakGuardedTestingM(nil, tempRoot, hostTempRoots{})
 
 	var order []string
 	code := g.runWith(
@@ -795,6 +799,72 @@ func TestDoltLeakGuardedTestingMRunWithSweepsOrphanDirsAtStartup(t *testing.T) {
 	}
 	if len(order) < 3 || order[0] != "sweepStale" || order[1] != "sweepOrphanDirs" || order[2] != "runTests" {
 		t.Fatalf("call order = %v, want [sweepStale sweepOrphanDirs runTests ...]", order)
+	}
+}
+
+// TestMain points TMPDIR and GOTMPDIR at a fresh per-run root before the guard
+// runs. A prior run's orphaned Dolt store dirs sit under the host temp root the
+// binary inherited, and nothing under a root created moments ago is old enough
+// to clear the sweep's age gate, so the startup sweep must read the host root.
+func TestDoltLeakGuardOrphanStoreDirSweepReadsHostTempRoot(t *testing.T) {
+	hostRoot := t.TempDir()
+	perRunRoot := t.TempDir()
+	hostStore := agedDoltStoreDir(t, hostRoot, "orphaned-store")
+	perRunStore := agedDoltStoreDir(t, perRunRoot, "per-run-store")
+	t.Setenv("TMPDIR", perRunRoot)
+	t.Setenv("GOTMPDIR", perRunRoot)
+
+	g := newDoltLeakGuardedTestingM(nil, perRunRoot, hostTempRoots{tmp: hostRoot})
+	g.orphanSweepLsof = func(context.Context) ([]byte, error) { return nil, nil }
+	g.sweepOrphanDoltStoreDirs()
+
+	if _, err := os.Stat(hostStore); !os.IsNotExist(err) {
+		t.Errorf("orphaned store dir under the host temp root survived the startup sweep: stat %s: %v", hostStore, err)
+	}
+	if _, err := os.Stat(perRunStore); err != nil {
+		t.Errorf("startup sweep read the per-run root instead of the host temp root: stat %s: %v", perRunStore, err)
+	}
+}
+
+// agedDoltStoreDir creates root/name holding a .dolt marker, dated past the
+// orphan store-dir sweep's minimum age, and returns its path.
+func agedDoltStoreDir(t *testing.T, root, name string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Join(dir, ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * doltorphan.DefaultMinAge)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// The startup stale sweep protects Dolt servers under other live runs' test
+// roots, which sit under the host temp roots the binary inherited. TestMain
+// points TMPDIR and GOTMPDIR at the per-run root before the guard runs, so
+// active-root discovery must be handed the host roots, not read them from the
+// environment.
+func TestCmdGCTestActiveRootsDiscoversUnderHostTempRoots(t *testing.T) {
+	perRunRoot := t.TempDir()
+	t.Setenv("TMPDIR", perRunRoot)
+	t.Setenv("GOTMPDIR", perRunRoot)
+	host := hostTempRoots{tmp: "/host/tmp", goTmp: "/host/tmp/session-work"}
+	liveRoot := "/host/tmp/session-work/TestLive1234"
+
+	var gotTempDir, gotGoTmpDir string
+	discover := func(_, tempDir, goTmpDir string) []string {
+		gotTempDir, gotGoTmpDir = tempDir, goTmpDir
+		return []string{liveRoot}
+	}
+	roots := cmdGCTestActiveRoots(discover, host, perRunRoot)
+
+	if gotTempDir != host.tmp || gotGoTmpDir != host.goTmp {
+		t.Errorf("active-root discovery searched tempDir %q and goTmpDir %q, want the host roots %q and %q (the per-run root is %q)", gotTempDir, gotGoTmpDir, host.tmp, host.goTmp, perRunRoot)
+	}
+	if want := []string{liveRoot, perRunRoot}; !slices.Equal(roots, want) {
+		t.Errorf("cmdGCTestActiveRoots = %q, want %q", roots, want)
 	}
 }
 
@@ -827,7 +897,7 @@ func TestDoltLeakGuardedTestingMToleratesLeakClearingWithinGraceWindow(t *testin
 		}
 		return nil, nil // cleared by the next poll, well within the grace window
 	}
-	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g := newDoltLeakGuardedTestingM(nil, tempRoot, hostTempRoots{})
 
 	var reapedLeaks []DoltProcInfo
 	code := g.runWith(
@@ -857,7 +927,7 @@ func TestDoltLeakGuardedTestingMToleratesLeakClearingWithinGraceWindow(t *testin
 // ga-7r2h5i found this let a real enumeration failure fall through and get
 // reported as a clean run.
 func TestDoltLeakGuardedTestingMWaitForFinalScanToClearReturnsEnumerationError(t *testing.T) {
-	g := newDoltLeakGuardedTestingM(nil, t.TempDir())
+	g := newDoltLeakGuardedTestingM(nil, t.TempDir(), hostTempRoots{})
 	scanErr := errors.New("reading /proc: permission denied")
 	enumerate := func() ([]DoltProcInfo, error) { return nil, scanErr }
 
@@ -886,7 +956,7 @@ func TestDoltLeakGuardedTestingMRunWithFailsOnFinalScanError(t *testing.T) {
 		}
 		return nil, scanErr // every final-scan poll fails
 	}
-	g := newDoltLeakGuardedTestingM(nil, tempRoot)
+	g := newDoltLeakGuardedTestingM(nil, tempRoot, hostTempRoots{})
 
 	var reapedLeaks []DoltProcInfo
 	code := g.runWith(
