@@ -114,10 +114,10 @@ recovered from what was kept.
   builds to the index as well. It builds without a trace, so its index builds
   are not among the ones the trace counted.
   The cache answers from the last complete build until one of these happens: a
-  bead event carries a closed named-session bead, the event feed reports a gap,
-  a named session the cache saw open leaves the reader's open-session snapshot,
-  the store changes, the snapshot is degraded or absent, or the index is ten
-  minutes old. The controller's bead event feed carries its own writes and the
+  bead event carries a closed named-session bead the index can find (a close as
+  failed-create is not one), the event feed reports a gap, a named session the
+  cache saw open leaves the reader's open-session snapshot, the store changes,
+  the snapshot is degraded or absent, or the index is ten minutes old. The controller's bead event feed carries its own writes and the
   closes other gc processes announce, so it reports a named session that opened
   and closed between two passes, which no snapshot shows. One build runs at a
   time, outside the cache's lock, so an event never waits on a store read. A

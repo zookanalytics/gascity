@@ -1250,10 +1250,14 @@ func TestClosedNamedIndexCacheRebuildsWhenTheEventFeedCarriesANamedSessionClose(
 
 	openNamed := closedNamedSessionBead("gc-witness", "witness")
 	openNamed.Status = "open"
+	failedCreate := closedNamedSessionBead("gc-failed", "keeper")
+	failedCreate.Metadata["state"] = string(session.StateFailedCreate)
 	for _, evt := range []events.Event{
 		beadEventFor(t, events.BeadClosed, beads.Bead{ID: "gc-pool", Type: sessionBeadType, Status: "closed", Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "worker-1", "template": "worker"}}),
 		beadEventFor(t, events.BeadClosed, beads.Bead{ID: "gc-task", Type: "task", Status: "closed"}),
 		beadEventFor(t, events.BeadUpdated, openNamed),
+		// A failed-create rollback's close adds nothing the index finds.
+		beadEventFor(t, events.BeadClosed, failedCreate),
 		{Type: events.BeadClosed, Subject: "gc-garbled", Payload: json.RawMessage(`{"metadata":{"` + session.NamedSessionIdentityMetadata + `":`)},
 	} {
 		cs.applyBeadEventToStores(evt)

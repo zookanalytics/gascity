@@ -211,24 +211,23 @@ func (c *closedNamedIndexCache) get(store beads.Store, snap *sessionBeadSnapshot
 	return idx, err
 }
 
-// noteBeadEvent drops the cached index when evt carries a closed named-session
-// bead: a named session closed, or a closed one was rewritten. The controller's
-// bead event feed carries the closes this controller makes and the ones other
-// gc processes announce, so a named session that opened and closed between two
-// snapshots, which no snapshot can show, still rebuilds the index. An event for
-// any other bead, or one whose payload does not decode, changes nothing. A nil
-// cache ignores the event.
+// noteBeadEvent drops the cached index when evt carries a bead the index can
+// find (session.ClosedNamedSessionBeadIndexed): a named session closed, or a
+// closed one was rewritten so that it counts. The controller's bead event feed
+// carries the closes this controller makes and the ones other gc processes
+// announce, so a named session that opened and closed between two snapshots,
+// which no snapshot can show, still rebuilds the index. An event for any other
+// bead, a close as failed-create included, or one whose payload does not
+// decode, changes nothing. A nil cache ignores the event.
 func (c *closedNamedIndexCache) noteBeadEvent(evt events.Event) {
 	// Most events are for beads that carry no named identity; skip decoding
 	// their payloads.
 	if c == nil || !bytes.Contains(evt.Payload, []byte(session.NamedSessionIdentityMetadata)) {
 		return
 	}
-	b, ok := beads.DecodeBeadEventPayload(evt.Payload)
-	if !ok || b.Status != "closed" || session.NamedSessionIdentity(b) == "" {
-		return
+	if b, ok := beads.DecodeBeadEventPayload(evt.Payload); ok && session.ClosedNamedSessionBeadIndexed(b) {
+		c.invalidate()
 	}
-	c.invalidate()
 }
 
 // noteEventGap drops the cached index: the bead event feed may have lost a
