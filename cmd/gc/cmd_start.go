@@ -37,10 +37,14 @@ func startupSessionName(cityName, agentName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, agentName, sessionTemplate)
 }
 
+// standaloneBuildAgentsFnWithSessionBeads returns the standalone controller's
+// BuildFnWithSessionBeads. closedNamed carries the closed named-session index
+// from one build to the next; nil reads it afresh on every build.
 func standaloneBuildAgentsFnWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
 	stderr io.Writer,
+	closedNamed *closedNamedIndexCache,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	return func(
 		c *config.City,
@@ -50,7 +54,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeadsAt(
+		return buildDesiredStateWithClosedNamedIndexAt(
 			cityName,
 			cityPath,
 			beaconTime,
@@ -62,6 +66,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 			sessionBeads,
 			trace,
 			stderr,
+			closedNamed,
 		)
 	}
 }
@@ -977,7 +982,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
+	// One closed named-session index cache serves the controller: its builds
+	// here and, through runController, the runtime's other readers.
+	closedNamed := newClosedNamedIndexCache()
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr, closedNamed)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
@@ -1006,7 +1014,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, closedNamed, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, defaultConfigDebounce, recorder, eventProv, stdout, stderr)
 	}
 

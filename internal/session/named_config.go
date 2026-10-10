@@ -1213,6 +1213,15 @@ func BuildClosedNamedSessionBeadIndex(store beads.Store) (ClosedNamedSessionBead
 	return ClosedNamedSessionBeadIndex{byIdentity: winners}, err
 }
 
+// ClosedNamedSessionBeadIndexed reports whether b, as it stands, is a bead
+// BuildClosedNamedSessionBeadIndex can index: closed, carrying a configured
+// named identity, and eligible to be reopened. A write that leaves a bead in
+// this shape can change what the index finds for its identity. Any other
+// write, such as a close as failed-create, cannot make the index find a bead.
+func ClosedNamedSessionBeadIndexed(b beads.Bead) bool {
+	return b.Status == "closed" && NamedSessionIdentity(b) != "" && closedNamedSessionReopenEligible(b)
+}
+
 // Find returns the indexed closed bead for identity, matching
 // FindClosedNamedSessionBeadForSessionName(store, identity, "")'s result
 // against the same store snapshot the index was built from.

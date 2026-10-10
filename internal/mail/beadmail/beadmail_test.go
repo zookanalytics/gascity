@@ -2834,6 +2834,192 @@ func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
 	}
 }
 
+// failingSessionListStore counts the closed-inclusive session enumerations it
+// is asked for, by their type leg, and fails them while failing is set.
+// inFlight, when set, runs inside each counted enumeration before it answers:
+// a test advances its clock there to stand for a slow store. Metadata-keyed
+// address lookups pass through, so a recipient that matches no current address
+// still reaches the alias-history enumeration.
+type failingSessionListStore struct {
+	*beads.MemStore
+	mu       sync.Mutex
+	failing  bool
+	attempts int
+	inFlight func()
+}
+
+var errSessionListDown = errors.New("session list down")
+
+func (s *failingSessionListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == session.BeadType && query.IncludeClosed && len(query.Metadata) == 0 {
+		s.mu.Lock()
+		s.attempts++
+		failing, inFlight := s.failing, s.inFlight
+		s.mu.Unlock()
+		if inFlight != nil {
+			inFlight()
+		}
+		if failing {
+			return nil, errSessionListDown
+		}
+	}
+	return s.MemStore.List(query)
+}
+
+func (s *failingSessionListStore) setFailing(failing bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failing = failing
+}
+
+func (s *failingSessionListStore) setInFlight(inFlight func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inFlight = inFlight
+}
+
+func (s *failingSessionListStore) attemptCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.attempts
+}
+
+func TestProviderCached_SessionEnumerationRunsOncePerRefreshIntervalEvenWhenItFails(t *testing.T) {
+	store := &failingSessionListStore{MemStore: beads.NewMemStore(), failing: true}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 10, 9, 17, 5, 0, 0, time.UTC))
+	if _, err := p.Send("human", "worker-a", "", "for old route"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	// While the store cannot enumerate, every lookup that falls through to the
+	// alias history degrades to the literal route, and only the first one asks.
+	for _, recipient := range []string{"old-route", "nobody", "old-route"} {
+		msgs, err := p.Inbox(recipient)
+		if err != nil {
+			t.Fatalf("Inbox(%q) with the enumeration failing: %v", recipient, err)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("Inbox(%q) with the enumeration failing = %d messages, want 0", recipient, len(msgs))
+		}
+	}
+	if got := store.attemptCount(); got != 1 {
+		t.Fatalf("session enumerations within one refresh interval = %d, want 1: a failed enumeration must be held, not retried per lookup", got)
+	}
+
+	// Once the interval passes the next lookup enumerates again, and the success
+	// is held for the following lookups, unknown recipients included.
+	store.setFailing(false)
+	advance(2 * time.Minute)
+	msgs, err := p.Inbox("old-route")
+	if err != nil {
+		t.Fatalf("Inbox(old-route) after recovery: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Body != "for old route" {
+		t.Fatalf("Inbox(old-route) after recovery = %#v, want the mail routed through the alias history", msgs)
+	}
+	for _, recipient := range []string{"nobody", "nobody", "old-route"} {
+		if _, err := p.Inbox(recipient); err != nil {
+			t.Fatalf("Inbox(%q): %v", recipient, err)
+		}
+	}
+	if got := store.attemptCount(); got != 2 {
+		t.Fatalf("session enumerations = %d, want 2: one failed attempt, then one success reused for the rest of its interval", got)
+	}
+}
+
+// Kills: a failed refresh that drops the last enumeration that succeeded. One
+// timeout or partial read would otherwise turn off alias-history routing for a
+// whole refresh interval. The failure is still held for that interval, so the
+// store is not asked again by every lookup.
+func TestProviderCached_FailedRefreshKeepsRoutingThroughTheLastEnumeration(t *testing.T) {
+	store := &failingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 10, 10, 20, 0, 0, 0, time.UTC))
+	if _, err := p.Send("human", "worker-a", "", "for old route"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	lookup := func(when string, wantAttempts int) {
+		t.Helper()
+		msgs, err := p.Inbox("old-route")
+		if err != nil {
+			t.Fatalf("Inbox(old-route) %s: %v", when, err)
+		}
+		if len(msgs) != 1 || msgs[0].Body != "for old route" {
+			t.Fatalf("Inbox(old-route) %s = %#v, want the mail routed through the alias history", when, msgs)
+		}
+		if got := store.attemptCount(); got != wantAttempts {
+			t.Fatalf("session enumerations %s = %d, want %d", when, got, wantAttempts)
+		}
+	}
+
+	lookup("with the store answering", 1)
+	store.setFailing(true)
+	advance(2 * time.Minute)
+	lookup("on the refresh that fails", 2)
+	lookup("within the interval after the failed refresh", 2)
+	advance(2 * time.Minute)
+	lookup("on the next failed refresh", 3)
+	store.setFailing(false)
+	advance(2 * time.Minute)
+	lookup("after the store recovers", 4)
+}
+
+// Kills: a held enumeration timed from when it began. A store slow enough to
+// spend most of the refresh interval answering leaves the result, failure or
+// success, expired or nearly so as soon as it is stored, and the next lookup
+// starts another full enumeration.
+func TestProviderCached_SessionEnumerationIsHeldFromWhenItReturns(t *testing.T) {
+	store := &failingSessionListStore{MemStore: beads.NewMemStore(), failing: true}
+	p := NewCached(store)
+	// The refresh interval is a minute, and each enumeration takes 50 seconds
+	// to answer.
+	advance := setCachedProviderClock(t, p, time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC))
+	store.setInFlight(func() { advance(50 * time.Second) })
+	lookup := func(when string, want int) {
+		t.Helper()
+		if _, err := p.Inbox("old-route"); err != nil {
+			t.Fatalf("Inbox(old-route) %s: %v", when, err)
+		}
+		if got := store.attemptCount(); got != want {
+			t.Fatalf("session enumerations %s = %d, want %d", when, got, want)
+		}
+	}
+
+	lookup("after the first lookup", 1)
+	advance(30 * time.Second)
+	lookup("30s after a failed enumeration returned, 80s after it began", 1)
+	advance(30 * time.Second)
+	store.setFailing(false)
+	lookup("one refresh interval after the failure returned", 2)
+	advance(30 * time.Second)
+	lookup("30s after a successful enumeration returned, 80s after it began", 2)
+	advance(30 * time.Second)
+	lookup("one refresh interval after the success returned", 3)
+}
+
 // --- Address contention fixtures ---
 //
 // Six fixtures in which two sessions contend for one address. They are the
