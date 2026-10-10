@@ -3268,7 +3268,7 @@ func isBdQueryMetadataKey(key string) bool {
 
 // isBdQueryMetadataValue reports whether bd's metadata equality, an SQL
 // comparison against JSON_UNQUOTE of the stored value, matches value on the
-// same rows matchesMetadata does. That leaves out three kinds of value:
+// same rows matchesMetadata does. It reports false for:
 //   - The empty value. matchesMetadata matches a missing key with it, and SQL
 //     equality never does.
 //   - A value with a NUL or a non-ASCII byte. A NUL cannot be passed in an
