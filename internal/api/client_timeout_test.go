@@ -7,7 +7,7 @@ import (
 
 // TestDefaultClientTimeoutAccommodatesFederatedReads guards the ceiling that
 // governs the control-plane read paths. ListBeads/GetBead/GetStatus/
-// ListMailInbox pass context.Background(), so the HTTP client's overall timeout
+// MailInboxSummary pass context.Background(), so the HTTP client's overall timeout
 // is their only deadline. Those endpoints federate the city store plus every
 // rig store, and a dolt-backed rig store can take several seconds; a too-tight
 // ceiling false-times-out healthy-but-slow federated reads. 10s was too tight

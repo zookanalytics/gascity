@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1172,11 +1171,14 @@ func TestClientListConvoys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConvoys: %v", err)
 	}
-	if len(got.Body) != 1 {
-		t.Fatalf("items = %d, want 1", len(got.Body))
+	if len(got.Body.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Body.Items))
 	}
-	if got.Body[0].ID != "gc-1" || got.Body[0].Title != "deploy" || got.Body[0].Type != "convoy" {
-		t.Errorf("got[0] = %+v", got.Body[0])
+	if got.Body.Items[0].ID != "gc-1" || got.Body.Items[0].Title != "deploy" || got.Body.Items[0].Type != "convoy" {
+		t.Errorf("got[0] = %+v", got.Body.Items[0])
+	}
+	if got.Body.Partial || len(got.Body.PartialErrors) != 0 {
+		t.Errorf("partial = %v %q, want a complete read", got.Body.Partial, got.Body.PartialErrors)
 	}
 	if got.AgeSeconds != 1.25 {
 		t.Errorf("AgeSeconds = %v, want 1.25", got.AgeSeconds)
@@ -1216,105 +1218,6 @@ func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
 	}
 	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
-	}
-}
-
-// TestClientListConvoysFollowsNextCursor proves ListConvoys walks every keyset
-// page. One request returns only the server's first page, 100 rows by default,
-// so the walk is what lists a city with more open convoys than that in full.
-func TestClientListConvoysFollowsNextCursor(t *testing.T) {
-	var cursors []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/city/alpha/convoys" {
-			t.Errorf("path = %q, want /v0/city/alpha/convoys", r.URL.Path)
-		}
-		// Every page asks for the 1000-row server cap so the walk makes as few
-		// round trips as the server allows.
-		if got, want := r.URL.Query().Get("limit"), "1000"; got != want {
-			t.Errorf("limit query = %q, want %q", got, want)
-		}
-		cursor := r.URL.Query().Get("cursor")
-		cursors = append(cursors, cursor)
-		w.Header().Set("Content-Type", "application/json")
-		switch cursor {
-		case "":
-			w.Header().Set("X-GC-Cache-Age-S", "1.25")
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items": []map[string]any{
-					{"id": "gc-2", "title": "release", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T11:00:00Z"},
-				},
-				"total":       2,
-				"next_cursor": "page2",
-			})
-		case "page2":
-			// A different age on the later page proves the merged read reports
-			// the first page's age.
-			w.Header().Set("X-GC-Cache-Age-S", "9.9")
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items": []map[string]any{
-					{"id": "gc-1", "title": "deploy", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
-				},
-				"total": 2,
-			})
-		default:
-			// End the walk with an empty last page so an over-walk fails here
-			// instead of hanging.
-			t.Errorf("unexpected page request, cursor = %q", cursor)
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 2}) //nolint:errcheck
-		}
-	}))
-	defer ts.Close()
-
-	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListConvoys()
-	if err != nil {
-		t.Fatalf("ListConvoys: %v", err)
-	}
-	if len(got.Body) != 2 || got.Body[0].ID != "gc-2" || got.Body[1].ID != "gc-1" {
-		t.Fatalf("convoys = %+v, want gc-2 then gc-1 (both pages, in server order)", got.Body)
-	}
-	if got.AgeSeconds != 1.25 {
-		t.Errorf("AgeSeconds = %v, want 1.25 (first page's age)", got.AgeSeconds)
-	}
-	if want := []string{"", "page2"}; !slices.Equal(cursors, want) {
-		t.Errorf("requested cursors = %q, want %q", cursors, want)
-	}
-}
-
-// TestClientListConvoysLaterPageErrorFailsTheList proves a failure on a later
-// page fails the whole read instead of returning the pages already fetched. A
-// short list would read as the complete set; the error keeps the caller's
-// fallback reachable.
-func TestClientListConvoysLaterPageErrorFailsTheList(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("cursor") == "" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items": []map[string]any{
-					{"id": "gc-2", "title": "release", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T11:00:00Z"},
-				},
-				"total":       2,
-				"next_cursor": "page2",
-			})
-			return
-		}
-		w.Header().Set("Content-Type", "application/problem+json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"title":  "Service Unavailable",
-			"status": http.StatusServiceUnavailable,
-			"detail": "cache_not_live: supervisor cache is priming",
-		})
-	}))
-	defer ts.Close()
-
-	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListConvoys()
-	if err == nil {
-		t.Fatalf("ListConvoys = %d convoys and no error, want the second page's error", len(got.Body))
-	}
-	if !ShouldFallback(nil, err) {
-		t.Errorf("ShouldFallback = false for a cache-not-live later page: %v", err)
 	}
 }
 
@@ -1407,7 +1310,10 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox(t *testing.T) {
+// TestClientMailInboxSummary proves the summary is one single-row request
+// whose list metadata, not its rows, carries the answer: total counts the
+// whole inbox and the partial-read state names the failed provider.
+func TestClientMailInboxSummary(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/mail" {
@@ -1428,15 +1334,12 @@ func TestClientListMailInbox(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListMailInbox("mayor", "")
+	got, err := c.MailInboxSummary("mayor", "")
 	if err != nil {
-		t.Fatalf("ListMailInbox: %v", err)
-	}
-	if len(got.Body.Items) != 1 || got.Body.Items[0].ID != "msg-1" || got.Body.Items[0].From != "alice" {
-		t.Errorf("got.Body = %+v", got.Body)
+		t.Fatalf("MailInboxSummary: %v", err)
 	}
 	if got.Body.Total != 1 || !got.Body.Partial {
-		t.Errorf("list metadata = total:%d partial:%v, want total:1 partial:true", got.Body.Total, got.Body.Partial)
+		t.Errorf("summary = total:%d partial:%v, want total:1 partial:true", got.Body.Total, got.Body.Partial)
 	}
 	if len(got.Body.PartialErrors) != 1 || !strings.Contains(got.Body.PartialErrors[0], "store_slow:") {
 		t.Errorf("PartialErrors = %v, want store_slow entry", got.Body.PartialErrors)
@@ -1444,12 +1347,12 @@ func TestClientListMailInbox(t *testing.T) {
 	if got.AgeSeconds != 2 {
 		t.Errorf("AgeSeconds = %v, want 2", got.AgeSeconds)
 	}
-	if !strings.Contains(gotQuery, "agent=mayor") {
-		t.Errorf("query = %q, missing agent=mayor", gotQuery)
+	if q, err := url.ParseQuery(gotQuery); err != nil || q.Get("agent") != "mayor" || q.Get("limit") != "1" {
+		t.Errorf("query = %q, want agent=mayor and limit=1", gotQuery)
 	}
 }
 
-func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
+func TestClientMailInboxSummary_CacheNotLiveFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1462,7 +1365,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1471,7 +1374,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
+func TestClientMailInboxSummary_StoreSlowDoesNotFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1484,7 +1387,7 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1499,102 +1402,17 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
+func TestClientMailInboxSummary_ConnErrorFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}
 	if !ShouldFallback(nil, err) {
 		t.Errorf("ShouldFallback = false for conn error: %v", err)
-	}
-}
-
-// TestClientListMailInboxFollowsNextCursor proves ListMailInbox walks every
-// keyset page and merges the page metadata. `gc mail check` reports the count
-// of the messages it gets back, so the walk is what makes that count right for
-// an inbox larger than one server page.
-func TestClientListMailInboxFollowsNextCursor(t *testing.T) {
-	const slowOps = "mail provider ops: store_slow: mail read timed out after 8s"
-	const failedDocs = "mail provider docs: read failed"
-	var cursors []string
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v0/city/alpha/mail" {
-			t.Errorf("path = %q, want /v0/city/alpha/mail", r.URL.Path)
-		}
-		// Every page carries the caller's recipient and the 1000-row cap.
-		q := r.URL.Query()
-		if q.Get("agent") != "worker" || q.Get("limit") != "1000" {
-			t.Errorf("query = %q, want agent=worker and limit=1000 on every page", r.URL.RawQuery)
-		}
-		cursor := q.Get("cursor")
-		cursors = append(cursors, cursor)
-		message := func(id, createdAt string) map[string]any {
-			return map[string]any{"id": id, "from": "alice", "to": "worker", "subject": id, "body": "b", "created_at": createdAt, "read": false}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch cursor {
-		case "":
-			w.Header().Set("X-GC-Cache-Age-S", "2")
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items":       []map[string]any{message("msg-3", "2026-04-23T12:00:00Z")},
-				"total":       3,
-				"next_cursor": "page2",
-			})
-		case "page2":
-			w.Header().Set("X-GC-Cache-Age-S", "7")
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items":          []map[string]any{message("msg-2", "2026-04-23T11:00:00Z")},
-				"total":          3,
-				"next_cursor":    "page3",
-				"partial":        true,
-				"partial_errors": []string{slowOps},
-			})
-		case "page3":
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"items":          []map[string]any{message("msg-1", "2026-04-23T10:00:00Z")},
-				"total":          3,
-				"partial":        true,
-				"partial_errors": []string{slowOps, failedDocs},
-			})
-		default:
-			t.Errorf("unexpected page request, cursor = %q", cursor)
-			json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{}, "total": 3}) //nolint:errcheck
-		}
-	}))
-	defer ts.Close()
-
-	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListMailInbox("worker", "")
-	if err != nil {
-		t.Fatalf("ListMailInbox: %v", err)
-	}
-	var ids []string
-	for _, m := range got.Body.Items {
-		ids = append(ids, m.ID)
-	}
-	if want := []string{"msg-3", "msg-2", "msg-1"}; !slices.Equal(ids, want) {
-		t.Fatalf("message ids = %q, want %q (every page, in server order)", ids, want)
-	}
-	if got.Body.Total != 3 {
-		t.Errorf("Total = %d, want 3", got.Body.Total)
-	}
-	// One degraded page makes the merged read partial, and a provider that
-	// failed on every later page is reported once.
-	if !got.Body.Partial {
-		t.Error("Partial = false, want true when any page was partial")
-	}
-	if want := []string{slowOps, failedDocs}; !slices.Equal(got.Body.PartialErrors, want) {
-		t.Errorf("PartialErrors = %q, want %q", got.Body.PartialErrors, want)
-	}
-	if got.AgeSeconds != 2 {
-		t.Errorf("AgeSeconds = %v, want 2 (first page's age)", got.AgeSeconds)
-	}
-	if want := []string{"", "page2", "page3"}; !slices.Equal(cursors, want) {
-		t.Errorf("requested cursors = %q, want %q", cursors, want)
 	}
 }
 
