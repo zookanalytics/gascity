@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -613,19 +614,25 @@ const defaultConfigDebounce = 200 * time.Millisecond
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
 type configWatchRegistrar struct {
-	watcher        *fsnotify.Watcher
-	stderr         io.Writer
-	mu             sync.Mutex
-	recursiveRoots map[string]struct{}
+	watcher *fsnotify.Watcher
+	stderr  io.Writer
+	mu      sync.Mutex
+	// recursiveRoots maps each recursively watched root, normalized, to the
+	// spellings an event path under it can start with (watchPathSpellings).
+	recursiveRoots map[string][]string
 	discoveryRoots map[string]struct{}
+	// shallowTargets holds the spellings of the non-recursive targets: config
+	// source directories and directly watched files.
+	shallowTargets map[string]struct{}
 }
 
 func newConfigWatchRegistrar(watcher *fsnotify.Watcher, stderr io.Writer) *configWatchRegistrar {
 	return &configWatchRegistrar{
 		watcher:        watcher,
 		stderr:         stderr,
-		recursiveRoots: make(map[string]struct{}),
+		recursiveRoots: make(map[string][]string),
 		discoveryRoots: make(map[string]struct{}),
+		shallowTargets: make(map[string]struct{}),
 	}
 }
 
@@ -674,7 +681,7 @@ func (r *configWatchRegistrar) addPath(root string, recursive bool, done <-chan 
 		if samePath(path, root) {
 			return nil
 		}
-		if path != root && shouldIgnoreConfigWatchEvent(path) {
+		if path != root && (shouldIgnoreConfigWatchEvent(path) || r.revisionSkips(path)) {
 			return filepath.SkipDir
 		}
 		r.addOne(path, done)
@@ -703,10 +710,38 @@ func (r *configWatchRegistrar) addOne(path string, done <-chan struct{}) bool {
 	return true
 }
 
-func (r *configWatchRegistrar) markRecursiveRoot(root string) {
+// markTarget records how target takes part in watching before addPath
+// registers it. A discovery root admits convention subtrees created later, a
+// recursive root carries its revision hash's skip rule (revisionSkips), and a
+// shallow target delivers every event for itself and its direct entries.
+func (r *configWatchRegistrar) markTarget(target config.WatchTarget) {
+	if target.DiscoverConventions {
+		r.markDiscoveryRoot(target.Path)
+	}
+	if target.Recursive {
+		r.markRecursiveRoot(target.Path)
+		return
+	}
+	spellings := watchPathSpellings(target.Path)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recursiveRoots[normalizePathForCompare(root)] = struct{}{}
+	for _, spelling := range spellings {
+		r.shallowTargets[spelling] = struct{}{}
+	}
+}
+
+func (r *configWatchRegistrar) markRecursiveRoot(root string) {
+	key := normalizePathForCompare(root)
+	spellings := watchPathSpellings(root)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known := r.recursiveRoots[key]
+	for _, spelling := range spellings {
+		if !slices.Contains(known, spelling) {
+			known = append(known, spelling)
+		}
+	}
+	r.recursiveRoots[key] = known
 }
 
 func (r *configWatchRegistrar) unmarkRecursiveRoot(root string) {
@@ -732,6 +767,52 @@ func (r *configWatchRegistrar) watchesRecursively(path string) bool {
 	return false
 }
 
+// revisionSkips reports whether path lies under a recursive root and every
+// recursive root it lies under leaves it out of that root's content hash
+// (config.IsIgnoredPackRuntimePath, relative to the root). The recursive
+// roots are the directories the config revision hashes, so a write there
+// cannot change the revision: the walk does not watch it and the event loop
+// drops it. A path under no recursive root, or spelled so that no root
+// matches it, is not skipped.
+func (r *configWatchRegistrar) revisionSkips(path string) bool {
+	clean := filepath.Clean(path)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	skipped := false
+	for _, spellings := range r.recursiveRoots {
+		for _, root := range spellings {
+			rel, err := filepath.Rel(root, clean)
+			if err != nil || pathutil.IsOutsideDir(rel) {
+				continue
+			}
+			if !config.IsIgnoredPackRuntimePath(rel) {
+				return false
+			}
+			skipped = true
+		}
+	}
+	return skipped
+}
+
+// ignoresEvent reports whether an event at path is dropped instead of
+// marking config dirty: runtime state under .gc or .beads, or a path the
+// revision skips. A shallow target and its direct entries are always
+// delivered, because a config source file can sit in a directory that a
+// recursive root skips.
+func (r *configWatchRegistrar) ignoresEvent(path string) bool {
+	if shouldIgnoreConfigWatchEvent(path) {
+		return true
+	}
+	clean := filepath.Clean(path)
+	r.mu.Lock()
+	_, shallow := r.shallowTargets[clean]
+	if !shallow {
+		_, shallow = r.shallowTargets[filepath.Dir(clean)]
+	}
+	r.mu.Unlock()
+	return !shallow && r.revisionSkips(clean)
+}
+
 func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 	parent := filepath.Dir(path)
 	base := filepath.Base(filepath.Clean(path))
@@ -750,6 +831,18 @@ func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 
 func pathIsWithin(root, path string) bool {
 	return pathutil.PathWithin(root, path)
+}
+
+// watchPathSpellings returns the spellings an event path at or under path can
+// start with: path as registered, under which fsnotify names its direct
+// entries, and its symlink-resolved form, under which the recursive walk
+// registers nested directories.
+func watchPathSpellings(path string) []string {
+	spellings := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != spellings[0] {
+		spellings = append(spellings, resolved)
+	}
+	return spellings
 }
 
 func isConventionDiscoveryDirName(base string) bool {
@@ -805,14 +898,11 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 	// fsnotify is non-recursive. Watch config source directories shallowly,
 	// but recurse through pack and convention roots where config-bearing
 	// files live below pre-existing subdirectories. Regression guard:
-	// gastownhall/gascity#780.
+	// gastownhall/gascity#780. A recursive root watches only what the
+	// revision hashes, so a pack root that is a git checkout leaves its .git
+	// unwatched (revisionSkips).
 	for _, target := range targets {
-		if target.DiscoverConventions {
-			registrar.markDiscoveryRoot(target.Path)
-		}
-		if target.Recursive {
-			registrar.markRecursiveRoot(target.Path)
-		}
+		registrar.markTarget(target)
 		if ok := registrar.addPath(target.Path, target.Recursive, done); !ok && target.Recursive {
 			registrar.unmarkRecursiveRoot(target.Path)
 		}
@@ -831,7 +921,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				if !ok {
 					return
 				}
-				if shouldIgnoreConfigWatchEvent(event.Name) {
+				if registrar.ignoresEvent(event.Name) {
 					continue
 				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
