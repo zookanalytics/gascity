@@ -815,6 +815,10 @@ func orderedOpenWorkflowSubtree(store beads.MoleculeTarget, rootID string, exclu
 
 // CloseSpecSidecarsForRoot closes open generated spec sidecars owned by the
 // workflow root. It is safe to call after the root has already been closed.
+//
+// The sidecar lookup excludes closed beads: a closed sidecar needs no close,
+// and a Dolt-backed store answers a metadata filter that includes closed beads
+// by reading the metadata of every row, closed history included.
 func CloseSpecSidecarsForRoot(store beads.MoleculeTarget, rootID, reason string) (int, error) {
 	if store.Absent() {
 		return 0, fmt.Errorf("bead store unavailable")
@@ -829,7 +833,6 @@ func CloseSpecSidecarsForRoot(store beads.MoleculeTarget, rootID, reason string)
 	}
 
 	matched, err := beads.LiveFor(store).List(beads.ListQuery{
-		IncludeClosed: true,
 		Metadata: map[string]string{
 			beadmeta.RootBeadIDMetadataKey: rootID,
 		},
