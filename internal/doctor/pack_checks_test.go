@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -385,10 +386,12 @@ func TestPackScriptCheckKillsScriptIgnoringTerm(t *testing.T) {
 }
 
 // blockedScript is a pack check whose script is blocked on a foreground
-// command standing in for a store read. The command records a call in calls
-// every tenth of a second and writes nothing to the check's output.
+// command standing in for a store read. The command holds the alive FIFO open
+// for writing, and every process it starts inherits it, so a read of alive
+// reaches EOF only once all of them have exited. The command writes nothing
+// to the check's output.
 type blockedScript struct {
-	calls   string
+	exited  chan error
 	results chan *CheckResult
 }
 
@@ -398,20 +401,33 @@ func startBlockedScript(t *testing.T, prologue string, done <-chan struct{}) *bl
 	t.Helper()
 	dir := t.TempDir()
 	started := filepath.Join(dir, "started")
-	if err := syscall.Mkfifo(started, 0o600); err != nil {
-		t.Fatal(err)
+	alive := filepath.Join(dir, "alive")
+	for _, fifo := range []string{started, alive} {
+		if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	b := &blockedScript{calls: filepath.Join(dir, "calls"), results: make(chan *CheckResult, 1)}
+	b := &blockedScript{exited: make(chan error, 1), results: make(chan *CheckResult, 1)}
 	// The loop is bounded so a regression cannot leave it running long past
-	// the test.
+	// the test. It outlasts every limit waitStopped is given, so a command that
+	// was not stopped is still running when waitStopped gives up on it.
 	command := filepath.Join(dir, "command.sh")
-	commandBody := "#!/bin/sh\necho started > '" + started + "'\ni=0\nwhile [ $i -lt 100 ]; do echo call >> '" + b.calls + "'; sleep 0.1; i=$((i+1)); done\n"
+	commandBody := "#!/bin/sh\nexec 3> '" + alive + "'\necho started > '" + started + "'\ni=0\nwhile [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n"
 	if err := os.WriteFile(command, []byte(commandBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	script := writeCheckScript(t, dir, "#!/bin/sh\n"+prologue+"'"+command+"'\necho finished\n")
 	c := &PackScriptCheck{CheckName: "topo:blocked", Script: script, PackDir: dir, PackName: "topo"}
 
+	// Opening alive for reading waits until the command opens it for writing.
+	go func() {
+		f, err := os.Open(alive)
+		if err == nil {
+			_, err = io.Copy(io.Discard, f)
+			_ = f.Close()
+		}
+		b.exited <- err
+	}()
 	go func() { b.results <- c.Run(&CheckContext{CityPath: dir, Done: done}) }()
 	running := make(chan error, 1)
 	go func() {
@@ -429,30 +445,25 @@ func startBlockedScript(t *testing.T, prologue string, done <-chan struct{}) *bl
 	return b
 }
 
-// waitStopped fails unless Run returns within limit and the command records
-// no call in the second after it does.
+// waitStopped fails unless, within limit, Run returns and the command the
+// script was blocked on has exited along with every process it started.
 func (b *blockedScript) waitStopped(t *testing.T, limit time.Duration) {
 	t.Helper()
+	deadline := time.After(limit)
 	select {
 	case result := <-b.results:
 		if result.Message == "finished" {
 			t.Fatalf("result = %+v, want the script stopped before it finished", result)
 		}
-	case <-time.After(limit):
+	case <-deadline:
 		t.Fatalf("Run still waiting on the abandoned check's script after %s", limit)
 	}
-	before := countLines(t, b.calls)
-	time.Sleep(time.Second)
-	if after := countLines(t, b.calls); after != before {
-		t.Fatalf("the command the script was blocked on made %d calls in the second after Run returned; want none", after-before)
+	select {
+	case err := <-b.exited:
+		if err != nil {
+			t.Fatalf("watching the command the script was blocked on: %v", err)
+		}
+	case <-deadline:
+		t.Fatalf("the command the script was blocked on is still running %s after the check was abandoned", limit)
 	}
-}
-
-func countLines(t *testing.T, path string) int {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return bytes.Count(data, []byte("\n"))
 }
