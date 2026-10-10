@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 )
+
+// packScriptCancelGrace is how long an abandoned check's script has to exit
+// after SIGTERM before it is killed.
+const packScriptCancelGrace = 5 * time.Second
 
 // PackScriptCheck implements Check by running a script shipped with
 // a pack. The script follows the pack doctor protocol:
@@ -20,6 +26,11 @@ import (
 //
 //	GC_CITY_PATH    — absolute path to the city root
 //	GC_PACK_DIR — absolute path to the pack directory
+//
+// A check script still running when the doctor runner abandons its check at
+// the per-check timeout is sent SIGTERM, and killed if it is still running
+// packScriptCancelGrace later, so it issues no further calls. A fix script is
+// never stopped this way.
 //
 // When FixScript is non-empty, the check also supports `gc doctor --fix`:
 // the fix script is dispatched with the same environment contract as
@@ -93,7 +104,11 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
+	runCtx, cancel := ctx.runContext()
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, c.Script) //nolint:gosec // script path from pack config
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = packScriptCancelGrace
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
 	cmd.Env = append(cmd.Env,

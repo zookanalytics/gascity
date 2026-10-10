@@ -103,7 +103,7 @@ func holdRouteWant(holdValue string, aliases map[string][]string) string {
 	return holdValue
 }
 
-func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+func (c *holdLabelRoutedToCheck) collect(ctx *doctor.CheckContext) (targets []holdRouteTarget, skipped []string) {
 	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
@@ -116,6 +116,10 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 	}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+			continue
+		}
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
 			continue
 		}
 		store, err := c.newStore(sc.path)
@@ -156,8 +160,8 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 	return targets, skipped
 }
 
-func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no hold:<value> labels are missing a matching gc.routed_to")
 	}
@@ -179,8 +183,8 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		details)
 }
 
-func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Fix(ctx *doctor.CheckContext) error {
+	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)

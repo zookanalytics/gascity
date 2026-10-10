@@ -3,7 +3,11 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"context"
+	"errors"
+	"io"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -61,6 +65,48 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// Done, when non-nil, is closed once the runner abandons this Run at the
+	// per-check timeout. Nothing reads an abandoned check's result, so a check
+	// that issues many store or subprocess calls should stop issuing new ones
+	// once it closes (see Canceled). Nil for unbounded runs. The runner never
+	// sets it for Fix, so it does not interrupt an abandoned fix mid-mutation.
+	Done <-chan struct{}
+}
+
+// ErrCheckAbandoned is what a check reports for the work it skipped because
+// the runner abandoned it (see Canceled).
+var ErrCheckAbandoned = errors.New("check abandoned at its timeout")
+
+// Canceled reports whether the runner has abandoned the check execution this
+// context belongs to. A nil context, or one without Done, is never canceled.
+func (c *CheckContext) Canceled() bool {
+	if c == nil || c.Done == nil {
+		return false
+	}
+	select {
+	case <-c.Done:
+		return true
+	default:
+		return false
+	}
+}
+
+// runContext returns a context that is canceled once the runner abandons the
+// check (see Done), for the subprocesses a check starts. The caller calls
+// cancel when the context is no longer needed.
+func (c *CheckContext) runContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if c == nil || c.Done == nil {
+		return ctx, cancel
+	}
+	go func() {
+		select {
+		case <-c.Done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 // Renderer is implemented by checks that produce additional, optional

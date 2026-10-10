@@ -803,3 +803,24 @@ func (s *residueClaimedOnGetSpyStore) SetMetadataBatch(id string, kvs map[string
 	s.writes++
 	return s.Store.SetMetadataBatch(id, kvs)
 }
+
+// TestExecutorIdentityResidueCheckStopsOnceAbandoned: abandoned while it builds
+// the session-identity index, the check scans no scope for residue. It scans
+// each of the three scopes once the index is built.
+func TestExecutorIdentityResidueCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	indexReads := full.reads.Load() - 3
+	if full.opens.Load() != 3 || indexReads < 1 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want the index reads plus one scan per scope", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if got := probe.reads.Load(); got != indexReads {
+		t.Fatalf("abandoned run made %d reads, want only the %d that build the index", got, indexReads)
+	}
+}

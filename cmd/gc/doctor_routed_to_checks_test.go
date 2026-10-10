@@ -365,3 +365,29 @@ func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.queries = append(s.queries, query)
 	return s.Store.List(query)
 }
+
+// TestV2RoutedToNamespaceCheckStopsOnceAbandoned: abandoned while its first
+// route query is in flight, the check queries no other route and opens no
+// other scope. It queries each bound short-form route in each scope.
+func TestV2RoutedToNamespaceCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "gastown"},
+			{Name: "polecat", Dir: "repo", BindingName: "gastown"},
+		},
+		Rigs: doctorAbandonTestRigs(t),
+	}
+
+	full := newDoctorAbandonProbe()
+	newV2RoutedToNamespaceCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() != 6 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want two route queries in each of three scopes", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newV2RoutedToNamespaceCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.opens.Load() != 1 || probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes, want only the first route query", probe.reads.Load(), probe.opens.Load())
+	}
+}

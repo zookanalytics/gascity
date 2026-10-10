@@ -533,3 +533,40 @@ type censusGetErrorStore struct {
 func (s censusGetErrorStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
 }
+
+// TestCensusOwnerLivenessCheckStopsOnceAbandoned: abandoned while its first
+// owner_bead lookup is in flight, the check looks up no other owner_bead.
+func TestCensusOwnerLivenessCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	writeCensusLedger(t, cityDir, `
+version = 1
+
+[[audit_baseline]]
+scope = "all"
+resource = "subprocess"
+owner_bead = "ga-owner-1"
+
+[[debt]]
+scope = "untagged"
+resource = "subprocess"
+owner_bead = "ga-owner-2"
+
+[[small_debt]]
+scope = "untagged"
+resource = "fixed_sleep"
+owner_bead = "ga-owner-3"
+`)
+	owners := []beads.Bead{{ID: "ga-owner-1"}, {ID: "ga-owner-2"}, {ID: "ga-owner-3"}}
+
+	full := newDoctorAbandonProbe()
+	newCensusOwnerLivenessCheck(nil, cityDir, full.newStore(beads.NewMemStoreFrom(0, owners, nil))).Run(&doctor.CheckContext{})
+	if full.reads.Load() != 3 {
+		t.Fatalf("unabandoned run made %d reads, want one lookup per owner_bead", full.reads.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newCensusOwnerLivenessCheck(nil, cityDir, probe.newStore(beads.NewMemStoreFrom(0, owners, nil))).Run(probe.ctx())
+	if probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads, want only the first owner_bead lookup", probe.reads.Load())
+	}
+}

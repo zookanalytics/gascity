@@ -1081,3 +1081,113 @@ func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
 }
 
 func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// callLoopCheck walks a series of blocking calls, the shape of a check that
+// reads one store per scope and pool template. Each call blocks until release
+// closes, after which a check that ignored cancellation would issue calls
+// without end. stopped closes when Run returns.
+type callLoopCheck struct {
+	release chan struct{}
+	stopped chan struct{}
+	issued  atomic.Int64
+}
+
+func (c *callLoopCheck) Name() string { return "call-loop" }
+func (c *callLoopCheck) Run(ctx *CheckContext) *CheckResult {
+	defer close(c.stopped)
+	for !ctx.Canceled() {
+		c.issued.Add(1)
+		<-c.release
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *callLoopCheck) CanFix() bool              { return false }
+func (c *callLoopCheck) Fix(_ *CheckContext) error { return nil }
+func (c *callLoopCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutStopsAbandonedCallLoop: a check still issuing calls when
+// the per-check timeout fires is abandoned without being waited on, and once
+// the call it had in flight returns it issues no more, so it stops loading the
+// store while the checks after it run.
+func TestRunCheckTimeoutStopsAbandonedCallLoop(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	loop := &callLoopCheck{release: make(chan struct{}), stopped: make(chan struct{})}
+	d.Register(loop)
+	d.Register(&mockCheck{name: "after", status: StatusOK, msg: "ran"})
+
+	reports := make(chan *Report, 1)
+	go func() { reports <- d.RunCollect(&CheckContext{}, false) }()
+	var report *Report
+	select {
+	case report = <-reports:
+	case <-time.After(5 * time.Second):
+		close(loop.release)
+		t.Fatal("run did not return at the timeout; it waited on the check's in-flight call")
+	}
+	if len(report.Results) != 2 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want the call loop timed out", report.Results)
+	}
+	if got := report.Results[1]; got.Name != "after" || got.Status != StatusOK {
+		t.Fatalf("after result = %+v, want the next check to have run", got)
+	}
+
+	// The check is still inside the call it had in flight at the timeout, or
+	// never started one. Release that call and every later one.
+	close(loop.release)
+	select {
+	case <-loop.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("abandoned check still issuing calls 5s after its in-flight call returned (%d issued)", loop.issued.Load())
+	}
+	if got := loop.issued.Load(); got > 1 {
+		t.Fatalf("abandoned check issued %d calls, want at most the one in flight at the timeout", got)
+	}
+	d.Wait()
+}
+
+// TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
+// context is never canceled.
+func TestCheckContextCanceledNilSafe(t *testing.T) {
+	var nilCtx *CheckContext
+	if nilCtx.Canceled() {
+		t.Fatal("nil CheckContext reported canceled")
+	}
+	if (&CheckContext{}).Canceled() {
+		t.Fatal("CheckContext without Done reported canceled")
+	}
+}
+
+// fixDoneRecordingCheck fails fast and records whether its Fix was handed a
+// Done channel.
+type fixDoneRecordingCheck struct {
+	fixHadDone atomic.Bool
+}
+
+func (c *fixDoneRecordingCheck) Name() string { return "fix-done-recorder" }
+func (c *fixDoneRecordingCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{Name: c.Name(), Status: StatusError, Message: "needs fix"}
+}
+func (c *fixDoneRecordingCheck) CanFix() bool { return true }
+func (c *fixDoneRecordingCheck) Fix(ctx *CheckContext) error {
+	c.fixHadDone.Store(ctx.Done != nil)
+	return nil
+}
+func (c *fixDoneRecordingCheck) WarmupEligible() bool { return false }
+
+// TestRunCheckTimeoutNeverCancelsFix: a bounded run hands Fix no Done channel,
+// so the runner does not interrupt a fix abandoned at the timeout
+// mid-mutation.
+func TestRunCheckTimeoutNeverCancelsFix(t *testing.T) {
+	d := &Doctor{CheckTimeout: time.Minute}
+	check := &fixDoneRecordingCheck{}
+	d.Register(check)
+
+	report := d.RunCollect(&CheckContext{}, true)
+	d.Wait()
+	if len(report.Results) != 1 || !report.Results[0].FixAttempted {
+		t.Fatalf("Results = %+v, want the fix attempted", report.Results)
+	}
+	if check.fixHadDone.Load() {
+		t.Fatal("Fix was handed a Done channel; the runner must not interrupt an abandoned fix")
+	}
+}

@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func writeCheckScript(t *testing.T, dir, content string) string {
@@ -356,5 +358,46 @@ func TestParseScriptOutput(t *testing.T) {
 				t.Errorf("details count = %d, want %d", len(details), tt.wantDetail)
 			}
 		})
+	}
+}
+
+// TestPackScriptCheckStopsScriptOnceAbandoned: a pack script still running
+// when the runner abandons its check is stopped, so it issues no further calls,
+// and Run returns without waiting out the script.
+func TestPackScriptCheckStopsScriptOnceAbandoned(t *testing.T) {
+	dir := t.TempDir()
+	started := filepath.Join(dir, "started")
+	if err := syscall.Mkfifo(started, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The loop is bounded so a regression cannot leave it running past the test.
+	script := writeCheckScript(t, dir, "#!/bin/sh\necho started > '"+started+"'\ni=0\nwhile [ $i -lt 60 ]; do sleep 1; i=$((i+1)); done\necho finished\n")
+	c := &PackScriptCheck{CheckName: "topo:long", Script: script, PackDir: dir, PackName: "topo"}
+
+	done := make(chan struct{})
+	results := make(chan *CheckResult, 1)
+	go func() { results <- c.Run(&CheckContext{CityPath: dir, Done: done}) }()
+	running := make(chan error, 1)
+	go func() {
+		_, err := os.ReadFile(started)
+		running <- err
+	}()
+	select {
+	case err := <-running:
+		if err != nil {
+			t.Fatalf("reading the script's start signal: %v", err)
+		}
+	case result := <-results:
+		t.Fatalf("script exited before the check was abandoned: %+v", result)
+	}
+
+	close(done)
+	select {
+	case result := <-results:
+		if result.Message == "finished" {
+			t.Fatalf("result = %+v, want the script stopped before it finished", result)
+		}
+	case <-time.After(packScriptCancelGrace + 10*time.Second):
+		t.Fatal("the abandoned check's script is still running")
 	}
 }

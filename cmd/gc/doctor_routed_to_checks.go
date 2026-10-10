@@ -50,13 +50,13 @@ func (f routedToDriftFinding) describe() string {
 	return fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", f.label, f.beadID, f.route, strings.Join(f.canonicals, ", "))
 }
 
-func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *v2RoutedToNamespaceCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	aliases := boundRoutedToAliases(c.cfg)
 	if len(aliases) == 0 {
 		return okCheck(c.Name(), "no binding-qualified route targets configured")
 	}
 
-	findings, skipped := c.collect(aliases)
+	findings, skipped := c.collect(ctx, aliases)
 	if len(findings) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no short-form gc.routed_to values targeting bound agents found")
 	}
@@ -91,12 +91,12 @@ func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 // SetMetadata error on one bead, or a store this check could not scan, does
 // not stop it from attempting every other unambiguous finding — every error
 // encountered is accumulated and returned together via errors.Join.
-func (c *v2RoutedToNamespaceCheck) Fix(_ *doctor.CheckContext) error {
+func (c *v2RoutedToNamespaceCheck) Fix(ctx *doctor.CheckContext) error {
 	aliases := boundRoutedToAliases(c.cfg)
 	if len(aliases) == 0 {
 		return nil
 	}
-	findings, skipped := c.collect(aliases)
+	findings, skipped := c.collect(ctx, aliases)
 	var errs []error
 	for _, f := range findings {
 		if len(f.canonicals) != 1 {
@@ -116,8 +116,9 @@ func (c *v2RoutedToNamespaceCheck) Fix(_ *doctor.CheckContext) error {
 // a short form present in aliases. Callers must only call this with a
 // non-empty aliases map (both Run and Fix short-circuit before calling it
 // otherwise), since an empty aliases map would make every per-store route
-// query a no-op.
-func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (findings []routedToDriftFinding, skipped []string) {
+// query a no-op. It stops issuing store calls once the doctor runner abandons
+// the check.
+func (c *v2RoutedToNamespaceCheck) collect(ctx *doctor.CheckContext, aliases map[string][]string) (findings []routedToDriftFinding, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
@@ -132,12 +133,16 @@ func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (finding
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
+			continue
+		}
 		store, err := c.newStore(sc.path)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		scopeFindings, err := c.collectStoreFindings(store, aliases, sc.label)
+		scopeFindings, err := c.collectStoreFindings(ctx, store, aliases, sc.label)
 		findings = append(findings, scopeFindings...)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, err))
@@ -153,7 +158,7 @@ func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (finding
 // query fails — mirroring the targeted-query error handling the rest of this
 // check relies on, so a single flaky query does not silently drop the routes
 // that already succeeded.
-func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, aliases map[string][]string, label string) ([]routedToDriftFinding, error) {
+func (c *v2RoutedToNamespaceCheck) collectStoreFindings(ctx *doctor.CheckContext, store beads.Store, aliases map[string][]string, label string) ([]routedToDriftFinding, error) {
 	var findings []routedToDriftFinding
 	seen := make(map[string]bool)
 	routes := make([]string, 0, len(aliases))
@@ -162,6 +167,9 @@ func (c *v2RoutedToNamespaceCheck) collectStoreFindings(store beads.Store, alias
 	}
 	sort.Strings(routes)
 	for _, route := range routes {
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
+		}
 		items, err := store.List(beads.ListQuery{
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
 		})

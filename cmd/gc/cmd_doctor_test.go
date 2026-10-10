@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -1212,4 +1214,112 @@ func TestWriteDoctorJSONOKReflectsBlockingFailed(t *testing.T) {
 			}
 		})
 	}
+}
+
+// doctorAbandonProbe models the doctor runner abandoning a store-reading check
+// while the check's first store read is in flight: its stores count every read,
+// and the probe closes the check's Done once the first read returns.
+type doctorAbandonProbe struct {
+	done  chan struct{}
+	once  sync.Once
+	reads atomic.Int32
+	opens atomic.Int32
+}
+
+func newDoctorAbandonProbe() *doctorAbandonProbe {
+	return &doctorAbandonProbe{done: make(chan struct{})}
+}
+
+// ctx is the CheckContext to run the check with.
+func (p *doctorAbandonProbe) ctx() *doctor.CheckContext {
+	return &doctor.CheckContext{Done: p.done}
+}
+
+// newStore is a store factory that counts opens and hands every scope store,
+// wrapped so its reads are counted.
+func (p *doctorAbandonProbe) newStore(store beads.Store) func(string) (beads.Store, error) {
+	return func(string) (beads.Store, error) {
+		p.opens.Add(1)
+		return p.wrap(store), nil
+	}
+}
+
+func (p *doctorAbandonProbe) wrap(store beads.Store) beads.Store {
+	return doctorAbandonStore{Store: store, probe: p}
+}
+
+func (p *doctorAbandonProbe) read() {
+	p.reads.Add(1)
+}
+
+func (p *doctorAbandonProbe) abandon() {
+	p.once.Do(func() { close(p.done) })
+}
+
+// doctorAbandonStore counts each read on its probe and abandons the check once
+// the read returns.
+type doctorAbandonStore struct {
+	beads.Store
+	probe *doctorAbandonProbe
+}
+
+func (s doctorAbandonStore) Get(id string) (beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.Get(id)
+}
+
+func (s doctorAbandonStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.List(q)
+}
+
+func (s doctorAbandonStore) ListOpen(status ...string) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.ListOpen(status...)
+}
+
+func (s doctorAbandonStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.Ready(q...)
+}
+
+func (s doctorAbandonStore) Children(parentID string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.Children(parentID, opts...)
+}
+
+func (s doctorAbandonStore) ListByLabel(label string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.ListByLabel(label, limit, opts...)
+}
+
+func (s doctorAbandonStore) ListByAssignee(assignee, status string, limit int) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.ListByAssignee(assignee, status, limit)
+}
+
+func (s doctorAbandonStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func (s doctorAbandonStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.probe.read()
+	defer s.probe.abandon()
+	return s.Store.DepList(id, direction)
+}
+
+// doctorAbandonTestRigs returns a config with two path-bearing rigs, so a
+// check that walks scopes has three of them.
+func doctorAbandonTestRigs(t *testing.T) []config.Rig {
+	t.Helper()
+	return []config.Rig{{Name: "alpha", Path: t.TempDir()}, {Name: "beta", Path: t.TempDir()}}
 }

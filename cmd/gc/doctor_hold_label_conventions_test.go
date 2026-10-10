@@ -187,3 +187,21 @@ func TestHoldLabelConventionsCheckStoreErrorIsGraceful(t *testing.T) {
 		t.Errorf("CanFix = true, want false (no single mechanical fix applies)")
 	}
 }
+
+// TestHoldLabelConventionsCheckStopsOnceAbandoned: abandoned while its first
+// retired-label query is in flight, the check queries no other label.
+func TestHoldLabelConventionsCheckStopsOnceAbandoned(t *testing.T) {
+	dir := t.TempDir()
+
+	full := newDoctorAbandonProbe()
+	newHoldLabelConventionsCheck(dir, "city", full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if got := full.reads.Load(); got != int32(len(retiredHoldLabels)) {
+		t.Fatalf("unabandoned run made %d reads, want one query per retired label (%d)", got, len(retiredHoldLabels))
+	}
+
+	probe := newDoctorAbandonProbe()
+	newHoldLabelConventionsCheck(dir, "city", probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if got := probe.reads.Load(); got != 1 {
+		t.Fatalf("abandoned run made %d reads, want only the first label query", got)
+	}
+}
