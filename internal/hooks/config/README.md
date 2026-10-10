@@ -15,13 +15,23 @@ gaps at a glance — see [`gastownhall/gascity#672`](https://github.com/gastownh
 
 Provider hook configs live in two places:
 
-- `internal/hooks/config/claude.json` — Claude-specific settings (this directory).
+- This directory, for the providers that get their hooks on the launch
+  command: `claude.json` holds Claude's settings, projected to
+  `.gc/settings.json` and passed with `--settings`. `codex.json` holds Codex's
+  hooks, bound to the city and passed on every Codex launch as a
+  `-c hooks=...` override that also marks each hook trusted
+  (`CodexLaunchArgs`).
 - `internal/bootstrap/packs/core/overlay/per-provider/<provider>/…` — every other
   provider, scoped under that provider's expected dotfile path
-  (e.g. `codex/.codex/hooks.json`, `cursor/.cursor/hooks.json`).
+  (e.g. `cursor/.cursor/hooks.json`, `gemini/.gemini/settings.json`).
 
 Installation walks the pack overlay during `gc start` / `gc rig boot`,
 materializing the per-provider files into each agent's working directory.
+Codex is not installed this way: in a linked git worktree it reads project
+hooks only from the main checkout, never from the session's directory, so a
+file there would not run. Installing for Codex instead removes Gas City's
+managed entries from a working directory's `.codex/hooks.json`, where Codex
+would otherwise run them a second time.
 
 ## Event mapping
 

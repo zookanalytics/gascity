@@ -14,6 +14,11 @@ import (
 // provider".
 func TestInstallWithResolver_WrappedCodex(t *testing.T) {
 	fs := fsys.NewFake()
+	staged, err := readEmbedded(codexManagedHooksAsset)
+	if err != nil {
+		t.Fatalf("reading the managed codex hooks document: %v", err)
+	}
+	fs.Files[filepath.Join("/work", ".codex", "hooks.json")] = staged
 	resolver := func(name string) string {
 		if name == "codex-mini" {
 			return "codex"
@@ -23,9 +28,10 @@ func TestInstallWithResolver_WrappedCodex(t *testing.T) {
 	if err := InstallWithResolver(fs, "/city", "/work", []string{"codex-mini"}, resolver); err != nil {
 		t.Fatalf("InstallWithResolver(codex-mini→codex) = %v, want nil", err)
 	}
-	// Codex installs .codex/hooks.json in the workDir.
-	if _, err := fs.ReadFile(filepath.Join("/work", ".codex", "hooks.json")); err != nil {
-		t.Errorf("expected /work/.codex/hooks.json to be written: %v", err)
+	// Codex takes its managed hooks from its launch command, so installing
+	// for it removes the managed copy from the workDir.
+	if _, err := fs.ReadFile(filepath.Join("/work", ".codex", "hooks.json")); err == nil {
+		t.Error("expected the staged /work/.codex/hooks.json to be removed")
 	}
 }
 
@@ -53,11 +59,11 @@ func TestInstallWithResolver_WrappedGemini(t *testing.T) {
 // Install(nil-resolver) behaves exactly like Install with raw names.
 func TestInstallWithResolver_NilResolverIsIdentity(t *testing.T) {
 	fs := fsys.NewFake()
-	if err := InstallWithResolver(fs, "/city", "/work", []string{"codex"}, nil); err != nil {
-		t.Fatalf("InstallWithResolver(codex, nil) = %v, want nil", err)
+	if err := InstallWithResolver(fs, "/city", "/work", []string{"gemini"}, nil); err != nil {
+		t.Fatalf("InstallWithResolver(gemini, nil) = %v, want nil", err)
 	}
-	if _, err := fs.ReadFile(filepath.Join("/work", ".codex", "hooks.json")); err != nil {
-		t.Errorf("expected /work/.codex/hooks.json to be written: %v", err)
+	if _, err := fs.ReadFile(filepath.Join("/work", ".gemini", "settings.json")); err != nil {
+		t.Errorf("expected /work/.gemini/settings.json to be written: %v", err)
 	}
 }
 
@@ -67,11 +73,11 @@ func TestInstallWithResolver_NilResolverIsIdentity(t *testing.T) {
 func TestInstallWithResolver_EmptyFamilyFallsBackToName(t *testing.T) {
 	fs := fsys.NewFake()
 	resolver := func(_ string) string { return "" } // always undetermined
-	if err := InstallWithResolver(fs, "/city", "/work", []string{"codex"}, resolver); err != nil {
+	if err := InstallWithResolver(fs, "/city", "/work", []string{"gemini"}, resolver); err != nil {
 		t.Fatalf("InstallWithResolver fallback to identity = %v, want nil", err)
 	}
-	if _, err := fs.ReadFile(filepath.Join("/work", ".codex", "hooks.json")); err != nil {
-		t.Errorf("expected /work/.codex/hooks.json to be written: %v", err)
+	if _, err := fs.ReadFile(filepath.Join("/work", ".gemini", "settings.json")); err != nil {
+		t.Errorf("expected /work/.gemini/settings.json to be written: %v", err)
 	}
 }
 

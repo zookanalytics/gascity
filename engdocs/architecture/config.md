@@ -250,6 +250,7 @@ Provider resolution happens later, at agent startup time, via
 | Depends on | How |
 |---|---|
 | `internal/fsys` | Filesystem abstraction for `Load`, `LoadWithIncludes`, pack loading, and revision hashing |
+| `internal/hooks` | `BuildProviderLaunchCommand` appends `hooks.CodexLaunchArgs`, the `-c` override that registers Gas City's managed hooks on a Codex launch |
 | `github.com/BurntSushi/toml` | TOML parsing and encoding for all config files |
 
 | Depended on by | How |
@@ -258,7 +259,6 @@ Provider resolution happens later, at agent startup time, via
 | `cmd/gc/pool.go` | Reads `Agent.Pool` for scaling; deep-copies agent fields when spawning pool instances |
 | `cmd/gc/reconciler.go` | Reads resolved agent list and rig list to start/stop agents |
 | `internal/city/` | Uses `Load` for basic config operations (init, add rig) |
-| `internal/hooks/` | Reads agent config for hook installation decisions via `ResolveInstallHooks` |
 | `internal/runtime/` | Receives `ResolvedProvider` output to determine runtime startup parameters |
 | `internal/orders/` | Reads `OrdersConfig` skip list and formula layers |
 | `cmd/gc/formula_resolve.go` | Uses `FormulaLayers` to resolve formula directory symlinks |

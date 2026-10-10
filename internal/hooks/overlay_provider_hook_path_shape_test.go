@@ -9,15 +9,16 @@ import (
 )
 
 // TestOverlayProviderHookCommandsAppendPathAndUseGCBinVar expresses the
-// acceptance criteria for ga-5korc0: the codex, copilot, and antigravity
-// hook overlay files must APPEND $HOME/go/bin:$HOME/.local/bin to PATH
-// (never prepend it ahead of the caller's own PATH) and must invoke
-// "${GC_BIN:-gc}" instead of a bare `gc`, matching the shape the cursor
-// overlay already uses. Prepending lets a stale, pre-af7ad8a0fe
-// PATH-shadowing `gc` binary win over a freshly built test binary inside
-// CI/integration test harnesses (see TestCleanInstallTutorialPath), since
-// installOverlayManaged (hooks.go) writes these files verbatim on a fresh
-// install.
+// acceptance criteria for ga-5korc0: the codex hooks document and the
+// copilot and antigravity hook overlay files must APPEND
+// $HOME/go/bin:$HOME/.local/bin to PATH (never prepend it ahead of the
+// caller's own PATH) and must invoke "${GC_BIN:-gc}" instead of a bare `gc`,
+// matching the shape the cursor overlay already uses. Prepending lets a
+// stale, pre-af7ad8a0fe PATH-shadowing `gc` binary win over a freshly built
+// test binary inside CI/integration test harnesses (see
+// TestCleanInstallTutorialPath), since installOverlayManaged (hooks.go)
+// writes the overlay files verbatim on a fresh install and CodexLaunchArgs
+// passes the codex document's commands to every Codex launch.
 func TestOverlayProviderHookCommandsAppendPathAndUseGCBinVar(t *testing.T) {
 	codexGot := extractCodexOverlayCommands(t)
 	codexWant := map[string]string{
@@ -69,12 +70,15 @@ func readOverlayFile(t *testing.T, relPath string) []byte {
 	return data
 }
 
-// extractCodexOverlayCommands parses .codex/hooks.json's
+// extractCodexOverlayCommands parses the managed codex hooks document's
 // {"hooks": {"<Event>": [{"matcher": "...", "hooks": [{"type":"command","command":"..."}]}]}}
 // shape and returns a label->command map for every managed hook entry.
 func extractCodexOverlayCommands(t *testing.T) map[string]string {
 	t.Helper()
-	data := readOverlayFile(t, "overlay/per-provider/codex/.codex/hooks.json")
+	data, err := readEmbedded(codexManagedHooksAsset)
+	if err != nil {
+		t.Fatalf("reading the managed codex hooks document: %v", err)
+	}
 
 	var parsed struct {
 		Hooks map[string][]struct {
@@ -86,7 +90,7 @@ func extractCodexOverlayCommands(t *testing.T) map[string]string {
 		} `json:"hooks"`
 	}
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		t.Fatalf("parsing codex overlay hooks.json: %v", err)
+		t.Fatalf("parsing the managed codex hooks document: %v", err)
 	}
 
 	get := func(event string, hookIdx int) string {

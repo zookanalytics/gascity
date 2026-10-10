@@ -1600,9 +1600,19 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 		// reconciler's template_resolve.go command construction.
 		command := resolved.CommandString()
 		resumeCommand := resolved.ResumeCommand
+		// appendDefaultArgs is the fallback when BuildProviderLaunchCommand
+		// does not produce the command, so it adds the provider's hook
+		// registration too.
 		appendDefaultArgs := func() {
 			if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
 				command = command + " " + shellquote.Join(defaultArgs)
+			}
+			hookArgs, err := config.ProviderHookLaunchArgs(cityPath, resolvedProviderLaunchFamily(resolved))
+			switch {
+			case err != nil && stderr != nil:
+				fmt.Fprintf(stderr, "%s hooks: %v\n", resolved.Name, err) //nolint:errcheck // best-effort stderr
+			case err == nil && len(hookArgs) > 0:
+				command = command + " " + shellquote.Join(hookArgs)
 			}
 		}
 		if overrides, err := session.ParseTemplateOverrides(metadata); err == nil {

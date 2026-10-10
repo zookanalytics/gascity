@@ -3162,22 +3162,14 @@ func TestPrepareTemplateResolution_MaterializesFamilyOverlayForCustomProvider(t 
 	}
 }
 
-// TestPrepareTemplateResolution_NormalizesStagedCodexHooks guards gc-beez. A
-// pack overlay ships per-provider/codex/.codex/hooks.json in raw form — managed
-// commands that are not bound to this city (`--city <path>`) and prompt hooks
-// that are not wrapped in `gc hook run`. The overlay stager copies (and JSON
-// merges) that file verbatim, but hooks.Install — the only writer that applies
-// the managed normalization — runs solely when install_agent_hooks is
-// non-empty. An agent whose resolved provider is codex therefore gets the codex
-// hook surface staged and audited by the codex-hooks-drift doctor check
-// (agentUsesCodexHookSurface matches on the provider, not on install hooks)
-// while nothing ever normalizes it.
-//
-// The result was a doctor check that could never go green: every reconciler
-// tick re-staged the raw overlay, so `gc doctor --fix` was undone within
-// seconds and the check re-flagged the file it had just upgraded. Staging must
-// leave managed Codex hooks in current managed form.
-func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
+// TestPrepareTemplateResolution_StripsStagedCodexHooks covers a pack overlay
+// that ships per-provider/codex/.codex/hooks.json carrying Gas City's own hook
+// commands. Session-start staging copies it into the workdir, where Codex reads
+// it whenever the workdir is not a linked git worktree. A Codex session already
+// gets those hooks from its launch command, so the reconcile tick must leave
+// the file without them, and must do so for an agent that declares no
+// install_agent_hooks, the live shape.
+func TestPrepareTemplateResolution_StripsStagedCodexHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
@@ -3188,7 +3180,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(hooksSrc), 0o755); err != nil {
 		t.Fatalf("MkdirAll(overlay): %v", err)
 	}
-	// Raw pack-overlay form: unbound `gc prime`, unwrapped prompt hooks.
+	// Gas City's commands, unbound to the city, next to the pack's own hook.
 	rawOverlay := `{
   "hooks": {
     "SessionStart": [
@@ -3223,6 +3215,17 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/pack-guard.sh"
+          }
+        ]
+      }
     ]
   }
 }`
@@ -3237,7 +3240,7 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 			Provider: "codex",
 			Scope:    "rig",
 			Dir:      "myrig",
-			// Intentionally no InstallAgentHooks — this is the live shape that
+			// Intentionally no InstallAgentHooks: this is the live shape that
 			// skips hooks.Install while the overlay still stages the codex slot.
 		}},
 		Providers:      map[string]config.ProviderSpec{"codex": {Command: "/bin/echo"}},
@@ -3246,43 +3249,32 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	}
 
 	// Session start is what puts the file there: tmux.stageStartFiles and
-	// runtime.StageSessionWorkDir stage through the NON-skipping path, so the
-	// raw unbound overlay lands in the workdir. The reconcile tick's own
-	// staging deliberately skips mergeable files (upstream #3919) so
-	// hooks.Install can be the tick's sole writer.
+	// runtime.StageSessionWorkDir stage through the NON-skipping path.
 	if err := runtime.StageProviderOverlayDir(overlayDir, rigDir, []string{"codex"}, io.Discard); err != nil {
 		t.Fatalf("session-start staging: %v", err)
 	}
 	staged := filepath.Join(rigDir, ".codex", "hooks.json")
-	if !codexHooksNeedUpgrade(staged, cityDir) {
-		t.Fatalf("precondition: session-start staging should leave an unbound codex hooks file")
+	if !codexHooksHaveManagedEntries(staged) {
+		t.Fatalf("precondition: session-start staging should leave managed codex hooks in the workdir")
 	}
 
-	// The tick must converge it. Upstream's staging comment asserts "the next
-	// tick converges it", but hooks.Install is gated on install_agent_hooks,
-	// which this agent (the live shape) does not declare — so without the
-	// normalizer no writer runs on the tick and the drift is permanent, not
-	// transient (gc-beez).
 	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
 	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
 
-	if _, err := os.Stat(staged); err != nil {
-		t.Fatalf("codex hooks file disappeared from workdir: %v", err)
-	}
-	if codexHooksNeedUpgrade(staged, cityDir) {
-		got, _ := os.ReadFile(staged)
-		t.Fatalf("staged managed Codex hooks still need a managed upgrade — the doctor\n"+
-			"codex-hooks-drift check will flag this file on every tick and `gc doctor --fix`\n"+
-			"will be undone by the next stage (gc-beez).\nstaged content:\n%s", got)
-	}
 	first, err := os.ReadFile(staged)
 	if err != nil {
-		t.Fatalf("ReadFile(staged): %v", err)
+		t.Fatalf("the pack's own hook was dropped with the managed ones: %v", err)
+	}
+	if codexHooksHaveManagedEntries(staged) {
+		t.Fatalf("the reconcile tick left managed Codex hooks in the workdir; a Codex session\n"+
+			"there would run each of them twice.\nstaged content:\n%s", first)
+	}
+	if !strings.Contains(string(first), "/opt/pack-guard.sh") {
+		t.Fatalf("the pack's own hook was dropped:\n%s", first)
 	}
 
-	// Every reconciler tick re-stages the raw overlay over the normalized file,
-	// so stage+normalize must reach a fixed point rather than accumulating
-	// merged entries. Re-run the pass and require byte stability.
+	// The tick's own staging skips the mergeable file, so a second pass leaves
+	// the stripped file byte for byte as it was.
 	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
 	second, err := os.ReadFile(staged)
 	if err != nil {
@@ -3291,15 +3283,12 @@ func TestPrepareTemplateResolution_NormalizesStagedCodexHooks(t *testing.T) {
 	if !bytes.Equal(first, second) {
 		t.Fatalf("staged Codex hooks are not stable across reconciler passes:\nfirst:\n%s\nsecond:\n%s", first, second)
 	}
-	if codexHooksNeedUpgrade(staged, cityDir) {
-		t.Fatalf("staged Codex hooks need an upgrade again after a second pass:\n%s", second)
-	}
 }
 
 // TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks ensures the
-// normalization added for gc-beez stays scoped to Gas City's managed hook
-// surface: a workdir whose .codex/hooks.json contains only user-authored hooks
-// is left byte-for-byte alone.
+// tick's strip stays scoped to Gas City's managed hook surface: a workdir
+// whose .codex/hooks.json contains only user-authored hooks is left
+// byte-for-byte alone.
 func TestPrepareTemplateResolution_PreservesUserOwnedCodexHooks(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")

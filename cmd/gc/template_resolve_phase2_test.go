@@ -20,6 +20,7 @@ type phase2ProviderCase struct {
 	family                string
 	wantCommand           string
 	wantCommandPrefix     string
+	wantCodexHooksArg     bool
 	wantPromptMode        string
 	wantPromptFlag        string
 	wantSettingsArg       bool
@@ -71,7 +72,8 @@ func selectedPhase2ProviderCases(t *testing.T) []phase2ProviderCase {
 		{
 			profileID:             "codex/tmux-cli",
 			family:                "codex",
-			wantCommand:           "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c model_reasoning_effort=xhigh",
+			wantCommandPrefix:     "codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.5 -c model_reasoning_effort=xhigh ",
+			wantCodexHooksArg:     true,
 			wantReadyDelayMs:      3000,
 			wantReadyPromptPrefix: "› ",
 			wantProcessNames:      []string{"codex", "codex-raw"},
