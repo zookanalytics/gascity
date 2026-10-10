@@ -56,6 +56,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,
 	"DepListBatch":   nativeStoreRead,
+	"ChildrenOfAny":  nativeStoreRead,
+	"GetExactBatch":  nativeStoreRead,
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,

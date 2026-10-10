@@ -608,6 +608,47 @@ func (s *ProxiedStore) Get(id string) (Bead, error) {
 	return Bead{}, s.classifyReadError(err)
 }
 
+// GetExactBatch reads ids with the native leaf's exact batch read when the leaf
+// offers one, the read Get makes for each id. An id the relocated-class guard
+// refuses is left unresolved, so the caller's Get reports the refusal, and so is
+// every id the native leaf does not answer, which Get's fallback to the bd leaf
+// answers. A demoted store forwards to the bd leaf, as Get does. A native leaf
+// without the batch (the in-process Dolt store reads one row per Get, with no
+// subprocess to amortize) reports ErrExactBatchGetUnsupported, and the caller
+// reads each id with Get.
+func (s *ProxiedStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	native := s.nativeLeaf()
+	if native == nil {
+		getter, ok := s.bd.(ExactBatchGetter)
+		if !ok {
+			return nil, nil, ErrExactBatchGetUnsupported
+		}
+		return getter.GetExactBatch(ids)
+	}
+	var leaf Store = native
+	batch, ok := leaf.(ExactBatchGetter)
+	if !ok {
+		return nil, nil, ErrExactBatchGetUnsupported
+	}
+	allowed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s.guardRelocatedIDs("get "+id, id) == nil {
+			allowed = append(allowed, id)
+		}
+	}
+	found, _, err := batch.GetExactBatch(allowed)
+	if err != nil {
+		return nil, nil, s.classifyReadError(err)
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // List reads beads matching a query.
 func (s *ProxiedStore) List(query ListQuery) ([]Bead, error) {
 	beads, err := s.readLeaf().List(query)
@@ -635,6 +676,13 @@ func (s *ProxiedStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 // Children reads a parent's children.
 func (s *ProxiedStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 	beads, err := s.readLeaf().Children(parentID, opts...)
+	return beads, s.classifyReadError(err)
+}
+
+// ChildrenOfAny reads every parent's children on the current read leaf: the
+// leaf's batch when it offers one, one exact Children per parent otherwise.
+func (s *ProxiedStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	beads, err := ChildrenOfAny(s.readLeaf(), parentIDs, opts...)
 	return beads, s.classifyReadError(err)
 }
 
