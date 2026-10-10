@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -415,9 +416,11 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // The API path queries /convoys for the convoy list and /convoy/{id}/check
 // for each convoy's progress counts. If the per-convoy check returns a
 // fallbackable error, the whole operation falls back to local reads so
-// output is consistent (partial failure would produce surprising gaps).
+// output is consistent (partial failure would produce surprising gaps). A
+// partial list, one missing the convoys of a rig store the server could not
+// read, falls back to the local reads for the same reason.
 func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
-	var cr api.CachedRead[[]beads.Bead]
+	var cr api.CachedRead[api.ConvoyListView]
 	var progress []api.ConvoyCheckView
 	return routeRead(c, "convoy list", nilReason, stderr,
 		func() error {
@@ -425,7 +428,10 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 			if cr, err = c.ListConvoys(); err != nil {
 				return err
 			}
-			progress, err = fetchConvoyProgress(c, cr.Body)
+			if cr.Body.Partial || len(cr.Body.PartialErrors) > 0 {
+				return fallbackAfterFetch{Reason: "partial-read"}
+			}
+			progress, err = fetchConvoyProgress(c, cr.Body.Items)
 			return err
 		},
 		func() int { return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr) },
@@ -433,27 +439,63 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 	)
 }
 
-// fetchConvoyProgress calls /convoy/{id}/check for each convoy in list and
-// returns a parallel slice of progress views. Returns the first fallbackable
-// error encountered so the caller can surface it for the whole operation.
+// convoyProgressConcurrency bounds the /convoy/{id}/check requests
+// fetchConvoyProgress keeps in flight. The supervisor answers check requests in
+// parallel, so the fan-out divides the progress reads' wall time by about this
+// bound, and the bound keeps one `gc convoy list` from flooding the server with
+// a request per open convoy at once.
+const convoyProgressConcurrency = 8
+
+// fetchConvoyProgress calls /convoy/{id}/check for each convoy in list, at most
+// convoyProgressConcurrency at a time, and returns a parallel slice of progress
+// views. Once a check fails no further check starts, and the error returned is
+// the failed check earliest in list order, so the caller can surface it for the
+// whole operation.
 func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheckView, error) {
 	out := make([]api.ConvoyCheckView, len(convoys))
+	errs := make([]error, len(convoys))
+	slots := make(chan struct{}, convoyProgressConcurrency)
+	var (
+		wg     sync.WaitGroup
+		failed atomic.Bool
+	)
 	for i, convoy := range convoys {
-		cr, err := c.CheckConvoy(convoy.ID)
+		slots <- struct{}{}
+		if failed.Load() {
+			<-slots
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer func() {
+				<-slots
+				wg.Done()
+			}()
+			cr, err := c.CheckConvoy(convoy.ID)
+			if err != nil {
+				errs[i] = err
+				failed.Store(true)
+				return
+			}
+			out[i] = cr.Body
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return nil, err
 		}
-		out[i] = cr.Body
 	}
 	return out, nil
 }
 
 // renderConvoyListFromAPI formats the API-sourced convoy list to match
 // doConvoyListAcrossStores output. Stale banner appends when cache age > 30s.
-func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, jsonOut bool, stdout, stderr io.Writer) int {
+func renderConvoyListFromAPI(cr api.CachedRead[api.ConvoyListView], progress []api.ConvoyCheckView, jsonOut bool, stdout, stderr io.Writer) int {
+	convoys := cr.Body.Items
 	if jsonOut {
-		items := make([]convoySummaryJSON, 0, len(cr.Body))
-		for i, convoy := range cr.Body {
+		items := make([]convoySummaryJSON, 0, len(convoys))
+		for i, convoy := range convoys {
 			items = append(items, convoySummaryFromAPI(convoy, progress[i]))
 		}
 		if err := writeCLIJSONLine(stdout, convoyListResultJSON{
@@ -466,13 +508,13 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 		}
 		return 0
 	}
-	if len(cr.Body) == 0 {
+	if len(convoys) == 0 {
 		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "ID\tTITLE\tPROGRESS") //nolint:errcheck // best-effort stdout
-	for i, convoy := range cr.Body {
+	for i, convoy := range convoys {
 		p := progress[i]
 		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, convoy.Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
 	}
