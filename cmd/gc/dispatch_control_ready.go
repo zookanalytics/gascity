@@ -6,22 +6,27 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/deps"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // This file cuts the gc->bd read-storm documented on ga-ak6rt1: the
 // control-dispatcher's per-tick readiness scan (workflowServeControlReadyQueryForBeads,
 // dispatch_runtime.go) builds a shell script that fork-execs up to ~9
-// bd/jq processes per agent per tick. Wire that same readiness evaluation to
-// answer from an in-process CachingStore snapshot first, falling back to
-// exactly one batched `bd ready --json` call when the snapshot can't answer,
-// instead of the shell script's N separate `bd` invocations.
+// bd/jq processes per agent per tick. That same readiness evaluation is
+// answered here from one read per scan instead. A scope whose ledger is a bd
+// workspace is read with exactly one batched `bd ready --json` call. Any other
+// scope answers from an in-process CachingStore snapshot primed for the scan,
+// and falls back to the batched call when the snapshot can't answer.
 //
 // Why this hooks into nextWorkflowServeBeads (the default workflowServeList
 // implementation) rather than drainWorkflowServeWork: workflowServeList is a
@@ -46,8 +51,8 @@ const controlReadyQueryMarkerPrefix = "BD_EXPORT_AUTO=false GC_CONTROL_TARGET="
 // controlReadyExcludeType mirrors the shell script's --exclude-type=epic.
 const controlReadyExcludeType = "epic"
 
-// controlReadyFallbackLimit bounds the single batched bd ready call issued
-// when the cache can't answer. It must be generous enough that per-candidate/
+// controlReadyFallbackLimit bounds the single batched bd ready call a scan
+// issues. It must be generous enough that per-candidate/
 // per-route filtering in Go (each capped at workflowServeScanLimit) is never
 // starved by an earlier truncation at the bd layer -- unlike the shell script
 // this replaces (which ran each candidate/route's own independently-capped bd
@@ -67,6 +72,11 @@ type parsedControlReadyQuery struct {
 	legacyTarget       string
 	bareTarget         string
 	includeEphemeral   bool
+	// readEnv holds the query's other prefix assignments: BD_EXPORT_AUTO, and
+	// the Dolt host and port ambientDoltConnectionQueryPrefix takes from the
+	// dispatcher's own environment. The generated query's bd calls run with
+	// them, and so does the batched read (controlReadyReadEnv).
+	readEnv map[string]string
 }
 
 // parseControlReadyQuery recognizes a workQuery built by
@@ -93,9 +103,38 @@ func parseControlReadyQuery(workQuery string) (parsedControlReadyQuery, bool) {
 			parsed.legacyTarget = strings.TrimPrefix(tok, "GC_CONTROL_LEGACY_TARGET=")
 		case strings.HasPrefix(tok, "GC_CONTROL_BARE_TARGET="):
 			parsed.bareTarget = strings.TrimPrefix(tok, "GC_CONTROL_BARE_TARGET=")
+		case strings.HasPrefix(tok, "GC_CONTROL_"):
+		default:
+			if key, value, ok := strings.Cut(tok, "="); ok && key != "" {
+				if parsed.readEnv == nil {
+					parsed.readEnv = make(map[string]string)
+				}
+				parsed.readEnv[key] = value
+			}
 		}
 	}
 	return parsed, parsed.target != ""
+}
+
+// controlReadyReadEnv returns env with the query's own prefix assignments
+// applied over it, as the generated query's shell applies them over the
+// environment it inherits. The serve loop builds env once, at startup, and
+// mergeRuntimeEnv replaces every inherited Dolt variable with env's. The
+// prefix carries the host and port of the dispatcher's own environment, so a
+// startup that resolved env without a port does not leave every read pointed
+// at port 0.
+func controlReadyReadEnv(env map[string]string, parsed parsedControlReadyQuery) map[string]string {
+	if len(parsed.readEnv) == 0 {
+		return env
+	}
+	merged := make(map[string]string, len(env)+len(parsed.readEnv))
+	for key, value := range env {
+		merged[key] = value
+	}
+	for key, value := range parsed.readEnv {
+		merged[key] = value
+	}
+	return merged
 }
 
 // envListValue looks up key in a KEY=VALUE environment list such as the one
@@ -274,9 +313,11 @@ func beadsToHookBeads(items []beads.Bead) []hookBead {
 	return out
 }
 
-// controlReadyFallbackReady answers the batched ready scan the in-process cache
-// could not: dirty, still priming, or a bd compatibility mode that requires
-// --include-ephemeral (a tier CachedReady can't serve).
+// controlReadyFallbackReady is the batched ready read. It is the whole scan for
+// a scope whose ledger is a bd workspace (controlScanReadsBdWorkspace), and it
+// answers what an in-process snapshot could not: dirty, still priming, or a bd
+// compatibility mode that requires --include-ephemeral (a tier CachedReady
+// can't serve).
 //
 // It reads whichever ledger(s) the control dispatcher will actually dispatch
 // against, which controlGraphBinding and controlGraphExtraLeg answer between
@@ -341,13 +382,18 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 }
 
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
-// shelling `bd` in the scope directory, exactly as it always was.
+// shelling `bd` in the scope directory. When that bd accepts it, the read asks
+// for --brief rows (controlReadyReadsBrief).
 func controlReadyScopeShellReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
+	envList := mergeRuntimeEnv(os.Environ(), env)
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
-	output, err := shellWorkQueryWithEnv(query, dir, mergeRuntimeEnv(os.Environ(), env))
+	if controlReadyReadsBrief(envList) {
+		query += " --brief"
+	}
+	output, err := shellWorkQueryWithEnv(query, dir, envList)
 	if err != nil {
 		return nil, err
 	}
@@ -552,10 +598,20 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	}
 
 	cityPath := cityForStoreDir(dir)
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
+	readEnv := controlReadyReadEnv(env, parsed)
 
 	start := time.Now()
+	if controlScanReadsBdWorkspace(dir, cityPath) {
+		ready, err := controlReadyFallbackReady(dir, cityPath, readEnv, parsed.includeEphemeral)
+		if err != nil {
+			return nil, true, err
+		}
+		queue = beadsToHookBeads(evaluateControlReady(ready, parsed, envList))
+		workflowTracef("control-ready scan source=ready ready=%d queue=%d dur=%s", len(ready), len(queue), time.Since(start))
+		return queue, true, nil
+	}
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	if !parsed.includeEphemeral {
 		if caches := controlReadyCachesFor(dir, cityPath, cfg); len(caches) > 0 {
 			if ready, ok := cachedControlReadyUnion(caches); ok {
@@ -567,11 +623,92 @@ func tryControlReadyFromCacheOrFallback(workQuery, dir string, env map[string]st
 	}
 
 	primeDur := time.Since(start)
-	ready, err := controlReadyFallbackReady(dir, cityPath, env, parsed.includeEphemeral)
+	ready, err := controlReadyFallbackReady(dir, cityPath, readEnv, parsed.includeEphemeral)
 	if err != nil {
 		return nil, true, err
 	}
 	queue = beadsToHookBeads(evaluateControlReady(ready, parsed, envList))
 	workflowTracef("control-ready scan source=live ready=%d queue=%d declined_snapshot_dur=%s dur=%s", len(ready), len(queue), primeDur, time.Since(start))
 	return queue, true, nil
+}
+
+// controlScanReadsBdWorkspace reports whether a readiness scan of dir reads a
+// bd workspace, the scope ledger openControlStoreAtForCity opens as a BdStore.
+// Such a scan is one `bd ready` call (controlReadyFallbackReady), which returns
+// the ready set. Priming a snapshot of that ledger instead lists every open and
+// every in-progress bead in both tiers through `bd`, then reads their
+// dependencies and blocked projection, so its cost follows the whole open set.
+// A relocated city scope reads only the in-process graph binding, so its scan
+// keeps the snapshot.
+func controlScanReadsBdWorkspace(dir, cityPath string) bool {
+	if _, relocated := controlGraphBinding(cityPath, dir); relocated {
+		return false
+	}
+	return controlProviderIsBdWorkspace(rawBeadsProviderForScope(resolveStoreScopeRoot(cityPath, dir), cityPath))
+}
+
+// controlReadyBriefMinBDVersion is the first bd release whose `bd ready`
+// accepts --brief; an older bd rejects the flag.
+const controlReadyBriefMinBDVersion = "1.2.1"
+
+// controlReadyBriefVerdicts memoizes controlReadyReadsBrief per bd binary.
+var controlReadyBriefVerdicts = struct {
+	mu       sync.Mutex
+	byBinary map[string]bool
+}{byBinary: make(map[string]bool)}
+
+// controlReadyReadsBrief reports whether the scope read may pass --brief, which
+// omits each row's free-form text (description, design, acceptance criteria,
+// notes, payload, waiters). The scan reads none of those fields, and they are
+// most of the bytes: a 680-row ready set measured 24.5 MB in full and 0.9 MB
+// brief.
+//
+// Whether bd takes the flag is a property of the binary, so the verdict is
+// probed once per bd file the read's PATH resolves, keyed on the file's size
+// and modification time so a binary replaced in place is probed again. A bd
+// that cannot be found or whose version cannot be read gets no --brief, which
+// costs the read its row text and nothing else; the failed probe is not
+// memoized, so the next scan probes again.
+func controlReadyReadsBrief(envList []string) bool {
+	bdPath := controlReadyBDPath(envListValue(envList, "PATH"))
+	if bdPath == "" {
+		return false
+	}
+	info, err := os.Stat(bdPath)
+	if err != nil {
+		return false
+	}
+	key := fmt.Sprintf("%s\x00%d\x00%d", bdPath, info.Size(), info.ModTime().UnixNano())
+	controlReadyBriefVerdicts.mu.Lock()
+	verdict, known := controlReadyBriefVerdicts.byBinary[key]
+	controlReadyBriefVerdicts.mu.Unlock()
+	if known {
+		return verdict
+	}
+	version, err := beads.ProbeBDVersion(bdPath)
+	if err != nil {
+		workflowTracef("control-ready brief probe bd=%s: %v", bdPath, err)
+		return false
+	}
+	verdict = deps.CompareVersions(version, controlReadyBriefMinBDVersion) >= 0
+	controlReadyBriefVerdicts.mu.Lock()
+	controlReadyBriefVerdicts.byBinary[key] = verdict
+	controlReadyBriefVerdicts.mu.Unlock()
+	return verdict
+}
+
+// controlReadyBDPath returns the bd the scope read's shell runs: the first
+// executable bd in an absolute directory of pathValue, or "" when there is
+// none.
+func controlReadyBDPath(pathValue string) string {
+	for _, dir := range filepath.SplitList(pathValue) {
+		dir = strings.TrimSpace(dir)
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		if candidate, err := exec.LookPath(filepath.Join(dir, "bd")); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }

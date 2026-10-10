@@ -39,9 +39,9 @@ const bdReadyProjectionMinVersion = "1.0.5"
 //
 // It is reported exactly once per SCOPE: the verdict is latched in a registry
 // keyed by scope path, not on the store object, because cmd/gc rebuilds a store
-// per request and the control dispatcher rebuilds one on every readiness scan. Each
-// cache over the scope still learns the verdict — it must, to decline its ready
-// reads — but the operator notice and the failing subprocess are spent once.
+// per request. Each cache over the scope still learns the verdict — it must, to
+// decline its ready reads — but the operator notice and the failing subprocess
+// are spent once.
 var ErrReadyProjectionUnsupported = errors.New("ready projection unsupported by this bead store")
 
 // readyProjectionDegrade is the latched verdict for one scope: the reason its
@@ -56,11 +56,9 @@ type readyProjectionDegrade struct {
 // Per-scope rather than per-store object is the same correction unreadStoreGuard
 // already carries (scopeGuards, unread_store_notice.go). A verdict memoized on
 // the store object is memoized on nothing: cmd/gc's scoped stores are built per
-// request, and cmd/gc's control-ready path rebuilds a store per readiness
-// scan per scope for the life of the dispatcher. Bounding
-// there turns "once per store" into "once per rebuild" — an unbounded operator
-// notice, and a latch that never actually saves the failing 6-16s `bd sql` it
-// exists to save.
+// request, so bounding there turns "once per store" into "once per rebuild" — an
+// unbounded operator notice, and a latch that never actually saves the failing
+// 6-16s `bd sql` it exists to save.
 type readyProjectionScopeGuard struct {
 	// degrade latches the reason this scope cannot serve the projection. It is
 	// never cleared: a ledger in front of a running process does not grow the
@@ -276,10 +274,9 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 // same scope go straight to the blocked door.
 //
 // The choice is latched in the scope guard, not just on this store object,
-// because cmd/gc builds a store per request and the control-ready scan rebuilds
-// one per scope on every scan: a store-local flag would let the
+// because cmd/gc builds a store per request: a store-local flag would let the
 // next store re-derive the SQL door from metadata and re-spend the failing
-// 6-16s `bd sql` a few times a minute, forever. It is a DISTINCT verdict from
+// 6-16s `bd sql` on every request, forever. It is a DISTINCT verdict from
 // the degrade the guard also carries — "SQL door proven refused, use `bd
 // blocked`", not "this scope is out of doors at all" — so it rides its own
 // field (readyProjectionScopeGuard.blockedDoor), which bdReadyProjectionEnabled
@@ -296,8 +293,8 @@ func (s *BdStore) switchToBlockedDoor() {
 // readyProjectionBlockedDoorLatched reports whether some store over this scope
 // already proved `bd sql` refused at runtime and switched to the blocked door.
 // A fresh store consults it before deriving the door from metadata, so the
-// proven refusal survives the per-request / per-scan store
-// rebuilds instead of re-spending the failing `bd sql` on each one.
+// proven refusal survives the per-request store rebuilds instead of
+// re-spending the failing `bd sql` on each one.
 func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
 	g := s.readyProjectionGuard()
 	if g == nil {
@@ -450,12 +447,10 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 			// permanent property of the ledger, so switchToBlockedDoor latches
 			// the choice in the scope guard — shared by every store rooted here
 			// — and every later rebuild consults it before the metadata-derived
-			// door. Without that scope latch the switch lived only on this store
-			// object, and cmd/gc rebuilds the store per request while the
-			// control-ready scan rebuilds one per scope on every
-			// scan: the next store re-picked the SQL door and
-			// re-spent this failing 6-16s subprocess on every prime and every
-			// reconcile, indefinitely.
+			// door. Without that scope latch the switch would live only on this
+			// store object, and cmd/gc rebuilds the store per request: the next
+			// store would re-pick the SQL door and re-spend this failing 6-16s
+			// subprocess on every prime and every reconcile, indefinitely.
 			s.switchToBlockedDoor()
 			return s.projectViaBlockedDoor(wanted, err)
 		}

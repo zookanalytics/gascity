@@ -543,7 +543,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	defer close(done)
 
 	eventCh := make(chan workflowWatchResult, 1)
-	go pumpWorkflowEvents(done, watcher, eventCh)
+	go pumpWorkflowEvents(done, watcher, eventCh, workflowServeUnreadStoreFilter(agentCfg, cityPath, storePath, workQuery))
 
 	idleSweeps := 0
 	var pendingWakeErr error
@@ -612,9 +612,22 @@ type workflowWatchResult struct {
 	err error
 }
 
-func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult) {
+// pumpWorkflowEvents forwards the watcher's events and its terminal error to
+// eventCh until done closes. It drops each event skip reports true for, so that
+// event neither wakes the serve loop nor joins a coalesced wake. A nil skip
+// drops nothing.
+func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult, skip func(events.Event) bool) {
 	for {
 		evt, err := watcher.Next()
+		if err == nil && skip != nil && skip(evt) {
+			workflowTracef("serve ignore-unread-store-event type=%s subject=%s", evt.Type, evt.Subject)
+			select {
+			case <-done:
+				return
+			default:
+			}
+			continue
+		}
 		select {
 		case eventCh <- workflowWatchResult{evt: evt, err: err}:
 		case <-done:
