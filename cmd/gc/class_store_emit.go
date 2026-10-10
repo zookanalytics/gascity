@@ -783,6 +783,13 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 // embedded Store interface does not promote an optional capability and this
 // wrapper is what a class-routed caller holds. Without it the batch is invisible
 // and the caller silently pays a round trip per anchor (ga-50tsx).
+// ChildrenOfAny forwards the batched children read. Emission has nothing to
+// say about a read, so the answer passes through; an inner store without the
+// capability is read one exact Children per parent (beads.ChildrenOfAny).
+func (s *emittingClassStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return beads.ChildrenOfAny(s.Store, parentIDs, opts...)
+}
+
 func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	batch, ok := beads.DepListBatchFor(s.Store)
 	if !ok {
@@ -825,6 +832,18 @@ func (s *emittingClassStore) Count(ctx context.Context, query beads.ListQuery, e
 		return 0, beads.ErrCountUnsupported
 	}
 	return counter.Count(ctx, query, excludeTypes...)
+}
+
+// GetExactBatch forwards the inner store's exact batch read. Emission has
+// nothing to say about a read, so the answer passes through. An inner store
+// without the read reports beads.ErrExactBatchGetUnsupported, and the caller
+// reads each id with Get.
+func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
 }
 
 // ReadOnly forwards the inner store's mutation fence.

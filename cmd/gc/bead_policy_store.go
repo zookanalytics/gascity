@@ -215,8 +215,10 @@ func (s *beadPolicyStore) GetExactBatch(ids []string) (map[string]beads.Bead, []
 }
 
 var (
-	_ beads.ExactBatchGetter = (*beadPolicyStore)(nil)
-	_ beads.ExactBatchGetter = (*beadPolicyGraphStore)(nil)
+	_ beads.ExactBatchGetter    = (*beadPolicyStore)(nil)
+	_ beads.ExactBatchGetter    = (*beadPolicyGraphStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyStore)(nil)
+	_ beads.ChildrenBatchLister = (*beadPolicyGraphStore)(nil)
 )
 
 var (
@@ -257,6 +259,13 @@ func (s *beadPolicyStore) SawRows() bool {
 // assertion, and read a few hundred beads one round trip at a time over a link
 // that drops handshakes (ga-50tsx). beadPolicyGraphStore embeds
 // *beadPolicyStore, so it forwards through this too.
+// ChildrenOfAny forwards the batched children read; the policy guards cover
+// writes, and a read passes through. An inner store without the capability is
+// read one exact Children per parent (beads.ChildrenOfAny).
+func (s *beadPolicyStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return beads.ChildrenOfAny(s.Store, parentIDs, opts...)
+}
+
 func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
 	batch, ok := beads.DepListBatchFor(s.Store)
 	if !ok {

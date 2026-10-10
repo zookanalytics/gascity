@@ -326,6 +326,9 @@ func requireTracksDep(t *testing.T, store beads.Store, convoyID, itemID string) 
 	t.Fatalf("missing tracks dep %s -> %s; deps=%v", convoyID, itemID, deps)
 }
 
+// metadataParseErrorStore serves corruptID the way the native store serves a
+// row whose metadata it cannot project: Get fails with beads.ErrMetadataParse
+// and List leaves the row out.
 type metadataParseErrorStore struct {
 	beads.Store
 	corruptID string
@@ -336,4 +339,15 @@ func (s metadataParseErrorStore) Get(id string) (beads.Bead, error) {
 		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
 	}
 	return s.Store.Get(id)
+}
+
+func (s metadataParseErrorStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(query)
+	kept := rows[:0]
+	for _, b := range rows {
+		if b.ID != s.corruptID {
+			kept = append(kept, b)
+		}
+	}
+	return kept, err
 }
