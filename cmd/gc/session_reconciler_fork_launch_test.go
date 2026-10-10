@@ -33,7 +33,7 @@ func TestRecoverRunningPendingCreate_BuildFailResidueMatchesStore(t *testing.T) 
 	// pre-flight guard fires clearStaleResumeKeyMetadata (persisting started_config_hash="")
 	// before validateForkLaunch aborts on fork + wake_mode=fresh.
 	prevProbe := staleResumeKeyProbe
-	staleResumeKeyProbe = func(_, _, _ string) (present, probeable bool) { return false, true }
+	staleResumeKeyProbe = func(_ []string, _, _, _ string) (present, probeable bool) { return false, true }
 	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
 
 	ok, residue := recoverRunningPendingCreate(candidate.info, candidate.tp, cfg, store, clock.Real{}, nil)
@@ -416,7 +416,7 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 			prevProbe := staleResumeKeyProbe
 			// The own session_key is stale (transcript gone) so recovery fires; the
 			// parent's presence is controlled per case.
-			staleResumeKeyProbe = func(_, _, key string) (present, probeable bool) {
+			staleResumeKeyProbe = func(_ []string, _, _, key string) (present, probeable bool) {
 				if key == parentSID {
 					return tc.parentPresent, true
 				}
@@ -441,6 +441,27 @@ func TestBuildPreparedStart_ForkValidationNotBypassedByStaleKeyRecovery(t *testi
 				t.Errorf("command %q should re-fork (contain %q), not silently go fresh", prepared.cfg.Command, tc.wantCmdContains)
 			}
 		})
+	}
+}
+
+// TestBuildPreparedStart_ForksParentWithTranscriptUnderObservePath pins that
+// the fork-launch parent check searches the configured [daemon] observe_paths:
+// a brain parent whose transcript is filed only there is present, so the warm
+// arm forks off it instead of failing as missing on disk.
+func TestBuildPreparedStart_ForksParentWithTranscriptUnderObservePath(t *testing.T) {
+	const parentSID = "brain-xyz"
+	isolateClaudeHome(t)
+	candidate, cfg, store := newForkSessionCandidate(t, keyedClaude(), parentSID, "")
+	observeRoot := t.TempDir()
+	writeKeyedClaudeTranscript(t, observeRoot, candidate.info.WorkDir, parentSID)
+	cfg.Daemon.ObservePaths = []string{observeRoot}
+
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v; the parent transcript is under an observe path", err)
+	}
+	if want := "--resume " + parentSID + " --fork-session --session-id "; !strings.Contains(prepared.cfg.Command, want) {
+		t.Fatalf("command = %q, want it to fork off the parent (contain %q)", prepared.cfg.Command, want)
 	}
 }
 

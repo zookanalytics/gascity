@@ -280,6 +280,9 @@ type preparedStart struct {
 	// preWakeUndo is what a capacity refusal needs to undo this attempt's
 	// PreWake (restorePreWakeState). Zero when the start had no persisted row.
 	preWakeUndo preWakeUndo
+	// transcriptSearchPaths are the claude transcript roots of the config this
+	// start was prepared from.
+	transcriptSearchPaths []string
 }
 
 type startResult struct {
@@ -1177,9 +1180,10 @@ func buildPreparedStartWithWorkDirResolver(
 	// transcriptState carries the same probe result forward to the firstStart
 	// classification below, so the disk is read once per launch.
 	transcriptState := sessTranscriptUnknown
+	searchPaths := transcriptSearchPaths(cfg)
 	if sk := strings.TrimSpace(candidate.info.SessionKey); sk != "" && agentCfg.WorkDir != "" {
 		provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-		present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, sk)
+		present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, sk)
 		if probeable {
 			if present {
 				transcriptState = sessTranscriptPresent
@@ -1247,7 +1251,7 @@ func buildPreparedStartWithWorkDirResolver(
 		parentStale := false
 		if firstStart && !forceFresh && tp.ResolvedProvider != nil && agentCfg.WorkDir != "" {
 			provider := sessionTranscriptProvider(tp.ResolvedProvider, candidate.info)
-			if present, probeable := staleResumeKeyProbe(provider, agentCfg.WorkDir, parentSID); probeable && !present {
+			if present, probeable := staleResumeKeyProbe(searchPaths, provider, agentCfg.WorkDir, parentSID); probeable && !present {
 				parentStale = true
 			}
 		}
@@ -1347,15 +1351,16 @@ func buildPreparedStartWithWorkDirResolver(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:       candidate,
-		cfg:             agentCfg,
-		coreHash:        coreHash,
-		coreBreakdown:   coreBreakdown,
-		liveHash:        liveHash,
-		provisionHash:   provisionHash,
-		launchHash:      launchHash,
-		promptDelivered: promptDelivered,
-		promptHash:      promptHash,
+		candidate:             candidate,
+		cfg:                   agentCfg,
+		coreHash:              coreHash,
+		coreBreakdown:         coreBreakdown,
+		liveHash:              liveHash,
+		provisionHash:         provisionHash,
+		launchHash:            launchHash,
+		promptDelivered:       promptDelivered,
+		promptHash:            promptHash,
+		transcriptSearchPaths: searchPaths,
 	}, candidate.info, nil
 }
 
@@ -2473,15 +2478,23 @@ func observeRuntimeProviderLiveness(sp runtime.Provider, name string, processNam
 }
 
 // staleResumeKeyProbe reports whether the keyed transcript a resume would
-// reattach to is present (present), and whether the provider exposes a keyed
-// transcript that can be probed on disk at all (probeable). It is a package var
-// so tests can model a present or absent transcript without materializing
-// provider-specific transcript trees. Production delegates to the transcript
-// discovery layer, which knows each provider's on-disk layout and merges each
-// provider's own default roots on top of the supplied claude default, so
-// claude/kimi/pi each probe their real location.
-var staleResumeKeyProbe = func(provider, workDir, sessionKey string) (present, probeable bool) {
-	return workertranscript.HasKeyedTranscript(worker.DefaultSearchPaths(), provider, workDir, sessionKey)
+// reattach to is present, and whether the provider exposes a keyed transcript
+// that can be probed on disk at all. It is a package var so tests can model a
+// present or absent transcript without materializing provider-specific
+// transcript trees. Production is the transcript discovery layer, which knows
+// each provider's on-disk layout. A claude transcript is searched for under the
+// search paths alone; the other probeable providers merge their own default
+// roots on top of them, so each probes its real location.
+var staleResumeKeyProbe = workertranscript.HasKeyedTranscript
+
+// transcriptSearchPaths returns the claude transcript roots for cfg: the
+// default ~/.claude/projects plus the configured [daemon] observe_paths, the
+// same roots the worker factory, the API and gc session logs search.
+func transcriptSearchPaths(cfg *config.City) []string {
+	if cfg == nil {
+		return worker.DefaultSearchPaths()
+	}
+	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
 // validateForkLaunch enforces fork-launch invariants before command resolution.
@@ -3102,7 +3115,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
-	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName())
+	_ = recordWakeFailure(result.prepared.candidate.info, sessFront, clk, tp.DisplayName(), result.prepared.transcriptSearchPaths)
 	if trace != nil {
 		trace.RecordOperation(TraceSiteLifecycleStartFailed, TraceReasonStart, result.outcome, "", tp.TemplateName, name, 0, traceRecordPayload{
 			"error": formatLifecycleError(result.err),

@@ -8504,10 +8504,11 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 
 	workDir := "/tmp/projects/example_one"
 	key := "11111111-2222-3333-4444-555555555555"
+	roots := transcriptSearchPaths(nil)
 
 	// Missing transcript: claude is probeable and reports absent, so the guard
 	// would treat the resume key as stale.
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || present {
+	if present, probeable := staleResumeKeyProbe(roots, "claude", workDir, key); !probeable || present {
 		t.Fatalf("missing claude transcript: probeable=%v present=%v, want probeable && !present", probeable, present)
 	}
 
@@ -8521,21 +8522,173 @@ func TestStaleResumeKeyProbe(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(projDir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if present, probeable := staleResumeKeyProbe("claude", workDir, key); !probeable || !present {
+	if present, probeable := staleResumeKeyProbe(roots, "claude", workDir, key); !probeable || !present {
 		t.Fatalf("present claude transcript: probeable=%v present=%v, want probeable && present", probeable, present)
 	}
 
 	// Codex resolves transcripts by cwd/date, not a keyed file, so it is never
 	// probeable and the guard leaves its metadata untouched.
-	if _, probeable := staleResumeKeyProbe("codex", workDir, key); probeable {
+	if _, probeable := staleResumeKeyProbe(roots, "codex", workDir, key); probeable {
 		t.Fatal("codex probeable = true, want false")
 	}
 	// Empty inputs are not probeable.
-	if _, probeable := staleResumeKeyProbe("claude", "", key); probeable {
+	if _, probeable := staleResumeKeyProbe(roots, "claude", "", key); probeable {
 		t.Fatal("empty workDir probeable = true, want false")
 	}
-	if _, probeable := staleResumeKeyProbe("claude", workDir, ""); probeable {
+	if _, probeable := staleResumeKeyProbe(roots, "claude", workDir, ""); probeable {
 		t.Fatal("empty key probeable = true, want false")
+	}
+}
+
+// isolateClaudeHome points HOME at an empty temp dir, so the default
+// ~/.claude/projects transcript root holds nothing.
+func isolateClaudeHome(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	t.Setenv("USERPROFILE", "")
+}
+
+// writeKeyedClaudeTranscript files the keyed transcript of a claude session
+// started in workDir under root, at <root>/<project slug>/<key>.jsonl.
+func writeKeyedClaudeTranscript(t *testing.T, root, workDir, key string) {
+	t.Helper()
+	dir := filepath.Join(root, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write transcript: %v", err)
+	}
+}
+
+// keyedClaude is the claude builtin profile with the start command the
+// stale-resume probe reads the provider from.
+func keyedClaude() *config.ResolvedProvider {
+	rp := forkClaude()
+	rp.Command = "claude"
+	return rp
+}
+
+// newKeyedClaudeCandidate is an asleep claude session that holds a resume key,
+// in a city that configures one [daemon] observe_paths root. HOME is an empty
+// temp dir and no transcript is filed yet.
+func newKeyedClaudeCandidate(t *testing.T) (candidate startCandidate, cfg *config.City, store beads.Store, key, observeRoot string) {
+	t.Helper()
+	isolateClaudeHome(t)
+	key = "0d6f3a5e-8c1b-4f2a-9e7d-3b5c1a2f4e6d"
+	observeRoot = t.TempDir()
+	store = beads.NewMemStore()
+	session, err := store.Create(beads.Bead{
+		Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":        "worker",
+			"template":            "worker",
+			"state":               "asleep",
+			"provider":            "claude",
+			"work_dir":            t.TempDir(),
+			"session_key":         key,
+			"started_config_hash": "deadbeef",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session): %v", err)
+	}
+	cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+		Daemon: config.DaemonConfig{ObservePaths: []string{observeRoot}},
+	}
+	tp := TemplateParams{Command: "claude", SessionName: "worker", TemplateName: "worker", ResolvedProvider: keyedClaude()}
+	return startCandidate{info: sessiontest.SeedBead(t, session), tp: tp}, cfg, store, key, observeRoot
+}
+
+// TestBuildPreparedStart_KeepsResumeKeyWithTranscriptUnderObservePath pins that
+// the pre-flight stale-resume guard searches the configured [daemon]
+// observe_paths as well as ~/.claude/projects, the roots the worker, the API
+// and gc session logs search for claude transcripts. A keyed transcript under
+// either root is present, so the session keeps its key and resumes. A
+// transcript under a directory the city does not configure is missing, and the
+// guard starts a fresh conversation.
+func TestBuildPreparedStart_KeepsResumeKeyWithTranscriptUnderObservePath(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		defaultRoot   bool
+		noObservePath bool
+		wantKept      bool
+	}{
+		{name: "transcript under the observe path", wantKept: true},
+		{name: "transcript under the default root with an observe path configured", defaultRoot: true, wantKept: true},
+		{name: "transcript under a directory the city does not configure", noObservePath: true, wantKept: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate, cfg, store, key, observeRoot := newKeyedClaudeCandidate(t)
+			root := observeRoot
+			if tc.defaultRoot {
+				root = filepath.Join(os.Getenv("HOME"), ".claude", "projects")
+			}
+			writeKeyedClaudeTranscript(t, root, candidate.info.WorkDir, key)
+			if tc.noObservePath {
+				cfg.Daemon.ObservePaths = nil
+			}
+
+			prepared, _, err := buildPreparedStart(candidate, cfg, store)
+			if err != nil {
+				t.Fatalf("buildPreparedStart: %v", err)
+			}
+			got, err := store.Get(candidate.info.ID)
+			if err != nil {
+				t.Fatalf("store.Get: %v", err)
+			}
+			if !tc.wantKept {
+				if got.Metadata["session_key"] == key || got.Metadata["started_config_hash"] != "" {
+					t.Fatalf("session_key = %q, started_config_hash = %q; want the stale key replaced and the hash cleared", got.Metadata["session_key"], got.Metadata["started_config_hash"])
+				}
+				return
+			}
+			if got.Metadata["session_key"] != key {
+				t.Fatalf("session_key = %q, want %q kept: its transcript is under a searched root", got.Metadata["session_key"], key)
+			}
+			if got.Metadata["started_config_hash"] != "deadbeef" {
+				t.Fatalf("started_config_hash = %q, want deadbeef kept", got.Metadata["started_config_hash"])
+			}
+			if want := "--resume " + key; !strings.Contains(prepared.cfg.Command, want) {
+				t.Fatalf("command = %q, want it to resume (contain %q)", prepared.cfg.Command, want)
+			}
+		})
+	}
+}
+
+// TestCommitStartFailure_KeepsConversationWithTranscriptUnderObservePath pins
+// that a failed start's wake-failure accounting searches the roots the
+// pre-flight guard searched, so a transient start failure keeps a conversation
+// whose transcript is filed under an observe path.
+func TestCommitStartFailure_KeepsConversationWithTranscriptUnderObservePath(t *testing.T) {
+	candidate, cfg, store, key, observeRoot := newKeyedClaudeCandidate(t)
+	writeKeyedClaudeTranscript(t, observeRoot, candidate.info.WorkDir, key)
+	prepared, _, err := buildPreparedStart(candidate, cfg, store)
+	if err != nil {
+		t.Fatalf("buildPreparedStart: %v", err)
+	}
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)
+	result := startResult{
+		prepared: *prepared,
+		err:      errors.New("spawn failed"),
+		outcome:  TraceOutcomeProviderError,
+		started:  now,
+		finished: now,
+	}
+	commitStartFailure(result, sessionFrontDoor(store), &clock.Fake{Time: now}, events.Discard, 0, io.Discard, nil)
+
+	got, err := store.Get(candidate.info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.Metadata["wake_attempts"] != "1" {
+		t.Fatalf("wake_attempts = %q, want 1: the failure must still be counted", got.Metadata["wake_attempts"])
+	}
+	if got.Metadata["session_key"] != key {
+		t.Fatalf("session_key = %q, want %q kept: its transcript is under an observe path", got.Metadata["session_key"], key)
 	}
 }
 

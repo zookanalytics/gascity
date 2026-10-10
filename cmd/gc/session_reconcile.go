@@ -505,7 +505,7 @@ func checkStability(info sessionpkg.Info, cfg *config.City, alive bool, dt *drai
 	if sessionpkg.DecideSessionExit(sessionExitFactsInfo(info, cfg, alive, dt, clk)) != sessionpkg.ExitRapidCrash {
 		return info, false
 	}
-	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg))
+	info = recordWakeFailure(info, sessFront, clk, sessionAgentMetricIdentityInfo(info, cfg), transcriptSearchPaths(cfg))
 	info = clearLastWokeAt(info, sessFront)
 	return info, true
 }
@@ -669,24 +669,25 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // A quarantined accrual whose persist failed leaves the snapshot un-advanced for
 // that write (ApplyPatchInfo folds only on success), so the returned Info matches
 // what the raw bead carries. agentIdentity is the start-path-joinable agent label
-// for gc.agent.quarantines.total.
+// for gc.agent.quarantines.total, and searchPaths are the claude transcript
+// roots searched for the session's conversation.
 // wakeFailureKeepsConversation reports whether a wake failure should leave
 // session_key / started_config_hash alone because the conversation the key
-// points at is provably still on disk. Only a probeable provider with a present
-// keyed transcript qualifies; everything else (no key, no work dir, provider we
-// cannot probe, transcript gone) returns false and keeps the unconditional
-// reset that recovery depends on.
-func wakeFailureKeepsConversation(info sessionpkg.Info) bool {
+// points at is provably still on disk under searchPaths. Only a probeable
+// provider with a present keyed transcript qualifies; everything else (no key,
+// no work dir, provider we cannot probe, transcript gone) returns false and
+// keeps the unconditional reset that recovery depends on.
+func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
 	if sessionKey == "" || workDir == "" {
 		return false
 	}
-	present, probeable := staleResumeKeyProbe(sessionTranscriptProvider(nil, info), workDir, sessionKey)
+	present, probeable := staleResumeKeyProbe(searchPaths, sessionTranscriptProvider(nil, info), workDir, sessionKey)
 	return probeable && present
 }
 
-func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
+func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string, searchPaths []string) sessionpkg.Info {
 	// Parse the raw wake_attempts mirror (not the pre-parsed info.WakeAttempts,
 	// which zeroes on strconv.ErrRange) so an out-of-range counter yields the
 	// same clamped value the old strconv.Atoi(session.Metadata[...]) path did —
@@ -715,7 +716,7 @@ func recordWakeFailure(info sessionpkg.Info, sessFront *sessionpkg.Store, clk cl
 	// existing unconditional behavior. Attempt accrual and quarantine below are
 	// untouched either way, so a genuinely broken session still escalates.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
-		if !wakeFailureKeepsConversation(info) {
+		if !wakeFailureKeepsConversation(info, searchPaths) {
 			reset := sessionpkg.ConversationResetPatch(true)
 			_ = sessFront.ApplyPatch(info.ID, reset)
 			info = info.ApplyPatch(reset)
