@@ -3,6 +3,8 @@ package convoy
 import (
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 
@@ -10,7 +12,7 @@ import (
 )
 
 // unreadableStore stands in for a named class whose backend is unavailable:
-// every Get fails with an I/O-shaped error, which is emphatically NOT
+// every Get and List fails with an I/O-shaped error, which is emphatically NOT
 // beads.ErrNotFound. It is the only way to tell the two directions of the
 // partial-result rule apart — a store that is silent because nobody asked it,
 // and a store that is silent because it broke.
@@ -23,6 +25,75 @@ type unreadableStore struct {
 func (s *unreadableStore) Get(string) (beads.Bead, error) {
 	s.reads++
 	return beads.Bead{}, s.err
+}
+
+func (s *unreadableStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	s.reads++
+	return nil, s.err
+}
+
+// readSpyStore records the member reads a store answers, so a test can pin the
+// read shape a lookup takes: keyed Lists, not a Get per member.
+type readSpyStore struct {
+	beads.Store
+	gets  []string
+	lists []beads.ListQuery
+}
+
+func (s *readSpyStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	return s.Store.Get(id)
+}
+
+func (s *readSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.lists = append(s.lists, query)
+	return s.Store.List(query)
+}
+
+// keyedLists returns the recorded List queries that were keyed by id.
+func (s *readSpyStore) keyedLists() []beads.ListQuery {
+	var keyed []beads.ListQuery
+	for _, q := range s.lists {
+		if len(q.IDs) > 0 {
+			keyed = append(keyed, q)
+		}
+	}
+	return keyed
+}
+
+// partialListStore answers List the way a store does when some rows could not
+// be decoded: it returns the other rows with a beads.PartialResultError. Get
+// still reads every bead, except that corruptID fails metadata projection.
+type partialListStore struct {
+	beads.Store
+	dropped   map[string]bool
+	corruptID string
+	gets      []string
+}
+
+func (s *partialListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	kept := rows[:0]
+	for _, b := range rows {
+		if !s.dropped[b.ID] {
+			kept = append(kept, b)
+		}
+	}
+	if len(kept) == len(rows) {
+		return kept, nil
+	}
+	return kept, &beads.PartialResultError{Op: "list", Err: fmt.Errorf("decoding %d rows", len(rows)-len(kept))}
+}
+
+func (s *partialListStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	if id == s.corruptID {
+		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
+	}
+	return s.Store.Get(id)
 }
 
 // prefixStore reports an id prefix, standing in for a class store that mints
@@ -361,5 +432,220 @@ func TestMembersInParticipantFailureOutranksAFoundOwnerInEitherOrder(t *testing.
 				t.Fatalf("the fixture member is not readable through the owning scope (%v); this test would prove nothing", getErr)
 			}
 		})
+	}
+}
+
+// residenceTopology seeds every residence shape the by-id rule distinguishes,
+// spread over four named class stores. The convoy and graph stores mint their
+// own prefixes; the two Work scopes mint none, as a policy-wrapped store does
+// not. It returns the classes and the ids to resolve.
+func residenceTopology(t *testing.T, broken *unreadableStore, brokenFirst bool) (MemberClasses, []string) {
+	t.Helper()
+	convoyStore := &prefixStore{prefix: "co", Store: beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "co-1", Title: "convoy-class item", Type: "task", Status: "open"},
+		{ID: "co-2", Title: "closed convoy-class item", Type: "task", Status: "closed"},
+	}, nil)}
+	work := beads.NewMemStoreFrom(1, []beads.Bead{
+		// A copy its prefix owner no longer holds, left by a migration.
+		{ID: "co-9", Title: "migrated item", Type: "task", Status: "open"},
+		{ID: "wk-1", Title: "work item", Type: "task", Status: "in_progress"},
+		{ID: "wk-dup", Title: "work copy", Type: "task", Status: "open"},
+	}, nil)
+	graph := &prefixStore{prefix: "gr", Store: beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "gr-1", Title: "wisp step", Type: "task", Status: "open", Ephemeral: true},
+		{ID: "wk-dup", Title: "graph copy", Type: "task", Status: "open"},
+	}, nil)}
+	scopes := []beads.Store{work}
+	if broken != nil {
+		if brokenFirst {
+			scopes = []beads.Store{broken, work}
+		} else {
+			scopes = []beads.Store{work, broken}
+		}
+	}
+	ids := []string{
+		"co-1",   // prefix owner holds it
+		"co-2",   // prefix owner holds it, closed
+		"co-9",   // prefix owner reports it absent; one other class holds it
+		"co-404", // prefix owner reports it absent; no class holds it
+		"gr-1",   // prefix owner holds it, ephemeral
+		"wk-1",   // no prefix owner; one class holds it
+		"wk-dup", // no prefix owner; two classes hold it
+		"wk-404", // no prefix owner; no class holds it
+		"wk-1",   // repeated
+	}
+	return MemberClasses{Convoy: convoyStore, Work: scopes, Graph: graph}, ids
+}
+
+// TestResolveMembersAnswersEachIDAsResolveMemberDoes is the contract for the
+// batched member read: whatever the residence shape, and whether or not a named
+// class is unreadable, resolveMembers answers every id with exactly the bead or
+// the error resolveMember gives for that id alone.
+func TestResolveMembersAnswersEachIDAsResolveMemberDoes(t *testing.T) {
+	cases := []struct {
+		name        string
+		broken      bool
+		brokenFirst bool
+	}{
+		{name: "every class readable"},
+		{name: "unreadable scope probed first", broken: true, brokenFirst: true},
+		{name: "unreadable scope probed last", broken: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var broken *unreadableStore
+			if tc.broken {
+				broken = &unreadableStore{err: fmt.Errorf("dial rig work store: connection refused")}
+			}
+			classes, ids := residenceTopology(t, broken, tc.brokenFirst)
+			resolve := classes.resolveMembers(ids)
+			var outcomes []string
+			for _, id := range ids {
+				want, _, wantErr := classes.resolveMember(id)
+				got, gotErr := resolve(id)
+				if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
+					t.Fatalf("%s: err = %v, want %v", id, gotErr, wantErr)
+				}
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("%s: bead = %+v, want %+v", id, got, want)
+				}
+				var dup *DuplicateResidenceError
+				switch {
+				case gotErr == nil:
+					outcomes = append(outcomes, id+"=bead")
+				case errors.As(gotErr, &dup):
+					outcomes = append(outcomes, id+"=duplicate")
+				case errors.Is(gotErr, beads.ErrNotFound):
+					outcomes = append(outcomes, id+"=absent")
+				default:
+					outcomes = append(outcomes, id+"=read-failure")
+				}
+			}
+			// The fixture must reach every outcome the rule can give, or the
+			// comparison above proves less than it claims.
+			wantOutcomes := "co-1=bead co-2=bead co-9=bead co-404=absent gr-1=bead wk-1=bead wk-dup=duplicate wk-404=absent wk-1=bead"
+			if tc.broken {
+				wantOutcomes = "co-1=bead co-2=bead co-9=read-failure co-404=read-failure gr-1=bead wk-1=read-failure wk-dup=read-failure wk-404=read-failure wk-1=read-failure"
+			}
+			if got := strings.Join(outcomes, " "); got != wantOutcomes {
+				t.Fatalf("outcomes = %s\nwant       %s", got, wantOutcomes)
+			}
+		})
+	}
+}
+
+// TestResolveMembersReadsEachClassAtMostTwiceAndNeverGets pins the read shape
+// of the batched resolution across classes: each class store answers keyed
+// Lists, at most two of them, and no Get, however many ids are resolved.
+func TestResolveMembersReadsEachClassAtMostTwiceAndNeverGets(t *testing.T) {
+	classes, ids := residenceTopology(t, nil, false)
+	convoySpy := &readSpyStore{Store: classes.Convoy.(*prefixStore).Store}
+	workSpy := &readSpyStore{Store: classes.Work[0]}
+	graphSpy := &readSpyStore{Store: classes.Graph.(*prefixStore).Store}
+	// The prefix wraps the spy because a spy does not report the prefix of the
+	// store it wraps.
+	spied := MemberClasses{
+		Convoy: &prefixStore{prefix: "co", Store: convoySpy},
+		Work:   []beads.Store{workSpy},
+		Graph:  &prefixStore{prefix: "gr", Store: graphSpy},
+	}
+	spies := map[string]*readSpyStore{"convoy": convoySpy, "work": workSpy, "graph": graphSpy}
+
+	resolve := spied.resolveMembers(ids)
+	for _, id := range ids {
+		_, _ = resolve(id)
+	}
+	for name, spy := range spies {
+		if len(spy.gets) != 0 {
+			t.Errorf("%s class answered Get for %v; want keyed Lists only", name, spy.gets)
+		}
+		if len(spy.lists) == 0 || len(spy.lists) > 2 {
+			t.Errorf("%s class answered %d Lists; want one or two", name, len(spy.lists))
+		}
+		for _, q := range spy.lists {
+			if len(q.IDs) == 0 || !q.IncludeClosed || q.TierMode != beads.TierBoth {
+				t.Errorf("%s class List = %+v; want a keyed read over every status and both tiers", name, q)
+			}
+		}
+	}
+	// The graph store owns gr-1, which it holds, and is otherwise asked only
+	// for the ids no store mints and the ones their owner reported absent.
+	var graphIDs []string
+	for _, q := range spies["graph"].lists {
+		graphIDs = append(graphIDs, q.IDs...)
+	}
+	sort.Strings(graphIDs)
+	if got, want := strings.Join(graphIDs, " "), "co-404 co-9 gr-1 wk-1 wk-404 wk-dup"; got != want {
+		t.Errorf("graph class read ids %q, want %q", got, want)
+	}
+}
+
+// TestResolveMembersPrefixOwnerNeedsNoProbe is the batched form of the
+// recorded-ownership fast path: ids their prefix owner holds are never looked
+// up in another class, so an unreadable class that no id needs is never read.
+func TestResolveMembersPrefixOwnerNeedsNoProbe(t *testing.T) {
+	graphBacking := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "gcg-1", Title: "graph node", Type: "task", Status: "open"},
+		{ID: "gcg-2", Title: "graph node", Type: "task", Status: "closed"},
+	}, nil)
+	graph := &prefixStore{Store: graphBacking, prefix: "gcg"}
+	work := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
+
+	resolve := MemberClasses{Convoy: graph, Work: []beads.Store{work}}.resolveMembers([]string{"gcg-1", "gcg-2"})
+	for _, id := range []string{"gcg-1", "gcg-2"} {
+		got, err := resolve(id)
+		if err != nil {
+			t.Fatalf("resolve(%s): %v", id, err)
+		}
+		if got.ID != id {
+			t.Fatalf("resolved %q, want %q", got.ID, id)
+		}
+	}
+	if work.reads != 0 {
+		t.Fatalf("work class read %d times, want 0: recorded ownership needs no probe", work.reads)
+	}
+}
+
+// TestResolveMembersPartialReadGetsTheRowsItDropped pins how a partial keyed
+// read is used: the rows it returned resolve as they are, and each id it did not
+// return is read with Get, so a row that could not be decoded becomes the same
+// metadata failure a Get of it reports, not a silent absence.
+func TestResolveMembersPartialReadGetsTheRowsItDropped(t *testing.T) {
+	backing := beads.NewMemStore()
+	convoy, _ := backing.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	kept, _ := backing.Create(beads.Bead{Title: "kept"})
+	dropped, _ := backing.Create(beads.Bead{Title: "dropped"})
+	corrupt, _ := backing.Create(beads.Bead{Title: "corrupt"})
+	for _, id := range []string{kept.ID, dropped.ID, corrupt.ID} {
+		trackOrFatal(t, backing, convoy.ID, id)
+	}
+	store := &partialListStore{
+		Store:     backing,
+		dropped:   map[string]bool{dropped.ID: true, corrupt.ID: true},
+		corruptID: corrupt.ID,
+	}
+
+	members, err := MembersIn(MemberClasses{Convoy: store}, convoy.ID, true)
+	if err != nil {
+		t.Fatalf("MembersIn: %v", err)
+	}
+	got := map[string]beads.Bead{}
+	for _, m := range members {
+		got[m.ID] = m
+	}
+	if b := got[kept.ID]; b.Title != "kept" {
+		t.Errorf("kept member = %+v, want the bead the partial read returned", b)
+	}
+	if b := got[dropped.ID]; b.Title != "dropped" {
+		t.Errorf("dropped member = %+v, want the bead Get returns", b)
+	}
+	if b := got[corrupt.ID]; !IsUnresolvedTrackedItem(b) {
+		t.Errorf("corrupt member = %+v, want the unresolved placeholder", b)
+	}
+	sort.Strings(store.gets)
+	want := []string{corrupt.ID, dropped.ID}
+	sort.Strings(want)
+	if !reflect.DeepEqual(store.gets, want) {
+		t.Errorf("Get calls = %v, want only the ids the partial read dropped (%v)", store.gets, want)
 	}
 }
