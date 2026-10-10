@@ -154,6 +154,81 @@ interval = "1m"
 	}
 }
 
+// TestUnboundRigScopedLogRepeatsOnlyAChangedWarning: a rig-scoped order in a
+// pack every rig imports reports its dropped city registration on every scan,
+// and the order set is rescanned every orderRescanInterval and on every
+// same-revision config reload. The warning is logged when a scan first reports
+// it and again only when it changes.
+func TestUnboundRigScopedLogRepeatsOnlyAChangedWarning(t *testing.T) {
+	var stderr bytes.Buffer
+	var l unboundRigScopedLog
+	report := l.handler(&stderr, "gc patrol: order scan")
+	report("sweep", []string{"alpha", "beta"})
+	report("sweep", []string{"alpha", "beta"})
+	report("other", []string{"alpha"})
+	report("sweep", []string{"alpha"})
+	report("sweep", []string{"alpha", "beta"})
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	want := []struct{ order, rigs string }{
+		{"sweep", "alpha, beta"},
+		{"other", "alpha"},
+		{"sweep", "alpha"},
+		{"sweep", "alpha, beta"},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("logged %d warnings, want %d (an unchanged repeat is not logged):\n%s", len(lines), len(want), stderr.String())
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(lines[i], `gc patrol: order scan: order "`+w.order+`" declares scope = "rig"`) ||
+			!strings.HasSuffix(lines[i], "(still registered on rig(s) "+w.rigs+")") {
+			t.Errorf("warning %d = %q, want order %q still registered on %s", i, lines[i], w.order, w.rigs)
+		}
+	}
+}
+
+// TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce: the orders lane's
+// periodic rescan and the same-revision config reload both scan through
+// CityRuntime.scanOrderSet, so a dropped rig-scope registration is logged
+// once, not on every rescan.
+func TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	cityLayer := filepath.Join(cityPath, "formulas")
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	for _, dir := range []string{cityLayer, filepath.Join(packDir, "formulas"), filepath.Join(packDir, "orders")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(packDir, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr}
+
+	for i := 0; i < 3; i++ {
+		snapshot, err := cr.scanOrderSet(cityPath, cfg, "gc patrol: order scan")
+		if err != nil {
+			t.Fatalf("scan %d: %v", i, err)
+		}
+		if !orderSnapshotHasName(snapshot.Orders, "sweep") {
+			t.Fatalf("scan %d dropped the rig-bound registration too: %#v", i, snapshot.Orders)
+		}
+	}
+	if n := strings.Count(stderr.String(), `order "sweep" declares scope = "rig"`); n != 1 {
+		t.Fatalf("dropped-registration warnings across three scans = %d, want 1:\n%s", n, stderr.String())
+	}
+}
+
 func orderSnapshotByName(aa []orders.Order, name string) orders.Order {
 	for _, a := range aa {
 		if a.Name == name {
@@ -1824,6 +1899,182 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}
+	}
+}
+
+// alwaysDueCooldownDispatcher builds an exec dispatcher over store whose orders
+// are due on every pass that is offered them (a 1ms cooldown against passes at
+// least a second apart), with a cap of 2 dispatches and the given budget
+// interval.
+func alwaysDueCooldownDispatcher(t *testing.T, store beads.Store, interval time.Duration, names ...string) *memoryOrderDispatcher {
+	t.Helper()
+	aa := make([]orders.Order, 0, len(names))
+	for _, name := range names {
+		aa = append(aa, orders.Order{Name: name, Trigger: "cooldown", Interval: "1ms", Exec: "true"})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	m := ad.(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 2
+	m.budgetInterval = interval
+	t.Cleanup(func() { m.dispatchCancel() })
+	return m
+}
+
+// TestOrderDispatchBudgetAccruesPerPatrolInterval pins the budget as a rate:
+// max_dispatches_per_tick dispatches for each patrol interval of wall time,
+// however long the passes between them take.
+//
+// A pass's length is store latency, maintenance arms and the lane's duty cycle,
+// none of which the cap is about. With more due orders than one pass's budget,
+// every order waits a whole rotation between dispatches, so a budget spent once
+// per pass would let a slow stretch of passes stretch that wait for every order
+// at once.
+func TestOrderDispatchBudgetAccruesPerPatrolInterval(t *testing.T) {
+	store := beads.NewMemStore()
+	names := make([]string, 40)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	cityPath := t.TempDir()
+
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// pass time in the past would leave a fired order not yet due again.
+	at := time.Now()
+	total := 0
+	for _, pass := range []struct {
+		gap  time.Duration
+		want int
+		why  string
+	}{
+		{0, 2, "the first pass has no previous pass to accrue from"},
+		{90 * time.Second, 6, "three patrol intervals since the previous pass began"},
+		{time.Second, 2, "a pass sooner than one interval keeps the configured cap"},
+		{50 * time.Second, 3, "5/3 of an interval accrues 3 1/3; the third carries"},
+		{50 * time.Second, 3, "3 1/3 plus the carried third is 3 2/3; two thirds carry"},
+		{50 * time.Second, 4, "3 1/3 plus the carried two thirds is exactly 4"},
+		{10 * time.Minute, 8, "a long gap accrues at most four intervals"},
+	} {
+		at = at.Add(pass.gap)
+		m.dispatch(context.Background(), cityPath, at)
+		drainOrderDispatch(t, m)
+		total += pass.want
+		if got := countOrderTrackingRuns(t, store); got != total {
+			t.Fatalf("tracking runs after a pass %s after the previous one = %d, want %d: %s", pass.gap, got, total, pass.why)
+		}
+	}
+}
+
+// TestOrderDispatchBudgetRestartsAfterASkippedPass: time the lane spent not
+// dispatching on purpose (FS pressure, a suspended city) is not a slow pass,
+// and accruing it would turn the pass that resumes into a burst.
+func TestOrderDispatchBudgetRestartsAfterASkippedPass(t *testing.T) {
+	store := beads.NewMemStore()
+	names := make([]string, 20)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	cityPath := t.TempDir()
+
+	at := time.Now()
+	m.dispatch(context.Background(), cityPath, at)
+	drainOrderDispatch(t, m)
+	m.restartBudget()
+	m.dispatch(context.Background(), cityPath, at.Add(10*time.Minute))
+	drainOrderDispatch(t, m)
+
+	if got := countOrderTrackingRuns(t, store); got != 4 {
+		t.Fatalf("tracking runs = %d, want 4: the pass after a restart must get the configured cap, not ten minutes of accrual", got)
+	}
+}
+
+// TestNewMemoryOrderDispatcherBudgetsOverThePatrolInterval wires the budget's
+// period to the patrol interval, the cadence the cap is configured against.
+func TestNewMemoryOrderDispatcherBudgetsOverThePatrolInterval(t *testing.T) {
+	for _, tc := range []struct {
+		patrol string
+		want   time.Duration
+	}{
+		{"", 30 * time.Second},
+		{"15s", 15 * time.Second},
+	} {
+		cfg := &config.City{Daemon: config.DaemonConfig{PatrolInterval: tc.patrol}}
+		m := newMemoryOrderDispatcher(nil, nil, t.TempDir(), cfg, events.Discard, &bytes.Buffer{})
+		m.dispatchCancel()
+		if m.budgetInterval != tc.want {
+			t.Errorf("patrol_interval %q: budget interval = %s, want %s", tc.patrol, m.budgetInterval, tc.want)
+		}
+	}
+}
+
+// TestReplaceOrderDispatcherResumesTheRotationByName: a reload or rescan
+// rebuilds the dispatcher, and a rebuild whose rotation started over at the head
+// of the order list would make every order the cursor had not reached yet wait
+// another full rotation. The rebuilt set can add and drop orders, so the cursor
+// resumes by scoped name, not by index.
+func TestReplaceOrderDispatcherResumesTheRotationByName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rebuilt []string
+		fires   []string
+	}{
+		{"orders added ahead of the cursor move its index", []string{"o5", "o6", "o0", "o2", "o3", "o4"}, []string{"o2", "o3"}},
+		{"the order at the cursor was dropped", []string{"o0", "o1", "o3", "o4"}, []string{"o3", "o4"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cityPath := t.TempDir()
+			prev := alwaysDueCooldownDispatcher(t, store, 0, "o0", "o1", "o2", "o3", "o4")
+			at := time.Now()
+			// Fires o0 and o1 and leaves the cursor on o2.
+			prev.dispatch(context.Background(), cityPath, at)
+			drainOrderDispatch(t, prev)
+
+			next := alwaysDueCooldownDispatcher(t, store, 0, tc.rebuilt...)
+			cr := &CityRuntime{od: prev}
+			cr.replaceOrderDispatcher(next)
+			next.dispatch(context.Background(), cityPath, at.Add(time.Second))
+			drainOrderDispatch(t, next)
+
+			want := map[string]int{"o0": 1, "o1": 1}
+			for _, name := range tc.fires {
+				want[name]++
+			}
+			for _, name := range []string{"o0", "o1", "o2", "o3", "o4", "o5", "o6"} {
+				if got := runCountFor(t, store, name); got != want[name] {
+					t.Errorf("%s runs = %d, want %d: the rebuilt dispatcher's first pass must fire %v", name, got, want[name], tc.fires)
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceOrderDispatcherCarriesTheBudgetAccrual: the rebuilt dispatcher's
+// first pass accrues from the outgoing dispatcher's last pass, instead of
+// starting over at the per-pass cap.
+func TestReplaceOrderDispatcherCarriesTheBudgetAccrual(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	names := make([]string, 10)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%d", i)
+	}
+	prev := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	at := time.Now()
+	prev.dispatch(context.Background(), cityPath, at)
+	drainOrderDispatch(t, prev)
+
+	next := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	(&CityRuntime{od: prev}).replaceOrderDispatcher(next)
+	next.dispatch(context.Background(), cityPath, at.Add(90*time.Second))
+	drainOrderDispatch(t, next)
+
+	if got := countOrderTrackingRuns(t, store); got != 8 {
+		t.Fatalf("tracking runs = %d, want 8: 2 before the rebuild, then three intervals' accrual of 2", got)
 	}
 }
 

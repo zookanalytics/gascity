@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,6 +100,11 @@ const (
 	// closed order-tracking beads deleted per watchdog invocation.
 	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
+
+// orderDispatchBudgetMaxIntervals bounds how many patrol intervals of dispatch
+// budget one pass can accrue (passDispatchBudget), and with it the burst a
+// single pass can launch after a slow one.
+const orderDispatchBudgetMaxIntervals = 4
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
 // constant so both load-time defaults and the runtime fallback stay in sync.
@@ -330,12 +336,49 @@ type memoryOrderDispatcher struct {
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
 
+	// budgetInterval is the wall-clock period maxDispatchesPerTick is a rate
+	// over: the patrol interval. Zero spends the cap once per pass
+	// (passDispatchBudget). budgetPassStart is when the previous pass's budget
+	// was computed, zero before the first pass and after restartBudget.
+	// budgetRemainder is what that pass accrued short of one more dispatch, in
+	// units where one dispatch costs budgetInterval nanoseconds.
+	budgetInterval  time.Duration
+	budgetPassStart time.Time
+	budgetRemainder int64
+
+	// lastPass is what the most recent dispatch call did with its budget and
+	// why it held orders back. Only dispatch and the gates it runs write it,
+	// and the orders lane reads it for the pass's trace record, all under the
+	// lane's passMu.
+	lastPass orderDispatchPassStats
+
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
 
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+}
+
+// orderDispatchPassStats is what one dispatch pass did with its budget, and why
+// it held back the orders it did not dispatch, for the pass's trace record.
+type orderDispatchPassStats struct {
+	// budget is the pass's allowance of budgeted dispatches, 0 when uncapped.
+	budget int
+	// dispatched counts the dispatches the pass launched, budgeted or not,
+	// including the trigger-env failure records that stand in for one.
+	dispatched int
+	// unreached counts the budgeted candidates the rotation did not reach
+	// because the budget ran out. Their due-ness was not evaluated.
+	unreached int
+	// The gate counts are orders held back by an open tracking bead, by open
+	// work under an earlier dispatch, by a gate read that failed closed (a
+	// contention timeout on a non-idempotent order, or a store error), and by
+	// the backoff an earlier timeout left.
+	gatedOpenTracking int
+	gatedOpenWork     int
+	gateFailedClosed  int
+	gateBackoff       int
 }
 
 type orderDispatchTrackingIndex struct {
@@ -403,8 +446,20 @@ func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cf
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	return scanOrderSetSnapshotFSWith(fs, cityPath, cfg, stderr, cmdName, nil)
+}
+
+// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS with the handler for a
+// registration the scan drops for its rig scope. A nil handler logs every one
+// the scan reports.
+func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, onUnbound orderdiscovery.UnboundRigScopedHandler) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
+	}
+	if onUnbound == nil {
+		onUnbound = func(orderName string, boundRigs []string) {
+			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+		}
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		FS: fs,
@@ -420,10 +475,8 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
 			return nil
 		},
-		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
-			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
-		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		OnUnboundRigScoped: onUnbound,
+		ValidateOrder:      validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err
@@ -432,6 +485,38 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),
 	}, nil
+}
+
+// unboundRigScopedLog logs a registration the order scan drops for its rig
+// scope the first time a scan reports it, and again only when its warning
+// changes. The drop is expected for a rig-scoped order in a pack every rig
+// imports, and the order set is rescanned by the orders lane every
+// orderRescanInterval and by every same-revision config reload, so an
+// unchanged warning repeated on each rescan buries the log; a changed one is
+// news.
+type unboundRigScopedLog struct {
+	mu   sync.Mutex
+	last map[string]string // order name -> the warning last logged for it
+}
+
+// handler returns the scan handler that logs through l, prefixed with
+// cmdName.
+func (l *unboundRigScopedLog) handler(stderr io.Writer, cmdName string) orderdiscovery.UnboundRigScopedHandler {
+	return func(orderName string, boundRigs []string) {
+		msg := orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)
+		l.mu.Lock()
+		repeat := l.last[orderName] == msg
+		if !repeat {
+			if l.last == nil {
+				l.last = make(map[string]string)
+			}
+			l.last[orderName] = msg
+		}
+		l.mu.Unlock()
+		if !repeat {
+			logDispatchError(stderr, "%s: %s", cmdName, msg)
+		}
+	}
 }
 
 func orderSetSignature(aa []orders.Order) string {
@@ -512,6 +597,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
 		maxDispatchesPerTick: maxDispatchesPerTick,
+		budgetInterval:       cfg.Daemon.PatrolIntervalDuration(),
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
@@ -615,12 +701,14 @@ func (m *memoryOrderDispatcher) prefetchConditionResults(candidates []*orderDisp
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	m.lastPass = orderDispatchPassStats{}
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
 	// against the controlled city rather than the process cwd.
 	if m.cfg != nil {
 		st, _ := loadSuspensionState(fsys.OSFS{}, m.cityPath)
 		if citySuspendedWithState(m.cfg, st) {
+			m.restartBudget()
 			return
 		}
 	}
@@ -653,16 +741,18 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	if total == 0 {
 		return
 	}
+	budget := m.passDispatchBudget(now)
+	m.lastPass.budget = budget
 	start := 0
-	if m.maxDispatchesPerTick > 0 {
+	if budget > 0 {
 		start = m.nextDispatchStart % total
 	}
 	spendDispatchBudget := func(idx int) bool {
 		budgetSpent++
-		if m.maxDispatchesPerTick > 0 {
+		if budget > 0 {
 			m.nextDispatchStart = (idx + 1) % total
 		}
-		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
+		return budget > 0 && budgetSpent >= budget
 	}
 
 	// Phase 1: resolve and open-tracking-gate every order, in rotation order.
@@ -715,6 +805,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// interval plus the synchronous tracking bead created below.
 		if !a.NoWorkGate {
 			if m.gateBackoffActive(scoped, now) {
+				m.lastPass.gateBackoff++
 				continue
 			}
 			hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
@@ -731,10 +822,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
+					m.lastPass.gateFailedClosed++
 					continue
 				}
 			}
 			if hasOpenTracking {
+				m.lastPass.gatedOpenTracking++
 				continue
 			}
 		}
@@ -781,17 +874,80 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}
 	}
 	for _, cand := range unbudgeted {
-		m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now)
+		if m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
+			m.lastPass.dispatched++
+		}
 	}
 	for i, cand := range budgeted {
 		if !m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
 			continue
 		}
+		m.lastPass.dispatched++
 		if spendDispatchBudget(cand.idx) {
-			m.logUnreachedCandidates(budgeted[i+1:])
+			m.lastPass.unreached = len(budgeted[i+1:])
+			m.logUnreachedCandidates(budget, budgeted[i+1:])
 			return
 		}
 	}
+}
+
+// passDispatchBudget returns how many budgeted dispatches the pass beginning at
+// now may launch, and 0 when dispatch is uncapped.
+//
+// maxDispatchesPerTick is a rate: that many dispatches for each budgetInterval
+// of wall time. A pass accrues it for the time since the previous pass began,
+// so the rate holds when passes slow down. A pass's length is store latency,
+// maintenance arms and the lane's duty cycle, none of which the cap limits. A
+// cap spent once per pass would let a slow stretch cut the dispatch rate for
+// every order at once: with more due orders than one pass's budget, each order
+// waits a whole rotation between dispatches, and the rotation grows with the
+// pass. Accrual keeps three bounds:
+//
+//   - A pass never gets less than maxDispatchesPerTick, which is also what the
+//     first pass gets, and the first pass after restartBudget.
+//   - A pass never gets more than orderDispatchBudgetMaxIntervals intervals'
+//     worth, which bounds the burst one pass launches after a long gap.
+//   - Only the fraction of a dispatch carries to the next pass. Budget a pass
+//     leaves unspent because fewer orders were due is dropped, so a quiet
+//     stretch builds no burst.
+func (m *memoryOrderDispatcher) passDispatchBudget(now time.Time) int {
+	if m.maxDispatchesPerTick <= 0 {
+		return 0
+	}
+	floor := m.maxDispatchesPerTick
+	ceiling := floor * orderDispatchBudgetMaxIntervals
+	prev := m.budgetPassStart
+	m.budgetPassStart = now
+	if prev.IsZero() || m.budgetInterval <= 0 || !now.After(prev) {
+		m.budgetRemainder = 0
+		return floor
+	}
+	elapsed := now.Sub(prev)
+	// A gap of the full accrual, or one long enough to overflow the product
+	// below, gets the ceiling.
+	if elapsed/m.budgetInterval >= orderDispatchBudgetMaxIntervals || int64(floor) > (math.MaxInt64-m.budgetRemainder)/int64(elapsed) {
+		m.budgetRemainder = 0
+		return ceiling
+	}
+	// Integer accrual, so fractional dispatches add up exactly across passes.
+	// elapsed is under orderDispatchBudgetMaxIntervals intervals and the
+	// remainder under one, so budget is at most ceiling.
+	accrued := int64(floor)*int64(elapsed) + m.budgetRemainder
+	budget := int(accrued / int64(m.budgetInterval))
+	m.budgetRemainder = accrued % int64(m.budgetInterval)
+	if budget < floor {
+		m.budgetRemainder = 0
+		return floor
+	}
+	return budget
+}
+
+// restartBudget makes the next pass's budget a first pass's: the configured cap,
+// with nothing accrued. The orders lane calls it after a pass it deliberately
+// did not dispatch (FS pressure, a suspended city), so the time the lane spent
+// not dispatching does not accrue into a burst on the pass that resumes.
+func (m *memoryOrderDispatcher) restartBudget() {
+	m.budgetPassStart, m.budgetRemainder = time.Time{}, 0
 }
 
 // dueConditionCandidate reports whether a candidate is a condition-triggered
@@ -832,7 +988,10 @@ const maxUnreachedOrderNames = 8
 // claims only what the tick already knows for free — that these orders were not
 // reached — and leaves the operator to judge whether the ones they expected to
 // fire are among them before reaching for orders.max_dispatches_per_tick.
-func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatchCandidate) {
+// budget is the pass's own allowance (passDispatchBudget), which a pass that
+// accrued more than one patrol interval's worth reports above the configured
+// cap.
+func (m *memoryOrderDispatcher) logUnreachedCandidates(budget int, unreached []*orderDispatchCandidate) {
 	if len(unreached) == 0 {
 		return
 	}
@@ -845,7 +1004,7 @@ func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatc
 		names = append(names, cand.scoped)
 	}
 	logDispatchError(m.stderr, "gc: order dispatch: per-tick budget %d spent; the rotation did not reach %d more order(s) this tick (due-ness not evaluated): %s",
-		m.maxDispatchesPerTick, len(unreached), strings.Join(names, ", "))
+		budget, len(unreached), strings.Join(names, ", "))
 }
 
 // openWorkGateShut reports whether the wisp-aware open-work gate (#2921) is
@@ -871,10 +1030,12 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 				// using the tick-start 'now' would set a deadline that has already passed.
 				m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 			}
+			m.lastPass.gateFailedClosed++
 			return true
 		}
 	}
 	if hasOpenWork {
+		m.lastPass.gatedOpenWork++
 		// This skip is the one that can last forever: a wisp subtree
 		// stalled in a store the recovery sweep does not search holds the
 		// gate shut on every tick with nothing emitted (see
@@ -1528,6 +1689,41 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 	for key, last := range prev.lastRunCache {
 		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
 			m.lastRunCache[key] = last
+		}
+	}
+}
+
+// carryDispatchRotationFrom carries the budget rotation from the dispatcher a
+// reload or rescan replaces. The cursor resumes at the order prev would have
+// served next, found by scoped name because the rebuilt order set can differ
+// from prev's. The budget keeps accruing from prev's last pass; the carried
+// fraction of a dispatch is dropped when the patrol interval it was measured in
+// changed. A rebuild that started the rotation over at the head of the order
+// list would make every order the cursor had not reached yet wait another full
+// rotation. Callers invoke this after draining prev, under the orders lane's
+// passMu, so no dispatch moves prev's cursor meanwhile.
+func (m *memoryOrderDispatcher) carryDispatchRotationFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	m.budgetPassStart = prev.budgetPassStart
+	if m.budgetInterval == prev.budgetInterval {
+		m.budgetRemainder = prev.budgetRemainder
+	}
+	if len(prev.aa) == 0 || len(m.aa) == 0 {
+		return
+	}
+	position := make(map[string]int, len(m.aa))
+	for i, a := range m.aa {
+		if _, seen := position[a.ScopedName()]; !seen {
+			position[a.ScopedName()] = i
+		}
+	}
+	for offset := 0; offset < len(prev.aa); offset++ {
+		next := prev.aa[(prev.nextDispatchStart+offset)%len(prev.aa)]
+		if i, ok := position[next.ScopedName()]; ok {
+			m.nextDispatchStart = i
+			return
 		}
 	}
 }

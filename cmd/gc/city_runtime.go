@@ -202,6 +202,9 @@ type CityRuntime struct {
 
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
+	// unboundRigScoped keeps scanOrderSet from repeating an unchanged
+	// dropped-registration warning on every rescan.
+	unboundRigScoped unboundRigScopedLog
 	// afterReloadStagesOrders, when set (tests), runs right after a config
 	// reload stages its order dispatcher.
 	afterReloadStagesOrders func()
@@ -2007,9 +2010,9 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data, active gate-backoff state, and open-work suppression
-// streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
-// them instead of cold-starting (#3201).
+// warm last-run data, active gate-backoff state, open-work suppression streaks,
+// and the budget rotation from the outgoing dispatcher so a rebuild (reload or
+// rescan) reuses them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
@@ -2017,6 +2020,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryDispatchRotationFrom(prev)
 		}
 	}
 	cr.od = next
