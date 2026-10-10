@@ -2209,6 +2209,7 @@ func TestOrderTrackingSweepWatchdogAllowsSweepOrderToCleanStaleTracking(t *testi
 			50*time.Millisecond,
 			nil,
 			false,
+			true,
 		)
 		return nil, err
 	}

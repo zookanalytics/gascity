@@ -543,7 +543,7 @@ func TestOrderSweepTrackingReachesTheOrdersBinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving sweep stores: %v", err)
 	}
-	result, err := sweepStaleOrderTrackingAcrossStores(stores, nil, stale.CreatedAt.Add(2*time.Hour), time.Hour, nil, false)
+	result, err := sweepStaleOrderTrackingAcrossStores(stores, nil, stale.CreatedAt.Add(2*time.Hour), time.Hour, nil, false, true)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestOrderWispSweepCountsTheWrappedOrdersBindingOnce(t *testing.T) {
 	}
 
 	now := root.CreatedAt.Add(2 * time.Hour)
-	result, err := sweepStaleOrderTrackingAcrossStoresDryRun(stores, binding, now, time.Hour, orderFilterForTest("dolt-health"), true)
+	result, err := sweepStaleOrderTrackingAcrossStoresDryRun(stores, binding, now, time.Hour, orderFilterForTest("dolt-health"), true, true)
 	if err != nil {
 		t.Fatalf("dry-run sweep across the wrapped binding: %v", err)
 	}

@@ -3033,8 +3033,14 @@ gc order sweep-nudge-mail [flags]
 Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It closes open tracking beads
-older than --stale-after, whatever timeout their run was started with, so a
---stale-after longer than every order's timeout leaves in-flight runs alone.
+older than --stale-after, except the bead of a run that may still be in
+flight: one with no outcome yet that records the timeout its run was started
+with (the order's timeout, capped by [orders].max_timeout). That bead stays
+open until it is --stale-after older than the recorded timeout, so an order
+whose timeout exceeds --stale-after keeps its single-flight gate for the whole
+run. Pass --ignore-run-timeouts to close such a bead at --stale-after too,
+when you know its run is dead.
+
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -3042,11 +3048,10 @@ The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 The controller's watchdog also closes stale open tracking beads, at most every
-30s, independent of this command and of --stale-after. A run still in flight
-keeps its tracking bead until the bead is 2m older than the timeout the run was
-started with (the order's timeout, capped by [orders].max_timeout), which the
-bead records. A later config reload does not change that timeout. Any other
-open tracking bead is closed once it is 2m old.
+30s, independent of this command. It keeps the same in-flight exception with a
+2m window in place of --stale-after, and closes any other open tracking bead
+once it is 2m old. A later config reload does not change a run's recorded
+timeout.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -3066,6 +3071,7 @@ gc order sweep-tracking [order ...] [flags]
 |------|------|---------|-------------|
 | `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
+| `--ignore-run-timeouts` | bool |  | also close the tracking beads of runs still inside the timeout they were started with |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for this command to close an open tracking bead |

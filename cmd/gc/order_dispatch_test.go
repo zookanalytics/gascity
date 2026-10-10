@@ -3985,25 +3985,59 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
-func TestSweepStaleOrderTrackingAcrossStoresIgnoresRecordedRunTimeout(t *testing.T) {
-	// gc order sweep-tracking applies --stale-after alone: it closes a
-	// tracking bead older than --stale-after even while the timeout its run
-	// records has not passed. Only the controller's watchdog waits that out.
-	store := beads.NewMemStore()
-	run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("long-pass", orders.RunOpts{Timeout: time.Hour})
-	if err != nil {
-		t.Fatalf("CreateRun: %v", err)
+func TestSweepStaleOrderTrackingAcrossStoresHonorsRecordedRunTimeout(t *testing.T) {
+	// The sweep gc order sweep-tracking runs keeps an in-flight run's tracking
+	// bead, the order's single-flight gate, until the bead is staleAfter older
+	// than the timeout the run records. Ignoring run timeouts closes it at
+	// staleAfter. A dry run reports exactly what the sweep would close.
+	const runTimeout = time.Hour
+	staleAfter := defaultOrderTrackingSweepStaleAfter
+	tests := []struct {
+		name             string
+		age              time.Duration
+		honorRunTimeouts bool
+		want             string
+	}{
+		{name: "past stale-after inside the run timeout", age: staleAfter + time.Second, honorRunTimeouts: true, want: "open"},
+		{name: "past the run timeout inside its stale window", age: runTimeout + staleAfter - time.Second, honorRunTimeouts: true, want: "open"},
+		{name: "past the run timeout and its stale window", age: runTimeout + staleAfter + time.Second, honorRunTimeouts: true, want: "closed"},
+		{name: "ignoring run timeouts", age: staleAfter + time.Second, honorRunTimeouts: false, want: "closed"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("long-pass", orders.RunOpts{Timeout: runTimeout})
+			if err != nil {
+				t.Fatalf("CreateRun: %v", err)
+			}
+			now := run.CreatedAt.Add(tt.age)
+			wantClosed := 0
+			if tt.want == "closed" {
+				wantClosed = 1
+			}
 
-	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, run.CreatedAt.Add(defaultOrderTrackingSweepStaleAfter+time.Second), defaultOrderTrackingSweepStaleAfter, nil, false)
-	if err != nil {
-		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
-	}
-	if result.trackingClosed != 1 {
-		t.Fatalf("closed = %d, want 1", result.trackingClosed)
-	}
-	if got := orderTrackingStatus(t, store, run.ID); got != "closed" {
-		t.Fatalf("tracking status past --stale-after inside the run's recorded timeout = %s, want closed", got)
+			dry, err := sweepStaleOrderTrackingAcrossStoresDryRun([]beads.Store{store}, nil, now, staleAfter, nil, false, tt.honorRunTimeouts)
+			if err != nil {
+				t.Fatalf("sweepStaleOrderTrackingAcrossStoresDryRun: %v", err)
+			}
+			if dry.trackingClosed != wantClosed {
+				t.Fatalf("dry run would close %d, want %d", dry.trackingClosed, wantClosed)
+			}
+			if got := orderTrackingStatus(t, store, run.ID); got != "open" {
+				t.Fatalf("tracking status after dry run = %s, want open", got)
+			}
+
+			result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, now, staleAfter, nil, false, tt.honorRunTimeouts)
+			if err != nil {
+				t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
+			}
+			if result.trackingClosed != wantClosed {
+				t.Fatalf("closed = %d, want %d", result.trackingClosed, wantClosed)
+			}
+			if got := orderTrackingStatus(t, store, run.ID); got != tt.want {
+				t.Fatalf("tracking status %s after dispatch = %s, want %s", tt.age, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -4646,6 +4680,7 @@ func TestSweepStaleOrderTrackingAcrossStoresClosesRigStoreAndUnblocksDispatch(t 
 		time.Minute,
 		orderFilterForTest("rig-digest:rig:frontend"),
 		false,
+		true,
 	)
 	if err != nil {
 		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
@@ -4711,6 +4746,7 @@ func TestSweepStaleOrderTrackingAcrossStoresContinuesAfterStoreError(t *testing.
 		time.Minute,
 		nil,
 		false,
+		true,
 	)
 	if err == nil {
 		t.Fatal("sweepStaleOrderTrackingAcrossStores err = nil, want aggregate store error")

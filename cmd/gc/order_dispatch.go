@@ -3069,8 +3069,8 @@ func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter t
 	return result.trackingClosed, err
 }
 
-func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, false)
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, honorRunTimeouts)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
@@ -3085,8 +3085,8 @@ func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore be
 	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, honorRunTimeouts)
 }
 
-func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, false)
+func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, honorRunTimeouts)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
