@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -284,6 +285,46 @@ func TestProxiedStoreGetFallsBackToBdLeafForWispIDs(t *testing.T) {
 	})
 }
 
+// TestProxiedStoreGetExactBatchReadsTheNativeLeaf pins the exact batch read on
+// the split store: the native leaf answers it, and an id the native leaf does
+// not hold is left unresolved, so the caller's Get takes H1's fallback to the bd
+// leaf. A demoted store forwards to the bd leaf, which here has no batch read.
+func TestProxiedStoreGetExactBatchReadsTheNativeLeaf(t *testing.T) {
+	native := newNativeDoltStoreForTest(newNativeDoltMemStorage(), WithProxiedReadOnly())
+	wisp := Bead{ID: "prx-wisp-0001", Title: "auto-handoff mail", Type: "task"}
+	bd := &recordingLeaf{Store: &wispOnlyStore{wisp: wisp}}
+	store, err := NewProxiedStore(native, bd, PinForTest("/scope", "", "beads"))
+	if err != nil {
+		t.Fatalf("NewProxiedStore: %v", err)
+	}
+	seeded, err := newNativeDoltStoreForTest(native.storage.(*nativeDoltMemStorage)).Create(Bead{Title: "in the issues table", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the native ledger: %v", err)
+	}
+
+	found, unresolved, err := store.GetExactBatch([]string{seeded.ID, wisp.ID})
+	if err != nil {
+		t.Fatalf("GetExactBatch: %v", err)
+	}
+	if b, ok := found[seeded.ID]; !ok || b.Title != seeded.Title || len(found) != 1 {
+		t.Fatalf("found = %+v, want only the native leaf's bead %s", found, seeded.ID)
+	}
+	if want := []string{wisp.ID}; !reflect.DeepEqual(unresolved, want) {
+		t.Fatalf("unresolved = %v, want %v", unresolved, want)
+	}
+	if calls := bd.took(); len(calls) != 0 {
+		t.Fatalf("the batch read reached the bd leaf (%v); it belongs to the native leaf", calls)
+	}
+	if got, err := store.Get(wisp.ID); err != nil || got.ID != wisp.ID {
+		t.Fatalf("Get(%s) = %+v, %v; want the bd leaf's wisp for the id the batch left unresolved", wisp.ID, got, err)
+	}
+
+	store.standDown(NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "demoted"))
+	if _, _, err := store.GetExactBatch([]string{seeded.ID}); !errors.Is(err, ErrExactBatchGetUnsupported) {
+		t.Fatalf("GetExactBatch on a demoted store = %v, want ErrExactBatchGetUnsupported from a bd leaf without the read", err)
+	}
+}
+
 // wispOnlyStore is a bd leaf that holds exactly one wisp-tier bead, standing in
 // for the `bd query --ephemeral` fallback BdStore.Get performs.
 type wispOnlyStore struct {
@@ -394,6 +435,19 @@ func TestProxiedStoreRelocatedClassReadsRefuseLikeBdStore(t *testing.T) {
 	if forks != 0 {
 		t.Errorf("the guard let %d bd fork(s) through; it must refuse before anything is spent", forks)
 	}
+
+	t.Run("the exact batch read leaves a relocated id to Get", func(t *testing.T) {
+		found, unresolved, err := store.GetExactBatch([]string{"gcg-1234", "prx-1"})
+		if err != nil {
+			t.Fatalf("GetExactBatch: %v", err)
+		}
+		if len(found) != 0 || !reflect.DeepEqual(unresolved, []string{"gcg-1234", "prx-1"}) {
+			t.Fatalf("GetExactBatch = %v, unresolved %v; want both ids left to Get, whose refusal names the relocation", found, unresolved)
+		}
+		if forks != 0 {
+			t.Fatalf("the batch read spent %d bd fork(s)", forks)
+		}
+	})
 
 	t.Run("an id this ledger does serve is untouched", func(t *testing.T) {
 		// A plain miss, not a refusal — and H1's wisp fallback is what spends the

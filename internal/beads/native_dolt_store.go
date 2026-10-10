@@ -1464,6 +1464,63 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	return out, err
 }
 
+var _ ExactBatchGetter = (*NativeDoltStore)(nil)
+
+// GetExactBatch reads ids with one search by id, the read Get makes for one id,
+// and returns the beads it found under exactly a requested id. Every requested
+// id it did not answer is listed in unresolved, in input order: the bead is
+// absent, or its row's metadata does not project, which Get reports as
+// ErrMetadataParse.
+func (s *NativeDoltStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	found := make(map[string]Bead, len(ids))
+	if len(ids) == 0 {
+		return found, nil, nil
+	}
+	requested := make(map[string]bool, len(ids))
+	distinct := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !requested[id] {
+			requested[id] = true
+			distinct = append(distinct, id)
+		}
+	}
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		clear(found)
+		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs:                 distinct,
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			return err
+		}
+		s.noteRows(len(issues))
+		for _, issue := range issues {
+			if issue == nil || !requested[issue.ID] {
+				continue
+			}
+			bead, err := beadFromNativeIssue(issue)
+			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
+				return err
+			}
+			found[issue.ID] = bead
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting %d beads: %w", len(distinct), err)
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	if err := s.readOnlyGuard(); err != nil {
@@ -1788,13 +1845,47 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 }
 
 // List returns beads matching the query.
+//
+// A query scoped to parents (ParentID, or ParentIDs) reads the parent-child
+// edges that target those parents, then searches only the children those edges
+// name, by id. No issue row outside the children is read; see
+// nativeParentChildIDs for what each read costs. ParentIDs is answered exactly:
+// a returned bead's ParentID is one of the listed parents, and an empty entry
+// names no parent.
 func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	listed := nativeListedParentIDs(query)
+	if len(query.ParentIDs) > 0 && len(listed) == 0 {
+		return []Bead{}, nil
+	}
+	parents := listed
+	if query.ParentID != "" {
+		parents = []string{query.ParentID}
+	}
 	var out []Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
 		filter := nativeIssueFilterFromListQuery(query)
+		if len(parents) > 0 {
+			children, scoped, err := nativeParentChildIDs(ctx, storage, parents, query.IDs)
+			if err != nil {
+				return err
+			}
+			switch {
+			case scoped && len(children) == 0:
+				out = []Bead{}
+				return nil
+			case scoped:
+				filter.ParentID = nil
+				filter.IDs = children
+			case len(listed) > 0:
+				// Nothing narrows the search to the listed parents but
+				// keepChildrenOf below, so a backing limit would cut the page
+				// before it runs.
+				filter.Limit = 0
+			}
+		}
 		issues, err := storage.SearchIssues(ctx, "", filter)
 		if err != nil {
 			return err
@@ -1811,6 +1902,9 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			beads = append(beads, bead)
 		}
 		s.noteRows(len(issues))
+		if len(listed) > 0 {
+			beads = keepChildrenOf(beads, listed)
+		}
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
@@ -1818,6 +1912,128 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// nativeListedParentIDs returns the distinct non-empty ids in query.ParentIDs.
+func nativeListedParentIDs(query ListQuery) []string {
+	seen := make(map[string]bool, len(query.ParentIDs))
+	parents := make([]string, 0, len(query.ParentIDs))
+	for _, id := range query.ParentIDs {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		parents = append(parents, id)
+	}
+	return parents
+}
+
+// nativeParentChildIDs returns the ids of the beads that hold a parent-child
+// edge to one of parents, kept to within when within is non-empty. It reads the
+// edges that target the parents across both dependency tables. scoped is false
+// when the storage exposes no target-keyed edge read; the caller then searches
+// with the upstream parent filter.
+//
+// The edge is the whole parent relation a list can return. A bead's ParentID is
+// the target of its parent-child edge (beadFromNativeIssue), and Matches keeps a
+// bead only when that ParentID is the queried parent. The upstream parent filter
+// also matches a dotted <parent>.N id that has no parent-child edge, but Matches
+// drops every such row, so reading the edges alone returns the same beads.
+//
+// Cost: the upstream filter ORs those two arms, and Dolt answers it by scanning
+// every issue row with its metadata. One parent's edges come from the dependents
+// read filtered to parent-child edges, which Dolt answers through the type
+// prefix of a (type, target) index: it reads every parent-child edge and no
+// other edge. Several parents' edges come from one batched dependents read,
+// which matches its targets through a COALESCE over the three typed target
+// columns and is answered by scanning the dependency tables. That is one round
+// trip however many parents there are, where the filtered read takes one parent
+// per round trip. Either read touches narrow edge rows, not issue rows. The
+// child search that follows is an id IN-list, answered from the primary key.
+func nativeParentChildIDs(ctx context.Context, storage beadslib.Storage, parents, within []string) ([]string, bool, error) {
+	querier, ok := beadslib.AsDependentQuerier(storage)
+	if !ok {
+		return nil, false, nil
+	}
+	edges := make(map[string][]*beadslib.Dependency, len(parents))
+	if len(parents) == 1 {
+		parentEdges, err := nativeParentChildEdgesOf(ctx, querier, parents[0])
+		if err != nil {
+			return nil, true, fmt.Errorf("reading parent-child edges of %s: %w", parents[0], err)
+		}
+		edges[parents[0]] = parentEdges
+	} else {
+		var err error
+		edges, err = querier.GetDependentRecordsForIssues(ctx, parents)
+		if err != nil {
+			return nil, true, fmt.Errorf("reading parent-child edges of %d parents: %w", len(parents), err)
+		}
+	}
+	var allowed map[string]bool
+	if len(within) > 0 {
+		allowed = make(map[string]bool, len(within))
+		for _, id := range within {
+			allowed[id] = true
+		}
+	}
+	seen := make(map[string]bool)
+	var children []string
+	for _, parent := range parents {
+		for _, edge := range edges[parent] {
+			if edge == nil || edge.Type != beadslib.DepParentChild || seen[edge.IssueID] {
+				continue
+			}
+			if allowed != nil && !allowed[edge.IssueID] {
+				continue
+			}
+			seen[edge.IssueID] = true
+			children = append(children, edge.IssueID)
+		}
+	}
+	return children, true, nil
+}
+
+// nativeDependentsPage is the page size asked of the filtered dependents read.
+// It is the hard cap beads clamps that read's page to, so a page holds this
+// many rows whenever that many remain.
+const nativeDependentsPage = 500
+
+// nativeParentChildEdgesOf returns every parent-child edge that targets parent.
+// The filtered dependents read returns at most one page per call, ordered by
+// edge id, so it is paged by the last edge id until a page comes back short.
+func nativeParentChildEdgesOf(ctx context.Context, querier beadslib.DependentQuerier, parent string) ([]*beadslib.Dependency, error) {
+	var edges []*beadslib.Dependency
+	after := ""
+	for {
+		page, err := querier.GetDependentRecords(ctx, parent, string(beadslib.DepParentChild), nativeDependentsPage, after)
+		if err != nil {
+			return nil, err
+		}
+		edges = append(edges, page...)
+		if len(page) < nativeDependentsPage {
+			return edges, nil
+		}
+		last := page[len(page)-1]
+		if last == nil || last.ID == after {
+			return nil, fmt.Errorf("dependents read did not page past edge %q", after)
+		}
+		after = last.ID
+	}
+}
+
+// keepChildrenOf returns the beads whose ParentID is one of parents.
+func keepChildrenOf(beads []Bead, parents []string) []Bead {
+	set := make(map[string]bool, len(parents))
+	for _, id := range parents {
+		set[id] = true
+	}
+	kept := beads[:0]
+	for _, b := range beads {
+		if set[b.ParentID] {
+			kept = append(kept, b)
+		}
+	}
+	return kept
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.
