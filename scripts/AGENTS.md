@@ -21,6 +21,28 @@ ga-sux0ij). Change all four together: `TestRunnerTestEnvsPinPaneShell` in
 `SHELL`: its panes start with an explicit command, which tmux runs as
 `$SHELL -c`, so they never reach the wizard.
 
+## Fan-out jobs keep the caller's PATH
+
+`scripts/test-local-parallel` runs each job with `bash -c`, never in a login
+shell. A login shell sources `/etc/profile`, whose macOS `path_helper` moves
+`/usr/bin` ahead of Homebrew, and the login profile under the forwarded
+`HOME`. The job would then run other `python3`, `bash` and `git` binaries than
+the caller resolved. `TestFanOutJobsKeepTheCallersPATH` in
+`scripts/git_test_env_test.go` fails on a login shell.
+
+## Fixture HOMEs never reach Homebrew
+
+On macOS the Makefile and the shard runners resolve ICU with
+`brew --prefix icu4c`. Under a fresh `HOME` the real brew first downloads
+Homebrew's API data, tens of megabytes whose download can outlast a test's
+whole wait budget. A test that runs the Makefile or a shard runner with a
+temporary `HOME`
+puts a brew stub ahead of the real one on `PATH`. `writeOfflineBrew` writes the
+stub into a fixture's fake-tool directory, and `offlineBrewDir` makes a
+directory holding it for a fixture without one. Both live in
+`scripts/precommit_contract_test.go`. A fixture that fakes `uname` as Linux
+never reaches brew.
+
 ## Git hooks chain to beads
 
 Each `.githooks` hook forwards to `.githooks/lib/beads-chain.sh`. Adding a

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -509,5 +510,184 @@ func assertSameJSON(t *testing.T, got, want string) {
 	}
 	if !reflect.DeepEqual(gotValue, wantValue) {
 		t.Fatalf("payload = %q, want the JSON value of %q", got, want)
+	}
+}
+
+// TestNativeDoltStoreParentListMatchesUpstreamParentFilter pins the parent
+// pushdown on real Dolt: for every parent query shape, List returns exactly
+// what searching with the upstream parent filter and applying the query
+// returns. The fixture holds the beads that filter could disagree on: a closed
+// child, an ephemeral child, a bead holding only a blocks edge to the parent, a
+// child unparented after creation, a bead whose id is the parent's dotted form
+// but which holds no parent-child edge, and a second parent for the batched
+// form.
+func TestNativeDoltStoreParentListMatchesUpstreamParentFilter(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "parent-pushdown", "gc")
+	create := func(b Bead) Bead {
+		t.Helper()
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%q): %v", b.Title, err)
+		}
+		return created
+	}
+
+	parent := create(Bead{Title: "parent"})
+	other := create(Bead{Title: "second parent"})
+	open := create(Bead{Title: "open child", ParentID: parent.ID})
+	closed := create(Bead{Title: "closed child", ParentID: parent.ID})
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	wisp := create(Bead{Title: "ephemeral child", ParentID: parent.ID, Ephemeral: true})
+	blocked := create(Bead{Title: "blocked on the parent", Needs: []string{"blocks:" + parent.ID}})
+	orphan := create(Bead{Title: "unparented child", ParentID: parent.ID})
+	unparent := ""
+	if err := store.Update(orphan.ID, UpdateOpts{ParentID: &unparent}); err != nil {
+		t.Fatalf("Update(ParentID=\"\"): %v", err)
+	}
+	otherChild := create(Bead{Title: "second parent's child", ParentID: other.ID})
+	dotted := create(Bead{ID: parent.ID + ".9", Title: "dotted id, no parent-child edge"})
+	create(Bead{Title: "unrelated"})
+
+	// upstream is List before the pushdown: the upstream parent filter for
+	// ParentID, an unfiltered search for ParentIDs, then the query applied.
+	upstream := func(query ListQuery) []Bead {
+		t.Helper()
+		issues, err := storage.SearchIssues(ctx, "", nativeIssueFilterFromListQuery(query))
+		if err != nil {
+			t.Fatalf("upstream search: %v", err)
+		}
+		beads := make([]Bead, 0, len(issues))
+		for _, issue := range issues {
+			bead, err := beadFromNativeIssue(issue)
+			if err != nil {
+				t.Fatalf("convert %s: %v", issue.ID, err)
+			}
+			beads = append(beads, bead)
+		}
+		if len(query.ParentIDs) > 0 {
+			beads = keepChildrenOf(beads, query.ParentIDs)
+		}
+		return ApplyListQuery(beads, query)
+	}
+
+	queries := map[string]ListQuery{
+		"open children":    {ParentID: parent.ID, Sort: SortCreatedAsc},
+		"all children":     {ParentID: parent.ID, IncludeClosed: true, Sort: SortCreatedAsc},
+		"both tiers":       {ParentID: parent.ID, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc},
+		"wisp tier":        {ParentID: parent.ID, TierMode: TierWisps, Sort: SortCreatedAsc},
+		"limited":          {ParentID: parent.ID, IncludeClosed: true, Sort: SortCreatedAsc, Limit: 1},
+		"batched parents":  {ParentIDs: []string{parent.ID, other.ID}, IncludeClosed: true, TierMode: TierBoth, AllowScan: true, Sort: SortCreatedAsc},
+		"childless parent": {ParentID: blocked.ID, IncludeClosed: true, TierMode: TierBoth},
+	}
+	for name, query := range queries {
+		t.Run(name, func(t *testing.T) {
+			got, err := store.List(query)
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if want := upstream(query); !reflect.DeepEqual(got, want) {
+				t.Fatalf("List = %v, upstream parent filter = %v", beadIDsOf(got), beadIDsOf(want))
+			}
+		})
+	}
+
+	all, err := store.List(queries["both tiers"])
+	if err != nil {
+		t.Fatalf("List(both tiers): %v", err)
+	}
+	if got, want := sortedIDs(all), slices.Sorted(slices.Values([]string{open.ID, closed.ID, wisp.ID})); !reflect.DeepEqual(got, want) {
+		t.Fatalf("children of %s = %v, want %v: the fixture no longer holds the cases it names", parent.ID, got, want)
+	}
+	batched, err := store.List(queries["batched parents"])
+	if err != nil {
+		t.Fatalf("List(batched parents): %v", err)
+	}
+	if got, want := sortedIDs(batched), slices.Sorted(slices.Values([]string{open.ID, closed.ID, wisp.ID, otherChild.ID})); !reflect.DeepEqual(got, want) {
+		t.Fatalf("children of both parents = %v, want %v", got, want)
+	}
+	// The upstream filter's dotted-id arm returns the dotted bead; Matches drops
+	// it because no parent-child edge gives it a ParentID. So reading the edges
+	// alone loses nothing.
+	raw, err := storage.SearchIssues(ctx, "", nativeIssueFilterFromListQuery(queries["all children"]))
+	if err != nil {
+		t.Fatalf("raw upstream search: %v", err)
+	}
+	var rawIDs []string
+	for _, issue := range raw {
+		rawIDs = append(rawIDs, issue.ID)
+	}
+	if !slices.Contains(rawIDs, dotted.ID) {
+		t.Fatalf("upstream parent filter returned %v without the dotted bead %s; the dotted-id arm is not exercised", rawIDs, dotted.ID)
+	}
+	if slices.Contains(rawIDs, orphan.ID) {
+		t.Fatalf("upstream parent filter returned the unparented child %s", orphan.ID)
+	}
+}
+
+// TestNativeDoltStoreGetExactBatchMatchesGet pins the exact batch read on real
+// Dolt: every id it answers, closed and ephemeral rows included, is the bead
+// Get returns for that id alone, and an absent id is left unresolved.
+func TestNativeDoltStoreGetExactBatchMatchesGet(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "exact-batch", "gc")
+	var ids []string
+	for _, b := range []Bead{
+		{Title: "open"},
+		{Title: "closed"},
+		{Title: "ephemeral", Ephemeral: true},
+	} {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%q): %v", b.Title, err)
+		}
+		ids = append(ids, created.ID)
+	}
+	if err := store.Close(ids[1]); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	absent := ids[0] + ".404"
+
+	found, unresolved, err := store.GetExactBatch(append(slices.Clone(ids), absent))
+	if err != nil {
+		t.Fatalf("GetExactBatch: %v", err)
+	}
+	for _, id := range ids {
+		single, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got, ok := found[id]; !ok || !reflect.DeepEqual(got, single) {
+			t.Fatalf("GetExactBatch[%s] = %+v (found %v), want Get's %+v", id, got, ok, single)
+		}
+	}
+	if want := []string{absent}; !reflect.DeepEqual(unresolved, want) {
+		t.Fatalf("unresolved = %v, want %v", unresolved, want)
 	}
 }

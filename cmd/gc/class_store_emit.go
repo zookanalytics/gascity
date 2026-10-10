@@ -720,6 +720,18 @@ func (s *emittingClassStore) Count(ctx context.Context, query beads.ListQuery, e
 	return counter.Count(ctx, query, excludeTypes...)
 }
 
+// GetExactBatch forwards the inner store's exact batch read. Emission has
+// nothing to say about a read, so the answer passes through. An inner store
+// without the read reports beads.ErrExactBatchGetUnsupported, and the caller
+// reads each id with Get.
+func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
+}
+
 // ReadOnly forwards the inner store's mutation fence.
 //
 // A store that has none answers false, which is the honest answer for every

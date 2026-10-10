@@ -507,8 +507,15 @@ func isStaleCmdGCTestConfigPathWithPIDCheck(configPath string, activeRoots []str
 // systemd-tmpfiles) after a SIGKILL that TestMain cannot trap. The missing
 // config file is the stale signal — a concurrent live run keeps its config
 // on disk until its servers stop.
+//
+// The Go temp root counts directly under tempParent or one level below it.
+// t.TempDir() creates its root under GOTMPDIR when that is set, so a run whose
+// GOTMPDIR was a directory under the host temp dir left its roots there. A
+// directory carrying a cmd/gc temp-root prefix is not such a GOTMPDIR: the
+// owner-PID check decides the servers under it, and an unowned legacy root is
+// left alone.
 func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
-	if _, ok := activeTestRootUnder(filepath.Clean(configPath), filepath.Clean(tempParent), []string{"Test"}); !ok {
+	if !underGoTempDirRoot(filepath.Clean(configPath), filepath.Clean(tempParent)) {
 		return false
 	}
 	// Bounded like statConfigPathState: configPath comes from an arbitrary
@@ -517,6 +524,25 @@ func isAbandonedGoTempDirConfigPath(configPath, tempParent string) bool {
 	// to "not stale" (protect) instead of wedging the startup sweep.
 	_, err := statWithTimeout(configPath)
 	return errors.Is(err, os.ErrNotExist)
+}
+
+// underGoTempDirRoot reports whether cleanPath lies under a Go t.TempDir()
+// root (a Test-prefixed directory) directly under cleanParent, or under one
+// inside a directory directly under cleanParent that carries no cmd/gc
+// temp-root prefix.
+func underGoTempDirRoot(cleanPath, cleanParent string) bool {
+	if _, ok := activeTestRootUnder(cleanPath, cleanParent, []string{"Test"}); ok {
+		return true
+	}
+	rel, ok := strings.CutPrefix(cleanPath, cleanParent+string(filepath.Separator))
+	if !ok {
+		return false
+	}
+	dir, rest, ok := strings.Cut(rel, string(filepath.Separator))
+	if !ok || strings.HasPrefix(dir, testCmdGCTempRootPrefix) || strings.HasPrefix(dir, testCmdGCShardTempRootPrefix) {
+		return false
+	}
+	return strings.HasPrefix(rest, "Test")
 }
 
 func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {

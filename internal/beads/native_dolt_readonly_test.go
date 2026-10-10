@@ -81,6 +81,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
 	"DepMetadata":                 nativeStoreRead,
+	"GetExactBatch":               nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,

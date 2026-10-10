@@ -195,8 +195,9 @@ func IsServerError(err error) bool {
 
 // ShouldFallbackForRead reports whether err indicates a read-path command
 // should fall back to direct bd. Read-path commands tolerate generic 5xx
-// server errors (IsServerError) in addition to the cases ShouldFallback
-// already covers.
+// server errors (IsServerError) and keyset list pages the client could not
+// use (a 2xx page with no list body, a repeated next_cursor, a walk past its
+// page cap) in addition to the cases ShouldFallback already covers.
 //
 // c is the client that produced err (nil-safe). Any error from a REMOTE client
 // is non-fallbackable regardless of type: a remote read has no local store to
@@ -215,7 +216,7 @@ func ShouldFallbackForRead(c *Client, err error) bool {
 	if IsRouteMissing(err) {
 		return true
 	}
-	return IsServerError(err)
+	return IsServerError(err) || isListPageError(err)
 }
 
 // ShouldFallback reports whether err indicates the CLI should fall back to
@@ -251,13 +252,13 @@ func ShouldFallback(c *Client, err error) bool {
 // pick a local path (the caller gates on ShouldFallbackForRead first, which
 // returns false for remote, so a remote error is surfaced, not fallen back).
 // "route-missing" is a new-CLI/old-server route gap (a 404 with no problem+json
-// body). Generic 5xx server errors collapse to "conn-refused" since from the
-// CLI's read-path perspective an unhealthy server is equivalent to an
-// unreachable one. Non-fallbackable error types such as store_slow are
-// intentionally absent from this set. Returns "unknown" for non-fallbackable
-// errors so callers that invoke FallbackReason unconditionally produce a token
-// instead of panicking; gate on ShouldFallbackForRead first to avoid that
-// sentinel. c is nil-safe.
+// body). Generic 5xx server errors and unusable keyset list pages collapse to
+// "conn-refused" since from the CLI's read-path perspective an unhealthy server
+// is equivalent to an unreachable one. Non-fallbackable error types such as
+// store_slow are intentionally absent from this set. Returns "unknown" for
+// non-fallbackable errors so callers that invoke FallbackReason
+// unconditionally produce a token instead of panicking; gate on
+// ShouldFallbackForRead first to avoid that sentinel. c is nil-safe.
 func FallbackReason(c *Client, err error) string {
 	if c.IsRemote() {
 		return "remote"
@@ -277,7 +278,7 @@ func FallbackReason(c *Client, err error) string {
 	if IsRouteMissing(err) {
 		return "route-missing"
 	}
-	if IsConnError(err) || IsServerError(err) {
+	if IsConnError(err) || IsServerError(err) || isListPageError(err) {
 		return "conn-refused"
 	}
 	return "unknown"
@@ -329,7 +330,7 @@ func (c *Client) bearerToken() (string, error) {
 const sessionMessageTimeout = 4 * time.Minute
 
 // defaultClientTimeout is the overall HTTP timeout for control-plane client
-// calls. The read paths (ListBeads, GetBead, GetStatus, ListMailInbox,
+// calls. The read paths (ListBeads, GetBead, GetStatus, MailInboxSummary,
 // ListConvoys, ...) pass context.Background() and rely solely on this ceiling,
 // and several of them federate the city store plus every rig store — a
 // dolt-backed rig store can take many seconds, so a 10s ceiling false-timed-out
@@ -804,30 +805,20 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 	return maintenanceTriggerViewFromGen(resp.JSON202), nil
 }
 
-// ListSessions fetches the current set of sessions via
-// GET /v0/city/{cityName}/sessions. The stateFilter and templateFilter
-// arguments correspond to the state/template query parameters (empty means
-// omit). peek controls the optional last-output preview. The
-// CachedRead.AgeSeconds field carries the supervisor CachingStore age from
-// the X-GC-Cache-Age-S response header so callers can surface _cache_age_s
-// on --json output and a staleness banner on human output.
+// ListSessions fetches every session via GET /v0/city/{cityName}/sessions,
+// walking all keyset pages (walkKeysetPages) so a fleet larger than one server
+// page is listed in full, each session once. The stateFilter and
+// templateFilter arguments correspond to the state/template query parameters
+// (empty means omit). peek controls the optional last-output preview. The
+// CachedRead.AgeSeconds field carries the supervisor CachingStore age from the
+// first page's X-GC-Cache-Age-S response header so callers can surface
+// _cache_age_s on --json output and a staleness banner on human output.
 func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (CachedRead[[]SessionView], error) {
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]SessionView]{}, err
 	}
-	// gc session list means "all sessions". Walk the keyset pages until the
-	// server stops minting next_cursor and merge them, so a fleet larger than
-	// one server-cap page is fully listed instead of silently truncated at the
-	// first page. Each page requests the 1000-row server cap to minimize round
-	// trips; the cache age is taken from the first page.
-	capLimit := int64(maxPaginationLimit)
-	var (
-		all        []SessionView
-		ageSeconds float64
-		cursor     string
-	)
-	for page := 0; ; page++ {
-		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &capLimit}
+	list, err := walkKeysetPages(keysetListRequest(c.cityName, "sessions"), 0, maxKeysetWalkPages, func(cursor string, pageLimit int64) (keysetPage[SessionView], error) {
+		params := &genclient.GetV0CityByCityNameSessionsParams{Limit: &pageLimit}
 		if stateFilter != "" {
 			params.State = &stateFilter
 		}
@@ -841,37 +832,21 @@ func (c *Client) ListSessions(stateFilter, templateFilter string, peek bool) (Ca
 			params.Cursor = &cursor
 		}
 		resp, err := c.cw.GetV0CityByCityNameSessionsWithResponse(context.Background(), c.cityName, params)
-		if err != nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		if err := listResponseError(resp, err); err != nil {
+			return keysetPage[SessionView]{}, err
 		}
-		if resp == nil {
-			return CachedRead[[]SessionView]{}, &connError{err: fmt.Errorf("nil response")}
+		body := resp.JSON200
+		if body == nil {
+			return keysetPage[SessionView]{http: resp.HTTPResponse}, nil
 		}
-		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-			return CachedRead[[]SessionView]{}, err
-		}
-		all = append(all, sessionsFromGenList(resp.JSON200)...)
-		if page == 0 {
-			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
-		}
-		next := ""
-		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
-			next = *resp.JSON200.NextCursor
-		}
-		// Stop at the last page. The equal-cursor guard is a safety net against
-		// a server that fails to advance the cursor, so the walk can never spin
-		// forever on a degenerate response.
-		if next == "" || next == cursor {
-			break
-		}
-		cursor = next
-	}
-	if all == nil {
-		all = []SessionView{}
+		return newKeysetPage(resp.HTTPResponse, sessionsFromGenList(body), body.NextCursor, body.Partial, body.PartialErrors), nil
+	}, func(s SessionView) string { return s.ID })
+	if err != nil {
+		return CachedRead[[]SessionView]{}, err
 	}
 	return CachedRead[[]SessionView]{
-		Body:       all,
-		AgeSeconds: ageSeconds,
+		Body:       list.items,
+		AgeSeconds: list.ageSeconds,
 	}, nil
 }
 
@@ -936,27 +911,44 @@ func (c *Client) ListRigs() (CachedRead[[]RigView], error) {
 }
 
 // ListConvoys fetches the open convoys across all rigs via
-// GET /v0/city/{cityName}/convoys. The CachedRead.AgeSeconds field carries the
-// supervisor CachingStore age from the X-GC-Cache-Age-S response header so
-// callers can surface _cache_age_s on --json output and a staleness banner
-// on human output.
-func (c *Client) ListConvoys() (CachedRead[[]beads.Bead], error) {
+// GET /v0/city/{cityName}/convoys, walking all keyset pages (walkKeysetPages) so
+// a city with more open convoys than one server page is listed in full, each
+// convoy once. The server reads every rig store for every page, and a rig whose
+// read fails makes that page partial: ConvoyListView.Partial is true when any
+// page was, with one PartialErrors entry per failed rig, so a caller never
+// takes a degraded read for the whole list. The CachedRead.AgeSeconds field
+// carries the supervisor CachingStore age from the first page's
+// X-GC-Cache-Age-S response header so callers can surface _cache_age_s on
+// --json output and a staleness banner on human output.
+func (c *Client) ListConvoys() (CachedRead[ConvoyListView], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
+		return CachedRead[ConvoyListView]{}, err
 	}
-	resp, err := c.cw.GetV0CityByCityNameConvoysWithResponse(context.Background(), c.cityName, &genclient.GetV0CityByCityNameConvoysParams{})
+	list, err := walkKeysetPages(keysetListRequest(c.cityName, "convoys"), 0, maxKeysetWalkPages, func(cursor string, pageLimit int64) (keysetPage[beads.Bead], error) {
+		params := &genclient.GetV0CityByCityNameConvoysParams{Limit: &pageLimit}
+		if cursor != "" {
+			params.Cursor = &cursor
+		}
+		resp, err := c.cw.GetV0CityByCityNameConvoysWithResponse(context.Background(), c.cityName, params)
+		if err := listResponseError(resp, err); err != nil {
+			return keysetPage[beads.Bead]{}, err
+		}
+		body := resp.JSON200
+		if body == nil {
+			return keysetPage[beads.Bead]{http: resp.HTTPResponse}, nil
+		}
+		return newKeysetPage(resp.HTTPResponse, convoysFromGenList(body), body.NextCursor, body.Partial, body.PartialErrors), nil
+	}, beadRowID)
 	if err != nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		return CachedRead[ConvoyListView]{}, err
 	}
-	if resp == nil {
-		return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return CachedRead[[]beads.Bead]{}, err
-	}
-	return CachedRead[[]beads.Bead]{
-		Body:       convoysFromGenList(resp.JSON200),
-		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
+	return CachedRead[ConvoyListView]{
+		Body: ConvoyListView{
+			Items:         list.items,
+			Partial:       list.partial,
+			PartialErrors: list.partialErrors,
+		},
+		AgeSeconds: list.ageSeconds,
 	}, nil
 }
 
@@ -1032,16 +1024,6 @@ type ListBeadsOpts struct {
 	All   bool
 }
 
-// maxBeadDrainPages hard-bounds the cursor-drain loop. The seenCursors guard
-// already aborts on a repeated cursor (immediate A,A or a longer A,B,A,B cycle),
-// but a server returning infinitely many DISTINCT, strictly-advancing cursors
-// with empty or all-duplicate pages is caught by neither that guard (cursors
-// never repeat) nor opts.Limit (dedup stops `all` from growing, so a positive
-// Limit is never reached). This cap fails loudly instead of spinning. At
-// maxPaginationLimit (1000) beads/page it admits 100M distinct beads — orders of
-// magnitude past any real city — so a legitimate drain never trips it.
-const maxBeadDrainPages = 100_000
-
 // listBeadsParams maps the caller's ListBeadsOpts filters onto the generated
 // query-parameter struct. Split out of ListBeads so the branch-heavy filter
 // mapping is a small, independently testable unit and does not inflate the
@@ -1080,17 +1062,20 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 	if err := c.requireCityScope(); err != nil {
 		return CachedRead[[]beads.Bead]{}, err
 	}
-	return c.drainBeadPages(listBeadsParams(opts), opts.Limit, maxBeadDrainPages)
+	return c.drainBeadPages(listBeadsParams(opts), opts.Limit, maxKeysetWalkPages)
 }
 
-// drainBeadPages follows next_cursor from the beads-list endpoint until the
-// server reports no further pages, or (when limit > 0) until limit beads have
-// been collected. Without this the server's page default (50) silently
-// truncated the result, so an offline `gc beads list` in a >50-bead city showed
-// only the first page while the direct-bd lane returned everything. Extracted
-// from ListBeads so the pagination invariants — non-nil empty slice, cross-page
-// ID dedup, and the cursor-repeat + hard-page bounds — live behind one focused,
-// separately tested seam.
+// drainBeadPages walks the beads-list endpoint (walkKeysetPages) until the
+// server reports no further pages, or, when limit > 0, until limit distinct
+// beads are in hand. One request holds only the server's first page, so an
+// offline `gc beads list` in a city larger than one page would show only that
+// page while the direct-bd lane returned everything. The walk keeps the first
+// copy of a bead two pages both return: cursors are non-snapshot offsets into a
+// created_at-DESC list rebuilt per request, so a bead created mid-walk can
+// shift the tail and reappear at a page boundary (a closed or deleted bead can
+// still be skipped, which offset paging without a snapshot token cannot
+// prevent). maxPages bounds the walk. The result is a non-nil slice even when
+// empty, so `--json` emits `[]` the way the direct-bd lane does, never `null`.
 //
 // Cost: with all=true the server runs bounded mode where every page after the
 // first is a SEEKED page that disables the store's native LIMIT and re-hydrates
@@ -1100,78 +1085,30 @@ func (c *Client) ListBeads(opts ListBeadsOpts) (CachedRead[[]beads.Bead], error)
 // than the direct-bd single O(H) pass it matches. Correctness is unaffected;
 // prefer filters over `--all` on very large cities.
 func (c *Client) drainBeadPages(params *genclient.GetV0CityByCityNameBeadsParams, limit, maxPages int) (CachedRead[[]beads.Bead], error) {
-	// Initialize non-nil: an empty city (or an all-filtered-out result) must
-	// serialize as `[]`, not `null`. A nil []beads.Bead marshals to JSON null,
-	// which breaks `--json` consumers (`jq '.beads[]'`) and diverges from the
-	// direct-bd lane, which always emits an empty array.
-	all := []beads.Bead{}
-	var ageSeconds float64
-	// Cursors are non-snapshot offsets into a created_at-DESC list rebuilt per
-	// request, so a bead created mid-drain can shift the tail and re-appear at a
-	// page boundary. Dedupe by ID so JSON/table output never carries a duplicate
-	// (a closed/deleted bead can still be skipped — inherent to offset paging
-	// without a snapshot token; the drain is still strictly better than the old
-	// page-1 truncation). AgeSeconds comes from the first page.
-	seen := make(map[string]bool)
-	// seenCursors records every next_cursor already requested. Cursors must
-	// strictly advance, so any repeat — an immediate A,A or a longer A,B,A,B
-	// cycle — is a buggy or hostile server; abort instead of looping. This
-	// catches repeated cursors only; maxBeadDrainPages backstops a distinct-
-	// cursor flood.
-	seenCursors := make(map[string]bool)
-	for page := 0; ; page++ {
-		if page >= maxPages {
-			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination exceeded %d pages; aborting", maxPages)
+	list, err := walkKeysetPages(keysetListRequest(c.cityName, "beads"), limit, maxPages, func(cursor string, pageLimit int64) (keysetPage[beads.Bead], error) {
+		params.Limit = &pageLimit
+		params.Cursor = nil
+		if cursor != "" {
+			params.Cursor = &cursor
 		}
-		pageLimit := maxPaginationLimit
-		if limit > 0 {
-			remaining := limit - len(all)
-			if remaining <= 0 {
-				break
-			}
-			if remaining < pageLimit {
-				pageLimit = remaining
-			}
-		}
-		lim := int64(pageLimit)
-		params.Limit = &lim
-
 		resp, err := c.cw.GetV0CityByCityNameBeadsWithResponse(context.Background(), c.cityName, params)
-		if err != nil {
-			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+		if err := listResponseError(resp, err); err != nil {
+			return keysetPage[beads.Bead]{}, err
 		}
-		if resp == nil {
-			return CachedRead[[]beads.Bead]{}, &connError{err: fmt.Errorf("nil response")}
+		body := resp.JSON200
+		if body == nil {
+			return keysetPage[beads.Bead]{http: resp.HTTPResponse}, nil
 		}
-		if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-			return CachedRead[[]beads.Bead]{}, err
-		}
-		if page == 0 {
-			ageSeconds = cacheAgeFromResponse(resp.HTTPResponse)
-		}
-		for _, b := range beadsFromGenList(resp.JSON200) {
-			if seen[b.ID] {
-				continue
-			}
-			seen[b.ID] = true
-			all = append(all, b)
-		}
-
-		next := ""
-		if resp.JSON200 != nil && resp.JSON200.NextCursor != nil {
-			next = *resp.JSON200.NextCursor
-		}
-		if next == "" {
-			break
-		}
-		if seenCursors[next] {
-			return CachedRead[[]beads.Bead]{}, fmt.Errorf("pagination cursor repeated (%q); aborting", next)
-		}
-		seenCursors[next] = true
-		params.Cursor = &next
+		return newKeysetPage(resp.HTTPResponse, beadsFromGenList(body), body.NextCursor, body.Partial, body.PartialErrors), nil
+	}, beadRowID)
+	if err != nil {
+		return CachedRead[[]beads.Bead]{}, err
 	}
-	return CachedRead[[]beads.Bead]{Body: all, AgeSeconds: ageSeconds}, nil
+	return CachedRead[[]beads.Bead]{Body: list.items, AgeSeconds: list.ageSeconds}, nil
 }
+
+// beadRowID is a bead's identity in a keyset list walk.
+func beadRowID(b beads.Bead) string { return b.ID }
 
 // GetBead fetches one bead by ID via
 // GET /v0/city/{cityName}/bead/{id}. Returns the bead detail with cache age
@@ -1224,20 +1161,25 @@ func (c *Client) GetStatus() (CachedRead[StatusView], error) {
 	}, nil
 }
 
-// ListMailInbox fetches unread messages for the given agent recipient via
-// GET /v0/city/{cityName}/mail. An empty agent lets the server choose the
-// default caller identity (same resolution path the CLI would take locally).
-// rig narrows the query to a single rig's provider when set. The returned
-// MailListView preserves partial aggregate-read metadata so callers do not
-// silently treat a degraded all-rig read as authoritative. The
-// CachedRead.AgeSeconds field carries the supervisor CachingStore age so
-// callers can surface _cache_age_s on --json output and a staleness banner
-// on human output.
-func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], error) {
+// MailInboxSummary reads the size and partial-read state of the unread inbox
+// for the given agent recipient with one GET /v0/city/{cityName}/mail request
+// for a single row. The list body's total counts every message in the inbox
+// whichever page is served, and the server reads every mail provider to build
+// it, so one request answers how many messages wait and whether a provider
+// failed, with no walk over the inbox. It counts the set the inbox list
+// returns. GET /v0/city/{cityName}/mail/count asks each provider for its own
+// count instead, which an exec provider whose script has no count operation
+// reports as zero. An empty agent lets the server choose the default caller
+// identity (same resolution path the CLI would take locally). rig narrows the
+// read to a single rig's provider when set. The CachedRead.AgeSeconds field
+// carries the supervisor CachingStore age so callers can surface _cache_age_s
+// on --json output and a staleness banner on human output.
+func (c *Client) MailInboxSummary(agent, rig string) (CachedRead[MailInboxSummaryView], error) {
 	if err := c.requireCityScope(); err != nil {
-		return CachedRead[MailListView]{}, err
+		return CachedRead[MailInboxSummaryView]{}, err
 	}
-	params := &genclient.GetV0CityByCityNameMailParams{}
+	one := int64(1)
+	params := &genclient.GetV0CityByCityNameMailParams{Limit: &one}
 	if agent != "" {
 		params.Agent = &agent
 	}
@@ -1245,17 +1187,21 @@ func (c *Client) ListMailInbox(agent, rig string) (CachedRead[MailListView], err
 		params.Rig = &rig
 	}
 	resp, err := c.cw.GetV0CityByCityNameMailWithResponse(context.Background(), c.cityName, params)
-	if err != nil {
-		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("request failed: %w", err)}
+	if err := listResponseError(resp, err); err != nil {
+		return CachedRead[MailInboxSummaryView]{}, err
 	}
-	if resp == nil {
-		return CachedRead[MailListView]{}, &connError{err: fmt.Errorf("nil response")}
+	if resp.JSON200 == nil {
+		return CachedRead[MailInboxSummaryView]{}, &listPageError{request: keysetListRequest(c.cityName, "mail"), page: 1, detail: fmt.Sprintf("the 2xx response decoded no list body (Content-Type %q)", responseContentType(resp.HTTPResponse))}
 	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
-		return CachedRead[MailListView]{}, err
+	summary := MailInboxSummaryView{
+		Total:   int(resp.JSON200.Total),
+		Partial: derefBool(resp.JSON200.Partial),
 	}
-	return CachedRead[MailListView]{
-		Body:       mailListFromGen(resp.JSON200),
+	if resp.JSON200.PartialErrors != nil {
+		summary.PartialErrors = *resp.JSON200.PartialErrors
+	}
+	return CachedRead[MailInboxSummaryView]{
+		Body:       summary,
 		AgeSeconds: cacheAgeFromResponse(resp.HTTPResponse),
 	}, nil
 }
