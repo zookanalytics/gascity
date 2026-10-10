@@ -60,6 +60,25 @@ func assertSameTestPath(t *testing.T, got, want string) {
 	testutil.AssertSamePath(t, got, want)
 }
 
+// withoutTempRoot returns out with each temp root replaced by "<tmp>", both as
+// named and in canonical form. Go 1.26's testing.T.TempDir prefers GOTMPDIR
+// over TMPDIR, so a test's temp dirs sit under GOTMPDIR when it is set and
+// under os.TempDir otherwise. Whoever launched the run picked those names. A
+// work dir named after a bead whose id starts with a digit contains a
+// sequential test-store id: gc-2xyz-work contains gc-2. Scrub output that
+// prints a temp path before asserting that it names or omits such an id.
+func withoutTempRoot(out string) string {
+	for _, root := range []string{os.Getenv("GOTMPDIR"), os.TempDir()} {
+		if root == "" {
+			continue
+		}
+		root = filepath.Clean(root)
+		out = strings.ReplaceAll(out, canonicalTestPath(root), "<tmp>")
+		out = strings.ReplaceAll(out, root, "<tmp>")
+	}
+	return out
+}
+
 func shortSocketTempDir(t *testing.T, prefix string) string {
 	t.Helper()
 	return testutil.ShortTempDir(t, prefix)
