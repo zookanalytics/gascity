@@ -500,7 +500,7 @@ func TestOrderWispForceCloseReachesTheGraphBinding(t *testing.T) {
 	now := root.CreatedAt.Add(2 * time.Hour)
 
 	// The regression: sweeping only the work stores is a silent no-op.
-	blind, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, nil, now, time.Hour, onlyOrders, true)
+	blind, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, nil, now, time.Hour, onlyOrders, true, true)
 	if err != nil {
 		t.Fatalf("work-store-only sweep: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestOrderWispForceCloseReachesTheGraphBinding(t *testing.T) {
 		t.Fatal("the work-store-only sweep closed the graph-resident root; the fixture is wrong")
 	}
 
-	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, onlyOrders, true)
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, onlyOrders, true, true)
 	if err != nil {
 		t.Fatalf("graph-routed sweep: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestOrderWispForceCloseStaysInTheOneStoreOnSingleStoreCity(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("create wisp step: %v", err)
 	}
-	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, root.CreatedAt.Add(2*time.Hour), time.Hour, orderFilterForTest("reaper"), true)
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, root.CreatedAt.Add(2*time.Hour), time.Hour, orderFilterForTest("reaper"), true, true)
 	if err != nil {
 		t.Fatalf("single-store sweep: %v", err)
 	}
@@ -591,7 +591,7 @@ func TestOrderWispForceCloseSweepsBothClassesOnASplitCity(t *testing.T) {
 	graphRoot, graphChild := seedOrderWispSubtreeForTest(t, graphStore, "reaper")
 
 	now := workRoot.CreatedAt.Add(2 * time.Hour)
-	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, orderFilterForTest("reaper"), true)
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{workStore}, graphStore, now, time.Hour, orderFilterForTest("reaper"), true, true)
 	if err != nil {
 		t.Fatalf("split-city sweep: %v", err)
 	}
@@ -621,7 +621,7 @@ func TestOrderWispForceCloseCountsAStoreServingBothClassesOnce(t *testing.T) {
 	root, _ := seedOrderWispSubtreeForTest(t, store, "reaper")
 
 	now := root.CreatedAt.Add(2 * time.Hour)
-	result, err := sweepStaleOrderTrackingAcrossStoresDryRun([]beads.Store{store}, store, now, time.Hour, orderFilterForTest("reaper"), true)
+	result, err := sweepStaleOrderTrackingAcrossStoresDryRun([]beads.Store{store}, store, now, time.Hour, orderFilterForTest("reaper"), true, true)
 	if err != nil {
 		t.Fatalf("collapsed-class dry-run sweep: %v", err)
 	}

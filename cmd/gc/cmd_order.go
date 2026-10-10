@@ -290,18 +290,32 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	dryRun := false
 	quiet := false
 	confirm := false
+	ignoreRunTimeouts := false
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
-This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+This is intended for maintenance exec orders. It closes open tracking beads
+older than --stale-after, except the bead of a run that may still be in
+flight: one with no outcome yet that records the timeout its run was started
+with (the order's timeout, capped by [orders].max_timeout). That bead stays
+open until it is --stale-after older than the recorded timeout, so an order
+whose timeout exceeds --stale-after keeps its single-flight gate for the whole
+run. Pass --ignore-run-timeouts to close such a bead at --stale-after too,
+when you know its run is dead.
+
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
+
+The controller's watchdog also closes stale open tracking beads, at most every
+30s, independent of this command. It keeps the same in-flight exception with a
+2m window in place of --stale-after, and closes any other open tracking bead
+once it is 2m old. A later config reload does not change a run's recorded
+timeout.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -314,17 +328,18 @@ proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
+			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, ignoreRunTimeouts, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeOrderNames,
 	}
-	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for this command to close an open tracking bead")
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
+	cmd.Flags().BoolVar(&ignoreRunTimeouts, "ignore-run-timeouts", false, "also close the tracking beads of runs still inside the timeout they were started with")
 	// The help text hardcodes the default threshold rather than calling
 	// bulkDeleteConfirmThreshold(): that reads the environment at command
 	// construction time, which would make docs/reference/cli.md regenerate
@@ -1040,8 +1055,9 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
-	// (#3570).
-	run, err := front.CreateRun(scoped, orders.RunOpts{})
+	// (#3570). The bead records the run's timeout, so the controller's
+	// watchdog keeps it open while the run may still be going.
+	run, err := front.CreateRun(scoped, orders.RunOpts{Timeout: orderRunTimeout(a, cfg)})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1080,13 +1096,18 @@ type orderRunExecResult struct {
 	failureLabel string
 }
 
-func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+// orderRunTimeout is how long `gc order run` lets an exec run of a go before
+// killing it: the order's timeout, capped by cfg's [orders].max_timeout.
+func orderRunTimeout(a orders.Order, cfg *config.City) time.Duration {
 	var maxTimeout time.Duration
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
-	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := withOrderTimeout(context.Background(), timeout)
+	return effectiveTimeout(a, maxTimeout)
+}
+
+func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+	ctx, cancel := withOrderTimeout(context.Background(), orderRunTimeout(a, cfg))
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
@@ -1975,7 +1996,7 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
-func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm, ignoreRunTimeouts bool, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -2021,10 +2042,11 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// point stale-close has already run, so normal reporting still happens and
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
+	honorRunTimeouts := !ignoreRunTimeouts
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, honorRunTimeouts)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, honorRunTimeouts)
 
 		// Bulk-delete confirm gate: before any retention deletions, count
 		// eligible beads and require --confirm when above
