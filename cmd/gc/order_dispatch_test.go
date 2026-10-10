@@ -3985,6 +3985,28 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
+func TestSweepStaleOrderTrackingAcrossStoresIgnoresRecordedRunTimeout(t *testing.T) {
+	// gc order sweep-tracking applies --stale-after alone: it closes a
+	// tracking bead older than --stale-after even while the timeout its run
+	// records has not passed. Only the controller's watchdog waits that out.
+	store := beads.NewMemStore()
+	run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("long-pass", orders.RunOpts{Timeout: time.Hour})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, run.CreatedAt.Add(defaultOrderTrackingSweepStaleAfter+time.Second), defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("closed = %d, want 1", result.trackingClosed)
+	}
+	if got := orderTrackingStatus(t, store, run.ID); got != "closed" {
+		t.Fatalf("tracking status past --stale-after inside the run's recorded timeout = %s, want closed", got)
+	}
+}
+
 func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	store := beads.NewMemStore()
 
