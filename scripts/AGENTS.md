@@ -21,6 +21,15 @@ ga-sux0ij). Change all four together: `TestRunnerTestEnvsPinPaneShell` in
 `SHELL`: its panes start with an explicit command, which tmux runs as
 `$SHELL -c`, so they never reach the wizard.
 
+## Fan-out jobs keep the caller's PATH
+
+`scripts/test-local-parallel` runs each job with `bash -c`, never in a login
+shell. A login shell sources `/etc/profile`, whose macOS `path_helper` moves
+`/usr/bin` ahead of Homebrew, and the login profile under the forwarded
+`HOME`. The job would then run other `python3`, `bash` and `git` binaries than
+the caller resolved. `TestFanOutJobsKeepTheCallersPATH` in
+`scripts/git_test_env_test.go` fails on a login shell.
+
 ## Fixture HOMEs never reach Homebrew
 
 On macOS the Makefile and the shard runners resolve ICU with
