@@ -108,8 +108,10 @@ type demandMigrationSweep struct {
 // as runBackstopDemandRepairs does, without the two writers that stay lane
 // steps (the session stamp and the control-dispatcher route repair). With fix
 // false each repair writes into a recordingWriteStore per row and the writes
-// are counted; with fix true the repairs get the real stores. It starts no
-// further read phase once the doctor runner abandons the check.
+// are counted; with fix true the repairs get the real stores. Once the doctor
+// runner abandons the check it issues no further store read: it starts no
+// further phase, and the two work collections read through reads that refuse
+// each read from then on.
 func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stderr io.Writer) demandMigrationSweep {
 	s := demandMigrationSweep{counts: map[demandMigrationKey]int{}}
 	city, err := c.newStore(c.cityPath)
@@ -152,11 +154,15 @@ func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stde
 		}
 		return out
 	}
+	// The collections issue many reads across the legs, so both read through
+	// reads: a check abandoned mid-collection stops at that collection's next
+	// read, not at the next phase.
+	reads := stoppableDemandReads{demandReads: legacyDemandReads{}, stopped: ctx.Canceled}
 	if ctx.Canceled() {
 		s.problems = append(s.problems, doctor.ErrCheckAbandoned.Error())
 		return s
 	}
-	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions, newReadyDemandCache())
+	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions, newReadyDemandCacheWithReads(reads))
 	if assignedPartial {
 		s.problems = append(s.problems, "assigned collection partial")
 	}
@@ -167,7 +173,7 @@ func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stde
 		s.problems = append(s.problems, doctor.ErrCheckAbandoned.Error())
 		return s
 	}
-	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, nil)
+	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, reads)
 	if routedPartial {
 		s.problems = append(s.problems, "unassigned routed collection partial")
 	}

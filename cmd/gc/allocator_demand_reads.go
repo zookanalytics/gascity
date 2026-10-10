@@ -29,7 +29,9 @@ import (
 // declares beads.CachedReadExact) is read through its cache, which refreshes
 // dirty rows and falls back to the local backing when it cannot serve; any
 // other leg's live reads come from the external-reads lane's recording
-// (allocator_backstop_lane.go).
+// (allocator_backstop_lane.go). stoppableDemandReads wraps either for a pass
+// its caller can give up on, such as a doctor check the runner abandons: once
+// stopped, it refuses every read without reaching the store.
 //
 // Unwired in this slice: P3-5a's gather builds a v2DemandReads per pass, and
 // P3-7 starts the external-reads lane.
@@ -38,6 +40,11 @@ var (
 	errDemandRecordingMissing = errors.New("no external-reads recording for this leg")
 	errDemandRecordingStale   = errors.New("external-reads recording is stale")
 	errDemandLegUncached      = errors.New("leg has no cache to read")
+	// errDemandReadStopped is what stoppableDemandReads answers in place of a
+	// read once its pass is stopped. It is not a read failure, so
+	// collectAssignedWorkBeadsWithStores marks the collection partial without
+	// logging it.
+	errDemandReadStopped = errors.New("demand pass stopped before this read")
 )
 
 // demandReads answers the controller-demand reads for one pass. Results are
@@ -109,6 +116,51 @@ func (legacyDemandReads) ReadyLimit(cfg *config.City) int {
 
 func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
 	return session.BuildClosedNamedSessionBeadIndex(store)
+}
+
+// stoppableDemandReads serves its embedded reads to a pass whose caller can
+// stop it. Once stopped reports true, each read answers errDemandReadStopped
+// without reaching the store, so the collectors reading through it issue no
+// further store read; a read already in flight finishes. ReadyLimit reads
+// nothing and always answers.
+type stoppableDemandReads struct {
+	demandReads
+	stopped func() bool
+}
+
+func (r stoppableDemandReads) RawOpen(store beads.Store) ([]beads.Bead, error) {
+	if r.stopped() {
+		return nil, errDemandReadStopped
+	}
+	return r.demandReads.RawOpen(store)
+}
+
+func (r stoppableDemandReads) Cached(store beads.Store, query beads.ListQuery) ([]beads.Bead, error) {
+	if r.stopped() {
+		return nil, errDemandReadStopped
+	}
+	return r.demandReads.Cached(store, query)
+}
+
+func (r stoppableDemandReads) ReadyAll(store beads.Store) ([]beads.Bead, error) {
+	if r.stopped() {
+		return nil, errDemandReadStopped
+	}
+	return r.demandReads.ReadyAll(store)
+}
+
+func (r stoppableDemandReads) CachedReady(store beads.Store) ([]beads.Bead, error) {
+	if r.stopped() {
+		return nil, errDemandReadStopped
+	}
+	return r.demandReads.CachedReady(store)
+}
+
+func (r stoppableDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
+	if r.stopped() {
+		return session.ClosedNamedSessionBeadIndex{}, errDemandReadStopped
+	}
+	return r.demandReads.ClosedNamedIndex(store)
 }
 
 // demandLegCache classifies a demand leg: its CachingStore, behind the

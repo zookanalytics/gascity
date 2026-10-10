@@ -1870,7 +1870,7 @@ func collectAssignedWorkBeadsWithStores(
 			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
-			log.Printf("collectAssignedWorkBeads: %v", err)
+			logAssignedWorkReadErr(err)
 			partial = true
 		}
 	}
@@ -1938,11 +1938,21 @@ func collectAssignedWorkBeadsWithStores(
 			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
-			log.Printf("collectAssignedWorkBeads: %v", err)
+			logAssignedWorkReadErr(err)
 			partial = true
 		}
 	}
 	return result, resultStores, resultStoreRefs, readyAssigned, partial
+}
+
+// logAssignedWorkReadErr logs a failed assigned-work read. A read refused
+// because its pass was stopped (errDemandReadStopped) is not a failure and is
+// not logged; the caller still marks the collection partial.
+func logAssignedWorkReadErr(err error) {
+	if errors.Is(err, errDemandReadStopped) {
+		return
+	}
+	log.Printf("collectAssignedWorkBeads: %v", err)
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {

@@ -216,7 +216,7 @@ func (c *executorIdentityResidueCheck) collect(ctx *doctor.CheckContext) (findin
 			scopeIdentities.backfill(sessionIdentities)
 			identities = scopeIdentities
 		}
-		scopeFindings, listErr := c.collectStoreFindings(sc.store, sc.label, identities)
+		scopeFindings, listErr := c.collectStoreFindings(ctx, sc.store, sc.label, identities)
 		findings = append(findings, scopeFindings...)
 		if listErr != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, listErr))
@@ -225,7 +225,13 @@ func (c *executorIdentityResidueCheck) collect(ctx *doctor.CheckContext) (findin
 	return findings, skipped
 }
 
-func (c *executorIdentityResidueCheck) collectStoreFindings(store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+// collectStoreFindings scans store's open beads for stale executor-identity
+// stamps, judged against routeIdentities. It issues no scan once the doctor
+// runner abandons the check.
+func (c *executorIdentityResidueCheck) collectStoreFindings(ctx *doctor.CheckContext, store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+	if ctx.Canceled() {
+		return nil, doctor.ErrCheckAbandoned
+	}
 	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return nil, err
