@@ -847,12 +847,12 @@ func TestClientMailListAllRigsMultipleStoreSlowReturnsTyped503BeforeClientTimeou
 	})
 	c := newTestCityScopedClientWithTimeout(t, ts.URL, state.CityName(), 250*time.Millisecond)
 
-	_, err := c.ListMailInbox("worker", "")
+	_, err := c.MailInboxSummary("worker", "")
 	if err == nil {
-		t.Fatal("ListMailInbox succeeded, want typed store_slow error")
+		t.Fatal("MailInboxSummary succeeded, want typed store_slow error")
 	}
 	if !IsStoreSlowError(err) {
-		t.Fatalf("ListMailInbox error = %v, want typed store_slow before client timeout", err)
+		t.Fatalf("MailInboxSummary error = %v, want typed store_slow before client timeout", err)
 	}
 	if ShouldFallbackForRead(nil, err) {
 		t.Fatalf("ShouldFallbackForRead = true for typed store_slow error: %v", err)
