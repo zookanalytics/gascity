@@ -53,8 +53,9 @@ func (c *v2SessionMigrationCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (c *v2SessionMigrationCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check.
-func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+// Run implements doctor.Check. It stops reading legs once the doctor runner
+// abandons the check, closing the ones it no longer reads.
+func (c *v2SessionMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	var rows []session.Info
 	var details []string
 	seen, notChecked := map[string]bool{}, 0
@@ -62,6 +63,12 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		if leg.store == nil {
 			notChecked++
 			details = append(details, fmt.Sprintf("leg %s: not checked (no read-only open): %s", leg.ref, leg.notChecked))
+			continue
+		}
+		if ctx.Canceled() {
+			_ = closeBeadStoreHandle(leg.store)
+			notChecked++
+			details = append(details, fmt.Sprintf("leg %s: not checked: %v", leg.ref, doctor.ErrCheckAbandoned))
 			continue
 		}
 		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})

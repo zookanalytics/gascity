@@ -198,3 +198,23 @@ type runTargetBackfillListErrorStore struct {
 func (s runTargetBackfillListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// TestRunTargetRoutedToBackfillCheckStopsOnceAbandoned: abandoned by the doctor
+// runner while its first store read is in flight, the check opens no other
+// scope and issues no other read.
+func TestRunTargetRoutedToBackfillCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newRunTargetRoutedToBackfillCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() != 3 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want one read in each of three scopes", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newRunTargetRoutedToBackfillCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.opens.Load() != 1 || probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes, want only the first scope's one read", probe.reads.Load(), probe.opens.Load())
+	}
+}

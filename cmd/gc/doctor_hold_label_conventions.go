@@ -61,7 +61,7 @@ func (c *holdLabelConventionsCheck) Fix(_ *doctor.CheckContext) error { return n
 
 func (c *holdLabelConventionsCheck) WarmupEligible() bool { return false }
 
-func (c *holdLabelConventionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *holdLabelConventionsCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	res := &doctor.CheckResult{Name: c.Name(), Severity: doctor.SeverityAdvisory}
 
 	if c.newStore == nil || strings.TrimSpace(c.dir) == "" {
@@ -80,6 +80,10 @@ func (c *holdLabelConventionsCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 	var details []string
 	var queryErrs []string
 	for _, label := range retiredHoldLabels {
+		if ctx.Canceled() {
+			queryErrs = append(queryErrs, doctor.ErrCheckAbandoned.Error())
+			break
+		}
 		found, err := store.ListByLabel(label, 0)
 		if err != nil {
 			queryErrs = append(queryErrs, fmt.Sprintf("querying label %q: %v", label, err))

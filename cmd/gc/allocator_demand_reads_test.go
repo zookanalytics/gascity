@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -350,6 +353,77 @@ var legacyCollectorBackingReads = func() map[string][]string {
 		"cached dirty":       {"List status=in_progress live=true", "List status=open live=true", "List status=open live=true", ready, "List status=open live=true", ready},
 	}
 }()
+
+// Kills: a stoppableDemandReads read that reaches the store once stopped, or
+// one that refuses before. ReadyLimit reads nothing, so it answers either way.
+func TestStoppableDemandReadsRefuseEveryReadOnceStopped(t *testing.T) {
+	cfg := demandReadsTestConfig()
+	backing := newDemandBacking(routedDemandBead("gc-r1"))
+	backing.armed.Store(true)
+	stopped := false
+	reads := stoppableDemandReads{demandReads: legacyDemandReads{}, stopped: func() bool { return stopped }}
+	calls := map[string]func() error{
+		"RawOpen":          func() error { _, err := reads.RawOpen(backing); return err },
+		"Cached":           func() error { _, err := reads.Cached(backing, beads.ListQuery{Status: "open"}); return err },
+		"ReadyAll":         func() error { _, err := reads.ReadyAll(backing); return err },
+		"CachedReady":      func() error { _, err := reads.CachedReady(backing); return err },
+		"ClosedNamedIndex": func() error { _, err := reads.ClosedNamedIndex(backing); return err },
+	}
+	for name, call := range calls {
+		stopped = false
+		before := len(backing.readLog())
+		if err := call(); err != nil || len(backing.readLog()) == before {
+			t.Errorf("%s before the stop: err=%v, backing reads %q; want the embedded read", name, err, backing.readLog()[before:])
+		}
+		stopped = true
+		before = len(backing.readLog())
+		if err := call(); !errors.Is(err, errDemandReadStopped) || len(backing.readLog()) != before {
+			t.Errorf("%s once stopped: err=%v, backing reads %q; want errDemandReadStopped and no read", name, err, backing.readLog()[before:])
+		}
+	}
+	if got, want := reads.ReadyLimit(cfg), (legacyDemandReads{}).ReadyLimit(cfg); got != want {
+		t.Errorf("ReadyLimit once stopped = %d, want the embedded %d", got, want)
+	}
+}
+
+// Kills: a stopped pass that still reaches the store, reads as complete, or
+// logs the stop as a read failure. The pass stops once the backing serves its
+// first read, which is in flight at the stop: neither collector issues another
+// read, both report partial, and the assigned collector logs nothing. A read
+// that fails is still logged.
+func TestStoppedDemandPassIssuesNoFurtherRead(t *testing.T) {
+	cfg := demandReadsTestConfig()
+	var logged bytes.Buffer
+	prevLog := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevLog) })
+
+	// With no in-progress row to capture, an unstopped assigned collection
+	// goes on to the live open List, the cached open List and the Ready pass.
+	backing := newDemandBacking(assignedDemandBead("gc-a1", "open"), routedDemandBead("gc-r1"))
+	backing.armed.Store(true)
+	reads := stoppableDemandReads{demandReads: legacyDemandReads{}, stopped: func() bool { return len(backing.readLog()) > 0 }}
+
+	_, _, _, _, partial := collectAssignedWorkBeadsWithStores("", cfg, backing, nil, nil, nil, newReadyDemandCacheWithReads(reads))
+	if got := backing.readLog(); len(got) != 1 || !partial {
+		t.Errorf("assigned collection: backing reads %q, partial=%t; want only the read in flight at the stop, and partial", got, partial)
+	}
+	_, _, _, routedPartial := collectOpenUnassignedRoutedWork("", cfg, backing, nil, nil, io.Discard, nil, reads)
+	if got := backing.readLog(); len(got) != 1 || !routedPartial {
+		t.Errorf("routed collection: backing reads %q, partial=%t; want no further read, and partial", got, routedPartial)
+	}
+	if strings.Contains(logged.String(), "collectAssignedWorkBeads:") {
+		t.Errorf("a stopped read was logged as a read failure:\n%s", logged.String())
+	}
+
+	failing := newDemandBacking(assignedDemandBead("gc-a1", "open"))
+	failing.failLive.Store(true)
+	running := stoppableDemandReads{demandReads: legacyDemandReads{}, stopped: func() bool { return false }}
+	collectAssignedWorkBeadsWithStores("", cfg, failing, nil, nil, nil, newReadyDemandCacheWithReads(running))
+	if !strings.Contains(logged.String(), "collectAssignedWorkBeads: List(open, live demand): "+errDemandBackingDown.Error()) {
+		t.Errorf("a failed live read was not logged:\n%s", logged.String())
+	}
+}
 
 // Kills: a strict refusal that blanks a cached exact leg. Clean, all four
 // collectors leave the backing untouched; with a dirty row whose stored copy

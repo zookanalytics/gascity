@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -380,5 +381,103 @@ func TestOrderFiringCurrent_ReadsCityEventLogPath(t *testing.T) {
 		if got != want {
 			t.Fatalf("read path = %q, want %q", got, want)
 		}
+	}
+}
+
+// TestOrderFiringCurrent_PrefetchIssuesNoLookupOnceAbandoned: once the check's
+// context is canceled, a lookup still waiting for a concurrency slot is not
+// issued. The lookups already in flight finish, and every other order records
+// ErrCheckAbandoned.
+func TestOrderFiringCurrent_PrefetchIssuesNoLookupOnceAbandoned(t *testing.T) {
+	const pendingCount = orderFiringLastRunConcurrency + 2
+	pending := make([]orders.Order, pendingCount)
+	for i := range pending {
+		pending[i] = orders.Order{Name: fmt.Sprintf("order-%d", i)}
+	}
+	var issued atomic.Int32
+	started := make(chan struct{}, pendingCount)
+	release := make(chan struct{})
+	check := NewOrderFiringCurrentCheck(nil, t.TempDir())
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		issued.Add(1)
+		started <- struct{}{}
+		<-release
+		return time.Time{}, nil
+	}
+
+	done := make(chan struct{})
+	finished := make(chan map[string]orderFiringLastRunResult, 1)
+	go func() { finished <- check.prefetchLastRuns(&CheckContext{Done: done}, pending) }()
+	for i := 0; i < orderFiringLastRunConcurrency; i++ {
+		<-started
+	}
+	close(done)
+	close(release)
+	out := <-finished
+
+	if got := issued.Load(); got != orderFiringLastRunConcurrency {
+		t.Fatalf("issued %d lookups, want only the %d in flight when the check was abandoned", got, orderFiringLastRunConcurrency)
+	}
+	abandoned := 0
+	for _, result := range out {
+		if errors.Is(result.err, ErrCheckAbandoned) {
+			abandoned++
+		}
+	}
+	if len(out) != pendingCount || abandoned != pendingCount-orderFiringLastRunConcurrency {
+		t.Fatalf("results = %d with %d abandoned, want %d with %d abandoned", len(out), abandoned, pendingCount, pendingCount-orderFiringLastRunConcurrency)
+	}
+}
+
+// TestOrderFiringCurrent_RunnerAbandonStopsLookups: when the doctor runner
+// abandons the check, the check stops waiting on its inner run and that run
+// issues no lookup it had not already started.
+func TestOrderFiringCurrent_RunnerAbandonStopsLookups(t *testing.T) {
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	cityPath, cfg := orderFiringTestCity(t)
+
+	// Every order is stale by events, so each needs a lookup, and one more
+	// order than there are concurrency slots leaves one lookup waiting.
+	const orderCount = orderFiringLastRunConcurrency + 1
+	evts := []events.Event{{Type: events.ControllerStarted, Ts: now.Add(-240 * time.Hour)}}
+	for i := 0; i < orderCount; i++ {
+		name := fmt.Sprintf("cooldown-order-%d", i)
+		writeOrderFiringTestOrder(t, cityPath, name, "cooldown", "1h")
+		evts = append(evts, events.Event{Type: events.OrderFired, Subject: name, Ts: now.Add(-9 * time.Hour)})
+	}
+	writeOrderFiringTestEvents(t, cityPath, evts...)
+
+	issued := make(chan struct{}, orderCount)
+	release := make(chan struct{})
+	check := NewOrderFiringCurrentCheck(cfg, cityPath)
+	check.clock = func() time.Time { return now }
+	check.historyTimeout = time.Minute
+	check.lastRun = func(orders.Order) (time.Time, error) {
+		issued <- struct{}{}
+		<-release
+		return now.Add(-30 * time.Minute), nil
+	}
+
+	runnerDone := make(chan struct{})
+	results := make(chan *CheckResult, 1)
+	go func() { results <- check.Run(&CheckContext{CityPath: cityPath, Done: runnerDone}) }()
+	for i := 0; i < orderFiringLastRunConcurrency; i++ {
+		select {
+		case <-issued:
+		case <-time.After(10 * time.Second):
+			close(release)
+			t.Fatalf("only %d of %d lookups started", i, orderFiringLastRunConcurrency)
+		}
+	}
+	close(runnerDone)
+	if result := <-results; !result.TimedOut {
+		t.Fatalf("result = %+v, want the abandoned check reported as timed out", result)
+	}
+
+	close(release)
+	select {
+	case <-issued:
+		t.Fatal("the abandoned check issued a lookup after the runner abandoned it")
+	case <-time.After(500 * time.Millisecond):
 	}
 }

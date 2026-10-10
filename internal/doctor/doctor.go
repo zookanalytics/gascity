@@ -44,7 +44,8 @@ type Doctor struct {
 	// abandoned so one wedged check (e.g. a store read stuck behind a saturated
 	// data plane, or a fix script blocked on I/O) cannot stall the entire
 	// doctor run and hide every check registered after it. A timed-out Run is
-	// reported as a timed-out advisory error; a timed-out fix is reported as an
+	// reported as a timed-out advisory error, and its CheckContext.Done is
+	// closed so it can stop issuing I/O; a timed-out fix is reported as an
 	// unconfirmed remediation. Call Wait before releasing resources that a
 	// timed execution may still be using.
 	CheckTimeout time.Duration
@@ -158,14 +159,20 @@ func (r *Report) tally(result *CheckResult) {
 // buffer: on completion the buffer is flushed to the real writer (keeping a
 // check's incidental output grouped before its result line); on timeout the
 // goroutine is abandoned with its private buffer, so a still-running check
-// can never interleave writes with — or race against — the rest of the run.
+// can never interleave writes with — or race against — the rest of the run,
+// and the check's CheckContext.Done is closed so it can stop issuing I/O.
+// The stops the check registered through onAbandon are called before
+// boundedRun returns.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
 		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
+	abandon := newAbandonment()
 	checkCtx := *ctx
 	checkCtx.Output = &buf
+	checkCtx.Done = abandon.done
+	checkCtx.abandon = abandon
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {
@@ -179,6 +186,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 		}
 		return result
 	case <-time.After(d.CheckTimeout):
+		abandon.abandonRun()
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusError,

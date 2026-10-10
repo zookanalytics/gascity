@@ -803,3 +803,62 @@ func (s *residueClaimedOnGetSpyStore) SetMetadataBatch(id string, kvs map[string
 	s.writes++
 	return s.Store.SetMetadataBatch(id, kvs)
 }
+
+// TestExecutorIdentityResidueCheckStopsOnceAbandoned: abandoned while it builds
+// the session-identity index, the check scans no scope for residue. It scans
+// each of the three scopes once the index is built.
+func TestExecutorIdentityResidueCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	indexReads := full.reads.Load() - 3
+	if full.opens.Load() != 3 || indexReads < 1 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want the index reads plus one scan per scope", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if got := probe.reads.Load(); got != indexReads {
+		t.Fatalf("abandoned run made %d reads, want only the %d that build the index", got, indexReads)
+	}
+}
+
+// TestExecutorIdentityResidueCheckStopsAfterScopeIndexOnceAbandoned: abandoned
+// while it builds a rig scope's own session-identity index, the check scans
+// neither that scope nor the next. Each rig has its own store, so neither is
+// the session store and each builds its own index before its scan.
+func TestExecutorIdentityResidueCheckStopsAfterScopeIndexOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+	// Only the rig stores are probed, so the probe's first read is the first
+	// rig's index build.
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) {
+		stores := map[string]beads.Store{cityDir: beads.NewMemStore()}
+		for _, rig := range cfg.Rigs {
+			stores[rig.Path] = probe.wrap(beads.NewMemStore())
+		}
+		newExecutorIdentityResidueCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+			return stores[path], nil
+		}).Run(ctx)
+	}
+
+	index := newDoctorAbandonProbe()
+	if _, err := buildExecutorRouteIdentityIndex(index.wrap(beads.NewMemStore())); err != nil {
+		t.Fatalf("buildExecutorRouteIdentityIndex: %v", err)
+	}
+	indexReads := index.reads.Load()
+
+	full := newDoctorAbandonProbe()
+	run(full, &doctor.CheckContext{})
+	if got, want := full.reads.Load(), 2*(indexReads+1); got != want {
+		t.Fatalf("unabandoned run made %d rig reads, want each rig's %d index reads and its scan (%d)", got, indexReads, want)
+	}
+
+	probe := newDoctorAbandonProbe()
+	run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != indexReads {
+		t.Fatalf("abandoned run made %d rig reads, want only the %d that build the first rig's index", got, indexReads)
+	}
+}

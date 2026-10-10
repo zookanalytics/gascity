@@ -346,3 +346,23 @@ func TestBuildDoctorChecksRegistersWorkOptionMetadataMigration(t *testing.T) {
 	}
 	t.Fatal("buildDoctorChecks did not register work-option-metadata-migration")
 }
+
+// TestWorkOptionMetadataMigrationCheckStopsOnceAbandoned: abandoned while the
+// first scope's task listing is in flight, the check skips that scope's session
+// listing and opens no other scope.
+func TestWorkOptionMetadataMigrationCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newWorkOptionMetadataMigrationCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() < 6 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want a task and a session listing in each of three scopes", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newWorkOptionMetadataMigrationCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.opens.Load() != 1 || probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes, want only the first scope's task listing", probe.reads.Load(), probe.opens.Load())
+	}
+}

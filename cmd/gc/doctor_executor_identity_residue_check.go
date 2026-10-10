@@ -56,8 +56,8 @@ func (f executorIdentityResidueFinding) describe() string {
 	return fmt.Sprintf("%s bead %s carries stale executor-identity stamp residue (%s)", f.label, f.beadID, strings.Join(f.keys, ", "))
 }
 
-func (c *executorIdentityResidueCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	findings, skipped := c.collect()
+func (c *executorIdentityResidueCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	findings, skipped := c.collect(ctx)
 	if len(findings) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no stale executor-identity stamp residue found")
 	}
@@ -85,8 +85,8 @@ func (c *executorIdentityResidueCheck) Run(_ *doctor.CheckContext) *doctor.Check
 		details)
 }
 
-func (c *executorIdentityResidueCheck) Fix(_ *doctor.CheckContext) error {
-	findings, skipped := c.collect()
+func (c *executorIdentityResidueCheck) Fix(ctx *doctor.CheckContext) error {
+	findings, skipped := c.collect(ctx)
 	var errs []error
 	for _, f := range findings {
 		if len(f.keys) == 0 {
@@ -124,7 +124,10 @@ func (c *executorIdentityResidueCheck) Fix(_ *doctor.CheckContext) error {
 	return errors.Join(errs...)
 }
 
-func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityResidueFinding, skipped []string) {
+// collect opens the city and every non-suspended, path-bearing rig store,
+// builds the session-identity index, and scans each store for residue. It
+// stops reading once the doctor runner abandons the check.
+func (c *executorIdentityResidueCheck) collect(ctx *doctor.CheckContext) (findings []executorIdentityResidueFinding, skipped []string) {
 	if c.newStore == nil {
 		return nil, nil
 	}
@@ -180,6 +183,10 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 		skipped = append(skipped, "all scopes skipped: session-identity index unavailable: city bead store did not open")
 		return nil, skipped
 	}
+	if ctx.Canceled() {
+		skipped = append(skipped, fmt.Sprintf("all scopes skipped: %v", doctor.ErrCheckAbandoned))
+		return nil, skipped
+	}
 	sessionStore := cliSessionStore(cityStore, c.cfg, c.cityPath)
 	sessionIdentities, err := buildExecutorRouteIdentityIndex(sessionStore)
 	if err != nil {
@@ -188,6 +195,10 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	}
 
 	for _, sc := range scopes {
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
+			continue
+		}
 		identities := sessionIdentities
 		// Union in a DISTINCT scope store's own session beads, so a rig that
 		// does hold session records still contributes them. Interface identity
@@ -205,7 +216,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 			scopeIdentities.backfill(sessionIdentities)
 			identities = scopeIdentities
 		}
-		scopeFindings, listErr := c.collectStoreFindings(sc.store, sc.label, identities)
+		scopeFindings, listErr := c.collectStoreFindings(ctx, sc.store, sc.label, identities)
 		findings = append(findings, scopeFindings...)
 		if listErr != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, listErr))
@@ -214,7 +225,13 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	return findings, skipped
 }
 
-func (c *executorIdentityResidueCheck) collectStoreFindings(store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+// collectStoreFindings scans store's open beads for stale executor-identity
+// stamps, judged against routeIdentities. It issues no scan once the doctor
+// runner abandons the check.
+func (c *executorIdentityResidueCheck) collectStoreFindings(ctx *doctor.CheckContext, store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+	if ctx.Canceled() {
+		return nil, doctor.ErrCheckAbandoned
+	}
 	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return nil, err

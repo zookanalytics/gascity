@@ -44,7 +44,7 @@ type backfillTarget struct {
 	runTarget string
 }
 
-func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, skipped []string) {
+func (c *runTargetRoutedToBackfillCheck) collect(ctx *doctor.CheckContext) (targets []backfillTarget, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -56,6 +56,10 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 	}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+			continue
+		}
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
 			continue
 		}
 		store, err := c.newStore(sc.path)
@@ -84,8 +88,8 @@ func (c *runTargetRoutedToBackfillCheck) collect() (targets []backfillTarget, sk
 	return targets, skipped
 }
 
-func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect()
+func (c *runTargetRoutedToBackfillCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no workflow roots need gc.routed_to backfill")
 	}
@@ -107,8 +111,8 @@ func (c *runTargetRoutedToBackfillCheck) Run(_ *doctor.CheckContext) *doctor.Che
 		details)
 }
 
-func (c *runTargetRoutedToBackfillCheck) Fix(_ *doctor.CheckContext) error {
-	targets, skipped := c.collect()
+func (c *runTargetRoutedToBackfillCheck) Fix(ctx *doctor.CheckContext) error {
+	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.runTarget); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)

@@ -55,11 +55,11 @@ func (f poolIdleRoutedWorkFinding) describe() string {
 		f.scope, f.template, len(f.beadIDs), strings.Join(f.beadIDs, ", "), len(f.idleInstances), strings.Join(f.idleInstances, ", "))
 }
 
-func (c *poolIdleRoutedWorkCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *poolIdleRoutedWorkCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	if c.cfg == nil {
 		return okCheck(c.Name(), "no config available")
 	}
-	findings, skipped := c.collect()
+	findings, skipped := c.collect(ctx)
 	if len(findings) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no pool has unclaimed routed work sitting beside an idle instance")
 	}
@@ -88,8 +88,9 @@ func (c *poolIdleRoutedWorkCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 // collect scans every in-scope bead store (the city plus every non-suspended,
 // path-bearing rig) for pool templates that have both an idle live instance
 // and unclaimed gc.routed_to work. It mirrors v2RoutedToNamespaceCheck's scope
-// iteration so routed-work sanity checks agree on what "in scope" means.
-func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFinding, skipped []string) {
+// iteration so routed-work sanity checks agree on what "in scope" means. It
+// stops issuing store calls once the doctor runner abandons the check.
+func (c *poolIdleRoutedWorkCheck) collect(ctx *doctor.CheckContext) (findings []poolIdleRoutedWorkFinding, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
 	for _, rig := range c.cfg.Rigs {
@@ -102,12 +103,16 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
 			continue
 		}
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
+			continue
+		}
 		store, err := c.newStore(sc.path)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
 			continue
 		}
-		scopeFindings, err := c.collectStoreFindings(store, sc.label)
+		scopeFindings, err := c.collectStoreFindings(ctx, store, sc.label)
 		findings = append(findings, scopeFindings...)
 		if err != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, err))
@@ -120,7 +125,7 @@ func (c *poolIdleRoutedWorkCheck) collect() (findings []poolIdleRoutedWorkFindin
 // against one store: a targeted session-class list for idle live instances,
 // and (only when at least one is idle) a targeted gc.routed_to metadata
 // lookup for unclaimed work — never a full-store scan.
-func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
+func (c *poolIdleRoutedWorkCheck) collectStoreFindings(ctx *doctor.CheckContext, store beads.Store, label string) ([]poolIdleRoutedWorkFinding, error) {
 	sessStore := cliSessionFrontDoor(store, c.cfg, c.cityPath)
 
 	var findings []poolIdleRoutedWorkFinding
@@ -134,6 +139,9 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			continue
 		}
 
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
+		}
 		sessions, err := sessStore.List("", template)
 		if err != nil {
 			return findings, fmt.Errorf("listing sessions for %s: %w", template, err)
@@ -153,6 +161,9 @@ func (c *poolIdleRoutedWorkCheck) collectStoreFindings(store beads.Store, label 
 			continue
 		}
 
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
+		}
 		// Live so bd's raw --status=open filter drops blocked/deferred rows
 		// before mapBdStatus collapses them into "open" and the check reports
 		// work the instance is correct to leave alone (same tradeoff as

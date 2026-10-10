@@ -115,7 +115,7 @@ func TestDoctorV2DemandMigrationsCountsEachRepair(t *testing.T) {
 				}
 				c := demandMigrationsCheckFor(t, cfg, f.env.CityPath, city, rigs, stampTestSession(clobberSessionName, clobberLiveWorkDir))
 
-				sweep := c.sweep(false, io.Discard)
+				sweep := c.sweep(nil, false, io.Discard)
 				if len(sweep.problems) != 0 {
 					t.Fatalf("problems = %q, want none", sweep.problems)
 				}
@@ -167,5 +167,64 @@ func TestDoctorV2DemandMigrationsFixAppliesLegacyRepairs(t *testing.T) {
 	}
 	if r := c.Run(ctx); r.Status != doctor.StatusOK {
 		t.Errorf("after fix: status = %v (%s), want OK", r.Status, r.Message)
+	}
+}
+
+// TestDoctorV2DemandMigrationsStopsOnceAbandoned: abandoned while it loads the
+// session snapshot, the sweep finishes that load and starts neither work
+// collection.
+func TestDoctorV2DemandMigrationsStopsOnceAbandoned(t *testing.T) {
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) {
+		f := newRepairGoldenFixture(t)
+		rigs := map[string]beads.Store{}
+		for name, store := range f.env.RigStores {
+			rigs[name] = probe.wrap(store)
+		}
+		demandMigrationsCheckFor(t, f.env.Cfg, f.env.CityPath, probe.wrap(f.env.CityStore), rigs).Run(ctx)
+	}
+
+	snapshot := newDoctorAbandonProbe()
+	f := newRepairGoldenFixture(t)
+	if _, err := loadSessionBeadSnapshot(cliSessionStore(snapshot.wrap(f.env.CityStore), f.env.Cfg, f.env.CityPath)); err != nil {
+		t.Fatalf("loadSessionBeadSnapshot: %v", err)
+	}
+	snapshotReads := snapshot.reads.Load()
+
+	full := newDoctorAbandonProbe()
+	run(full, &doctor.CheckContext{})
+	if full.reads.Load() <= snapshotReads {
+		t.Fatalf("unabandoned run made %d reads, want more than the snapshot's %d", full.reads.Load(), snapshotReads)
+	}
+
+	probe := newDoctorAbandonProbe()
+	run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != snapshotReads {
+		t.Fatalf("abandoned run made %d reads, want only the snapshot's %d", got, snapshotReads)
+	}
+}
+
+// TestDoctorV2DemandMigrationsStopsBetweenCollectionReads: abandoned as a rig
+// leg's first assigned-work read returns, the sweep issues no further read on
+// that leg, in the assigned collection or after it.
+func TestDoctorV2DemandMigrationsStopsBetweenCollectionReads(t *testing.T) {
+	// Only the fixture rig's store is probed, so the probe's first read is that
+	// leg's first assigned-work read: the session snapshot reads the city store.
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) {
+		f := newRepairGoldenFixture(t)
+		rigs := maps.Clone(f.env.RigStores)
+		rigs["fixture"] = probe.wrap(rigs["fixture"])
+		demandMigrationsCheckFor(t, f.env.Cfg, f.env.CityPath, f.env.CityStore, rigs).Run(ctx)
+	}
+
+	full := newDoctorAbandonProbe()
+	run(full, &doctor.CheckContext{})
+	if full.reads.Load() < 2 {
+		t.Fatalf("unabandoned run made %d reads on the rig leg, want its several assigned-work reads", full.reads.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != 1 {
+		t.Fatalf("abandoned run made %d reads on the rig leg, want only the one in flight at the abandon", got)
 	}
 }

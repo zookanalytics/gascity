@@ -24,7 +24,7 @@ func (c *sessionModelDoctorCheck) CanFix() bool { return false }
 
 func (c *sessionModelDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *sessionModelDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK, Message: "session ownership is consistent"}
 	if c == nil || c.newStore == nil {
 		return r
@@ -35,7 +35,7 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
 		return r
 	}
-	all, err := loadSessionModelDoctorBeads(store, cliSessionStore(store, c.cfg, c.cityPath))
+	all, err := loadSessionModelDoctorBeads(ctx, store, cliSessionStore(store, c.cfg, c.cityPath))
 	if err != nil {
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("session model diagnostics skipped: %v", err)
@@ -137,8 +137,9 @@ func (c *sessionModelDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 // (work class). They are the same store until a [beads.classes.sessions]
 // relocation splits them, at which point reading both from the work store made
 // the session union come back empty and the check report "session ownership is
-// consistent" on a city whose session model was broken.
-func loadSessionModelDoctorBeads(workStore, sessStore beads.Store) ([]beads.Bead, error) {
+// consistent" on a city whose session model was broken. It stops reading, and
+// returns doctor.ErrCheckAbandoned, once the doctor runner abandons the check.
+func loadSessionModelDoctorBeads(ctx *doctor.CheckContext, workStore, sessStore beads.Store) ([]beads.Bead, error) {
 	type listStep struct {
 		name  string
 		query beads.ListQuery
@@ -167,6 +168,9 @@ func loadSessionModelDoctorBeads(workStore, sessStore beads.Store) ([]beads.Bead
 		{Type: session.BeadType, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 		{Label: session.LabelSession, IncludeClosed: true, Sort: beads.SortCreatedAsc},
 	} {
+		if ctx.Canceled() {
+			return nil, doctor.ErrCheckAbandoned
+		}
 		items, err := sessStore.List(q)
 		if err != nil {
 			return nil, fmt.Errorf("session beads: %w", err)
@@ -184,6 +188,9 @@ func loadSessionModelDoctorBeads(workStore, sessStore beads.Store) ([]beads.Bead
 		return sessionUnion[i].CreatedAt.Before(sessionUnion[j].CreatedAt)
 	})
 	for _, step := range steps {
+		if ctx.Canceled() {
+			return nil, doctor.ErrCheckAbandoned
+		}
 		items, err := workStore.List(step.query)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", step.name, err)
