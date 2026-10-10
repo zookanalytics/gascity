@@ -1914,8 +1914,9 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	// just order-tracking-sweep's own. The old narrow scope only swept the
 	// sweep order's tracking to bootstrap it, relying on order-tracking-sweep
 	// to then clean the rest — a single-point-of-failure that jammed every
-	// order when slow reconciler cycles kept that one order from firing. The
-	// staleAfter cutoff still protects in-flight dispatches regardless of order.
+	// order when slow reconciler cycles kept that one order from firing.
+	// Neither bead records a run timeout, so both close at the watchdog
+	// window.
 	store := beads.NewMemStore()
 	sweepTracking, err := store.Create(beads.Bead{
 		Title:  "order:" + orderTrackingSweepOrder,
@@ -1955,6 +1956,161 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 	if gotMerge.Status != "closed" {
 		t.Fatalf("merge tracking status = %s, want closed (watchdog now sweeps all orders, not just order-tracking-sweep)", gotMerge.Status)
+	}
+}
+
+// newOrderTrackingWatchdogRigRuntime returns a runtime whose watchdog sweeps
+// rigStore as rig frontend's store, with set as its current order set and
+// maxTimeout as its current [orders].max_timeout.
+func newOrderTrackingWatchdogRigRuntime(t *testing.T, rigStore beads.Store, set []orders.Order, maxTimeout string) *CityRuntime {
+	t.Helper()
+	cityPath := t.TempDir()
+	return &CityRuntime{
+		cityPath: cityPath,
+		cityName: "test-city",
+		cfg: &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Rigs:      []config.Rig{{Name: "frontend", Path: filepath.Join(cityPath, "frontend")}},
+			Orders:    config.OrdersConfig{MaxTimeout: maxTimeout},
+		},
+		standaloneCityStore: beads.NewMemStore(),
+		standaloneRigStores: map[string]beads.Store{"frontend": rigStore},
+		orderSet:            set,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+}
+
+func orderTrackingStatus(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return got.Status
+}
+
+// launchInFlightOrderRun dispatches order on a dispatcher whose
+// [orders].max_timeout is maxTimeout, the way a lane pass does, and holds the
+// run in flight until the test ends. It returns the run's tracking bead.
+func launchInFlightOrderRun(t *testing.T, store beads.Store, order orders.Order, maxTimeout time.Duration) orders.OrderRun {
+	t.Helper()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	blockingExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		startOnce.Do(func() { close(started) })
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}
+	od := buildOrderDispatcherFromListExec([]orders.Order{order}, store, nil, blockingExec, nil).(*memoryOrderDispatcher)
+	od.maxTimeout = maxTimeout
+	t.Cleanup(func() {
+		close(release)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if !od.drain(ctx) {
+			t.Errorf("run of %s still in flight after release", order.ScopedName())
+		}
+	})
+	od.dispatch(context.Background(), t.TempDir(), time.Now())
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("run of %s did not start", order.ScopedName())
+	}
+	var open []orders.OrderRun
+	for _, b := range trackingBeads(t, store, orders.RunLabel(order.ScopedName())) {
+		if run, ok := orders.RunFromTrackingBead(b); ok && run.Open {
+			open = append(open, run)
+		}
+	}
+	if len(open) != 1 {
+		t.Fatalf("open tracking runs of %s = %d, want 1", order.ScopedName(), len(open))
+	}
+	return open[0]
+}
+
+func TestOrderTrackingSweepWatchdogKeepsInFlightRunInsideOrderTimeout(t *testing.T) {
+	// The open tracking bead is the order's single-flight gate. A run of an
+	// order whose timeout exceeds the watchdog window is still in flight past
+	// that window, and closing its bead then lets the next pass dispatch a
+	// second concurrent run. The watchdog may close it only once the dispatcher
+	// has killed the run: the timeout the run was launched with (the order's
+	// timeout, capped by [orders].max_timeout) plus the watchdog window. A
+	// reload that shortens either one leaves a run already in flight on the
+	// outgoing dispatcher running to its old timeout, so the watchdog must not
+	// judge that run by the reloaded order set.
+	longPass := orders.Order{Name: "long-pass", Rig: "frontend", Exec: "true", Trigger: "cooldown", Interval: "60s", Timeout: "300s"}
+	shortened := longPass
+	shortened.Timeout = "30s"
+	for _, tc := range []struct {
+		name string
+		// launchMaxTimeout is the [orders].max_timeout of the dispatcher that
+		// launches the run.
+		launchMaxTimeout time.Duration
+		// current and currentMaxTimeout are the runtime's order set and
+		// [orders].max_timeout when the watchdog runs.
+		current           orders.Order
+		currentMaxTimeout string
+		// runTimeout is the timeout the run was launched with.
+		runTimeout time.Duration
+	}{
+		{name: "order timeout", current: longPass, runTimeout: 300 * time.Second},
+		{name: "capped by max_timeout", launchMaxTimeout: 30 * time.Second, current: longPass, currentMaxTimeout: "30s", runTimeout: 30 * time.Second},
+		{name: "reload shortens the order timeout", current: shortened, runTimeout: 300 * time.Second},
+		{name: "reload lowers max_timeout", current: longPass, currentMaxTimeout: "30s", runTimeout: 300 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rigStore := beads.NewMemStore()
+			run := launchInFlightOrderRun(t, rigStore, longPass, tc.launchMaxTimeout)
+			cr := newOrderTrackingWatchdogRigRuntime(t, rigStore, []orders.Order{tc.current}, tc.currentMaxTimeout)
+
+			cr.runOrderTrackingSweepWatchdog(cr.cfg, run.CreatedAt.Add(tc.runTimeout+orderTrackingSweepWatchdogStaleAfter-time.Second))
+			if got := orderTrackingStatus(t, rigStore, run.ID); got != "open" {
+				t.Fatalf("tracking status inside the run's %s timeout plus the watchdog window = %s, want open", tc.runTimeout, got)
+			}
+
+			cr.orderSweepWatchdogLast = time.Time{} // the second sweep is not throttled by the watchdog interval
+			cr.runOrderTrackingSweepWatchdog(cr.cfg, run.CreatedAt.Add(tc.runTimeout+orderTrackingSweepWatchdogStaleAfter+time.Second))
+			if got := orderTrackingStatus(t, rigStore, run.ID); got != "closed" {
+				t.Fatalf("tracking status past the run's %s timeout plus the watchdog window = %s, want closed", tc.runTimeout, got)
+			}
+		})
+	}
+}
+
+func TestOrderTrackingSweepWatchdogClosesOutcomeTrackingAtWindow(t *testing.T) {
+	// A tracking bead that records an outcome has no run behind it: either the
+	// run finished and its close did not land, or it is the marker a
+	// trigger-env failure leaves open until the stale sweep retries the order.
+	// Neither waits out a run timeout, even one its bead records.
+	longPass := orders.Order{Name: "long-pass", Rig: "frontend", Exec: "true", Trigger: "cooldown", Interval: "60s", Timeout: "300s"}
+	rigStore := beads.NewMemStore()
+	front := orders.NewStore(beads.OrdersStore{Store: rigStore})
+	marker, err := front.CreateRun(longPass.ScopedName(), orders.RunOpts{Outcome: orders.RunOutcomeTriggerEnvFailed})
+	if err != nil {
+		t.Fatalf("CreateRun(trigger-env marker): %v", err)
+	}
+	finished, err := front.CreateRun(longPass.ScopedName(), orders.RunOpts{Timeout: 300 * time.Second})
+	if err != nil {
+		t.Fatalf("CreateRun(finished): %v", err)
+	}
+	if err := front.SetOutcome(finished.ID, orders.RunOutcomeExecFailed); err != nil {
+		t.Fatalf("SetOutcome(finished): %v", err)
+	}
+	cr := newOrderTrackingWatchdogRigRuntime(t, rigStore, []orders.Order{longPass}, "")
+
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, finished.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+
+	for _, id := range []string{marker.ID, finished.ID} {
+		if got := orderTrackingStatus(t, rigStore, id); got != "closed" {
+			t.Fatalf("outcome tracking %s status past the watchdog window = %s, want closed", id, got)
+		}
 	}
 }
 

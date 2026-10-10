@@ -3086,6 +3086,7 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
+	clauses, serverFilteredOnly = appendBdQueryMetadataClauses(clauses, serverFilteredOnly, serverQuery.Metadata)
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
@@ -3185,6 +3186,9 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 	// (identical tie-break to the in-memory sort), not via a bd query flag, so
 	// a bd-side limit would cut rows before that filter runs — same class as
 	// CreatedBefore.
+	// Metadata: bd compares metadata in SQL under a collation, and one that
+	// matched more rows than matchesMetadata's byte equality would let a
+	// bd-side limit spend the page on rows Go then drops.
 	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
@@ -3219,6 +3223,83 @@ func isBareBdQueryValue(value string) bool {
 	}
 	return true
 }
+
+// appendBdQueryMetadataClauses adds a metadata.<key>="<value>" clause, in key
+// order, for each metadata filter on which bd selects exactly the rows
+// matchesMetadata selects. A filter it leaves out is matched only by
+// applyListQuery, so it reports serverFilteredOnly=false.
+func appendBdQueryMetadataClauses(clauses []string, serverFilteredOnly bool, metadata map[string]string) ([]string, bool) {
+	keys := make([]string, 0, len(metadata))
+	for k := range metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		v := metadata[k]
+		if !isBdQueryMetadataKey(k) || !isBdQueryMetadataValue(v) {
+			serverFilteredOnly = false
+			continue
+		}
+		clauses = append(clauses, "metadata."+k+"="+quoteBdQueryString(v))
+	}
+	return clauses, serverFilteredOnly
+}
+
+// isBdQueryMetadataKey reports whether every supported bd reads key back
+// unchanged from a metadata.<key> field: a lowercase ASCII letter or an
+// underscore, then lowercase letters, digits, underscores and dots. bd
+// rejects a key outside ^[a-zA-Z_][a-zA-Z0-9_./]*$ with an error that fails
+// the whole query, and bd 1.0.4 lowercases the field name and cannot lex '/'.
+func isBdQueryMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c >= 'a' && c <= 'z', c == '_':
+		case i > 0 && (c >= '0' && c <= '9' || c == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// isBdQueryMetadataValue reports whether bd's metadata equality, an SQL
+// comparison against JSON_UNQUOTE of the stored value, matches value on the
+// same rows matchesMetadata does. It reports false for:
+//   - The empty value. matchesMetadata matches a missing key with it, and SQL
+//     equality never does.
+//   - A value with a NUL or a non-ASCII byte. A NUL cannot be passed in an
+//     argument, and bd's query lexer reads one byte at a time, so a multi-byte
+//     character reaches the comparison altered.
+//   - A JSON spelling other than true and false. bd may hold such a value as
+//     a JSON number, null, object or array, which matchesMetadata and
+//     JSON_UNQUOTE render differently: a stored -0 is "-0" to matchesMetadata
+//     and "0" to JSON_UNQUOTE.
+func isBdQueryMetadataValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0 || value[i] >= 0x80 {
+			return false
+		}
+	}
+	if value == "true" || value == "false" {
+		return true
+	}
+	return !json.Valid([]byte(value))
+}
+
+// quoteBdQueryString renders value as a double-quoted bd query string, whose
+// lexer turns \\ and \" back into \ and ".
+func quoteBdQueryString(value string) string {
+	return `"` + bdQueryStringEscaper.Replace(value) + `"`
+}
+
+var bdQueryStringEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	listQ := query

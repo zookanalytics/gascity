@@ -605,6 +605,44 @@ func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRoot(t *testing.T) {
 	}
 }
 
+// t.TempDir() creates its root under GOTMPDIR when that is set, so a run
+// whose GOTMPDIR was a directory under the host temp dir left its Go temp
+// roots one level down. A server there whose config is gone is stale the same
+// way, and a config still on disk still marks a live run. Only that one level
+// counts, and only for a Go t.TempDir() root.
+func TestIsStaleCmdGCTestConfigPathReapsAbandonedGoTempDirRootUnderGOTMPDIR(t *testing.T) {
+	tempParent := t.TempDir()
+	gotmpdir := filepath.Join(tempParent, "session-work")
+	doltConfig := func(root string) string {
+		return filepath.Join(root, "001", ".gc", "runtime", "packs", "dolt", "dolt-config.yaml")
+	}
+
+	goneConfig := doltConfig(filepath.Join(gotmpdir, "TestAbandoned1234"))
+	if !isStaleCmdGCTestConfigPath(goneConfig, nil, tempParent) {
+		t.Fatalf("abandoned go tempdir config path %q under a GOTMPDIR (file gone) not classified as stale", goneConfig)
+	}
+
+	liveConfig := doltConfig(filepath.Join(gotmpdir, "TestLive1234"))
+	if err := os.MkdirAll(filepath.Dir(liveConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(liveConfig, []byte("listener:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if isStaleCmdGCTestConfigPath(liveConfig, nil, tempParent) {
+		t.Fatalf("live go tempdir config path %q under a GOTMPDIR (file on disk) classified as stale", liveConfig)
+	}
+
+	for _, configPath := range []string{
+		doltConfig(filepath.Join(gotmpdir, "nested", "TestAbandoned1234")),
+		doltConfig(filepath.Join(gotmpdir, "city")),
+	} {
+		if isStaleCmdGCTestConfigPath(configPath, nil, tempParent) {
+			t.Fatalf("config path %q is not under a Go temp root one level below %q but was classified as stale", configPath, tempParent)
+		}
+	}
+}
+
 // TestSnapshotDoltProcessPIDs_EnumeratorErrorIsFatal pins that a
 // discovery error is reported via Fatalf so test runs surface
 // enumeration failures directly rather than silently treating them

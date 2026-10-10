@@ -3985,6 +3985,28 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 }
 
+func TestSweepStaleOrderTrackingAcrossStoresIgnoresRecordedRunTimeout(t *testing.T) {
+	// gc order sweep-tracking applies --stale-after alone: it closes a
+	// tracking bead older than --stale-after even while the timeout its run
+	// records has not passed. Only the controller's watchdog waits that out.
+	store := beads.NewMemStore()
+	run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("long-pass", orders.RunOpts{Timeout: time.Hour})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, run.CreatedAt.Add(defaultOrderTrackingSweepStaleAfter+time.Second), defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("closed = %d, want 1", result.trackingClosed)
+	}
+	if got := orderTrackingStatus(t, store, run.ID); got != "closed" {
+		t.Fatalf("tracking status past --stale-after inside the run's recorded timeout = %s, want closed", got)
+	}
+}
+
 func TestSweepStaleOrderTracking_ClosesOnlyOldOpenTrackingBeads(t *testing.T) {
 	store := beads.NewMemStore()
 
@@ -8524,6 +8546,75 @@ func TestStoreHasOpenDescendantsMembershipSkipsTransientNotification(t *testing.
 	}
 }
 
+// rootIDQueryRecordingStore records every List query that filters on
+// gc.root_bead_id. A Dolt-backed store reads every row's metadata for a
+// membership query that includes closed beads, and only the non-closed rows
+// for one that excludes them, so tests use it to pin the status scope a
+// membership lookup asks for.
+type rootIDQueryRecordingStore struct {
+	beads.Store
+	rootIDQueries []beads.ListQuery
+}
+
+func (s *rootIDQueryRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+		s.rootIDQueries = append(s.rootIDQueries, q)
+	}
+	return s.Store.List(q)
+}
+
+// TestStoreOpenDescendantIDsListsOnlyOpenMembers pins the membership fast path
+// to open beads. The caller discards closed members, so a lookup that includes
+// them only buys a scan of every closed row's metadata.
+func TestStoreOpenDescendantIDsListsOnlyOpenMembers(t *testing.T) {
+	store := &rootIDQueryRecordingStore{Store: beads.NewMemStore()}
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(done.ID); err != nil {
+		t.Fatalf("close member: %v", err)
+	}
+	open, err := store.Create(beads.Bead{
+		Title:    "generate-digest",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := storeOpenDescendantIDs(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeOpenDescendantIDs: %v", err)
+	}
+	if !slices.Equal(got, []string{open.ID}) {
+		t.Fatalf("storeOpenDescendantIDs = %v, want [%s]", got, open.ID)
+	}
+	if len(store.rootIDQueries) == 0 {
+		t.Fatal("storeOpenDescendantIDs issued no gc.root_bead_id membership query")
+	}
+	for _, q := range store.rootIDQueries {
+		if q.IncludeClosed {
+			t.Errorf("membership query %+v includes closed beads; the caller discards them, so it must ask for open beads only", q)
+		}
+		if q.TierMode != beads.TierBoth {
+			t.Errorf("membership query TierMode = %v, want TierBoth so wisp-tier members still count", q.TierMode)
+		}
+	}
+}
+
 func TestHasOpenWorkStrictFindsOlderInFlightWispBehindOrphanRoots(t *testing.T) {
 	const formerOpenWorkProbeLimit = 50
 
@@ -10488,8 +10579,10 @@ func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
-	idx.entries[storeKey+"\x00history"] = map[string]orderTrackingSummary{
-		"order-hit": {lastRun: indexed},
+	if _, err := idx.sharedRead(storeKey+"\x00history", func() (map[string]orderTrackingSummary, error) {
+		return map[string]orderTrackingSummary{"order-hit": {lastRun: indexed}}, nil
+	}); err != nil {
+		t.Fatalf("seeding the history index: %v", err)
 	}
 
 	fallbackCalls := 0

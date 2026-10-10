@@ -5807,6 +5807,179 @@ func TestBdStoreListWispsFallsBackToClientFilteringForUnsafeQueryValues(t *testi
 	}
 }
 
+// TestBdStoreListBothTiersSendsMetadataClauseToEphemeralQuery pins the
+// ephemeral leg's metadata pushdown: a TierBoth metadata list asks bd for the
+// matching wisps instead of every ephemeral row, including for a value that
+// contains a slash, and keeps the limit client-side.
+func TestBdStoreListBothTiersSendsMetadataClauseToEphemeralQuery(t *testing.T) {
+	var queryArgs []string
+	runner := func(_, name string, args ...string) ([]byte, error) {
+		if name == "bd" && len(args) > 0 && args[0] == "query" {
+			queryArgs = append([]string(nil), args...)
+			return []byte(`[{"id":"bd-w","title":"wisp","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"metadata":{"gc.routed_to":"gascity/gc-toolkit.polecat"}}]`), nil
+		}
+		return []byte(`[]`), nil
+	}
+	s := beads.NewBdStore("/city", runner)
+	got, err := s.List(beads.ListQuery{
+		Metadata: map[string]string{"gc.routed_to": "gascity/gc-toolkit.polecat"},
+		Limit:    5,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"query", "--json", `ephemeral=true AND metadata.gc.routed_to="gascity/gc-toolkit.polecat"`, "--limit", "0"}
+	if !reflect.DeepEqual(queryArgs, want) {
+		t.Fatalf("bd query args = %q, want %q", queryArgs, want)
+	}
+	if len(got) != 1 || got[0].ID != "bd-w" {
+		t.Fatalf("got = %+v, want bd-w", got)
+	}
+}
+
+// TestBdStoreListEphemeralMetadataClauseSelection pins which metadata filters
+// the ephemeral leg sends to bd and that every filter it holds back still
+// filters client-side. bd answers each query below with both a matching and a
+// non-matching row, so a dropped Go-side filter shows up as an extra row.
+func TestBdStoreListEphemeralMetadataClauseSelection(t *testing.T) {
+	cases := []struct {
+		name     string
+		metadata map[string]string
+		wantExpr string
+		match    string
+		miss     string
+	}{
+		{
+			name:     "every key sent in key order",
+			metadata: map[string]string{"phase": "keep", "gc.routed_to": "gascity/gc-toolkit.polecat"},
+			wantExpr: `ephemeral=true AND metadata.gc.routed_to="gascity/gc-toolkit.polecat" AND metadata.phase="keep"`,
+			match:    `{"gc.routed_to":"gascity/gc-toolkit.polecat","phase":"keep"}`,
+			miss:     `{"gc.routed_to":"gascity/gc-toolkit.polecat","phase":"skip"}`,
+		},
+		{
+			name:     "quote and backslash escaped",
+			metadata: map[string]string{"note": `say "hi" \ bye`},
+			wantExpr: `ephemeral=true AND metadata.note="say \"hi\" \\ bye"`,
+			match:    `{"note":"say \"hi\" \\ bye"}`,
+			miss:     `{"note":"say hi bye"}`,
+		},
+		{
+			name:     "boolean sent",
+			metadata: map[string]string{"mail.read": "true"},
+			wantExpr: `ephemeral=true AND metadata.mail.read="true"`,
+			match:    `{"mail.read":true}`,
+			miss:     `{"mail.read":false}`,
+		},
+		{
+			name:     "number held back",
+			metadata: map[string]string{"count": "-0"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"count":-0}`,
+			miss:     `{"count":0}`,
+		},
+		{
+			name:     "null held back",
+			metadata: map[string]string{"marker": "null"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"marker":"null"}`,
+			miss:     `{"marker":null}`,
+		},
+		{
+			name:     "empty value held back",
+			metadata: map[string]string{"phase": ""},
+			wantExpr: `ephemeral=true`,
+			match:    `{}`,
+			miss:     `{"phase":"keep"}`,
+		},
+		{
+			name:     "non-ASCII value held back",
+			metadata: map[string]string{"phase": "café"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"phase":"café"}`,
+			miss:     `{"phase":"cafe"}`,
+		},
+		{
+			name:     "control character sent",
+			metadata: map[string]string{"phase": "a\tb"},
+			wantExpr: "ephemeral=true AND metadata.phase=\"a\tb\"",
+			match:    `{"phase":"a\tb"}`,
+			miss:     `{"phase":"a b"}`,
+		},
+		{
+			name:     "NUL held back",
+			metadata: map[string]string{"phase": "a\x00b"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"phase":"a\u0000b"}`,
+			miss:     `{"phase":"ab"}`,
+		},
+		{
+			name:     "mixed-case key held back",
+			metadata: map[string]string{"camelKey": "x"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"camelKey":"x"}`,
+			miss:     `{"camelkey":"x"}`,
+		},
+		{
+			name:     "slash key held back",
+			metadata: map[string]string{"jira/sprint": "s1"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"jira/sprint":"s1"}`,
+			miss:     `{"jira/sprint":"s2"}`,
+		},
+		{
+			name:     "key bd rejects held back",
+			metadata: map[string]string{"has-dash": "x"},
+			wantExpr: `ephemeral=true`,
+			match:    `{"has-dash":"x"}`,
+			miss:     `{"has-dash":"y"}`,
+		},
+		{
+			name:     "sendable filter sent beside a held-back one",
+			metadata: map[string]string{"phase": "keep", "camelKey": "x"},
+			wantExpr: `ephemeral=true AND metadata.phase="keep"`,
+			match:    `{"phase":"keep","camelKey":"x"}`,
+			miss:     `{"phase":"keep","camelKey":"y"}`,
+		},
+	}
+	tiers := []struct {
+		name string
+		tier beads.TierMode
+	}{
+		{name: "wisps", tier: beads.TierWisps},
+		{name: "both", tier: beads.TierBoth},
+	}
+	for _, tier := range tiers {
+		for _, tc := range cases {
+			t.Run(tier.name+"/"+tc.name, func(t *testing.T) {
+				var queryArgs []string
+				runner := func(_, name string, args ...string) ([]byte, error) {
+					if name == "bd" && len(args) > 0 && args[0] == "query" {
+						queryArgs = append([]string(nil), args...)
+						return []byte(`[
+							{"id":"bd-match","title":"match","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","ephemeral":true,"metadata":` + tc.match + `},
+							{"id":"bd-miss","title":"miss","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","ephemeral":true,"metadata":` + tc.miss + `}
+						]`), nil
+					}
+					return []byte(`[]`), nil
+				}
+				s := beads.NewBdStore("/city", runner)
+				got, err := s.List(beads.ListQuery{Metadata: tc.metadata, Limit: 10, TierMode: tier.tier})
+				if err != nil {
+					t.Fatalf("List: %v", err)
+				}
+				want := []string{"query", "--json", tc.wantExpr, "--limit", "0"}
+				if !reflect.DeepEqual(queryArgs, want) {
+					t.Fatalf("bd query args = %q, want %q", queryArgs, want)
+				}
+				if len(got) != 1 || got[0].ID != "bd-match" {
+					t.Fatalf("List() = %+v, want only bd-match", got)
+				}
+			})
+		}
+	}
+}
+
 // --- Read retry ---
 
 func TestBdStoreReadyRetriesOnInvalidConnection(t *testing.T) {
