@@ -118,9 +118,11 @@ recovered from what was kept.
   for `all` or a list that names `closed`. Every other filter already dropped
   each closed row in memory, so results are unchanged, and the doctor's
   per-template listing reads open sessions only.
-- **The cached beadmail provider holds a failed enumeration for its refresh
-  interval**, as it already held a successful one. A store too slow to answer
-  is asked again after thirty seconds, not on every recipient lookup.
+- **The cached beadmail provider holds an enumeration's outcome, a failure as
+  well as a success, for its refresh interval after the enumeration returns.**
+  A store too slow to answer is asked again thirty seconds after its last
+  answer. It is not asked on every recipient lookup, and not again straight
+  after an enumeration that used up the interval.
 
 ## What this does not change
 

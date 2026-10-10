@@ -54,7 +54,7 @@ type sessionInfoCache struct {
 	list []session.Info
 	// err is the last enumeration's failure, nil after a success.
 	err error
-	// fetchedAt is when the last enumeration was attempted.
+	// fetchedAt is when the last enumeration returned.
 	fetchedAt       time.Time
 	refreshInterval time.Duration
 	now             func() time.Time
@@ -111,9 +111,9 @@ func NewCachedWithStores(msgStore, sessionStore beads.Store) *Provider {
 }
 
 // cachedSessionBeads returns the full set of session beads (open + closed).
-// Cached providers reuse a single enumeration, and a failed one, until the
-// refresh interval passes; stateless providers fetch fresh results on every
-// call.
+// Cached providers reuse one enumeration's outcome, a failure included, for the
+// refresh interval after it returns; stateless providers fetch fresh results on
+// every call.
 func (p *Provider) cachedSessionBeads() ([]session.Info, error) {
 	if p.sessions == nil {
 		return nil, nil
@@ -125,21 +125,23 @@ func (p *Provider) cachedSessionBeads() ([]session.Info, error) {
 }
 
 // get returns the cached enumeration, or its failure, while it is fresh, and
-// enumerates again once it is not. A failure is held for the same interval as
-// a success: the enumeration reads every closed session, so a store too slow
-// to answer it would otherwise be asked again by every recipient lookup.
+// enumerates again once it is not. The enumeration reads every closed session,
+// so its outcome is held for the refresh interval after it returns, a failure
+// as long as a success. Holding a failure keeps a store too slow to answer from
+// being asked again by every recipient lookup. Timing the hold from the return
+// keeps an enumeration that used up the interval from going stale the moment
+// it is stored.
 func (c *sessionInfoCache) get(directory session.AddressDirectory) ([]session.Info, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.currentTime()
-	if c.fetched && c.isFresh(now) {
+	if c.fetched && c.isFresh(c.currentTime()) {
 		if c.err != nil {
 			return nil, c.err
 		}
 		return c.list, nil
 	}
 	list, err := directory.ListAddresses(true)
-	c.fetchedAt = now
+	c.fetchedAt = c.currentTime()
 	c.fetched = true
 	if err != nil {
 		c.list, c.err = nil, err
