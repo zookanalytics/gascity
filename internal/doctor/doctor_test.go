@@ -1315,3 +1315,27 @@ func TestOnAbandonWithoutRunner(t *testing.T) {
 		c.onAbandon(func() { t.Error("stop called for a context without Done") })()
 	}
 }
+
+// TestOnAbandonFollowsDerivedDone: a context a check derives from the
+// runner's with a Done of its own calls a registered stop once that Done
+// closes, when Canceled starts reporting true, though the runner never
+// abandons the Run.
+func TestOnAbandonFollowsDerivedDone(t *testing.T) {
+	a := newAbandonment()
+	derived := CheckContext{Done: a.done, abandon: a}
+	derivedDone := make(chan struct{})
+	derived.Done = derivedDone
+	stopped := make(chan struct{})
+	release := derived.onAbandon(func() { close(stopped) })
+	defer release()
+
+	close(derivedDone)
+	if !derived.Canceled() {
+		t.Fatal("Canceled() = false after the derived Done closed")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop not called after the derived context's Done closed")
+	}
+}

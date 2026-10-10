@@ -32,10 +32,12 @@ const packScriptCancelGrace = 5 * time.Second
 // A check script runs as the leader of its own process group. When the doctor
 // runner abandons the check at the per-check timeout, it sends the whole group
 // SIGTERM before it moves on. The command the script is blocked on, such as a
-// store read through `gc bd`, therefore stops along with the shell, and any of
-// the group still running packScriptCancelGrace later is killed. Because the
-// group is the script's own, a signal sent to the doctor's process group, such
-// as Ctrl-C at a terminal, does not reach a running check script. A fix script
+// store read through `gc bd`, therefore stops along with the shell. Whatever
+// of the group is still running packScriptCancelGrace later is killed, if the
+// process that ran the check is still running then. gc doctor does not wait
+// for that, so a script that ignores SIGTERM can outlive it. Because the group
+// is the script's own, a signal sent to the doctor's process group, such as
+// Ctrl-C at a terminal, does not reach a running check script. A fix script
 // runs in the doctor's process group and is never stopped this way.
 //
 // When FixScript is non-empty, the check also supports `gc doctor --fix`:
@@ -177,11 +179,11 @@ func runScriptGroup(ctx *CheckContext, cmd *exec.Cmd) ([]byte, error) {
 	return out.Bytes(), err
 }
 
-// stopScriptGroup sends SIGTERM to the process group pgid leads, then kills
-// whatever of it is still running packScriptCancelGrace later. Only the
-// SIGTERM is sent before it returns, so the runner can call it without
-// waiting. Errors are dropped because nothing reads an abandoned check's
-// result.
+// stopScriptGroup sends SIGTERM to the process group pgid leads. A goroutine
+// then kills whatever of the group is still running packScriptCancelGrace
+// later, unless this process has exited by then. Only the SIGTERM is sent
+// before it returns, so the runner can call it without waiting. Errors are
+// dropped because nothing reads an abandoned check's result.
 func stopScriptGroup(pgid int) {
 	_ = syscall.Kill(-pgid, syscall.SIGTERM)
 	go func() {

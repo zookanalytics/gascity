@@ -73,7 +73,7 @@ type CheckContext struct {
 	// sets it for Fix, so it does not interrupt an abandoned fix mid-mutation.
 	Done <-chan struct{}
 	// abandon is set with Done by the runner, which abandons the Run through
-	// it (see onAbandon).
+	// it. onAbandon follows it only while Done is the channel it closes.
 	abandon *abandonment
 }
 
@@ -103,14 +103,16 @@ func (c *CheckContext) Canceled() bool {
 // doctor process exits as soon as its last check is abandoned and a stop left
 // to another goroutine can lose that race. So stop must deliver its signal
 // without waiting, and must not call release. If the check is already
-// abandoned, stop is called at once. A context whose Done has no runner
-// behind it calls stop from a goroutine once Done closes, and a context
-// without Done never calls it.
+// abandoned, stop is called at once. A context whose Done the runner does not
+// close, such as one with no runner behind it or one a check derives with a
+// Done of its own, calls stop from a goroutine once that Done closes. A
+// context without Done never calls it.
 func (c *CheckContext) onAbandon(stop func()) (release func()) {
 	if c == nil || c.Done == nil {
 		return func() {}
 	}
-	if c.abandon != nil {
+	done := c.Done
+	if c.abandon != nil && done == c.abandon.done {
 		return c.abandon.register(stop)
 	}
 	a := newAbandonment()
@@ -118,7 +120,7 @@ func (c *CheckContext) onAbandon(stop func()) (release func()) {
 	finished := make(chan struct{})
 	go func() {
 		select {
-		case <-c.Done:
+		case <-done:
 			a.abandonRun()
 		case <-finished:
 		}
