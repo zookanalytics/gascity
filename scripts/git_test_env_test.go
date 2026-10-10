@@ -166,14 +166,80 @@ func TestRunnerTestEnvsPinPaneShell(t *testing.T) {
 }
 
 // TestFanOutWorkerReceivesExportedGitConfigGlobal exercises the real
-// run_fan_out xargs/bash -c dispatch end to end instead of asserting on
-// source text: it extracts the live gc_test_gitconfig preamble and the
-// run_fan_out function body from the current file content and runs them
-// under a minimal synthetic harness. This catches an unexported
-// gc_test_gitconfig (ga-9t7vpl) by the worker actually failing, a class of
-// regression TestShardTestEnvsIgnoreUserGitConfiguration above cannot
-// detect since it only counts a string, not the variable's export scope.
+// run_fan_out xargs/bash -c dispatch end to end through runFanOutProbe instead
+// of asserting on source text. This catches an unexported gc_test_gitconfig
+// (ga-9t7vpl) by the worker actually failing, a class of regression
+// TestShardTestEnvsIgnoreUserGitConfiguration above cannot detect since it
+// only counts a string, not the variable's export scope.
 func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
+	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
+	probe := runFanOutProbe(t, probeCmd, nil)
+
+	if probe.runErr != nil {
+		t.Fatalf("run_fan_out worker did not receive a usable GIT_CONFIG_GLOBAL: %v\nharness output:\n%s\nprobe log (err=%v):\n%s",
+			probe.runErr, probe.out, probe.readErr, probe.log)
+	}
+	if probe.readErr != nil {
+		t.Fatalf("read probe log %s: %v\nharness output:\n%s", probe.logPath, probe.readErr, probe.out)
+	}
+	if !strings.Contains(string(probe.log), "GIT_CONFIG_GLOBAL_OK=") {
+		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probe.log, probe.out)
+	}
+}
+
+// TestFanOutJobsKeepTheCallersPATH pins the job shell to a non-login bash. A
+// job must run under exactly the PATH it was handed, so it resolves the same
+// python3, bash and git as the caller. A login shell sources /etc/profile,
+// whose macOS path_helper moves /usr/bin ahead of Homebrew, and the login
+// profile under HOME. The probe's HOME carries a login profile that prepends a
+// marker directory to PATH, so a login shell fails this test on every host,
+// not only where /etc/profile rewrites PATH.
+func TestFanOutJobsKeepTheCallersPATH(t *testing.T) {
+	home := t.TempDir()
+	// A login bash reads .bash_profile; a login POSIX sh reads .profile.
+	for _, name := range []string{".bash_profile", ".profile"} {
+		profile := "PATH=/login-profile-ran:$PATH; export PATH\n"
+		if err := os.WriteFile(filepath.Join(home, name), []byte(profile), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	callerPATH := os.Getenv("PATH")
+	probe := runFanOutProbe(t, `printf "JOB_PATH=%s\n" "$PATH"`, append(os.Environ(), "HOME="+home))
+	if probe.runErr != nil || probe.readErr != nil {
+		t.Fatalf("PATH probe job failed: %v\nharness output:\n%s\nprobe log (err=%v):\n%s",
+			probe.runErr, probe.out, probe.readErr, probe.log)
+	}
+
+	var jobPATH string
+	for _, line := range strings.Split(string(probe.log), "\n") {
+		if value, ok := strings.CutPrefix(line, "JOB_PATH="); ok {
+			jobPATH = value
+		}
+	}
+	if jobPATH != callerPATH {
+		t.Fatalf("a fan-out job ran under a PATH other than the caller's; run each job with bash -c, not a login shell, which sources /etc/profile and the login profile under HOME\njob PATH:    %s\ncaller PATH: %s\nprobe log:\n%s",
+			jobPATH, callerPATH, probe.log)
+	}
+}
+
+// fanOutProbe is one runFanOutProbe run: the harness output and exit error,
+// and the probe job's log.
+type fanOutProbe struct {
+	out     []byte
+	runErr  error
+	logPath string
+	log     []byte
+	readErr error
+}
+
+// runFanOutProbe extracts the live gc_test_gitconfig preamble and the
+// run_fan_out function body from scripts/test-local-parallel and runs them
+// under a minimal synthetic harness whose one jobspec runs probeCmd. The
+// jobspec is single-quoted in the harness, so probeCmd must not contain a
+// single quote. env is the harness environment; nil inherits the test's.
+func runFanOutProbe(t *testing.T, probeCmd string, env []string) fanOutProbe {
+	t.Helper()
 	repoRoot := repoRoot(t)
 	scriptPath := filepath.Join(repoRoot, "scripts", "test-local-parallel")
 	data, err := os.ReadFile(scriptPath)
@@ -204,8 +270,6 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 	fanOutBody := content[bodyStart : bodyStart+endIdx]
 
 	logDir := t.TempDir()
-	probeCmd := `if [ -n "${GIT_CONFIG_GLOBAL:-}" ] && [ -f "$GIT_CONFIG_GLOBAL" ] && [ -w "$GIT_CONFIG_GLOBAL" ]; then printf "GIT_CONFIG_GLOBAL_OK=%s\n" "$GIT_CONFIG_GLOBAL"; else printf "GIT_CONFIG_GLOBAL_MISSING\n"; exit 1; fi`
-
 	lines := []string{
 		"#!/usr/bin/env bash",
 		"set -euo pipefail",
@@ -235,18 +299,10 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 		t.Fatalf("write harness script: %v", err)
 	}
 
-	out, runErr := testCommand("bash", harnessPath).CombinedOutput()
-	probeLog := filepath.Join(logDir, "probe.log")
-	probeOut, readErr := os.ReadFile(probeLog)
-
-	if runErr != nil {
-		t.Fatalf("run_fan_out worker did not receive a usable GIT_CONFIG_GLOBAL: %v\nharness output:\n%s\nprobe log (err=%v):\n%s",
-			runErr, out, readErr, probeOut)
-	}
-	if readErr != nil {
-		t.Fatalf("read probe log %s: %v\nharness output:\n%s", probeLog, readErr, out)
-	}
-	if !strings.Contains(string(probeOut), "GIT_CONFIG_GLOBAL_OK=") {
-		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
-	}
+	cmd := testCommand("bash", harnessPath)
+	cmd.Env = env
+	out, runErr := cmd.CombinedOutput()
+	logPath := filepath.Join(logDir, "probe.log")
+	probeLog, readErr := os.ReadFile(logPath)
+	return fanOutProbe{out: out, runErr: runErr, logPath: logPath, log: probeLog, readErr: readErr}
 }
