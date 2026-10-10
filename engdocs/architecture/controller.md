@@ -209,6 +209,14 @@ indicate bugs.
   the top of each tick. Multiple filesystem events within a single tick
   coalesce into a single reload.
 
+- **A recursive watch covers only what the revision hashes**: pack and
+  convention roots are watched recursively, and each one skips what its own
+  content hash skips (`config.IsIgnoredPackRuntimePath`, relative to that
+  root). A write under a root's `.git`, `.cache`, `state` or `tmp`, or under
+  any `node_modules` or `__pycache__`, holds no watch and marks nothing
+  dirty unless another recursive root hashes it. A shallow config source
+  directory still delivers every event for its direct entries.
+
 - **Pool check commands run in parallel**: `evaluatePool()` calls for all
   pool agents in a single `buildAgents()` invocation run concurrently via
   goroutines. Results are processed sequentially after `wg.Wait()`.
