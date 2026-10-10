@@ -804,24 +804,32 @@ func (c *Client) TriggerMaintenanceDoltGC(wait bool) (MaintenanceTriggerView, er
 	return maintenanceTriggerViewFromGen(resp.JSON202), nil
 }
 
+// maxKeysetWalkPages hard-bounds walkKeysetPages. A server that mints a new,
+// distinct cursor on every page never repeats one, so the repeated-cursor guard
+// cannot stop it. The walk fails at this many pages instead of spinning. At
+// maxPaginationLimit (1000) rows a page the cap admits 100M rows, orders of
+// magnitude past any real city, so a legitimate walk never reaches it.
+const maxKeysetWalkPages = 100_000
+
 // walkKeysetPages walks a keyset-paginated list to its end. fetch requests one
 // page, the first with an empty cursor and each later one with the cursor the
 // page before it returned, and returns the next_cursor its page carried. The
 // walk ends at the first page that carries none.
 //
-// The keyset list endpoints (sessions, convoys, mail) cut their pages at the
-// server default of 100 rows unless asked for more, so a caller that wants the
-// whole list must walk it: one request reads as a complete list while holding
-// only the first page. Callers ask for the maxPaginationLimit server cap on
-// every page to keep the walk to as few round trips as the server allows.
+// The keyset list endpoints cut their pages at the server default of 100 rows
+// unless asked for more, so a caller that wants the whole list must walk it:
+// one request reads as a complete list while holding only the first page.
+// Callers ask for the maxPaginationLimit server cap on every page to keep the
+// walk to as few round trips as the server allows.
 //
 // Keyset cursors only advance, so a cursor the walk has already requested
 // means the server is not honoring it. The walk then fails, because requesting
-// it again would spin forever and stopping would hand back repeated rows.
+// it again would spin forever and stopping would hand back repeated rows. A
+// walk still unfinished after maxKeysetWalkPages pages fails the same way.
 func walkKeysetPages(fetch func(cursor string) (next string, err error)) error {
 	requested := map[string]bool{}
 	cursor := ""
-	for {
+	for page := 1; ; page++ {
 		next, err := fetch(cursor)
 		if err != nil {
 			return err
@@ -831,6 +839,9 @@ func walkKeysetPages(fetch func(cursor string) (next string, err error)) error {
 		}
 		if requested[next] {
 			return fmt.Errorf("pagination cursor repeated (%q); aborting", next)
+		}
+		if page >= maxKeysetWalkPages {
+			return fmt.Errorf("pagination exceeded %d pages; aborting", maxKeysetWalkPages)
 		}
 		requested[next] = true
 		cursor = next

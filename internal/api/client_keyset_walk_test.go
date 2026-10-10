@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,6 +12,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -37,6 +39,26 @@ func TestWalkKeysetPagesRejectsCursorCycle(t *testing.T) {
 	}
 	if want := []string{"", "a", "b"}; !slices.Equal(requested, want) {
 		t.Errorf("requested cursors = %q, want %q", requested, want)
+	}
+}
+
+// TestWalkKeysetPagesStopsAtThePageCap proves the hard page cap bounds a server
+// that mints a new cursor on every page. No cursor ever repeats, so the
+// repeated-cursor guard cannot end that walk.
+func TestWalkKeysetPagesStopsAtThePageCap(t *testing.T) {
+	fetches := 0
+	err := walkKeysetPages(func(string) (string, error) {
+		fetches++
+		if fetches > maxKeysetWalkPages {
+			return "", nil // end a walk that lost its cap instead of spinning
+		}
+		return strconv.Itoa(fetches), nil
+	})
+	if want := fmt.Sprintf("exceeded %d pages", maxKeysetWalkPages); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("err = %v, want an error containing %q", err, want)
+	}
+	if fetches != maxKeysetWalkPages {
+		t.Errorf("fetches = %d, want %d (the cap bounds the walk)", fetches, maxKeysetWalkPages)
 	}
 }
 
