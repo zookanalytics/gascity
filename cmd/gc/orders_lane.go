@@ -296,10 +296,6 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 		return
 	}
 	now := time.Now()
-	if !cr.wispIndexMigrationApplied {
-		cr.wispIndexMigrationApplied = true
-		cr.applyWispQueryIndexes(ctx)
-	}
 	cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now)
 	// Installs whatever is staged — this rescan's result, or a reload staged
 	// while the previous pass held the lock — before anything dispatches

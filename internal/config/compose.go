@@ -347,6 +347,11 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if len(packDoctors) > 0 {
 			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
 		}
+		packMetadataIndexes, err := packLocalMetadataIndexes(&pc, cityRoot)
+		if err != nil {
+			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
+		}
+		mergeCityMetadataIndexes(root, packMetadataIndexes)
 
 		if root.PackSkillsDir == "" || root.PackMCPDir == "" {
 			skillsDir, mcpDir := DiscoverPackAttachmentRoots(fs, cityRoot)

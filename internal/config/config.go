@@ -385,6 +385,10 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// PackMetadataIndexes holds the bead metadata keys packs declare in
+	// [beads].metadata_indexes, composed city-wide from city and rig
+	// expansion in declaration order. Runtime-only.
+	PackMetadataIndexes []DiscoveredMetadataIndex `toml:"-" json:"-"`
 	// Runtimes maps pack-declared runtime selection names ([runtimes.<name>]
 	// in pack.toml) to their resolved declarations, composed during city and
 	// rig expansion. Selection is city-wide, so rig-imported runtime packs

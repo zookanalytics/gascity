@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/queryindex"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -567,6 +568,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		registerCityStoreCheck(doctor.NewCustomTypesCheck(cityPath, "city", doctorScopeBdBinary(cityPath, cityPath)))
 		registerCityStoreCheck(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 	}
+	// Query indexes on each bead store whose Dolt server gc owns. The
+	// self-test verdict is shared, so one doctor run tests each Dolt version
+	// once.
+	indexVerdicts := &queryindex.Verdicts{}
+	registerBeadStoreIndexesCheck := func(scopeRoot, label string) {
+		if cfgErr != nil || cfg == nil || gcDoltSkip() || !blockedRepairScopeEligible(cityPath, cfg, scopeRoot) {
+			return
+		}
+		register(storeGate.Check(newBeadStoreIndexesCheck(cityPath, scopeRoot, label, cfg.MetadataIndexKeys(), indexVerdicts), []string{scopeRoot}, []string{label}))
+	}
+	registerBeadStoreIndexesCheck(cityPath, "city")
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -592,6 +604,9 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			if storeOK {
 				register(storeGate.Check(doctor.NewCustomTypesCheck(rig.Path, rig.Name, doctorScopeBdBinary(cityPath, rig.Path)), rigScope, rigLabel))
 				register(storeGate.Check(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory), rigScope, rigLabel))
+			}
+			if !opts.SkipRigDoltChecks {
+				registerBeadStoreIndexesCheck(rig.Path, rig.Name)
 			}
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup

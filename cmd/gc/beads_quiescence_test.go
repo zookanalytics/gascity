@@ -317,7 +317,6 @@ func TestDispatchOrdersSkipsASuspendedCity(t *testing.T) {
 	cr, store := newPhaseFixtureRuntime(t, false, false)
 	od := &countingOrderDispatcher{}
 	cr.od = od
-	cr.wispIndexMigrationApplied = true
 	t.Setenv("GC_SUSPENDED", "1")
 	before := len(store.recorded())
 	cr.dispatchOrdersLocked(context.Background(), cr.cityPath, 0, cr.cfg)
