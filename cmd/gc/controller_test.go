@@ -180,7 +180,7 @@ func TestControllerShutdown(t *testing.T) {
 	done := make(chan struct{})
 	var exitCode int
 	go func() {
-		exitCode = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
+		exitCode = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -1924,7 +1924,7 @@ func TestControllerReloadCommandReloadsConfigImmediately(t *testing.T) {
 	var stdout, stderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 10*time.Second, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 10*time.Second, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -2025,7 +2025,7 @@ func TestControllerPokeTriggersImmediate(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &stdout, &stderr)
 		close(done)
 	}()
 
@@ -2180,7 +2180,7 @@ func TestRunControllerLatchesSessionReconciler(t *testing.T) {
 		buildFn := func(*config.City, runtime.Provider, beads.Store) DesiredStateResult { return DesiredStateResult{} }
 		s := started{dir: dir, done: make(chan struct{}), code: new(int), rec: events.NewFake(), stdout: &lockedBuffer{}, stderr: &lockedBuffer{}}
 		go func() {
-			*s.code = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, runtime.NewFake(), nil, nil, nil, nil, 0, s.rec, nil, s.stdout, s.stderr)
+			*s.code = runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, runtime.NewFake(), nil, nil, nil, nil, 0, s.rec, nil, s.stdout, s.stderr)
 			close(s.done)
 		}()
 		return s

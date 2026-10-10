@@ -105,20 +105,27 @@ recovered from what was kept.
 ## What changed
 
 - **The controller keeps the closed named-session index between passes.**
-  `closedNamedIndexCache` (`cmd/gc/allocator_demand_reads.go`) is created once
-  per controller in `supervisorBuildAgentsFnWithSessionBeads` and
-  `standaloneBuildAgentsFnWithSessionBeads`. The control-dispatcher tick keeps
-  its own on the `CityRuntime`. That tick narrows the config to the dispatcher
-  agents but keeps every named session, so an `on_demand` one sends each of its
-  desired-state builds to the index as well. It builds without a trace, so its
-  index builds are not among the ones the trace counted. Each cache answers
-  from the last complete build until a named session it saw open leaves the
-  pass's open-session snapshot, the store changes, the snapshot is degraded or
-  absent, or the index is ten minutes old. A failed build reaches its pass
-  unchanged and is not kept.
+  One `closedNamedIndexCache` (`cmd/gc/allocator_demand_reads.go`) serves each
+  `CityRuntime`. The entry point creates it and hands it to the desired-state
+  build function and to the runtime, which reads through it in the
+  control-dispatcher tick and in the v2 external-reads lane. The
+  control-dispatcher tick narrows the config to the dispatcher agents but keeps
+  every named session, so an `on_demand` one sends each of its desired-state
+  builds to the index as well. It builds without a trace, so its index builds
+  are not among the ones the trace counted.
+  The cache answers from the last complete build until one of these happens: a
+  bead event carries a closed named-session bead, the event feed reports a gap,
+  a named session the cache saw open leaves the reader's open-session snapshot,
+  the store changes, the snapshot is degraded or absent, or the index is ten
+  minutes old. The controller's bead event feed carries its own writes and the
+  closes other gc processes announce, so it reports a named session that opened
+  and closed between two passes, which no snapshot shows. One build runs at a
+  time, outside the cache's lock, so an event never waits on a store read. A
+  failed build reaches its reader unchanged and is not kept.
   The index only adds runtime-name assignees for on_demand identities, so a
-  stale entry costs one extra ready probe, and the open-set check catches the
-  change that would hide demand, a named session closing.
+  stale entry costs one extra ready probe. The change that would hide demand
+  is a named session closing, and the event feed and the open-set check both
+  report it.
 - **`session.Store.List` reads closed rows only when its filter can keep one**,
   for `all` or a list that names `closed`. Every other filter already dropped
   each closed row in memory, so results are unchanged, and the doctor's
@@ -127,7 +134,9 @@ recovered from what was kept.
   well as a success, for its refresh interval after the enumeration returns.**
   A store too slow to answer is asked again thirty seconds after its last
   answer. It is not asked on every recipient lookup, and not again straight
-  after an enumeration that used up the interval.
+  after an enumeration that used up the interval. A failed refresh is logged,
+  and alias-history routes keep using the last enumeration that succeeded; the
+  failure reaches the lookup only while no enumeration has succeeded.
 
 ## What this does not change
 

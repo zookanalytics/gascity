@@ -2939,6 +2939,54 @@ func TestProviderCached_SessionEnumerationRunsOncePerRefreshIntervalEvenWhenItFa
 	}
 }
 
+// Kills: a failed refresh that drops the last enumeration that succeeded. One
+// timeout or partial read would otherwise turn off alias-history routing for a
+// whole refresh interval. The failure is still held for that interval, so the
+// store is not asked again by every lookup.
+func TestProviderCached_FailedRefreshKeepsRoutingThroughTheLastEnumeration(t *testing.T) {
+	store := &failingSessionListStore{MemStore: beads.NewMemStore()}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":         "worker-a",
+			"alias_history": "old-route",
+			"session_name":  "wf__a",
+		},
+	}); err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	p := NewCached(store)
+	advance := setCachedProviderClock(t, p, time.Date(2026, 10, 10, 20, 0, 0, 0, time.UTC))
+	if _, err := p.Send("human", "worker-a", "", "for old route"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	lookup := func(when string, wantAttempts int) {
+		t.Helper()
+		msgs, err := p.Inbox("old-route")
+		if err != nil {
+			t.Fatalf("Inbox(old-route) %s: %v", when, err)
+		}
+		if len(msgs) != 1 || msgs[0].Body != "for old route" {
+			t.Fatalf("Inbox(old-route) %s = %#v, want the mail routed through the alias history", when, msgs)
+		}
+		if got := store.attemptCount(); got != wantAttempts {
+			t.Fatalf("session enumerations %s = %d, want %d", when, got, wantAttempts)
+		}
+	}
+
+	lookup("with the store answering", 1)
+	store.setFailing(true)
+	advance(2 * time.Minute)
+	lookup("on the refresh that fails", 2)
+	lookup("within the interval after the failed refresh", 2)
+	advance(2 * time.Minute)
+	lookup("on the next failed refresh", 3)
+	store.setFailing(false)
+	advance(2 * time.Minute)
+	lookup("after the store recovers", 4)
+}
+
 // Kills: a held enumeration timed from when it began. A store slow enough to
 // spend most of the refresh interval answering leaves the result, failure or
 // success, expired or nearly so as soon as it is stored, and the next lookup

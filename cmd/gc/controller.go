@@ -1380,6 +1380,10 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // --foreground does, before it starts the bead-store provider); the caller
 // keeps ownership and releases it after this returns. When heldLock is nil,
 // runController acquires the lock itself and releases it last.
+//
+// closedNamed is the closed named-session index cache the caller handed
+// buildFnWithSessionBeads; the runtime's other readers share it. Nil gives the
+// runtime a cache of its own.
 func runController(
 	cityPath string,
 	heldLock *os.File,
@@ -1388,6 +1392,7 @@ func runController(
 	configRev string,
 	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
+	closedNamed *closedNamedIndexCache,
 	sp runtime.Provider,
 	dops drainOps,
 	poolSessions map[string]time.Duration,
@@ -1471,6 +1476,7 @@ func runController(
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
 		BuildFnWithSessionBeads: buildFnWithSessionBeads,
+		ClosedNamedIndex:        closedNamed,
 		Dops:                    dops,
 		Rec:                     rec,
 		PoolSessions:            poolSessions,

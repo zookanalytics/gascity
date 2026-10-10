@@ -31,8 +31,10 @@ import (
 // one read in flight per source: every lane-fed leg in any demand leg set
 // (the work census, the default-probe target stores) through
 // legacyDemandReads; when the config has an on_demand named session,
-// the city store's closed named-session index on any leg, since no cache
-// holds closed history; and the custom scale_check commands (I5).
+// the city store's closed named-session index on any leg, since no
+// CachingStore holds closed history, read through the controller's
+// closedNamedIndexCache when the env carries one; and the custom scale_check
+// commands (I5).
 //
 // The source deadline bounds only how long a pass waits before it publishes;
 // it never decides whether a read counts. Each read stores its result when it
@@ -273,6 +275,10 @@ type externalReadsEnv struct {
 	// Sessions is the open session census the stamp and the assigned-work
 	// canonicalization read; nil leaves both inert, as in legacy.
 	Sessions *sessionBeadSnapshot
+	// ClosedNamed is the controller's closed named-session index cache. The
+	// closed named-session source reads through it, with Sessions as the
+	// snapshot; nil reads the index afresh on every pass.
+	ClosedNamed *closedNamedIndexCache
 	// SP, Nudges and WorkStore are C8's steps': the provider nudges go
 	// through, the nudges-class store and the city work store.
 	SP        runtime.Provider
@@ -625,8 +631,12 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 		})
 	}
 	if env.CityStore != nil && env.Cfg != nil && slices.ContainsFunc(env.Cfg.NamedSessions, func(n config.NamedSession) bool { return n.Mode == "on_demand" }) {
+		var closedNamed demandReads = reads
+		if env.ClosedNamed != nil {
+			closedNamed = closedNamedCachedReads{cache: env.ClosedNamed, snap: env.Sessions}
+		}
 		add(keyOf(sourceClosedNamed, env.CityStore), func() (sourcePayload, error) {
-			idx, err := reads.ClosedNamedIndex(env.CityStore)
+			idx, err := closedNamed.ClosedNamedIndex(env.CityStore)
 			return sourcePayload{ClosedNamed: idx}, err
 		})
 	}

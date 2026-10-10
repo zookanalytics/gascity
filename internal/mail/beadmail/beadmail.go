@@ -50,11 +50,14 @@ type Provider struct {
 }
 
 type sessionInfoCache struct {
-	mu   sync.Mutex
-	list []session.Info
-	// err is the last enumeration's failure, nil after a success.
+	mu sync.Mutex
+	// list is the last enumeration that succeeded, and listed reports that one
+	// has. A failed refresh keeps both.
+	list   []session.Info
+	listed bool
+	// err is the last enumeration's failure while none has succeeded.
 	err error
-	// fetchedAt is when the last enumeration returned.
+	// fetchedAt is when the last enumeration returned, succeeded or failed.
 	fetchedAt       time.Time
 	refreshInterval time.Duration
 	now             func() time.Time
@@ -111,9 +114,9 @@ func NewCachedWithStores(msgStore, sessionStore beads.Store) *Provider {
 }
 
 // cachedSessionBeads returns the full set of session beads (open + closed).
-// Cached providers reuse one enumeration's outcome, a failure included, for the
-// refresh interval after it returns; stateless providers fetch fresh results on
-// every call.
+// Cached providers hold an enumeration for the refresh interval after it
+// returns, and a failed refresh keeps the last one that succeeded; stateless
+// providers fetch fresh results on every call.
 func (p *Provider) cachedSessionBeads() ([]session.Info, error) {
 	if p.sessions == nil {
 		return nil, nil
@@ -124,31 +127,37 @@ func (p *Provider) cachedSessionBeads() ([]session.Info, error) {
 	return p.sessionCache.get(p.sessions)
 }
 
-// get returns the cached enumeration, or its failure, while it is fresh, and
-// enumerates again once it is not. The enumeration reads every closed session,
-// so its outcome is held for the refresh interval after it returns, a failure
-// as long as a success. Holding a failure keeps a store too slow to answer from
-// being asked again by every recipient lookup. Timing the hold from the return
-// keeps an enumeration that used up the interval from going stale the moment
-// it is stored.
+// get returns the cached enumeration while it is fresh, and enumerates again
+// once it is not. The enumeration reads every closed session, so its outcome
+// is held for the refresh interval after it returns, a failure as long as a
+// success: a store too slow to answer is not asked again by every recipient
+// lookup. A failed refresh logs the failure and keeps serving the last
+// enumeration that succeeded, so alias-history routes survive a transient
+// failure; the failure itself is returned only while no enumeration has
+// succeeded. Timing the hold from the return keeps an enumeration that used up
+// the interval from going stale the moment it is stored.
 func (c *sessionInfoCache) get(directory session.AddressDirectory) ([]session.Info, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.fetched && c.isFresh(c.currentTime()) {
-		if c.err != nil {
-			return nil, c.err
+		if c.listed {
+			return c.list, nil
 		}
-		return c.list, nil
+		return nil, c.err
 	}
 	list, err := directory.ListAddresses(true)
 	c.fetchedAt = c.currentTime()
 	c.fetched = true
-	if err != nil {
-		c.list, c.err = nil, err
-		return nil, err
+	if err == nil {
+		c.list, c.listed, c.err = list, true, nil
+		return list, nil
 	}
-	c.list, c.err = list, nil
-	return list, nil
+	if c.listed {
+		log.Printf("beadmail: refreshing the session list for alias-history routes: %v; routing from the previous list", err)
+		return c.list, nil
+	}
+	c.err = err
+	return nil, err
 }
 
 func (c *sessionInfoCache) currentTime() time.Time {

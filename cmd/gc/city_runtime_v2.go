@@ -81,7 +81,8 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			Episodes: func() (map[string]sessionpkg.StartupHealthEpisode, error) {
 				return readStartupHealthEpisodes(cr.v2SessionsStore())
 			},
-			Suspension: func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
+			Suspension:  func() suspensionstate.State { return loadSuspensionStateBestEffort(cr.cityPath) },
+			ClosedNamed: cr.closedNamedIndex(),
 			Nudges: func() beads.NudgesStore {
 				return beads.NudgesStore{Store: resolveNudgesStore(cr.storageRoutes, cr.cityBeadStore(), cr.serviceConfigSnapshot(), cr.cityPath, cr.rec)}
 			},
