@@ -320,11 +320,15 @@ in agreement.
 Every readiness scan reads the store as it is when the scan runs; nothing is
 reused from an earlier scan. A store that is a bd workspace is read with one
 `bd ready` call. Any other store is read from an in-process snapshot primed for
-that scan. The loop scans again when a bead event arrives from a store it reads.
-Bead events from the city's other stores do not wake it, because bd decides a
-bead's readiness from its own store's rows. Without an event, the loop sweeps on
-an idle timer that backs off from one second to five, which is how it sees a
-step closed by a raw `bd` write that publishes no event.
+that scan. Every scan sees the store's whole ready set, because it picks out the
+dispatcher's own beads only after the read, and a read cut short could leave
+them out. The `bd ready` call reads one page, and the scan reads the whole set
+again when that page comes back full. The loop scans again when a bead event
+arrives from a store it reads. Bead events from the city's other stores do not
+wake it, because bd decides a bead's readiness from its own store's rows.
+Without an event, the loop sweeps on an idle timer that backs off from one
+second to five, which is how it sees a step closed by a raw `bd` write that
+publishes no event.
 
 ## Interactions
 

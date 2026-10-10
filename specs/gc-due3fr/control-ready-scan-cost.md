@@ -1,6 +1,6 @@
 ---
 name: What a control-dispatcher readiness scan reads, and what wakes it (gc-due3fr)
-description: Records why a control dispatcher on a bd store now answers each readiness scan with one `bd ready` call instead of priming its open and in-progress beads, and why bead events from stores it does not read no longer wake it. Holds the before measurements from loomington (scans per hour, scan time, per-hop pickup latency, per-scan read cost), the two designs the bead proposed and why neither was built as proposed, and the method for re-measuring once the change is deployed.
+description: Records why a control dispatcher on a bd store now answers each readiness scan with one `bd ready` call instead of priming its open and in-progress beads, why that call reads one page and re-reads the whole ready set only when the page comes back full, and why bead events from stores it does not read no longer wake it. Holds the before measurements from loomington (scans per hour, scan time, per-hop pickup latency, per-scan read cost), the cost of a bounded against an unbounded `bd ready`, the two designs the bead proposed and why neither was built as proposed, and the method for re-measuring once the change is deployed.
 ---
 
 # gc-due3fr: what a control-dispatcher scan reads
@@ -10,12 +10,16 @@ description: Records why a control dispatcher on a bd store now answers each rea
 - Every readiness scan reads the ledger as it is when the scan runs. Nothing is
   reused from an earlier scan. This is upstream gastownhall/gascity#7404
   (`8a52426d61`), carried here unchanged.
-- On a store that is a bd workspace, a scan is one call:
+- On a store that is a bd workspace, a scan reads the store with one call:
   `bd --readonly --sandbox ready --json --exclude-type=epic --limit=5000`, plus
-  `--brief` when bd is 1.2.1 or newer. It returns the store's ready set. The
-  scan it replaces primed an in-process snapshot. That prime listed every open
-  and every in-progress bead in both tiers through four `bd` calls, then read
-  their dependencies and the blocked projection.
+  `--brief` when bd is 1.2.1 or newer. That page holds the store's whole ready
+  set unless it comes back full, and then the scan reads the whole set again
+  with `--limit=0`. The scan picks out the dispatcher's own beads only after the
+  read, so a page cut short could leave them out. The graph binding that a rig
+  scope also reads is read whole for the same reason. The scan this replaces
+  primed an in-process snapshot. That prime listed every open and every
+  in-progress bead in both tiers through four `bd` calls, then read their
+  dependencies and the blocked projection.
 - Bead events from the city's other stores no longer wake the serve loop. The
   loop still wakes on every bead event from a store it reads, and it still
   sweeps on its idle timer, which backs off from one second to five.
@@ -58,6 +62,29 @@ follows its `bd ready` with a `bd list` of every closed blocker of every ready
 bead, to apply the `gc.work_outcome` veto. The snapshot path never applied
 that veto to closed blockers, because a prime of the open and in-progress
 sets holds none.
+
+## Why the first read is a page
+
+The scan must see the whole ready set, because it filters for the dispatcher's
+own beads in Go after the read. `--limit=0` alone would give it that, but bd
+1.3.1 answers a bounded `bd ready --json` and an unbounded one differently
+(`runReadyCountsInTx`, `internal/storage/issueops/ready_work_counts.go`). A
+bounded read first selects one page of ready ids with an indexed query, then
+hydrates the counts for only those ids. An unbounded read runs the counts query
+over every candidate, which bd's comment there describes as
+O(candidates × blockers). Both were measured on the live stores with `--brief`,
+as the scan reads them (2026-10-10, 04:58Z, load 56 to 64). In two rounds that
+compared the outputs, both reads returned the same ids and the same bytes.
+Eight more rounds, with the two reads in alternating order, gave these medians:
+
+| Store | Ready rows | `--limit=5000`, median | `--limit=0`, median |
+|---|---|---|---|
+| gascity | 128 | 0.22 s | 0.29 s |
+| gc-toolkit | 744 to 745 | 0.50 s | 0.61 s |
+| signal-loom | 67 to 70 | 0.16 s | 0.23 s |
+
+So the scan reads one page and pays for an unbounded read only when the page
+comes back full, which is the one case where the page can be short.
 
 ## Before: loomington, 2026-10-09, installed `gc` at 1a3bda7a6
 

@@ -21,8 +21,10 @@ const bdScopeControlTarget = "gascity/control-dispatcher"
 
 // fakeBdScope is a stand-in `bd` on PATH for a bd-backed control scope. It
 // records every invocation with the Dolt port it was given, reports the
-// configured version, and answers `ready` with whatever the test last
-// published. Every other subcommand answers an empty list.
+// configured version, and answers `ready` with the rows the test last
+// published, limited the way bd limits them: `--limit=N` returns the first N
+// rows, `--limit=0` returns every row, and a read with no `--limit` returns
+// bd's default of 100. Every other subcommand answers an empty list.
 type fakeBdScope struct {
 	logPath   string
 	envPath   string
@@ -37,7 +39,7 @@ func installFakeBdScope(t *testing.T, version string) *fakeBdScope {
 	f := &fakeBdScope{
 		logPath:   filepath.Join(tmp, "bd.log"),
 		envPath:   filepath.Join(tmp, "bd.env"),
-		readyPath: filepath.Join(tmp, "ready.json"),
+		readyPath: filepath.Join(tmp, "ready.jsonl"),
 	}
 	versionArm := "exit 3"
 	if version != "" {
@@ -50,7 +52,18 @@ case "$1" in
   version) %s ;;
 esac
 case " $* " in
-  *" ready "*) cat %q ;;
+  *" ready "*)
+    limit=100
+    prev=
+    for arg in "$@"; do
+      case "$arg" in
+        --limit=*) limit="${arg#--limit=}" ;;
+      esac
+      [ "$prev" = "--limit" ] && limit="$arg"
+      prev="$arg"
+    done
+    awk -v limit="$limit" 'BEGIN { printf "[" } limit == 0 || NR <= limit { if (n++) printf ","; printf "%%s", $0 } END { printf "]" }' %q
+    ;;
   *) printf '[]' ;;
 esac
 `, f.logPath, f.envPath, versionArm, f.readyPath)
@@ -62,15 +75,18 @@ esac
 	return f
 }
 
-// publish sets the ledger's ready set to rows, in the JSON shape bd emits.
+// publish sets the ledger's ready set to rows, in bd's ready order and in the
+// JSON shape bd emits. The fake stores one row per line so that it can return
+// the first N.
 func (f *fakeBdScope) publish(t *testing.T, rows ...map[string]any) {
 	t.Helper()
-	if rows == nil {
-		rows = []map[string]any{}
-	}
-	data, err := json.Marshal(rows)
-	if err != nil {
-		t.Fatalf("marshal ready rows: %v", err)
+	var data []byte
+	for _, row := range rows {
+		line, err := json.Marshal(row)
+		if err != nil {
+			t.Fatalf("marshal ready row: %v", err)
+		}
+		data = append(append(data, line...), '\n')
 	}
 	if err := os.WriteFile(f.readyPath, data, 0o644); err != nil {
 		t.Fatalf("publish ready rows: %v", err)
@@ -142,9 +158,11 @@ func scanBdScopeControlReady(t *testing.T, cityDir string) []string {
 }
 
 // TestControlReadyScanOfBdScopeIsOneReadyCallWithoutAPrime pins the cost of a
-// scan: one `bd ready`, and none of the `bd list` / `bd query` calls a prime of
-// the open and in-progress sets makes. On a ledger of a thousand open beads
-// that prime is what made each scan take seconds.
+// scan: one `bd ready` page, and none of the `bd list` / `bd query` calls a
+// prime of the open and in-progress sets makes. On a ledger of a thousand open
+// beads that prime is what made each scan take seconds. The read is bounded
+// because bd answers a bounded ready read from an indexed page of ids, which
+// costs less than its unbounded read.
 func TestControlReadyScanOfBdScopeIsOneReadyCallWithoutAPrime(t *testing.T) {
 	cityDir := setUpControlReadyBdCity(t)
 	bd := installFakeBdScope(t, "1.3.1")
@@ -153,13 +171,45 @@ func TestControlReadyScanOfBdScopeIsOneReadyCallWithoutAPrime(t *testing.T) {
 	if got, want := scanBdScopeControlReady(t, cityDir), []string{"ga-ready-1"}; !slices.Equal(got, want) {
 		t.Fatalf("queue = %v, want %v", got, want)
 	}
-	if got := bd.calls(t, "ready"); len(got) != 1 {
-		t.Fatalf("bd ready calls = %q, want exactly one", got)
+	page := fmt.Sprintf("--limit=%d", controlReadyPageLimit)
+	if got := bd.calls(t, "ready"); len(got) != 1 || !slices.Contains(strings.Fields(got[0]), page) {
+		t.Fatalf("bd ready calls = %q, want exactly one, carrying %s", got, page)
 	}
 	for _, sub := range []string{"list", "query"} {
 		if got := bd.calls(t, sub); len(got) != 0 {
 			t.Fatalf("bd %s calls = %q, want none: the scan primed the open set instead of reading ready beads", sub, got)
 		}
+	}
+}
+
+// TestControlReadyScanOfBdScopeReadsTheWholeReadySet pins that the scan sees
+// every ready row. It picks the dispatcher's own beads out of the read in Go,
+// so a read that stopped at a page of other agents' ready beads would lose
+// them, and the dispatcher would report no work while its control bead sat
+// ready. A page that comes back full is therefore followed by bd's unbounded
+// read.
+func TestControlReadyScanOfBdScopeReadsTheWholeReadySet(t *testing.T) {
+	cityDir := setUpControlReadyBdCity(t)
+	bd := installFakeBdScope(t, "1.3.1")
+	rows := make([]map[string]any, 0, controlReadyPageLimit+1)
+	for i := range controlReadyPageLimit {
+		rows = append(rows, map[string]any{
+			"id":         fmt.Sprintf("ga-other-%d", i),
+			"issue_type": "task",
+			"status":     "open",
+			"priority":   0,
+			"metadata":   map[string]string{beadmeta.RoutedToMetadataKey: "gascity/worker"},
+		})
+	}
+	rows = append(rows, routedControlRow("ga-control-1"))
+	bd.publish(t, rows...)
+
+	if got, want := scanBdScopeControlReady(t, cityDir), []string{"ga-control-1"}; !slices.Equal(got, want) {
+		t.Fatalf("queue = %v, want %v: the scan stopped at a full page of %d ready beads routed elsewhere", got, want, controlReadyPageLimit)
+	}
+	ready := bd.calls(t, "ready")
+	if len(ready) != 2 || !slices.Contains(strings.Fields(ready[1]), "--limit=0") {
+		t.Fatalf("bd ready calls = %q, want the page and then one unbounded --limit=0 read", ready)
 	}
 }
 
