@@ -225,6 +225,7 @@ type prStaticScopeFixture struct {
 	lintLog            string
 	bazelLog           string
 	homeDir            string
+	brewDir            string
 }
 
 func newPRStaticScopeFixture(t *testing.T, files map[string]string) prStaticScopeFixture {
@@ -255,6 +256,7 @@ func newPRStaticScopeFixture(t *testing.T, files map[string]string) prStaticScop
 		lintLog:            lintLog,
 		bazelLog:           bazelLog,
 		homeDir:            t.TempDir(),
+		brewDir:            offlineBrewDir(t),
 	}
 	setupMakefile := filepath.Join(t.TempDir(), "git-init.mk")
 	writeTestFile(t, setupMakefile, `.PHONY: init
@@ -313,7 +315,8 @@ func (f prStaticScopeFixture) commandEnv() []string {
 	env := make([]string, 0, len(os.Environ())+7)
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if name == "HOME" ||
+		if name == "PATH" ||
+			name == "HOME" ||
 			// A forwarded GOROOT can pair a 1.2x driver with a different
 			// toolchain's compile binaries (bazel forwards GOROOT for its own
 			// type-checking tests); the real go must resolve its own.
@@ -332,6 +335,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 		env = append(env, entry)
 	}
 	return append(env,
+		"PATH="+f.brewDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"HOME="+f.homeDir,
 		"STATIC_SCOPE_LINT_LOG="+f.lintLog,
 		"STATIC_SCOPE_BAZEL_LOG="+f.bazelLog,
