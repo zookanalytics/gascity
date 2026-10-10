@@ -140,6 +140,40 @@ func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenDedicated returns a new *sql.DB for one statement that outlasts the
+// pool's read deadline, such as a CREATE INDEX, which sends nothing back
+// until it finishes. The handle stays out of the registry, holds a single
+// connection, and waits up to wait for each reply. The caller owns it and
+// must Close it.
+func OpenDedicated(host, port, user, password, database string, wait time.Duration) (*sql.DB, error) {
+	return openDedicated(dedicatedConfig("tcp", net.JoinHostPort(host, port), user, password, database, wait))
+}
+
+// OpenDedicatedSocket is OpenDedicated for a Dolt Unix-socket endpoint.
+func OpenDedicatedSocket(socket, user, password, database string, wait time.Duration) (*sql.DB, error) {
+	return openDedicated(dedicatedConfig("unix", socket, user, password, database, wait))
+}
+
+func dedicatedConfig(network, addr, user, password, database string, wait time.Duration) *mysql.Config {
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, network, addr, database
+	cfg.Timeout = connTimeout
+	cfg.ReadTimeout = wait
+	cfg.WriteTimeout = writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	return cfg
+}
+
+func openDedicated(cfg *mysql.Config) (*sql.DB, error) {
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening dedicated dolt connection %s/%s: %w", cfg.Addr, cfg.DBName, err)
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
 // configurePool applies the per-endpoint caps to a new pooled handle. TCP and
 // Unix-socket pools share it so neither can drift from the other: the socket
 // path once skipped the idle bound, so its idle connections lived until

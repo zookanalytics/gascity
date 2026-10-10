@@ -212,7 +212,6 @@ type CityRuntime struct {
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
-	wispIndexMigrationApplied          bool
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable
@@ -826,6 +825,16 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	defer func() {
 		stopOrdersLane()
 		<-ordersLaneDone
+	}()
+	// The bead stores' query indexes are kept on a lane of their own
+	// (bead_store_query_index.go): a build waits for its table to hold
+	// still, which no tick may block on. run() stops the lane and waits for
+	// it on every exit; an in-flight statement ends with the context.
+	indexLaneCtx, stopIndexLane := context.WithCancel(ctx)
+	indexLaneDone := cr.startBeadStoreIndexLane(indexLaneCtx)
+	defer func() {
+		stopIndexLane()
+		<-indexLaneDone
 	}()
 
 	// Recover ready work whose canonical pool route was lost or never written

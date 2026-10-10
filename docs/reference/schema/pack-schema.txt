@@ -830,6 +830,20 @@
       ],
       "description": "OptionChoice is one allowed value for a \"select\" option."
     },
+    "PackBeadsConfig": {
+      "properties": {
+        "metadata_indexes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "MetadataIndexes lists the bead metadata keys this pack's queries look\nup with closed beads included. Gas City keeps a functional index on\neach key, alongside the keys its own queries use, in the issues and\nwisps tables of every bead store it manages, on a Dolt server that\npasses its index self-test, so such a lookup reads the index instead\nof every row's metadata. A key must start with a letter or underscore\nand contain only letters, digits, underscores, dots and slashes."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "PackBeadsConfig is the [beads] table of a pack.toml."
+    },
     "PackCommandEntry": {
       "properties": {
         "name": {
@@ -915,6 +929,9 @@
             "$ref": "#/$defs/PackRuntimeEntry"
           },
           "type": "object"
+        },
+        "beads": {
+          "$ref": "#/$defs/PackBeadsConfig"
         },
         "patches": {
           "$ref": "#/$defs/PackPatches"

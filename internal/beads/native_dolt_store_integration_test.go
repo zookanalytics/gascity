@@ -215,9 +215,16 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 	}
 }
 
+// testDoltServerOptions adjusts the server startTestDoltServer launches.
+type testDoltServerOptions struct {
+	// queryLog, when set, is a file that receives the server's output at
+	// debug level, which records the text of every query the server runs.
+	queryLog string
+}
+
 // startTestDoltServer launches a throwaway server for tests that need the raw
 // SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t *testing.T) int {
+func startTestDoltServer(t *testing.T, opts ...testDoltServerOptions) int {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -234,8 +241,25 @@ func startTestDoltServer(t *testing.T) int {
 	}
 
 	dataDir := t.TempDir()
-	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
+	args := []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+	var queryLog *os.File
+	for _, opt := range opts {
+		if opt.queryLog == "" {
+			continue
+		}
+		queryLog, err = os.Create(opt.queryLog)
+		if err != nil {
+			t.Fatalf("create dolt query log: %v", err)
+		}
+		t.Cleanup(func() { _ = queryLog.Close() })
+		args = append(args, "--loglevel", "debug")
+	}
+	cmd := exec.Command(doltBin, args...)
 	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
+	if queryLog != nil {
+		cmd.Stdout = queryLog
+		cmd.Stderr = queryLog
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start dolt sql-server: %v", err)
 	}
