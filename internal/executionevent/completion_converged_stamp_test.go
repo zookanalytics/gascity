@@ -1,6 +1,7 @@
 package executionevent
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -129,9 +130,12 @@ func TestCompletionBackstopStampsOnlyVerifiedConvergenceThenSkips(t *testing.T) 
 	}
 }
 
-// TestCompletionBackstopDoesNotStampAnEmptyStepListing: a store wedge that
-// answers empty-with-nil must not vacuously prove convergence.
-func TestCompletionBackstopDoesNotStampAnEmptyStepListing(t *testing.T) {
+// TestCompletionBackstopFreshBackstopDoesNotStampAnEmptyStepListing: a store
+// wedge that answers empty-with-nil must not vacuously prove convergence. An
+// empty listing is confirmed only by the previous sweep of the same backstop,
+// so a fresh backstop, which is what every one-shot pass starts, never stamps
+// a root from one.
+func TestCompletionBackstopFreshBackstopDoesNotStampAnEmptyStepListing(t *testing.T) {
 	backing := beads.NewMemStore()
 	root := mustCreateProjectionRoot(t, backing, "")
 	closed := "closed"
@@ -354,4 +358,179 @@ func TestCompletionBackstopDoesNotStampFromAnUnconfirmedPhantom(t *testing.T) {
 	if journal.dropped != 3 {
 		t.Fatalf("journal dropped %d record(s) over 3 sweeps, want 3 — the fixture is not exercising the drop each pass", journal.dropped)
 	}
+}
+
+// wedgedStepListingStore answers every per-root step listing empty-with-nil
+// while wedged, the failure the empty-listing guard exists for. Root listings
+// and every other read pass through, so the sweep still finds the root.
+type wedgedStepListingStore struct {
+	beads.Store
+	wedged bool
+}
+
+func (s *wedgedStepListingStore) ListByMetadata(filter map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if _, ok := filter[beadmeta.RootBeadIDMetadataKey]; ok && s.wedged {
+		return nil, nil
+	}
+	return s.Store.ListByMetadata(filter, limit, opts...)
+}
+
+// assertStamped fails unless the root carries a converged stamp.
+func assertStamped(t *testing.T, store beads.Store, rootID, msg string) {
+	t.Helper()
+	root, err := store.Get(rootID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey] == "" {
+		t.Fatalf("%s: root %s is not stamped converged", msg, rootID)
+	}
+}
+
+func closeTestBead(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	closed := "closed"
+	if err := store.Update(id, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatalf("close %s: %v", id, err)
+	}
+}
+
+// stepLessRootShapes seeds the two kinds of closed graph.v2 root whose step
+// listing holds no step rows: one whose member rows are gone, and one whose
+// members carry gc.step_ref but no gc.step_id, so none of them is a step.
+var stepLessRootShapes = []struct {
+	name string
+	seed func(t *testing.T, store beads.Store) string
+}{
+	{"no member rows", func(t *testing.T, store beads.Store) string {
+		root := mustCreateProjectionRoot(t, store, "")
+		closeTestBead(t, store, root.ID)
+		return root.ID
+	}},
+	{"members without a step id", func(t *testing.T, store beads.Store) string {
+		root := mustCreateProjectionRoot(t, store, "")
+		member := mustCreateProjectionBead(t, store, beads.Bead{Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: root.ID,
+			beadmeta.StepRefMetadataKey:    "mol-example.build",
+		}})
+		closeTestBead(t, store, member.ID)
+		closeTestBead(t, store, root.ID)
+		return root.ID
+	}},
+}
+
+// TestCompletionBackstopConvergesAClosedRootWithNoSteps: a closed root whose
+// listing holds no step rows has no completion fact to emit, now or later. One
+// empty listing cannot tell it from a wedged store, so the root converges when
+// the next sweep of the same backstop lists it empty too. From then on the
+// hourly sweep skips it, and a startup sweep or a delta pass that lists it
+// empty again keeps the stamp: an empty answer is no evidence against it.
+func TestCompletionBackstopConvergesAClosedRootWithNoSteps(t *testing.T) {
+	for _, shape := range stepLessRootShapes {
+		t.Run(shape.name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			rootID := shape.seed(t, backing)
+			store := &sweepCountingGraphStore{Store: backing}
+			journal := events.NewFake()
+			stores := []beads.GraphStore{{Store: store}}
+			// One backstop across sweeps, as the completions lane holds it.
+			backstop := &CompletionBackstop{}
+
+			if r := backstop.Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 1 || r.Emitted != 0 {
+				t.Fatalf("first sweep = %+v, want the root visited with nothing to emit", r)
+			}
+			assertNotStamped(t, backing, rootID, "one empty listing stamped the root")
+
+			if r := backstop.Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 1 {
+				t.Fatalf("second sweep = %+v, want the root visited", r)
+			}
+			assertStamped(t, backing, rootID, "a closed root listed empty on two consecutive sweeps")
+
+			stepLists := store.stepLists
+			if r := backstop.Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 0 || r.RootsSkippedConverged != 1 {
+				t.Fatalf("third sweep = %+v, want the converged root skipped", r)
+			}
+			if store.stepLists != stepLists {
+				t.Fatalf("third sweep issued %d step listing(s) for a converged root, want 0", store.stepLists-stepLists)
+			}
+
+			// A reboot starts a fresh backstop, and its first sweep re-examines
+			// stamped roots.
+			if r := (&CompletionBackstop{VisitStamped: true}).Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 1 {
+				t.Fatalf("startup sweep = %+v, want the stamped root re-examined", r)
+			}
+			assertStamped(t, backing, rootID, "the startup sweep cleared the stamp on an empty listing, so every hourly sweep re-reads the root again")
+
+			var delta CompletedFactIndex
+			delta.ReconcileRoots(journal, stores, []string{rootID}, "execution-reconcile")
+			assertStamped(t, backing, rootID, "a delta pass cleared the stamp on an empty listing")
+		})
+	}
+}
+
+// TestCompletedFactIndexNeverStampsAClosedRootWithNoSteps: the delta pass keeps
+// no record of empty listings, so the empty listings it reads stamp nothing,
+// however often the journal names the root.
+func TestCompletedFactIndexNeverStampsAClosedRootWithNoSteps(t *testing.T) {
+	backing := beads.NewMemStore()
+	rootID := stepLessRootShapes[0].seed(t, backing)
+	stores := []beads.GraphStore{{Store: backing}}
+	journal := events.NewFake()
+	var delta CompletedFactIndex
+	for range 3 {
+		delta.ReconcileRoots(journal, stores, []string{rootID}, "execution-reconcile")
+	}
+	assertNotStamped(t, backing, rootID, "a delta pass stamped a root from an empty listing")
+}
+
+// TestCompletionBackstopNeverStampsARootWithStepsFromOneEmptyListing: a wedged
+// store answers a root's step listing empty-with-nil on every other sweep. The
+// root has an open step, so its healthy listings never converge it, and an
+// empty listing between two healthy ones must not stamp it either. Only empty
+// listings on consecutive sweeps confirm each other.
+func TestCompletionBackstopNeverStampsARootWithStepsFromOneEmptyListing(t *testing.T) {
+	backing := beads.NewMemStore()
+	root := mustCreateProjectionRoot(t, backing, "")
+	mustCreateProjectionStep(t, backing, "gcg-open-step", root.ID, "build", "[]")
+	closeTestBead(t, backing, root.ID)
+	store := &wedgedStepListingStore{Store: backing}
+	journal := events.NewFake()
+	stores := []beads.GraphStore{{Store: store}}
+	backstop := &CompletionBackstop{}
+
+	for sweep := 1; sweep <= 6; sweep++ {
+		store.wedged = sweep%2 == 0
+		if r := backstop.Pass(journal, stores, "execution-reconcile"); r.RootsVisited != 1 {
+			t.Fatalf("sweep %d = %+v, want the root visited", sweep, r)
+		}
+		assertNotStamped(t, backing, root.ID, fmt.Sprintf("sweep %d (wedged=%v)", sweep, store.wedged))
+	}
+}
+
+// TestCompletionBackstopStartupSweepHealsAStampFromATwoSweepWedge: empty
+// listings on two consecutive sweeps stamp a closed root, which is wrong when a
+// wedge outlasted both sweeps and the root's step still owes its fact. The
+// cadence sweep then skips the root. The next startup sweep that gets a healthy
+// listing emits the owed fact and clears the stamp, the same one-boot bound
+// every stale stamp has.
+func TestCompletionBackstopStartupSweepHealsAStampFromATwoSweepWedge(t *testing.T) {
+	backing, rootIDs, _ := closedCompletionCorpus(t, 1)
+	store := &wedgedStepListingStore{Store: backing, wedged: true}
+	journal := events.NewFake()
+	stores := []beads.GraphStore{{Store: store}}
+	backstop := &CompletionBackstop{}
+
+	for range 2 {
+		backstop.Pass(journal, stores, "execution-reconcile")
+	}
+	assertStamped(t, backing, rootIDs[0], "seed: two wedged sweeps")
+
+	store.wedged = false
+	if r := backstop.Pass(journal, stores, "execution-reconcile"); r.Emitted != 0 || r.RootsSkippedConverged != 1 {
+		t.Fatalf("cadence sweep = %+v, want the stamped root skipped", r)
+	}
+	if r := (&CompletionBackstop{VisitStamped: true}).Pass(journal, stores, "execution-reconcile"); r.Emitted != 1 {
+		t.Fatalf("startup sweep = %+v, want the owed fact emitted", r)
+	}
+	assertNotStamped(t, backing, rootIDs[0], "the startup sweep left a stamp on a root it just emitted for")
 }

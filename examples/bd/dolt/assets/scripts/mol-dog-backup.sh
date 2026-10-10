@@ -7,8 +7,9 @@
 # so bd picks the transport and owns the backup: `bd backup status` says
 # whether a destination is registered, `bd backup init` registers one under
 # the artifact dir when it is missing, and `bd backup sync` pushes the scope's
-# database (all branches, full history) to it. The artifact dir is then
-# rsynced to GC_BACKUP_OFFSITE_PATH when that is set.
+# database (all branches, full history) to it. A sync that exits 0 still fails
+# when its file:// destination shows the upload was never committed. The
+# artifact dir is then rsynced to GC_BACKUP_OFFSITE_PATH when that is set.
 set -euo pipefail
 
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -172,8 +173,10 @@ backup_unsupported() {
 
 # ensure_backup_destination registers <artifact-dir>/<db> as the scope's bd
 # backup destination when bd reports none. An existing destination is left
-# alone (operators may point it elsewhere). Prints a diagnostic and returns 1
-# on failure, 2 when bd refuses backup for the scope.
+# alone (operators may point it elsewhere). On success it prints the
+# destination URL, or nothing when bd reports a destination without one. On
+# failure it prints a diagnostic and returns 1, or 2 when bd refuses backup for
+# the scope.
 ensure_backup_destination() {
     local db="$1"
     local err_file
@@ -193,6 +196,7 @@ ensure_backup_destination() {
     fi
     if [ "$(printf '%s' "$status" | jq -r '.dolt.configured // false' 2>/dev/null)" = "true" ]; then
         rm -f "$err_file"
+        printf '%s' "$status" | jq -r '.dolt.backup_url // empty' 2>/dev/null || true
         return 0
     fi
     url="file://$BACKUP_ARTIFACT_DIR/$db"
@@ -208,9 +212,58 @@ ensure_backup_destination() {
     fi
     rm -f "$err_file"
     echo "backup: $SCOPE_LABEL: auto-configured missing backup destination -> $url" >&2
+    printf '%s' "$url"
 }
 
+# verify_backup_destination <url> confirms that a `bd backup sync` which exited
+# 0 left a restorable backup at its destination. Dolt writes a sync's chunk
+# files first and commits them by rewriting the manifest last, so a committed
+# destination holds no file newer than its manifest. A newer file is data the
+# sync uploaded and never committed, and the backup then restores only to the
+# previous sync, although bd records this one as done. A file whose mtime
+# equals the manifest's is not newer. Only a file:// destination is local to
+# inspect; any other is accepted on bd's exit status. Prints a diagnostic and
+# returns 1 when the destination has no manifest, holds a file newer than it,
+# or cannot be read.
+verify_backup_destination() {
+    local dir
+    local newer
+    local newer_count
+    local newer_what
+
+    case "$1" in
+        file://*) dir="${1#file://}" ;;
+        *) return 0 ;;
+    esac
+    dir="${dir%/}"
+    if [ ! -f "$dir/manifest" ]; then
+        printf 'bd backup sync exited 0 but %s has no manifest, so it holds no restorable backup' "$dir"
+        return 1
+    fi
+    # -H follows a destination that is itself a symlink, as to external storage.
+    if ! newer=$(find -H "$dir" -type f -newer "$dir/manifest" 2>/dev/null); then
+        printf 'bd backup sync exited 0 but %s could not be read to confirm the sync committed: %s' \
+            "$dir" "$(find -H "$dir" -type f -newer "$dir/manifest" 2>&1 >/dev/null | head -n 1)"
+        return 1
+    fi
+    [ -n "$newer" ] || return 0
+    newer_count=$(printf '%s\n' "$newer" | wc -l | tr -d ' ')
+    newer="${newer%%$'\n'*}"
+    if [ "$newer_count" -eq 1 ]; then
+        newer_what="${newer#"$dir"/} in $dir is"
+    else
+        newer_what="$newer_count files in $dir, among them ${newer#"$dir"/}, are"
+    fi
+    printf 'bd backup sync exited 0 but did not commit what it uploaded: %s newer than the manifest. The backup restores only to the previous sync, although bd backup status records this one.' \
+        "$newer_what"
+    return 1
+}
+
+# sync_scope <destination-url> runs `bd backup sync` for the current scope and
+# counts an attempt as done only when it exits 0 and verify_backup_destination
+# accepts what it left at the destination.
 sync_scope() {
+    local sync_dest_url="$1"
     local sync_err_tmp
     local sync_attempt=1
     local sync_rc
@@ -223,14 +276,15 @@ sync_scope() {
     while [ "$sync_attempt" -le "$BACKUP_SYNC_ATTEMPTS" ]; do
         sync_rc=0
         scope_bd_bounded "$BACKUP_SYNC_TIMEOUT_SECS" backup sync --json >/dev/null 2>"$sync_err_tmp" || sync_rc=$?
-        if [ "$sync_rc" -eq 0 ]; then
+        if [ "$sync_rc" -ne 0 ]; then
+            sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
+        elif sync_detail=$(verify_backup_destination "$sync_dest_url"); then
             if [ "$sync_attempt" -gt 1 ]; then
                 echo "backup: $SCOPE_LABEL: succeeded on attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS" >&2
             fi
             rm -f "$sync_err_tmp"
             return 0
         fi
-        sync_detail=$(classify_sync_failure "$sync_rc" "$sync_err_tmp")
         echo "backup: $SCOPE_LABEL: attempt $sync_attempt/$BACKUP_SYNC_ATTEMPTS failed — $sync_detail" >&2
         sync_attempt=$((sync_attempt + 1))
     done
@@ -338,7 +392,7 @@ $db
     TOTAL=$((TOTAL + 1))
 
     dest_rc=0
-    dest_detail=$(ensure_backup_destination "$db") || dest_rc=$?
+    dest_out=$(ensure_backup_destination "$db") || dest_rc=$?
     if [ "$dest_rc" -eq 2 ]; then
         UNSUPPORTED=$((UNSUPPORTED + 1))
         echo "backup: $SCOPE_LABEL ($db): bd does not support backup for this scope's transport; skipped" >&2
@@ -346,13 +400,13 @@ $db
         continue
     elif [ "$dest_rc" -ne 0 ]; then
         append_failed_db "$db(backup init failed)"
-        append_failed_detail "$db" "$dest_detail"
+        append_failed_detail "$db" "$dest_out"
         outcome_scope_skipped "$SCOPE_LABEL" "backup destination failed"
         continue
     fi
 
     sync_failure_detail=""
-    if sync_failure_detail=$(sync_scope); then
+    if sync_failure_detail=$(sync_scope "$dest_out"); then
         SYNCED=$((SYNCED + 1))
     else
         append_failed_db "$db(sync failed)"

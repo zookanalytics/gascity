@@ -40,6 +40,17 @@ Violating any fails the build; full rationale is in the architecture docs.
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Keyset list reads walk every page.** Non-test code anywhere in
+  the module calls a keyset-paginated list endpoint (a generated
+  method whose params carry `Cursor`) only as the fetch of a
+  `walkKeysetPages` walk. The walk follows `next_cursor` to the end,
+  lists each row once, and fails a read with a page it cannot use. One
+  request holds only the server's first page, 100 rows by default, and
+  reads as the complete list. The exceptions are the functions
+  `keysetCallAllowances` names, each with its reason: reads of one
+  page's metadata (its `total`, partial-read state or a header) that
+  never touch its rows, and the `gc events` walks, which stop on their
+  own documented bounds. Enforced by `TestKeysetListCallsWalkEveryPage`.
 
 ## Worker boundary exception
 

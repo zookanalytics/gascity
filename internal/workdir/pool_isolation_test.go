@@ -15,6 +15,17 @@ func demoRigs(cityPath string) []config.Rig {
 	return []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
 }
 
+// withoutCityPath returns msg with cityPath replaced by "<city>". The
+// validator's errors quote work_dir paths under the city path, in the form
+// given or as filepath.Join cleans it. Most tests here take the city path from
+// t.TempDir, which creates it under GOTMPDIR or TMPDIR, so whoever runs the
+// tests chose part of its name. An assertion about the words the validator
+// writes reads the message through this.
+func withoutCityPath(msg, cityPath string) string {
+	msg = strings.ReplaceAll(msg, cityPath, "<city>")
+	return strings.ReplaceAll(msg, filepath.Clean(cityPath), "<city>")
+}
+
 func TestValidatePoolWorkDirIsolationRejectsUnsetWorkDirForPooledAgent(t *testing.T) {
 	cityPath := t.TempDir()
 	agents := []config.Agent{{
@@ -27,7 +38,7 @@ func TestValidatePoolWorkDirIsolationRejectsUnsetWorkDirForPooledAgent(t *testin
 	if err == nil {
 		t.Fatal("expected error for pooled agent with unset work_dir, got nil")
 	}
-	if !strings.Contains(err.Error(), "polecat") {
+	if !strings.Contains(withoutCityPath(err.Error(), cityPath), "polecat") {
 		t.Fatalf("error %q does not identify the affected agent", err.Error())
 	}
 }
@@ -253,16 +264,21 @@ func TestValidatePoolWorkDirIsolationOnlyFlagsTheOffendingAgent(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error identifying the offending agent, got nil")
 	}
-	if strings.Contains(err.Error(), "\"demo/good\"") {
+	msg := withoutCityPath(err.Error(), cityPath)
+	if strings.Contains(msg, "\"demo/good\"") {
 		t.Fatalf("error incorrectly implicates the well-configured agent: %v", err)
 	}
-	if !strings.Contains(err.Error(), "bad") {
+	if !strings.Contains(msg, "bad") {
 		t.Fatalf("error %q does not identify the offending agent", err.Error())
 	}
 }
 
 func TestValidatePoolWorkDirIsolationErrorDoesNotHardcodeARoleName(t *testing.T) {
-	cityPath := t.TempDir()
+	// The city path names every role. The scan reads the message with that
+	// path removed, so a role word it finds is one the validator wrote.
+	// Resolving this agent's work_dir reads no files, so the path need not
+	// exist.
+	cityPath := "/" + strings.Join(knownRoleNames, "-")
 	agents := []config.Agent{{
 		Name:              "widget-runner",
 		Dir:               "demo",
@@ -273,9 +289,10 @@ func TestValidatePoolWorkDirIsolationErrorDoesNotHardcodeARoleName(t *testing.T)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+	msg := withoutCityPath(err.Error(), cityPath)
 	for _, role := range knownRoleNames {
-		if strings.Contains(strings.ToLower(err.Error()), role) {
-			t.Fatalf("error message hardcodes role name %q: %v", role, err.Error())
+		if strings.Contains(strings.ToLower(msg), role) {
+			t.Fatalf("error message hardcodes role name %q: %v", role, msg)
 		}
 	}
 }

@@ -626,6 +626,69 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	return c.backing.Get(id)
 }
 
+var _ ExactBatchGetter = (*CachingStore)(nil)
+
+// GetExactBatch answers ids the way Get answers each one, sharing the backing
+// reads. An id Get serves from the cache is answered from the cache. The ids Get
+// reads straight from the backing store go to the backing store's exact batch
+// read in one call. The rest are left unresolved for the caller's Get: an id Get
+// reports deleted, a dirty id Get refreshes before answering, and an id the
+// backing batch read did not answer or, when the backing store offers no such
+// read, could not ask.
+func (c *CachingStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	found := make(map[string]Bead, len(ids))
+	seen := make(map[string]bool, len(ids))
+	var fromBacking []string
+	c.mu.RLock()
+	servable := c.state == cacheLive || c.state == cachePartial
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, deleted := c.deletedSeq[id]; deleted {
+			continue
+		}
+		_, dirty := c.dirty[id]
+		if _, mutated := c.beadSeq[id]; mutated && !dirty {
+			if b, ok := c.beads[id]; ok {
+				found[id] = cloneBead(b)
+				continue
+			}
+		}
+		if servable {
+			if dirty {
+				continue
+			}
+			if b, ok := c.beads[id]; ok {
+				found[id] = cloneBead(b)
+				continue
+			}
+		}
+		fromBacking = append(fromBacking, id)
+	}
+	c.mu.RUnlock()
+
+	if getter, ok := c.backing.(ExactBatchGetter); ok && len(fromBacking) > 0 {
+		got, _, err := getter.GetExactBatch(fromBacking)
+		if err != nil && !errors.Is(err, ErrExactBatchGetUnsupported) {
+			return nil, nil, fmt.Errorf("getting %d beads from the backing store: %w", len(fromBacking), err)
+		}
+		for _, id := range fromBacking {
+			if b, ok := got[id]; ok {
+				found[id] = b
+			}
+		}
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // refetchFencedLocked reports whether a mutation or deletion newer than
 // startSeq touched id, so a backing read begun after startSeq may be older
 // than the cache and must not be installed. writeSeq covers a local write

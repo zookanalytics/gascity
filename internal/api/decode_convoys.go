@@ -21,6 +21,15 @@ type ConvoyProgressView struct {
 	Closed int
 }
 
+// ConvoyListView is the CLI-facing shape for `gc convoy list`: the open
+// convoys across every rig, and whether the read was partial because a rig
+// store failed (Partial, with one PartialErrors entry per failed rig).
+type ConvoyListView struct {
+	Items         []beads.Bead
+	Partial       bool
+	PartialErrors []string
+}
+
 // ConvoyCheckView is the CLI-facing shape for `gc convoy check` per-convoy
 // completion evaluation.
 type ConvoyCheckView struct {

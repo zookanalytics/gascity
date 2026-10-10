@@ -574,7 +574,9 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 // when a controller is up; otherwise falls back to the local mail-provider path.
 // Injecting hooks probe the API for degraded-read notices, then use the local
 // path because provider-backed mail may need to perform delivery side effects
-// after successful injection.
+// after successful injection. Both API reads are one MailInboxSummary request:
+// the check needs the inbox's size and partial-read state, never its messages,
+// and it runs on every UserPromptSubmit hook.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *api.Client, nilReason string, stdout, stderr io.Writer) int {
 	const cmdName = "mail check"
@@ -584,12 +586,12 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	}
 	if inject {
 		if c != nil {
-			cr, err := c.ListMailInbox(recipient, "")
+			cr, err := c.MailInboxSummary(recipient, "")
 			if err == nil {
-				if mailListHasPartial(cr.Body) {
+				if mailInboxHasPartial(cr.Body) {
 					logRoute(stderr, cmdName, "api", "error")
 					notice := formatMailCheckPartialDegradedNotice()
-					if mailListHasStoreSlowPartial(cr.Body) {
+					if mailInboxHasStoreSlowPartial(cr.Body) {
 						notice = formatMailCheckDegradedNotice()
 					}
 					_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", notice)
@@ -607,15 +609,15 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	if c != nil {
-		cr, err := c.ListMailInbox(recipient, "")
+		cr, err := c.MailInboxSummary(recipient, "")
 		if err == nil {
-			if mailListHasPartial(cr.Body) {
+			if mailInboxHasPartial(cr.Body) {
 				logRoute(stderr, cmdName, "api", "error")
-				fmt.Fprintf(stderr, "gc mail check: %s\n", mailListPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
+				fmt.Fprintf(stderr, "gc mail check: %s\n", mailInboxPartialErrorDetail(cr.Body)) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 			logRoute(stderr, cmdName, "api", "")
-			return renderMailCheckFromAPI(cr, recipient, inject, hookFormat, stdout)
+			return renderMailCheckFromAPI(cr, recipient, stdout)
 		}
 		if !api.ShouldFallbackForRead(c, err) {
 			logRoute(stderr, cmdName, "api", "error")
@@ -629,38 +631,30 @@ func routeMailCheck(_ string, args []string, inject bool, hookFormat string, c *
 	return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 }
 
-// renderMailCheckFromAPI formats the API-sourced inbox for `gc mail check`.
-// With --inject, writes the <system-reminder> block and always returns 0.
-// Without --inject, returns 0 if mail exists and 1 if empty, matching the
-// local fallback contract; human output appends a stale-read banner when the
-// supervisor cache is > 30 s old.
-func renderMailCheckFromAPI(cr api.CachedRead[api.MailListView], recipient string, inject bool, hookFormat string, stdout io.Writer) int {
-	messages := cr.Body.Items
-	if inject {
-		if len(messages) > 0 {
-			_ = writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", formatInjectOutput(messages))
-		}
-		return 0
-	}
-	if len(messages) == 0 {
+// renderMailCheckFromAPI prints the API-sourced unread count for a non-inject
+// `gc mail check`. It returns 0 if mail exists and 1 if the inbox is empty,
+// matching the local fallback contract, and appends a stale-read banner when
+// the supervisor cache is > 30 s old.
+func renderMailCheckFromAPI(cr api.CachedRead[api.MailInboxSummaryView], recipient string, stdout io.Writer) int {
+	if cr.Body.Total == 0 {
 		return 1
 	}
-	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", len(messages), recipient) //nolint:errcheck // best-effort stdout
+	fmt.Fprintf(stdout, "%d unread message(s) for %s\n", cr.Body.Total, recipient) //nolint:errcheck // best-effort stdout
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
 	}
 	return 0
 }
 
-func mailListHasStoreSlowPartial(view api.MailListView) bool {
+func mailInboxHasStoreSlowPartial(view api.MailInboxSummaryView) bool {
 	return mailPartialHasStoreSlow(view.Partial, view.PartialErrors)
 }
 
-func mailListHasPartial(view api.MailListView) bool {
+func mailInboxHasPartial(view api.MailInboxSummaryView) bool {
 	return view.Partial || len(view.PartialErrors) > 0
 }
 
-func mailListPartialErrorDetail(view api.MailListView) string {
+func mailInboxPartialErrorDetail(view api.MailInboxSummaryView) string {
 	return mailPartialErrorDetail(view.PartialErrors, "partial mail read failed")
 }
 
@@ -838,9 +832,8 @@ func selectMailInjectWindow(messages []mail.Message) []mail.Message {
 
 // formatInjectOutput formats messages as a <system-reminder> block for
 // injection into an agent's prompt via a UserPromptSubmit hook. It selects the
-// display window via selectMailInjectWindow so both inject render paths
-// (renderMailCheckFromAPI and doMailCheckTargetWithFormat) surface higher-
-// priority, then most-recent, unread mail first.
+// display window via selectMailInjectWindow so every inject render path
+// surfaces higher-priority, then most-recent, unread mail first.
 func formatInjectOutput(messages []mail.Message) string {
 	windowed := selectMailInjectWindow(messages)
 	var sb strings.Builder
