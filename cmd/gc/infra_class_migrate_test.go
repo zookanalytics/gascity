@@ -1299,14 +1299,20 @@ func TestEnsureInfraClassMigratedNamesAStrandOnAGarbageCollectedCity(t *testing.
 	stranded := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task", Labels: []string{"order-tracking"}})
 
 	var log bytes.Buffer
-	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationStranded {
+	got := migrateInfraClasses(t, cityPath, cfg, &log)
+	if got.Outcome != infraMigrationStranded {
 		t.Fatalf("outcome = %v, want stranded; the strand was lost in the GC exemption. log: %s", got.Outcome, log.String())
 	}
-	if !strings.Contains(log.String(), stranded.ID) {
+	if !slices.Equal(got.Stranded, []string{stranded.ID}) {
+		t.Fatalf("stranded = %v, want exactly [%s]; the GC-collected %v are not strands. log: %s", got.Stranded, stranded.ID, collected, log.String())
+	}
+	// The report prints the binding's path, which sits under the test temp root.
+	report := withoutTempRoot(log.String())
+	if !strings.Contains(report, stranded.ID) {
 		t.Fatalf("the stranded bead id was not named; log: %s", log.String())
 	}
 	for _, id := range collected {
-		if strings.Contains(log.String(), id) {
+		if strings.Contains(report, id) {
 			t.Fatalf("the report named %s, which the binding's own GC collected; log: %s", id, log.String())
 		}
 	}
