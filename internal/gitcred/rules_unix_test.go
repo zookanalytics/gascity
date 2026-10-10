@@ -18,6 +18,13 @@ func TestStatOwnerReportsRealOwnership(t *testing.T) {
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	// A new file does not always take the process's group: macOS and the BSDs
+	// give it the parent directory's group, and so does Linux under a setgid
+	// directory. Set the group explicitly so the expected gid does not depend
+	// on where the temp directory lives.
+	if err := os.Chown(path, -1, os.Getegid()); err != nil {
+		t.Fatalf("chown: %v", err)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatalf("stat: %v", err)
