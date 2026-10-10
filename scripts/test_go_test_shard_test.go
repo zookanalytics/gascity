@@ -789,7 +789,7 @@ func TestGoTestShardPreservesAcceptanceAuthEnv(t *testing.T) {
 	)
 	cmd.Dir = repoRoot
 	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=" + offlineBrewDir(t) + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
@@ -822,7 +822,7 @@ func TestGoTestShardRunsWithoutPreservedProviderEnv(t *testing.T) {
 	)
 	cmd.Dir = repoRoot
 	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=" + offlineBrewDir(t) + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + t.TempDir(),
 		"GO_TEST_TIMEOUT=1m",
