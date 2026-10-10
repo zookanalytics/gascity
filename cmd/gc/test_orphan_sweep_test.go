@@ -207,16 +207,23 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 	}
 }
 
-// adoptPerRunTMPDIR sets TMPDIR to newTMPDIR for the rest of the test
-// binary's life and returns the host temp root that was in effect
+// adoptPerRunTMPDIR points TMPDIR and GOTMPDIR at newTMPDIR for the rest of
+// the test binary's life and returns the host temp root that was in effect
 // beforehand, so callers can sweep legacy fixture dirs left there by prior
 // runs. os.TempDir() re-reads TMPDIR on every call, so the host root must be
 // captured before this override — capturing it afterward would instead
 // return newTMPDIR's own fresh, empty directory (ga-lygcyb).
+//
+// t.TempDir() creates its directory under GOTMPDIR when that is set and under
+// TMPDIR otherwise. Pinning TMPDIR alone would let every test's temp dir, and
+// any Dolt server a test starts in one, escape the per-run root that the dolt
+// leak guard watches and the startup sweep classifies by owner PID.
 func adoptPerRunTMPDIR(newTMPDIR string) (hostTmpRoot string, err error) {
 	hostTmpRoot = os.TempDir()
-	if err := os.Setenv("TMPDIR", newTMPDIR); err != nil {
-		return "", err
+	for _, key := range []string{"TMPDIR", "GOTMPDIR"} {
+		if err := os.Setenv(key, newTMPDIR); err != nil {
+			return "", fmt.Errorf("setting %s to the per-run temp root: %w", key, err)
+		}
 	}
 	return hostTmpRoot, nil
 }
