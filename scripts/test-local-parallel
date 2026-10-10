@@ -327,6 +327,10 @@ run_fan_out() {
   # The pane shell is pinned to /bin/sh, not forwarded from the caller: a test
   # tmux or herdr pane running zsh under a fresh HOME opens the new-user wizard,
   # which swallows the typed text (ga-yghhjf; mirrors Makefile TEST_ENV).
+  # The job shell is not a login shell, so the job keeps the PATH handed to it
+  # and resolves the same python3, bash and git as the caller. A login shell
+  # sources /etc/profile, whose macOS path_helper moves /usr/bin ahead of
+  # Homebrew, and the login profile under HOME.
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -360,7 +364,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?
