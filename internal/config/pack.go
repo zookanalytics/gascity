@@ -2990,7 +2990,7 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 	if prefix != "" {
 		dir = filepath.Join(base, prefix)
 	}
-	if prefix != "" && isIgnoredPackRuntimePath(prefix) {
+	if prefix != "" && IsIgnoredPackRuntimePath(prefix) {
 		return
 	}
 	entries, err := fs.ReadDir(dir)
@@ -3002,7 +3002,7 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 		if prefix != "" {
 			rel = prefix + "/" + e.Name()
 		}
-		if isIgnoredPackRuntimePath(rel) {
+		if IsIgnoredPackRuntimePath(rel) {
 			continue
 		}
 		if e.IsDir() {
@@ -3013,7 +3013,11 @@ func collectFiles(fs fsys.FS, base, prefix string, out *[]string) {
 	}
 }
 
-func isIgnoredPackRuntimePath(path string) bool {
+// IsIgnoredPackRuntimePath reports whether path, relative to a pack or
+// convention root, is runtime output that the root's content hash leaves out,
+// so a write there cannot change the config revision. The config watcher
+// applies it relative to each recursive watch target to drop those writes.
+func IsIgnoredPackRuntimePath(path string) bool {
 	parts := strings.FieldsFunc(filepath.ToSlash(path), func(r rune) bool { return r == '/' })
 	if len(parts) == 0 {
 		return false
