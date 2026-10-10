@@ -13,12 +13,18 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
+// scannedLiveness returns state as the deferred process-table scan that
+// worktreeLivenessInputs carries, for the hand-built snapshots below.
+func scannedLiveness(state liveWorktreeState) func() liveWorktreeState {
+	return func() liveWorktreeState { return state }
+}
+
 // livePruneAllowed is a successfully-scanned liveness snapshot that shows no
 // process or session in any worktree, so the liveness gate never blocks — the
 // implicit shape every prune test assumed before the gate existed. Shared by
 // both the raw and session.Info prune test forms.
 func livePruneAllowed() worktreeLivenessInputs {
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}}
+	return worktreeLivenessInputs{live: scannedLiveness(liveWorktreeState{scanned: true})}
 }
 
 // liveAt returns a successfully-scanned liveness snapshot reporting a live
@@ -29,20 +35,20 @@ func liveAt(dirs ...string) worktreeLivenessInputs {
 	for _, d := range dirs {
 		cwds = append(cwds, pathutil.NormalizePathForCompare(d))
 	}
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true, cwds: cwds}}
+	return worktreeLivenessInputs{live: scannedLiveness(liveWorktreeState{scanned: true, cwds: cwds})}
 }
 
 // liveViaSession returns a successfully-scanned liveness snapshot with no live
 // process cwd but the given open-session working directories, exercising the
 // session-dir cross-check independently of the /proc scan.
 func liveViaSession(dirs ...string) worktreeLivenessInputs {
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: dirs}
+	return worktreeLivenessInputs{live: scannedLiveness(liveWorktreeState{scanned: true}), sessionDirs: dirs}
 }
 
 // liveScanUnavailable is the indeterminate liveness snapshot — the process
 // table could not be enumerated — which must fail closed and block every prune.
 func liveScanUnavailable() worktreeLivenessInputs {
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: false}}
+	return worktreeLivenessInputs{live: scannedLiveness(liveWorktreeState{scanned: false})}
 }
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one

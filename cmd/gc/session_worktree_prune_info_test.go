@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -276,6 +277,68 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_LivenessScanUnavailable(t *testing.T) 
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
+func TestPruneAgentHomeWorktreeIfSafeInfo_NoLivenessScanFailsClosed(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, worktreeLivenessInputs{}, &stderr)
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked with no liveness scan supplied")
+	}
+	if !strings.Contains(stderr.String(), "liveness scan unavailable") {
+		t.Errorf("expected fail-closed reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+// TestNewWorktreeLivenessInputs_ScanRunsOnceAndOnlyAtTheGate pins the cost of
+// the inputs the reconciler builds for a pass's prune decisions: building them
+// runs no process-table scan, a decision that stops at a structural check runs
+// none, and every decision that reaches the liveness gate shares one scan and
+// acts on its result.
+func TestNewWorktreeLivenessInputs_ScanRunsOnceAndOnlyAtTheGate(t *testing.T) {
+	fx := newPruneFixture(t)
+	scans := 0
+	prev := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState {
+		scans++
+		return liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(fx.workerDir)}}
+	}
+	t.Cleanup(func() { collectLiveWorktreeStateFn = prev })
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	info := fx.sessionInfo()
+	liveness := newWorktreeLivenessInputs(newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info}))
+	if scans != 0 {
+		t.Fatalf("scans after building the inputs = %d, want 0", scans)
+	}
+
+	var stderr bytes.Buffer
+	outside := info
+	outside.WorkerDir = filepath.Join(fx.cityPath, "elsewhere")
+	pruneAgentHomeWorktreeIfSafeInfo(outside, fx.cityPath, fx.cfg, liveness, &stderr)
+	if scans != 0 {
+		t.Fatalf("scans after a decision that stopped at a structural check = %d, want 0", scans)
+	}
+
+	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, liveness, &stderr)
+	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, liveness, &stderr)
+	if scans != 1 {
+		t.Fatalf("scans after two decisions reached the liveness gate = %d, want 1", scans)
+	}
+	if got := strings.Count(stderr.String(), "live process cwd"); got != 2 {
+		t.Fatalf("decisions blocked by the shared scan = %d, want 2; log: %q", got, stderr.String())
+	}
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove invoked on a worktree the shared scan reports live")
+	}
+}
+
 func TestPruneAgentHomeWorktreeIfSafeInfo_LiveProcessCWD(t *testing.T) {
 	fx := newPruneFixture(t)
 	// Clean tree — the normal resting state of a healthy agent between commits.
@@ -371,7 +434,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot(t *
 	info := fx.sessionInfo()
 	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info})
 	pruneLiveness := worktreeLivenessInputs{
-		live:        liveWorktreeState{scanned: true},
+		live:        scannedLiveness(liveWorktreeState{scanned: true}),
 		sessionDirs: liveSessionWorktreeDirs(snapshot),
 	}
 	// Guard the reproduction: the session's worker_dir really is in the set the

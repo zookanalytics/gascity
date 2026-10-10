@@ -1012,6 +1012,36 @@ func TestReconcileSessionBeads_DrainAckMarksStopPendingAndStopsAsync(t *testing.
 	}
 }
 
+// TestReconcileSessionBeads_PassThatPrunesNothingSkipsLivenessScan pins that the
+// worker_dir auto-prune's process-table scan is paid only by a prune decision
+// that consults it. The scan enumerates every process on the host (an lsof
+// subprocess where /proc is absent), so a pass that makes no prune decision must
+// not run it, even though auto-prune is on by default.
+func TestReconcileSessionBeads_PassThatPrunesNothingSkipsLivenessScan(t *testing.T) {
+	var scans atomic.Int32
+	prev := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState {
+		scans.Add(1)
+		return liveWorktreeState{scanned: true}
+	}
+	t.Cleanup(func() { collectLiveWorktreeStateFn = prev })
+
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	if !env.cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		t.Fatal("precondition: auto-prune must default to on, or the pass never builds its prune inputs")
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := scans.Load(); got != 0 {
+		t.Fatalf("liveness scans = %d, want 0: a pass that prunes nothing must not enumerate the process table", got)
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckedOrphanStopDeferredWhenStoreQueryPartial is
 // the gc-hz0nu regression guard. During a transient store outage the desired /
 // assigned-work view is incomplete, so a live session can be misjudged as
