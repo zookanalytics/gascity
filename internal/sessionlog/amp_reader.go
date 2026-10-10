@@ -444,7 +444,7 @@ func FindAmpSessionFile(searchPaths []string, workDir string) string {
 		return ""
 	}
 	var candidates []ampSessionFileCandidate
-	for _, root := range mergeAmpSearchPaths(searchPaths) {
+	for _, root := range captureSearchRoots(DefaultAmpSearchPaths(), searchPaths) {
 		candidates = append(candidates, ampSessionCandidates(root)...)
 	}
 	sort.Slice(candidates, func(i, j int) bool {

@@ -47,7 +47,7 @@ func findCapturedACPSessionFile(searchPaths, defaultSearchPaths []string, workDi
 		return ""
 	}
 	var candidates []capturedACPSessionFileCandidate
-	for _, root := range mergePaths(defaultSearchPaths, searchPaths) {
+	for _, root := range captureSearchRoots(defaultSearchPaths, searchPaths) {
 		candidates = append(candidates, capturedACPSessionCandidates(root)...)
 	}
 	sort.Slice(candidates, func(i, j int) bool {

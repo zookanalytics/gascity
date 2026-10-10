@@ -1551,6 +1551,33 @@ func mergePaths(defaults, extras []string) []string {
 	return result
 }
 
+// captureSearchRoots returns the roots a capture scan searches: the
+// provider's default roots and the caller's search paths, minus Claude's
+// transcript store and any directory inside it. The search paths callers
+// share across providers include that store so the Claude reader finds it.
+// Claude's transcript lines record the cwd the session ran in, so a capture
+// scan that reached the store would open each Claude transcript in turn and
+// could return one recorded in the session's workdir as another provider's.
+func captureSearchRoots(defaults, extras []string) []string {
+	claudeStores := DefaultSearchPaths()
+	var roots []string
+	for _, root := range mergePaths(defaults, extras) {
+		if !withinAnyPath(claudeStores, root) {
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+func withinAnyPath(parents []string, path string) bool {
+	for _, parent := range parents {
+		if pathutil.PathWithin(parent, path) {
+			return true
+		}
+	}
+	return false
+}
+
 // WholeFileJSONFamily reports whether a provider family stores each session as
 // one whole-file JSON document (an OpenCode-shaped `{info, messages}` export or
 // a mirror of one) rather than as append-only JSONL.
