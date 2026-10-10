@@ -1866,9 +1866,9 @@ func nativeQueryParentIDs(query ListQuery) []string {
 
 // nativeParentChildIDs returns the ids of the beads that hold a parent-child
 // edge to one of parents, kept to within when within is non-empty. It reads the
-// edges that target the parents in one batched dependents read, across both
-// dependency tables. scoped is false when the storage exposes no target-keyed
-// edge read; the caller then searches with the upstream parent filter.
+// edges that target the parents across both dependency tables. scoped is false
+// when the storage exposes no target-keyed edge read; the caller then searches
+// with the upstream parent filter.
 //
 // The edge is the whole parent relation a list can return. A bead's ParentID is
 // the target of its parent-child edge (beadFromNativeIssue), and Matches keeps a
@@ -1877,18 +1877,33 @@ func nativeQueryParentIDs(query ListQuery) []string {
 // drops every such row, so reading the edges alone returns the same beads.
 //
 // Cost: the upstream filter ORs those two arms, and Dolt answers it by scanning
-// every issue row with its metadata. The edge read matches the target through a
-// COALESCE over the three typed target columns, which Dolt answers by scanning
-// the dependency tables: narrow edge rows, not issue rows. The child search
-// that follows is an id IN-list, answered from the primary key.
+// every issue row with its metadata. One parent's edges come from the dependents
+// read filtered to parent-child edges, which Dolt answers through the type
+// prefix of a (type, target) index: it reads every parent-child edge and no
+// other edge. Several parents' edges come from one batched dependents read,
+// which matches its targets through a COALESCE over the three typed target
+// columns and is answered by scanning the dependency tables. That is one round
+// trip however many parents there are, where the filtered read takes one parent
+// per round trip. Either read touches narrow edge rows, not issue rows. The
+// child search that follows is an id IN-list, answered from the primary key.
 func nativeParentChildIDs(ctx context.Context, storage beadslib.Storage, parents, within []string) ([]string, bool, error) {
 	querier, ok := beadslib.AsDependentQuerier(storage)
 	if !ok {
 		return nil, false, nil
 	}
-	edges, err := querier.GetDependentRecordsForIssues(ctx, parents)
-	if err != nil {
-		return nil, true, fmt.Errorf("reading parent-child edges of %d parents: %w", len(parents), err)
+	edges := make(map[string][]*beadslib.Dependency, len(parents))
+	if len(parents) == 1 {
+		parentEdges, err := nativeParentChildEdgesOf(ctx, querier, parents[0])
+		if err != nil {
+			return nil, true, fmt.Errorf("reading parent-child edges of %s: %w", parents[0], err)
+		}
+		edges[parents[0]] = parentEdges
+	} else {
+		var err error
+		edges, err = querier.GetDependentRecordsForIssues(ctx, parents)
+		if err != nil {
+			return nil, true, fmt.Errorf("reading parent-child edges of %d parents: %w", len(parents), err)
+		}
 	}
 	var allowed map[string]bool
 	if len(within) > 0 {
@@ -1912,6 +1927,33 @@ func nativeParentChildIDs(ctx context.Context, storage beadslib.Storage, parents
 		}
 	}
 	return children, true, nil
+}
+
+// nativeDependentsPage is the page size asked of the filtered dependents read,
+// which beads caps at 500 rows.
+const nativeDependentsPage = 500
+
+// nativeParentChildEdgesOf returns every parent-child edge that targets parent.
+// The filtered dependents read returns at most one page per call, ordered by
+// edge id, so it is paged by the last edge id until a page comes back empty.
+func nativeParentChildEdgesOf(ctx context.Context, querier beadslib.DependentQuerier, parent string) ([]*beadslib.Dependency, error) {
+	var edges []*beadslib.Dependency
+	after := ""
+	for {
+		page, err := querier.GetDependentRecords(ctx, parent, string(beadslib.DepParentChild), nativeDependentsPage, after)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			return edges, nil
+		}
+		last := page[len(page)-1]
+		if last == nil || last.ID == after {
+			return nil, fmt.Errorf("dependents read did not page past edge %q", after)
+		}
+		edges = append(edges, page...)
+		after = last.ID
+	}
 }
 
 // keepChildrenOf returns the beads whose ParentID is one of parents.
