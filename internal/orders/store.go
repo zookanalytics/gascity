@@ -22,8 +22,9 @@ import (
 //   - reads union the two tiers (wisps + issues) — TierBoth.
 //
 // The Store methods (CreateRun, CreateRunClosed, SetOutcome, SetCursor,
-// CloseRun, RecentRuns) emit byte-identical bead writes to the raw ops they
-// replace and are wired into order_dispatch.go / cmd_order.go. The cooldown
+// CloseRun, RecentRuns) are wired into order_dispatch.go / cmd_order.go. Apart
+// from the run timeout CreateRun records when given one, their bead writes are
+// byte-identical to the raw ops they replace. The cooldown
 // clock (last-run) and event-cursor READS the dispatch gate uses go through the
 // Store's mixed orders+graph reads (LastRun / Cursor / HasOpenWork, and the
 // LastRunAcross / CursorAcross federation helpers), which the in-memory tracking
@@ -48,6 +49,10 @@ const (
 	labelWispCanceled   = "wisp-canceled"
 	labelTriggerEnvFail = "trigger-env-failed"
 )
+
+// metaRunTimeout is the tracking-bead metadata key that records the dispatch
+// timeout a run was launched with, as a Go duration string.
+const metaRunTimeout = "order_run_timeout"
 
 // RunOutcome enumerates the terminal outcome of an order run. Each value maps
 // to a fixed label set that the dispatcher stamps on the tracking bead. The
@@ -155,6 +160,10 @@ type OrderRun struct {
 	Open bool
 	// Cursor is the decoded EventCursor (max seq across the run's labels).
 	Cursor EventCursor
+	// Timeout is the dispatch timeout the run was launched with: the run is
+	// killed once it has gone this long. Zero means the tracking bead records
+	// none.
+	Timeout time.Duration
 }
 
 // State returns the feed-facing lifecycle status of the run: "failed" when the
@@ -178,6 +187,10 @@ type RunOpts struct {
 	// the trigger-env-failed pre-dispatch path which creates an already-labeled
 	// open bead so the open-work gate suppresses repeat ticks.
 	Outcome RunOutcome
+	// Timeout, when positive, is recorded on the created bead as the dispatch
+	// timeout the run is launched with, so a stale sweep can tell how long the
+	// run may still be in flight.
+	Timeout time.Duration
 }
 
 // Store is the order-class domain wrapper. It holds the strongly-typed
@@ -280,16 +293,21 @@ func baseLabels(scoped string, outcome RunOutcome) []string {
 }
 
 // CreateRun creates an OPEN tracking bead for scoped (the in-flight marker
-// whose CreatedAt advances the cooldown clock). It is the byte-identical
-// replacement for the store.Create(beads.Bead{Title:"order:"+scoped, Labels:
-// {order-run, order-tracking[, outcome]}, NoHistory:true}) sites in
-// order_dispatch.go.
+// whose CreatedAt advances the cooldown clock): title "order:"+scoped, labels
+// {order-run, order-tracking[, outcome]}, NoHistory, and the run's timeout in
+// metadata when opts.Timeout is positive.
 func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
-	created, err := s.store.Create(beads.Bead{
+	bead := beads.Bead{
 		Title:     trackingTitle(scoped),
 		Labels:    baseLabels(scoped, opts.Outcome),
 		NoHistory: true,
-	})
+	}
+	var timeout time.Duration
+	if opts.Timeout > 0 {
+		timeout = opts.Timeout
+		bead.Metadata = map[string]string{metaRunTimeout: timeout.String()}
+	}
+	created, err := s.store.Create(bead)
 	if err != nil {
 		return OrderRun{}, fmt.Errorf("creating order run for %q: %w", scoped, err)
 	}
@@ -299,6 +317,7 @@ func (s *Store) CreateRun(scoped string, opts RunOpts) (OrderRun, error) {
 		Outcome:   opts.Outcome,
 		CreatedAt: created.CreatedAt,
 		Open:      true,
+		Timeout:   timeout,
 	}, nil
 }
 
@@ -496,7 +515,8 @@ func RunFromTrackingBead(b beads.Bead) (OrderRun, bool) {
 // decodeRun projects an order tracking/run bead onto an OrderRun. It is pure,
 // side-effect-free, and backend-invariant (reads only bead fields), matching the
 // projection-invariance invariant. The cooldown clock (CreatedAt), open flag,
-// outcome (from labels), and event cursor (max seq from labels) are decoded here.
+// outcome (from labels), event cursor (max seq from labels), and run timeout
+// (from metadata) are decoded here.
 func decodeRun(scoped string, b beads.Bead) OrderRun {
 	return OrderRun{
 		ID:        b.ID,
@@ -506,7 +526,19 @@ func decodeRun(scoped string, b beads.Bead) OrderRun {
 		UpdatedAt: b.UpdatedAt,
 		Open:      b.Status != "closed",
 		Cursor:    EventCursor(MaxSeqFromLabels([][]string{b.Labels})),
+		Timeout:   runTimeoutFromMetadata(b.Metadata),
 	}
+}
+
+// runTimeoutFromMetadata reads the run timeout CreateRun records. A value that
+// is absent, does not parse as a duration, or is not positive reads as zero,
+// the same as a bead that records no timeout.
+func runTimeoutFromMetadata(metadata map[string]string) time.Duration {
+	timeout, err := time.ParseDuration(strings.TrimSpace(metadata[metaRunTimeout]))
+	if err != nil || timeout <= 0 {
+		return 0
+	}
+	return timeout
 }
 
 // NameFromOrderRunLabel resolves the scoped order name from a bead's
