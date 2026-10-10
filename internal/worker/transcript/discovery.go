@@ -36,6 +36,12 @@ func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) s
 
 // DiscoverKeyedPath resolves only the session-id-based transcript path.
 func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID string) string {
+	return discoverKeyedPath(searchPaths, provider, workDir, gcSessionID, sessionlog.FindSessionFileByID)
+}
+
+// discoverKeyedPath is DiscoverKeyedPath with the lookup for the Claude
+// project-folder layout supplied by the caller.
+func discoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID string, findClaudeLayout func(searchPaths []string, workDir, sessionID string) string) string {
 	if strings.TrimSpace(gcSessionID) == "" {
 		return ""
 	}
@@ -73,7 +79,7 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 	if !SupportsIDLookup(provider) {
 		return ""
 	}
-	return sessionlog.FindSessionFileByID(searchPaths, workDir, gcSessionID)
+	return findClaudeLayout(searchPaths, workDir, gcSessionID)
 }
 
 // DiscoverCodexPathInTimeWindow resolves a Codex transcript whose metadata
@@ -149,11 +155,18 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // own default roots on top of searchPaths, so known probeable providers each
 // probe their real on-disk location even when given only a partial configured
 // search root.
+//
+// For the Claude layout only workDir's project folders count, although
+// DiscoverKeyedPath also finds a transcript filed under another project folder.
+// A resume started in workDir looks in those folders first, and reaches any
+// other folder only through Claude's resume fallbacks, which carry conditions
+// of their own: the same repository's worktrees, or a single match across all
+// folders. The probe counts only what a resume is sure to find.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
 	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
 		return false, false
 	}
-	return DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey) != "", true
+	return discoverKeyedPath(searchPaths, provider, workDir, sessionKey, sessionlog.FindSessionFileByIDInWorkDir) != "", true
 }
 
 // providerHasKeyedTranscript reports whether the provider family can use keyed
