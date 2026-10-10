@@ -248,12 +248,10 @@ func TestReadyProjectionLatchesAnUnimplementedBackendWhoseBlockedDoorAlsoFails(t
 // makes "once" mean anything.
 //
 // Nothing in gc holds one BdStore per scope for the life of the process:
-// cmd/gc's scoped stores are built per request, and the control-dispatcher
-// readiness scan rebuilds a store per scope every controlReadyCacheTTL (3s) and
-// primes it immediately, so a verdict memoized on the store object is
-// re-derived — and re-announced — a few times a minute, forever. That is the
-// same defect the sibling unread-store notice already had to fix, so this
-// reuses its registry pattern.
+// cmd/gc's scoped stores are built per request, so a verdict memoized on the
+// store object is re-derived — and re-announced — on every request, forever.
+// That is the same defect the sibling unread-store notice already had to fix,
+// so this reuses its registry pattern.
 //
 // The verdict is still REPORTED to every rebuilt store, because each one backs a
 // fresh cache that must learn to send readiness reads live; what the scope bound
@@ -325,10 +323,9 @@ func TestReadyProjectionVerdictIsPerScopeAcrossStoreRebuilds(t *testing.T) {
 // runtime refusal ("not yet supported in embedded mode") reveals the backend was
 // opened embedded, and `bd blocked` answers in its place. A choice recorded only
 // on the store object is re-derived on every rebuild: cmd/gc builds a store per
-// request and the control-ready scan rebuilds one per scope every
-// controlReadyCacheTTL (3s), so the SQL door would be re-picked and the failing
-// 6-16s `bd sql` re-spent a few times a minute, forever — the exact pathology
-// this door was added to remove. Latching the choice in the scope guard lets a
+// request, so the SQL door would be re-picked and the failing 6-16s `bd sql`
+// re-spent on every request, forever — the exact pathology this door was added
+// to remove. Latching the choice in the scope guard lets a
 // fresh store start on the blocked door with no `bd sql` spent, while still
 // serving the column on every rebuild.
 func TestReadyProjectionRuntimeBlockedDoorSurvivesStoreRebuilds(t *testing.T) {

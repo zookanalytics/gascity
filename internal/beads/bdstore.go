@@ -447,8 +447,7 @@ type BdStore struct {
 	// readyProjectionScope memoizes, per SCOPE PATH, the verdict that this
 	// ledger cannot serve the ready projection at all. Shared with every other
 	// store rooted at the same directory, because cmd/gc rebuilds a store per
-	// request and the control dispatcher rebuilds one every few seconds. See
-	// bdstore_ready_projection.go.
+	// request. See bdstore_ready_projection.go.
 	readyProjectionScope *readyProjectionScopeGuard
 
 	// condReleaseLatchedUnsupported records that this bd rejected the

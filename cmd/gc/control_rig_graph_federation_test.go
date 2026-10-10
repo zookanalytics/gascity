@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -772,6 +773,62 @@ func TestControlReadyScanRigScopeFederatesTheBindingOnBothArms(t *testing.T) {
 			if !slices.Contains(got, "ga-rig-resident") {
 				t.Errorf("rig-scoped control-ready queue = %v, missing the rig's OWN control bead; "+
 					"the binding replaced the scope leg instead of joining it", got)
+			}
+		})
+	}
+}
+
+// TestControlReadyScanReadsTheWholeGraphBinding pins that the graph binding's
+// ready set is read whole, on both scopes that read it. The scan picks the
+// dispatcher's own beads out of that set in Go, so a leg cut short would lose
+// them behind the city's other ready beads, and the dispatcher would report no
+// work while its control bead sat ready. The binding holds as many other ready
+// beads as one page of the scope's bd read, all ahead of the control bead.
+func TestControlReadyScanReadsTheWholeGraphBinding(t *testing.T) {
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
+	route := agentCfg.QualifiedName()
+
+	for _, tc := range []struct {
+		name  string
+		scope func(cityPath, rigPath string) string
+		beads config.BeadsConfig
+	}{
+		{
+			name:  "rig scope federating the binding",
+			scope: func(_, rigPath string) string { return rigPath },
+		},
+		{
+			name:  "city scope fallback arm",
+			scope: func(cityPath, _ string) string { return cityPath },
+			beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, rigPath, _ := rigFederationFixture(t, `[]`)
+			others := make([]beads.Bead, 0, controlReadyPageLimit)
+			for i := range controlReadyPageLimit {
+				others = append(others, beads.Bead{
+					ID:       fmt.Sprintf("gc-other-%d", i),
+					Title:    "other work",
+					Type:     "task",
+					Status:   "open",
+					Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gascity/worker"},
+				})
+			}
+			binding := beads.NewMemStoreFrom(0, others, nil)
+			seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(binding))
+			root, err := binding.Create(beads.Bead{
+				Title:    "workflow",
+				Type:     "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+			})
+			if err != nil {
+				t.Fatalf("create workflow root: %v", err)
+			}
+			routed := newRoutedControlBead(t, binding, root.ID, route)
+
+			if got := controlReadyScan(t, tc.scope(cityPath, rigPath), agentCfg, tc.beads); !slices.Contains(got, routed.ID) {
+				t.Fatalf("control-ready queue = %v, missing the binding's control bead %s behind %d ready beads routed elsewhere", got, routed.ID, len(others))
 			}
 		})
 	}
