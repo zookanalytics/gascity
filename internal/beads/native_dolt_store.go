@@ -1464,6 +1464,63 @@ func (s *NativeDoltStore) Get(id string) (Bead, error) {
 	return out, err
 }
 
+var _ ExactBatchGetter = (*NativeDoltStore)(nil)
+
+// GetExactBatch reads ids with one search by id, the read Get makes for one id,
+// and returns the beads it found under exactly a requested id. Every requested
+// id it did not answer is listed in unresolved, in input order: the bead is
+// absent, or its row's metadata does not project, which Get reports as
+// ErrMetadataParse.
+func (s *NativeDoltStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	found := make(map[string]Bead, len(ids))
+	if len(ids) == 0 {
+		return found, nil, nil
+	}
+	requested := make(map[string]bool, len(ids))
+	distinct := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if !requested[id] {
+			requested[id] = true
+			distinct = append(distinct, id)
+		}
+	}
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		clear(found)
+		issues, err := storage.SearchIssues(ctx, "", beadslib.IssueFilter{
+			IDs:                 distinct,
+			IncludeDependencies: true,
+		})
+		if err != nil {
+			return err
+		}
+		s.noteRows(len(issues))
+		for _, issue := range issues {
+			if issue == nil || !requested[issue.ID] {
+				continue
+			}
+			bead, err := beadFromNativeIssue(issue)
+			if err != nil {
+				if isNativeIssueMetadataParseError(err) {
+					continue
+				}
+				return err
+			}
+			found[issue.ID] = bead
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting %d beads: %w", len(distinct), err)
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // Update modifies an existing bead through the upstream beads storage layer.
 func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	if err := s.readOnlyGuard(); err != nil {
@@ -1793,28 +1850,39 @@ func (s *NativeDoltStore) CloseAll(ids []string, metadata map[string]string) (in
 // edges that target those parents, then searches only the children those edges
 // name, by id. No issue row outside the children is read; see
 // nativeParentChildIDs for what each read costs. ParentIDs is answered exactly:
-// a returned bead's ParentID is one of the listed parents.
+// a returned bead's ParentID is one of the listed parents, and an empty entry
+// names no parent.
 func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	listed := nativeListedParentIDs(query)
+	if len(query.ParentIDs) > 0 && len(listed) == 0 {
+		return []Bead{}, nil
+	}
+	parents := listed
+	if query.ParentID != "" {
+		parents = []string{query.ParentID}
+	}
 	var out []Bead
 	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
 		filter := nativeIssueFilterFromListQuery(query)
-		if parents := nativeQueryParentIDs(query); len(parents) > 0 {
+		if len(parents) > 0 {
 			children, scoped, err := nativeParentChildIDs(ctx, storage, parents, query.IDs)
 			if err != nil {
 				return err
 			}
-			if scoped {
-				if len(children) == 0 {
-					out = []Bead{}
-					return nil
-				}
+			switch {
+			case scoped && len(children) == 0:
+				out = []Bead{}
+				return nil
+			case scoped:
 				filter.ParentID = nil
 				filter.IDs = children
-				// ApplyListQuery applies the limit after Matches; a backing limit
-				// over the children could cut a row Matches would have kept.
+			case len(listed) > 0:
+				// Nothing narrows the search to the listed parents but
+				// keepChildrenOf below, so a backing limit would cut the page
+				// before it runs.
 				filter.Limit = 0
 			}
 		}
@@ -1834,8 +1902,8 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			beads = append(beads, bead)
 		}
 		s.noteRows(len(issues))
-		if len(query.ParentIDs) > 0 {
-			beads = keepChildrenOf(beads, query.ParentIDs)
+		if len(listed) > 0 {
+			beads = keepChildrenOf(beads, listed)
 		}
 		out = ApplyListQuery(beads, query)
 		return nil
@@ -1846,12 +1914,8 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	return out, nil
 }
 
-// nativeQueryParentIDs returns the parents a list query is scoped to: its
-// ParentID, which Matches enforces, or else its distinct non-empty ParentIDs.
-func nativeQueryParentIDs(query ListQuery) []string {
-	if query.ParentID != "" {
-		return []string{query.ParentID}
-	}
+// nativeListedParentIDs returns the distinct non-empty ids in query.ParentIDs.
+func nativeListedParentIDs(query ListQuery) []string {
 	seen := make(map[string]bool, len(query.ParentIDs))
 	parents := make([]string, 0, len(query.ParentIDs))
 	for _, id := range query.ParentIDs {
@@ -1929,13 +1993,14 @@ func nativeParentChildIDs(ctx context.Context, storage beadslib.Storage, parents
 	return children, true, nil
 }
 
-// nativeDependentsPage is the page size asked of the filtered dependents read,
-// which beads caps at 500 rows.
+// nativeDependentsPage is the page size asked of the filtered dependents read.
+// It is the hard cap beads clamps that read's page to, so a page holds this
+// many rows whenever that many remain.
 const nativeDependentsPage = 500
 
 // nativeParentChildEdgesOf returns every parent-child edge that targets parent.
 // The filtered dependents read returns at most one page per call, ordered by
-// edge id, so it is paged by the last edge id until a page comes back empty.
+// edge id, so it is paged by the last edge id until a page comes back short.
 func nativeParentChildEdgesOf(ctx context.Context, querier beadslib.DependentQuerier, parent string) ([]*beadslib.Dependency, error) {
 	var edges []*beadslib.Dependency
 	after := ""
@@ -1944,14 +2009,14 @@ func nativeParentChildEdgesOf(ctx context.Context, querier beadslib.DependentQue
 		if err != nil {
 			return nil, err
 		}
-		if len(page) == 0 {
+		edges = append(edges, page...)
+		if len(page) < nativeDependentsPage {
 			return edges, nil
 		}
 		last := page[len(page)-1]
 		if last == nil || last.ID == after {
 			return nil, fmt.Errorf("dependents read did not page past edge %q", after)
 		}
-		edges = append(edges, page...)
 		after = last.ID
 	}
 }

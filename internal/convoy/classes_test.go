@@ -12,7 +12,7 @@ import (
 )
 
 // unreadableStore stands in for a named class whose backend is unavailable:
-// every Get and List fails with an I/O-shaped error, which is emphatically NOT
+// every Get fails with an I/O-shaped error, which is emphatically NOT
 // beads.ErrNotFound. It is the only way to tell the two directions of the
 // partial-result rule apart — a store that is silent because nobody asked it,
 // and a store that is silent because it broke.
@@ -27,74 +27,59 @@ func (s *unreadableStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, s.err
 }
 
-func (s *unreadableStore) List(beads.ListQuery) ([]beads.Bead, error) {
-	s.reads++
-	return nil, s.err
-}
-
-// readSpyStore records the member reads a store answers, so a test can pin the
-// read shape a lookup takes: keyed Lists, not a Get per member.
-type readSpyStore struct {
+// corruptRowStore serves the ids in corrupt the way the native store serves a
+// row whose metadata it cannot project: Get fails with beads.ErrMetadataParse.
+type corruptRowStore struct {
 	beads.Store
-	gets  []string
-	lists []beads.ListQuery
+	corrupt map[string]bool
 }
 
-func (s *readSpyStore) Get(id string) (beads.Bead, error) {
-	s.gets = append(s.gets, id)
-	return s.Store.Get(id)
-}
-
-func (s *readSpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	s.lists = append(s.lists, query)
-	return s.Store.List(query)
-}
-
-// keyedLists returns the recorded List queries that were keyed by id.
-func (s *readSpyStore) keyedLists() []beads.ListQuery {
-	var keyed []beads.ListQuery
-	for _, q := range s.lists {
-		if len(q.IDs) > 0 {
-			keyed = append(keyed, q)
-		}
-	}
-	return keyed
-}
-
-// partialListStore answers List the way a store does when some rows could not
-// be decoded: it returns the other rows with a beads.PartialResultError. Get
-// still reads every bead, except that corruptID fails metadata projection.
-type partialListStore struct {
-	beads.Store
-	dropped   map[string]bool
-	corruptID string
-	gets      []string
-}
-
-func (s *partialListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	rows, err := s.Store.List(query)
-	if err != nil {
-		return nil, err
-	}
-	kept := rows[:0]
-	for _, b := range rows {
-		if !s.dropped[b.ID] {
-			kept = append(kept, b)
-		}
-	}
-	if len(kept) == len(rows) {
-		return kept, nil
-	}
-	return kept, &beads.PartialResultError{Op: "list", Err: fmt.Errorf("decoding %d rows", len(rows)-len(kept))}
-}
-
-func (s *partialListStore) Get(id string) (beads.Bead, error) {
-	s.gets = append(s.gets, id)
-	if id == s.corruptID {
+func (s *corruptRowStore) Get(id string) (beads.Bead, error) {
+	if s.corrupt[id] {
 		return beads.Bead{}, fmt.Errorf("parsing metadata for bead %q: %w", id, beads.ErrMetadataParse)
 	}
 	return s.Store.Get(id)
 }
+
+// batchingStore offers the exact batch read a class store shares across
+// members, and records each batch read and Get it answers. Its batch read
+// answers every requested id its Get answers and leaves the rest unresolved, as
+// the native store leaves a row it cannot project; batchErr fails every batch
+// read instead. A non-empty prefix is the id prefix the store mints.
+type batchingStore struct {
+	beads.Store
+	prefix   string
+	batchErr error
+	batches  [][]string
+	gets     []string
+}
+
+func (s *batchingStore) IDPrefix() string { return s.prefix }
+
+func (s *batchingStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	return s.Store.Get(id)
+}
+
+func (s *batchingStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	s.batches = append(s.batches, append([]string(nil), ids...))
+	if s.batchErr != nil {
+		return nil, nil, s.batchErr
+	}
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		if err != nil {
+			unresolved = append(unresolved, id)
+			continue
+		}
+		found[id] = b
+	}
+	return found, unresolved, nil
+}
+
+var _ beads.ExactBatchGetter = (*batchingStore)(nil)
 
 // prefixStore reports an id prefix, standing in for a class store that mints
 // its own id namespace (the recorded-ownership fast path).
@@ -436,52 +421,66 @@ func TestMembersInParticipantFailureOutranksAFoundOwnerInEitherOrder(t *testing.
 }
 
 // residenceTopology seeds every residence shape the by-id rule distinguishes,
-// spread over four named class stores. The convoy and graph stores mint their
-// own prefixes; the two Work scopes mint none, as a policy-wrapped store does
-// not. It returns the classes and the ids to resolve.
-func residenceTopology(t *testing.T, broken *unreadableStore, brokenFirst bool) (MemberClasses, []string) {
+// spread over named class stores. The convoy and graph stores mint their own
+// prefixes; the Work scope mints none, as a policy-wrapped store does not. It
+// returns the classes twice over the same stores, once offering the exact batch
+// read and once answering Get alone, and the ids to resolve.
+func residenceTopology(t *testing.T, broken *unreadableStore, brokenFirst bool) (batched, getOnly MemberClasses, ids []string) {
 	t.Helper()
-	convoyStore := &prefixStore{prefix: "co", Store: beads.NewMemStoreFrom(1, []beads.Bead{
+	convoy := &corruptRowStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "co-1", Title: "convoy-class item", Type: "task", Status: "open"},
 		{ID: "co-2", Title: "closed convoy-class item", Type: "task", Status: "closed"},
-	}, nil)}
-	work := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "co-bad", Title: "unprojectable item", Type: "task", Status: "open"},
+	}, nil), corrupt: map[string]bool{"co-bad": true}}
+	work := &corruptRowStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{
 		// A copy its prefix owner no longer holds, left by a migration.
 		{ID: "co-9", Title: "migrated item", Type: "task", Status: "open"},
+		// A stale copy of a bead its prefix owner holds but cannot project.
+		{ID: "co-bad", Title: "stale copy", Type: "task", Status: "closed"},
 		{ID: "wk-1", Title: "work item", Type: "task", Status: "in_progress"},
 		{ID: "wk-dup", Title: "work copy", Type: "task", Status: "open"},
-	}, nil)
-	graph := &prefixStore{prefix: "gr", Store: beads.NewMemStoreFrom(1, []beads.Bead{
+	}, nil)}
+	graph := &corruptRowStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "gr-1", Title: "wisp step", Type: "task", Status: "open", Ephemeral: true},
 		{ID: "wk-dup", Title: "graph copy", Type: "task", Status: "open"},
 	}, nil)}
-	scopes := []beads.Store{work}
-	if broken != nil {
-		if brokenFirst {
-			scopes = []beads.Store{broken, work}
-		} else {
-			scopes = []beads.Store{work, broken}
+	build := func(wrap func(store beads.Store, prefix string) beads.Store) MemberClasses {
+		scopes := []beads.Store{wrap(work, "")}
+		if broken != nil {
+			if brokenFirst {
+				scopes = []beads.Store{broken, scopes[0]}
+			} else {
+				scopes = append(scopes, broken)
+			}
 		}
+		return MemberClasses{Convoy: wrap(convoy, "co"), Work: scopes, Graph: wrap(graph, "gr")}
 	}
-	ids := []string{
+	batched = build(func(store beads.Store, prefix string) beads.Store {
+		return &batchingStore{Store: store, prefix: prefix}
+	})
+	getOnly = build(func(store beads.Store, prefix string) beads.Store {
+		return &prefixStore{Store: store, prefix: prefix}
+	})
+	ids = []string{
 		"co-1",   // prefix owner holds it
 		"co-2",   // prefix owner holds it, closed
 		"co-9",   // prefix owner reports it absent; one other class holds it
 		"co-404", // prefix owner reports it absent; no class holds it
+		"co-bad", // prefix owner cannot project it; another class holds a stale copy
 		"gr-1",   // prefix owner holds it, ephemeral
 		"wk-1",   // no prefix owner; one class holds it
 		"wk-dup", // no prefix owner; two classes hold it
 		"wk-404", // no prefix owner; no class holds it
 		"wk-1",   // repeated
 	}
-	return MemberClasses{Convoy: convoyStore, Work: scopes, Graph: graph}, ids
+	return batched, getOnly, ids
 }
 
-// TestResolveMembersAnswersEachIDAsResolveMemberDoes is the contract for the
-// batched member read: whatever the residence shape, and whether or not a named
-// class is unreadable, resolveMembers answers every id with exactly the bead or
-// the error resolveMember gives for that id alone.
-func TestResolveMembersAnswersEachIDAsResolveMemberDoes(t *testing.T) {
+// TestResolveMembersAnswersEachIDAsGetAloneDoes is the contract for the shared
+// member read: whatever the residence shape, and whether or not a named class
+// is unreadable, resolving ids together through the stores' batch read gives
+// every id exactly the bead, owner and error the rule gives it from Get alone.
+func TestResolveMembersAnswersEachIDAsGetAloneDoes(t *testing.T) {
 	cases := []struct {
 		name        string
 		broken      bool
@@ -497,17 +496,21 @@ func TestResolveMembersAnswersEachIDAsResolveMemberDoes(t *testing.T) {
 			if tc.broken {
 				broken = &unreadableStore{err: fmt.Errorf("dial rig work store: connection refused")}
 			}
-			classes, ids := residenceTopology(t, broken, tc.brokenFirst)
-			resolve := classes.resolveMembers(ids)
+			batched, getOnly, ids := residenceTopology(t, broken, tc.brokenFirst)
+			resolve := batched.resolveMembers(ids)
+			alone := getOnly.resolveMembers(ids)
 			var outcomes []string
 			for _, id := range ids {
-				want, _, wantErr := classes.resolveMember(id)
-				got, gotErr := resolve(id)
+				got, gotOwner, gotErr := resolve(id)
+				want, wantOwner, wantErr := alone(id)
 				if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
 					t.Fatalf("%s: err = %v, want %v", id, gotErr, wantErr)
 				}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("%s: bead = %+v, want %+v", id, got, want)
+				}
+				if gotOwner.class != wantOwner.class {
+					t.Fatalf("%s: owner = %q, want %q", id, gotOwner.class, wantOwner.class)
 				}
 				var dup *DuplicateResidenceError
 				switch {
@@ -517,15 +520,20 @@ func TestResolveMembersAnswersEachIDAsResolveMemberDoes(t *testing.T) {
 					outcomes = append(outcomes, id+"=duplicate")
 				case errors.Is(gotErr, beads.ErrNotFound):
 					outcomes = append(outcomes, id+"=absent")
+				case errors.Is(gotErr, beads.ErrMetadataParse):
+					outcomes = append(outcomes, id+"=unprojectable")
 				default:
 					outcomes = append(outcomes, id+"=read-failure")
 				}
 			}
 			// The fixture must reach every outcome the rule can give, or the
-			// comparison above proves less than it claims.
-			wantOutcomes := "co-1=bead co-2=bead co-9=bead co-404=absent gr-1=bead wk-1=bead wk-dup=duplicate wk-404=absent wk-1=bead"
+			// comparison above proves less than it claims. An unprojectable
+			// row in its prefix owner settles its id before any other class is
+			// read, so neither the stale copy nor the unreadable scope reaches
+			// it.
+			wantOutcomes := "co-1=bead co-2=bead co-9=bead co-404=absent co-bad=unprojectable gr-1=bead wk-1=bead wk-dup=duplicate wk-404=absent wk-1=bead"
 			if tc.broken {
-				wantOutcomes = "co-1=bead co-2=bead co-9=read-failure co-404=read-failure gr-1=bead wk-1=read-failure wk-dup=read-failure wk-404=read-failure wk-1=read-failure"
+				wantOutcomes = "co-1=bead co-2=bead co-9=read-failure co-404=read-failure co-bad=unprojectable gr-1=bead wk-1=read-failure wk-dup=read-failure wk-404=read-failure wk-1=read-failure"
 			}
 			if got := strings.Join(outcomes, " "); got != wantOutcomes {
 				t.Fatalf("outcomes = %s\nwant       %s", got, wantOutcomes)
@@ -534,49 +542,49 @@ func TestResolveMembersAnswersEachIDAsResolveMemberDoes(t *testing.T) {
 	}
 }
 
-// TestResolveMembersReadsEachClassAtMostTwiceAndNeverGets pins the read shape
-// of the batched resolution across classes: each class store answers keyed
-// Lists, at most two of them, and no Get, however many ids are resolved.
-func TestResolveMembersReadsEachClassAtMostTwiceAndNeverGets(t *testing.T) {
-	classes, ids := residenceTopology(t, nil, false)
-	convoySpy := &readSpyStore{Store: classes.Convoy.(*prefixStore).Store}
-	workSpy := &readSpyStore{Store: classes.Work[0]}
-	graphSpy := &readSpyStore{Store: classes.Graph.(*prefixStore).Store}
-	// The prefix wraps the spy because a spy does not report the prefix of the
-	// store it wraps.
-	spied := MemberClasses{
-		Convoy: &prefixStore{prefix: "co", Store: convoySpy},
-		Work:   []beads.Store{workSpy},
-		Graph:  &prefixStore{prefix: "gr", Store: graphSpy},
-	}
-	spies := map[string]*readSpyStore{"convoy": convoySpy, "work": workSpy, "graph": graphSpy}
-
-	resolve := spied.resolveMembers(ids)
+// TestResolveMembersBatchesEachClassOnce pins the read shape of the shared
+// member read: each class store answers one batch read, holding the ids it
+// mints and the ids no store mints, and is asked with Get only for an id its
+// batch did not return.
+func TestResolveMembersBatchesEachClassOnce(t *testing.T) {
+	batched, _, ids := residenceTopology(t, nil, false)
+	resolve := batched.resolveMembers(ids)
 	for _, id := range ids {
-		_, _ = resolve(id)
+		_, _, _ = resolve(id)
 	}
-	for name, spy := range spies {
-		if len(spy.gets) != 0 {
-			t.Errorf("%s class answered Get for %v; want keyed Lists only", name, spy.gets)
+	stores := map[string]*batchingStore{
+		"convoy": batched.Convoy.(*batchingStore),
+		"work":   batched.Work[0].(*batchingStore),
+		"graph":  batched.Graph.(*batchingStore),
+	}
+	wantBatches := map[string]string{
+		"convoy": "co-1 co-2 co-9 co-404 co-bad wk-1 wk-dup wk-404",
+		"work":   "wk-1 wk-dup wk-404",
+		"graph":  "gr-1 wk-1 wk-dup wk-404",
+	}
+	for name, store := range stores {
+		if len(store.batches) != 1 {
+			t.Fatalf("%s class answered %d batch reads (%v), want one", name, len(store.batches), store.batches)
 		}
-		if len(spy.lists) == 0 || len(spy.lists) > 2 {
-			t.Errorf("%s class answered %d Lists; want one or two", name, len(spy.lists))
+		if got := strings.Join(store.batches[0], " "); got != wantBatches[name] {
+			t.Errorf("%s class batch = %q, want %q", name, got, wantBatches[name])
 		}
-		for _, q := range spy.lists {
-			if len(q.IDs) == 0 || !q.IncludeClosed || q.TierMode != beads.TierBoth {
-				t.Errorf("%s class List = %+v; want a keyed read over every status and both tiers", name, q)
+		answered := map[string]bool{}
+		for _, id := range store.batches[0] {
+			if _, err := store.Store.Get(id); err == nil {
+				answered[id] = true
 			}
 		}
-	}
-	// The graph store owns gr-1, which it holds, and is otherwise asked only
-	// for the ids no store mints and the ones their owner reported absent.
-	var graphIDs []string
-	for _, q := range spies["graph"].lists {
-		graphIDs = append(graphIDs, q.IDs...)
-	}
-	sort.Strings(graphIDs)
-	if got, want := strings.Join(graphIDs, " "), "co-404 co-9 gr-1 wk-1 wk-404 wk-dup"; got != want {
-		t.Errorf("graph class read ids %q, want %q", got, want)
+		seen := map[string]bool{}
+		for _, id := range store.gets {
+			if answered[id] {
+				t.Errorf("%s class answered Get(%s), which its batch read already returned", name, id)
+			}
+			if seen[id] {
+				t.Errorf("%s class answered Get(%s) twice; each id resolves once", name, id)
+			}
+			seen[id] = true
+		}
 	}
 }
 
@@ -588,12 +596,12 @@ func TestResolveMembersPrefixOwnerNeedsNoProbe(t *testing.T) {
 		{ID: "gcg-1", Title: "graph node", Type: "task", Status: "open"},
 		{ID: "gcg-2", Title: "graph node", Type: "task", Status: "closed"},
 	}, nil)
-	graph := &prefixStore{Store: graphBacking, prefix: "gcg"}
+	graph := &batchingStore{Store: graphBacking, prefix: "gcg"}
 	work := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
 
 	resolve := MemberClasses{Convoy: graph, Work: []beads.Store{work}}.resolveMembers([]string{"gcg-1", "gcg-2"})
 	for _, id := range []string{"gcg-1", "gcg-2"} {
-		got, err := resolve(id)
+		got, _, err := resolve(id)
 		if err != nil {
 			t.Fatalf("resolve(%s): %v", id, err)
 		}
@@ -604,26 +612,89 @@ func TestResolveMembersPrefixOwnerNeedsNoProbe(t *testing.T) {
 	if work.reads != 0 {
 		t.Fatalf("work class read %d times, want 0: recorded ownership needs no probe", work.reads)
 	}
+	if len(graph.gets) != 0 {
+		t.Fatalf("graph class answered Get for %v; its batch read returned both", graph.gets)
+	}
 }
 
-// TestResolveMembersPartialReadGetsTheRowsItDropped pins how a partial keyed
-// read is used: the rows it returned resolve as they are, and each id it did not
-// return is read with Get, so a row that could not be decoded becomes the same
-// metadata failure a Get of it reports, not a silent absence.
-func TestResolveMembersPartialReadGetsTheRowsItDropped(t *testing.T) {
+// TestMembersInUnprojectableMemberStaysAPlaceholder pins what an unprojectable
+// member resolves to when its prefix owner cannot project it: the unresolved
+// placeholder, as a Get of it alone gives, whatever another named class holds.
+// The batch read leaves such a row unresolved rather than reporting it absent,
+// so neither an unreadable class nor a stale copy elsewhere is consulted.
+func TestMembersInUnprojectableMemberStaysAPlaceholder(t *testing.T) {
+	seed := func(t *testing.T) (*batchingStore, string) {
+		t.Helper()
+		backing := beads.NewMemStoreFrom(1, []beads.Bead{
+			{ID: "co-1", Title: "readable item", Type: "task", Status: "open"},
+			{ID: "co-bad", Title: "unprojectable item", Type: "task", Status: "open"},
+		}, nil)
+		convoy, err := backing.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+		if err != nil {
+			t.Fatalf("seed convoy: %v", err)
+		}
+		for _, id := range []string{"co-1", "co-bad"} {
+			if err := backing.DepAdd(convoy.ID, id, TrackingDepType); err != nil {
+				t.Fatalf("seed tracks edge to %s: %v", id, err)
+			}
+		}
+		return &batchingStore{Store: &corruptRowStore{Store: backing, corrupt: map[string]bool{"co-bad": true}}, prefix: "co"}, convoy.ID
+	}
+	check := func(t *testing.T, members []beads.Bead) {
+		t.Helper()
+		got := map[string]beads.Bead{}
+		for _, m := range members {
+			got[m.ID] = m
+		}
+		if b := got["co-1"]; b.Title != "readable item" {
+			t.Fatalf("readable member = %+v, want the bead its owner holds", b)
+		}
+		if b := got["co-bad"]; !IsUnresolvedTrackedItem(b) {
+			t.Fatalf("unprojectable member = %+v, want the unresolved placeholder", b)
+		}
+	}
+
+	t.Run("another named class is unreadable", func(t *testing.T) {
+		convoyStore, convoyID := seed(t)
+		broken := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
+		members, err := MembersIn(MemberClasses{Convoy: convoyStore, Work: []beads.Store{broken}}, convoyID, true)
+		if err != nil {
+			t.Fatalf("MembersIn: %v; the unprojectable member's owner answers it before the unreadable class is read", err)
+		}
+		check(t, members)
+		if broken.reads != 0 {
+			t.Fatalf("unreadable work class read %d times, want 0", broken.reads)
+		}
+	})
+
+	t.Run("another named class holds a stale copy", func(t *testing.T) {
+		convoyStore, convoyID := seed(t)
+		stale := &batchingStore{Store: beads.NewMemStoreFrom(1, []beads.Bead{
+			{ID: "co-bad", Title: "stale copy", Type: "task", Status: "closed"},
+		}, nil)}
+		members, err := MembersIn(MemberClasses{Convoy: convoyStore, Work: []beads.Store{stale}}, convoyID, true)
+		if err != nil {
+			t.Fatalf("MembersIn: %v", err)
+		}
+		check(t, members)
+		if len(stale.gets) != 0 || len(stale.batches) != 0 {
+			t.Fatalf("the work class was read (gets %v, batches %v); the prefix owner answers its own ids", stale.gets, stale.batches)
+		}
+	})
+}
+
+// TestMembersInFailedBatchReadFallsBackToGet pins that a batch read that fails
+// costs no member its answer: each id it covered is read with Get, so a present
+// member resolves and a deleted one stays the unresolved placeholder.
+func TestMembersInFailedBatchReadFallsBackToGet(t *testing.T) {
 	backing := beads.NewMemStore()
 	convoy, _ := backing.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	kept, _ := backing.Create(beads.Bead{Title: "kept"})
-	dropped, _ := backing.Create(beads.Bead{Title: "dropped"})
-	corrupt, _ := backing.Create(beads.Bead{Title: "corrupt"})
-	for _, id := range []string{kept.ID, dropped.ID, corrupt.ID} {
-		trackOrFatal(t, backing, convoy.ID, id)
+	trackOrFatal(t, backing, convoy.ID, kept.ID)
+	if err := backing.DepAdd(convoy.ID, "gc-deleted", TrackingDepType); err != nil {
+		t.Fatalf("seed tracks edge to a deleted member: %v", err)
 	}
-	store := &partialListStore{
-		Store:     backing,
-		dropped:   map[string]bool{dropped.ID: true, corrupt.ID: true},
-		corruptID: corrupt.ID,
-	}
+	store := &batchingStore{Store: backing, batchErr: errors.New("bd list: skipped 1 corrupt bead")}
 
 	members, err := MembersIn(MemberClasses{Convoy: store}, convoy.ID, true)
 	if err != nil {
@@ -634,18 +705,30 @@ func TestResolveMembersPartialReadGetsTheRowsItDropped(t *testing.T) {
 		got[m.ID] = m
 	}
 	if b := got[kept.ID]; b.Title != "kept" {
-		t.Errorf("kept member = %+v, want the bead the partial read returned", b)
+		t.Errorf("present member = %+v, want the bead Get returns", b)
 	}
-	if b := got[dropped.ID]; b.Title != "dropped" {
-		t.Errorf("dropped member = %+v, want the bead Get returns", b)
-	}
-	if b := got[corrupt.ID]; !IsUnresolvedTrackedItem(b) {
-		t.Errorf("corrupt member = %+v, want the unresolved placeholder", b)
+	if b := got["gc-deleted"]; !IsUnresolvedTrackedItem(b) {
+		t.Errorf("deleted member = %+v, want the unresolved placeholder", b)
 	}
 	sort.Strings(store.gets)
-	want := []string{corrupt.ID, dropped.ID}
+	want := []string{"gc-deleted", kept.ID}
 	sort.Strings(want)
 	if !reflect.DeepEqual(store.gets, want) {
-		t.Errorf("Get calls = %v, want only the ids the partial read dropped (%v)", store.gets, want)
+		t.Errorf("Get calls = %v, want one per member the failed batch covered (%v)", store.gets, want)
+	}
+}
+
+// TestResolveMembersResolvesEachIDOnce pins that an id asked about again, as a
+// member several convoys track is, is answered without reading it again.
+func TestResolveMembersResolvesEachIDOnce(t *testing.T) {
+	store := &batchingStore{Store: beads.NewMemStore()}
+	resolve := MemberClasses{Convoy: store}.resolveMembers([]string{"gc-gone", "gc-gone"})
+	for range 3 {
+		if _, _, err := resolve("gc-gone"); !errors.Is(err, beads.ErrNotFound) {
+			t.Fatalf("resolve(gc-gone) err = %v, want ErrNotFound", err)
+		}
+	}
+	if len(store.gets) != 1 || len(store.batches) != 0 {
+		t.Fatalf("reads = gets %v, batches %v; want one Get, and no batch for one id", store.gets, store.batches)
 	}
 }

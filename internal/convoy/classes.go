@@ -145,34 +145,113 @@ func (m MemberClasses) candidates() []classHandle {
 // is returned with that class as provenance even when another class holds the
 // bead, because uniqueness cannot be proven while a participant is unreadable.
 func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error) {
+	return m.resolveMembers([]string{id})(id)
+}
+
+// resolveMembers returns a function that resolves an id under the by-id
+// residence rule resolveMember documents, with reads shared across ids. Every
+// lookup the rule makes is the answer Store.Get gives for that id in that
+// class, so each id resolves exactly as it resolves alone, errors included.
+//
+// The reads are shared through beads.ExactBatchGetter. Before any id is
+// resolved, each class store that offers that read is asked once for every id
+// the rule reads from it first: the ids whose prefix it mints, and the ids no
+// named store mints. A bead that read returns is the answer Get gives. Every
+// other lookup goes to Get, because a bead the batch did not return may be
+// absent, unprojectable, or reachable only through Get's own fallbacks, and
+// only Get tells those apart. A class store without the batch read, one asked
+// about a single id, and one whose batch read fails leave all their lookups to
+// Get, which reports any failure of its own. Each id is resolved once; asking
+// again returns the first answer.
+func (m MemberClasses) resolveMembers(ids []string) func(id string) (beads.Bead, classHandle, error) {
 	cands := m.candidates()
 	if len(cands) == 0 {
-		return beads.Bead{}, classHandle{}, fmt.Errorf("resolving %s: no class handle named: %w", id, beads.ErrNotFound)
+		return func(id string) (beads.Bead, classHandle, error) {
+			return beads.Bead{}, classHandle{}, fmt.Errorf("resolving %s: no class handle named: %w", id, beads.ErrNotFound)
+		}
 	}
-
-	// Recorded ownership first: a store that mints id's prefix owns it, so no
-	// probe of the other classes is needed and no second residence is possible.
 	stores := make([]beads.Store, 0, len(cands))
 	for _, c := range cands {
 		stores = append(stores, c.store)
 	}
-	if owner := storeref.PrefixOwner(id, stores); owner != nil {
-		for _, c := range cands {
-			if !sameHandle(c.store, owner) {
-				continue
-			}
-			got, err := owner.Get(id)
-			if err == nil {
-				return got, c, nil
-			}
-			if !errors.Is(err, beads.ErrNotFound) {
-				return beads.Bead{}, classHandle{}, classReadError(c, id, err)
-			}
-			// A prefix owner that reports the bead absent means a partial
-			// migration or a foreign id shape; fall through to the full
-			// named-class probe rather than reducing correctness.
-			break
+	// ownerOf returns the index in cands of the store that mints id's prefix,
+	// or -1 when no named store mints it.
+	ownerOf := func(id string) int {
+		owner := storeref.PrefixOwner(id, stores)
+		if owner == nil {
+			return -1
 		}
+		for i, c := range cands {
+			if sameHandle(c.store, owner) {
+				return i
+			}
+		}
+		return -1
+	}
+
+	owners := make(map[string]int, len(ids))
+	want := make([][]string, len(cands))
+	for _, id := range ids {
+		if _, ok := owners[id]; ok {
+			continue
+		}
+		o := ownerOf(id)
+		owners[id] = o
+		for i := range cands {
+			if o < 0 || o == i {
+				want[i] = append(want[i], id)
+			}
+		}
+	}
+	batched := make([]map[string]beads.Bead, len(cands))
+	for i, c := range cands {
+		batched[i] = exactBatch(c.store, want[i])
+	}
+	get := func(i int, id string) (beads.Bead, error) {
+		if b, ok := batched[i][id]; ok {
+			return b, nil
+		}
+		return cands[i].store.Get(id)
+	}
+
+	type answer struct {
+		bead  beads.Bead
+		owner classHandle
+		err   error
+	}
+	answers := make(map[string]answer, len(owners))
+	return func(id string) (beads.Bead, classHandle, error) {
+		a, ok := answers[id]
+		if !ok {
+			o, known := owners[id]
+			if !known {
+				o = ownerOf(id)
+			}
+			a.bead, a.owner, a.err = residence(id, cands, o, get)
+			answers[id] = a
+		}
+		return a.bead, a.owner, a.err
+	}
+}
+
+// residence applies the by-id residence rule to id over cands. prefixOwner is
+// the index of the store that mints id's prefix, or -1, and get(i, id) answers
+// cands[i]'s lookup of id the way Store.Get does.
+func residence(id string, cands []classHandle, prefixOwner int, get func(int, string) (beads.Bead, error)) (beads.Bead, classHandle, error) {
+	// Recorded ownership first: a store that mints id's prefix owns it, so no
+	// probe of the other classes is needed and no second residence is possible.
+	if prefixOwner >= 0 {
+		c := cands[prefixOwner]
+		got, err := get(prefixOwner, id)
+		if err == nil {
+			return got, c, nil
+		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, classHandle{}, classReadError(c, id, err)
+		}
+		// A prefix owner that reports the bead absent means a partial
+		// migration or a foreign id shape; fall through to the full
+		// named-class probe rather than reducing correctness.
 	}
 
 	var (
@@ -181,8 +260,12 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 		haveOwner  bool
 		duplicates []string
 	)
-	for _, c := range cands {
-		got, err := c.store.Get(id)
+	for i, c := range cands {
+		if i == prefixOwner {
+			// The prefix owner already reported the bead absent.
+			continue
+		}
+		got, err := get(i, id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -207,189 +290,23 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 	return found, owner, nil
 }
 
-// resolveMembers resolves ids under the by-id residence rule resolveMember
-// applies, reading each named class store with keyed List reads instead of one
-// Get per id. The returned function answers each of ids as resolveMember would
-// answer it alone: the owner's bead, beads.ErrNotFound for zero owners, a
-// *DuplicateResidenceError for more than one, and a participating class's read
-// failure with that class as provenance, outranking any owner found elsewhere.
-//
-// Each class store is read at most twice. The first read covers the ids whose
-// prefix that store mints and the ids no named store mints. The second covers
-// the ids their prefix owner reported absent, which the rule then probes in
-// every other named class. A lookup that names one class costs one read.
-//
-// A keyed read cannot tell an absent bead from one its store cannot project, so
-// such a row is absent from that class. A read that reports a partial result
-// resolves the rows it returned and reads each id it did not return with Get.
-func (m MemberClasses) resolveMembers(ids []string) func(id string) (beads.Bead, error) {
-	cands := m.candidates()
-	if len(cands) == 0 {
-		return func(id string) (beads.Bead, error) {
-			return beads.Bead{}, fmt.Errorf("resolving %s: no class handle named: %w", id, beads.ErrNotFound)
-		}
+// exactBatch reads ids from store with its exact batch read and returns the
+// beads that read answered. It reads nothing for a single id, whose Get costs
+// the same read, or from a store without the read, and answers nothing when the
+// read fails: the caller reads each of those ids with Get.
+func exactBatch(store beads.Store, ids []string) map[string]beads.Bead {
+	if len(ids) < 2 {
+		return nil
 	}
-	stores := make([]beads.Store, 0, len(cands))
-	for _, c := range cands {
-		stores = append(stores, c.store)
+	getter, ok := store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil
 	}
-
-	// ownerOf holds the index in cands of the store that mints each id's
-	// prefix, or -1 when no named store mints it.
-	ownerOf := make(map[string]int, len(ids))
-	var unique []string
-	for _, id := range ids {
-		if _, ok := ownerOf[id]; ok {
-			continue
-		}
-		unique = append(unique, id)
-		ownerOf[id] = -1
-		owner := storeref.PrefixOwner(id, stores)
-		if owner == nil {
-			continue
-		}
-		for i, c := range cands {
-			if sameHandle(c.store, owner) {
-				ownerOf[id] = i
-				break
-			}
-		}
+	found, _, err := getter.GetExactBatch(ids)
+	if err != nil {
+		return nil
 	}
-
-	answers := make([]map[string]memberAnswer, len(cands))
-	for i := range cands {
-		answers[i] = make(map[string]memberAnswer)
-	}
-	readInto := func(i int, want []string) {
-		for id, a := range readClassMembers(cands[i], want) {
-			answers[i][id] = a
-		}
-	}
-	for i := range cands {
-		var want []string
-		for _, id := range unique {
-			if o := ownerOf[id]; o == i || o < 0 {
-				want = append(want, id)
-			}
-		}
-		readInto(i, want)
-	}
-	for i := range cands {
-		var want []string
-		for _, id := range unique {
-			o := ownerOf[id]
-			if o < 0 || o == i {
-				continue
-			}
-			if a := answers[o][id]; !a.found && a.err == nil {
-				want = append(want, id)
-			}
-		}
-		readInto(i, want)
-	}
-
-	return func(id string) (beads.Bead, error) {
-		prefixOwner, ok := ownerOf[id]
-		if !ok {
-			return beads.Bead{}, fmt.Errorf("resolving %s: the id was not in the set resolved together", id)
-		}
-		if prefixOwner >= 0 {
-			a := answers[prefixOwner][id]
-			if a.err != nil {
-				return beads.Bead{}, a.err
-			}
-			if a.found {
-				return a.bead, nil
-			}
-		}
-		var (
-			found      beads.Bead
-			owner      classHandle
-			haveOwner  bool
-			duplicates []string
-		)
-		for i, c := range cands {
-			if i == prefixOwner {
-				// The prefix owner already answered absent.
-				continue
-			}
-			a := answers[i][id]
-			if a.err != nil {
-				return beads.Bead{}, a.err
-			}
-			if !a.found {
-				continue
-			}
-			if haveOwner {
-				if len(duplicates) == 0 {
-					duplicates = append(duplicates, owner.class)
-				}
-				duplicates = append(duplicates, c.class)
-				continue
-			}
-			found, owner, haveOwner = a.bead, c, true
-		}
-		if len(duplicates) > 0 {
-			return beads.Bead{}, &DuplicateResidenceError{ID: id, Classes: duplicates}
-		}
-		if !haveOwner {
-			return beads.Bead{}, fmt.Errorf("resolving %s across %s: %w", id, strings.Join(classNames(cands), ", "), beads.ErrNotFound)
-		}
-		return found, nil
-	}
-}
-
-// memberAnswer is one class store's answer for one id: the bead when the store
-// holds it, a read failure, or neither when the store reports it absent.
-type memberAnswer struct {
-	bead  beads.Bead
-	found bool
-	err   error
-}
-
-// readClassMembers answers ids from one class store with a keyed List spanning
-// both tiers and every status, which returns what a Get of each id returns.
-// A failed read is a failure for every id it covered.
-func readClassMembers(c classHandle, ids []string) map[string]memberAnswer {
-	out := make(map[string]memberAnswer, len(ids))
-	if len(ids) == 0 {
-		return out
-	}
-	rows, err := c.store.List(beads.ListQuery{IDs: ids, IncludeClosed: true, TierMode: beads.TierBoth})
-	if err != nil && !beads.IsPartialResult(err) {
-		for _, id := range ids {
-			out[id] = memberAnswer{err: classReadError(c, id, err)}
-		}
-		return out
-	}
-	requested := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		requested[id] = true
-	}
-	for _, b := range rows {
-		if requested[b.ID] {
-			out[b.ID] = memberAnswer{bead: b, found: true}
-		}
-	}
-	for _, id := range ids {
-		if _, ok := out[id]; ok {
-			continue
-		}
-		if err == nil {
-			out[id] = memberAnswer{}
-			continue
-		}
-		got, getErr := c.store.Get(id)
-		switch {
-		case getErr == nil:
-			out[id] = memberAnswer{bead: got, found: true}
-		case errors.Is(getErr, beads.ErrNotFound):
-			out[id] = memberAnswer{}
-		default:
-			out[id] = memberAnswer{err: classReadError(c, id, getErr)}
-		}
-	}
-	return out
+	return found
 }
 
 // classReadError wraps a participating class's read failure with the class as

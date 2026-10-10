@@ -638,3 +638,56 @@ func TestNativeDoltStoreParentListMatchesUpstreamParentFilter(t *testing.T) {
 		t.Fatalf("upstream parent filter returned the unparented child %s", orphan.ID)
 	}
 }
+
+// TestNativeDoltStoreGetExactBatchMatchesGet pins the exact batch read on real
+// Dolt: every id it answers, closed and ephemeral rows included, is the bead
+// Get returns for that id alone, and an absent id is left unresolved.
+func TestNativeDoltStoreGetExactBatchMatchesGet(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "exact-batch", "gc")
+	var ids []string
+	for _, b := range []Bead{
+		{Title: "open"},
+		{Title: "closed"},
+		{Title: "ephemeral", Ephemeral: true},
+	} {
+		created, err := store.Create(b)
+		if err != nil {
+			t.Fatalf("Create(%q): %v", b.Title, err)
+		}
+		ids = append(ids, created.ID)
+	}
+	if err := store.Close(ids[1]); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	absent := ids[0] + ".404"
+
+	found, unresolved, err := store.GetExactBatch(append(slices.Clone(ids), absent))
+	if err != nil {
+		t.Fatalf("GetExactBatch: %v", err)
+	}
+	for _, id := range ids {
+		single, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", id, err)
+		}
+		if got, ok := found[id]; !ok || !reflect.DeepEqual(got, single) {
+			t.Fatalf("GetExactBatch[%s] = %+v (found %v), want Get's %+v", id, got, ok, single)
+		}
+	}
+	if want := []string{absent}; !reflect.DeepEqual(unresolved, want) {
+		t.Fatalf("unresolved = %v, want %v", unresolved, want)
+	}
+}

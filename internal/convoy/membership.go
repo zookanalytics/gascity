@@ -108,9 +108,9 @@ func Members(store beads.Store, convoyID string, includeClosed bool, memberStore
 //
 // The convoy's own membership (legacy parent-child List and the tracks DepList)
 // is read from classes.Convoy, which owns those edges. The tracked member beads
-// are resolved together across the classes the caller named, with keyed reads
-// rather than a Get per member (see resolveMembers), and the partial-result
-// rule decides what an absent member means:
+// are resolved together across the classes the caller named, sharing one
+// batched read per class store that offers it (see resolveMembers), and the
+// partial-result rule decides what an absent member means:
 //
 //   - A class the caller did not name contributes nothing. A member owned by
 //     an unnamed class is reported as an unresolved placeholder — an empty
@@ -136,7 +136,17 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 	if err != nil {
 		return nil, fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
 	}
-	return assembleMembers(legacyChildren, deps, includeClosed, classes.resolveMembers(trackedIDs(deps)))
+	return assembleMembers(legacyChildren, deps, includeClosed, classes.memberResolver(trackedIDs(deps)))
+}
+
+// memberResolver returns resolveMembers for ids in the shape assembleMembers
+// takes: the member bead, without the class handle that owns it.
+func (m MemberClasses) memberResolver(ids []string) func(id string) (beads.Bead, error) {
+	resolve := m.resolveMembers(ids)
+	return func(id string) (beads.Bead, error) {
+		item, _, err := resolve(id)
+		return item, err
+	}
 }
 
 // trackedIDs returns the targets of the tracks edges among deps.
@@ -206,9 +216,9 @@ func assembleMembers(legacyChildren []beads.Bead, deps []beads.Dep, includeClose
 //
 // The reads are: every convoy's tracks edges (one DepListBatch, or one DepList
 // per convoy when the store cannot batch them), every convoy's legacy
-// parent-child rows (one List), and every tracked member bead (one List keyed
-// by id, the read MembersIn resolves its members with). A tracks target absent
-// from that member read resolves to the unresolved placeholder.
+// parent-child rows (one List), and every tracked member bead, resolved as
+// MembersIn resolves them: one beads.ExactBatchGetter read when the store
+// offers it, then a Get for each member that read did not return.
 func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (map[string][]beads.Bead, error) {
 	if isNilStore(store) {
 		return nil, fmt.Errorf("listing convoy members: %w", ErrNoConvoyClass)
@@ -254,7 +264,7 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 	for _, id := range convoyIDs {
 		memberIDs = append(memberIDs, trackedIDs(depsByConvoy[id])...)
 	}
-	resolve := MemberClasses{Convoy: store}.resolveMembers(memberIDs)
+	resolve := MemberClasses{Convoy: store}.memberResolver(memberIDs)
 
 	for _, id := range convoyIDs {
 		members, err := assembleMembers(legacyByParent[id], depsByConvoy[id], includeClosed, resolve)

@@ -15,105 +15,134 @@ import (
 // Members call returns. It is the guard that the batching changes throughput,
 // not output.
 func TestMembersBatchMatchesPerConvoyMembers(t *testing.T) {
-	store := beads.NewMemStore()
-	ids := seedMembershipShapes(t, store)
-
-	for _, includeClosed := range []bool{true, false} {
-		batch, err := MembersBatch(store, ids, includeClosed)
-		if err != nil {
-			t.Fatalf("MembersBatch(includeClosed=%v): %v", includeClosed, err)
-		}
-		for _, id := range ids {
-			want, err := Members(store, id, includeClosed)
-			if err != nil {
-				t.Fatalf("Members(%s, includeClosed=%v): %v", id, includeClosed, err)
+	for name, batched := range map[string]bool{"get only": false, "batch read": true} {
+		t.Run(name, func(t *testing.T) {
+			backing := beads.NewMemStore()
+			ids := seedMembershipShapes(t, backing)
+			var store beads.Store = backing
+			if batched {
+				store = &batchingStore{Store: backing}
 			}
-			got := batch[id]
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("includeClosed=%v convoy %s:\n batch = %+v\n want  = %+v", includeClosed, id, got, want)
+			for _, includeClosed := range []bool{true, false} {
+				batch, err := MembersBatch(store, ids, includeClosed)
+				if err != nil {
+					t.Fatalf("MembersBatch(includeClosed=%v): %v", includeClosed, err)
+				}
+				for _, id := range ids {
+					want, err := Members(backing, id, includeClosed)
+					if err != nil {
+						t.Fatalf("Members(%s, includeClosed=%v): %v", id, includeClosed, err)
+					}
+					got := batch[id]
+					if !reflect.DeepEqual(got, want) {
+						t.Errorf("includeClosed=%v convoy %s:\n batch = %+v\n want  = %+v", includeClosed, id, got, want)
+					}
+				}
 			}
-		}
+		})
 	}
 }
 
-// TestMembersInMatchesPerMemberGet is the correctness contract for the keyed
-// member read: for every convoy shape, MembersIn returns exactly the members
-// that resolving each tracked member alone with a Get returns.
+// TestMembersInMatchesPerMemberGet is the correctness contract for the shared
+// member read: for every convoy shape, MembersIn over a store that offers the
+// batch read returns exactly the members that resolving each tracked member
+// alone with a Get returns.
 func TestMembersInMatchesPerMemberGet(t *testing.T) {
-	store := beads.NewMemStore()
-	ids := seedMembershipShapes(t, store)
-	classes := MemberClasses{Convoy: store}
+	backing := beads.NewMemStore()
+	ids := seedMembershipShapes(t, backing)
+	batched := MemberClasses{Convoy: &batchingStore{Store: backing}}
+	alone := MemberClasses{Convoy: backing}
 
 	for _, includeClosed := range []bool{true, false} {
 		for _, id := range ids {
-			want := membersByGet(t, classes, id, includeClosed)
-			got, err := MembersIn(classes, id, includeClosed)
+			want := membersByGet(t, alone, id, includeClosed)
+			got, err := MembersIn(batched, id, includeClosed)
 			if err != nil {
 				t.Fatalf("MembersIn(%s, includeClosed=%v): %v", id, includeClosed, err)
 			}
 			if !reflect.DeepEqual(got, want) {
-				t.Errorf("includeClosed=%v convoy %s:\n keyed   = %+v\n per-Get = %+v", includeClosed, id, got, want)
+				t.Errorf("includeClosed=%v convoy %s:\n batched = %+v\n per-Get = %+v", includeClosed, id, got, want)
 			}
 		}
 	}
 }
 
-// TestMembersReadTrackedMembersWithOneKeyedRead pins the read shape of both
-// member readers on one class store: the tracked members are resolved by a
-// single List keyed by their ids, over every status and both tiers, and never
-// by a Get per member.
-func TestMembersReadTrackedMembersWithOneKeyedRead(t *testing.T) {
+// TestMembersShareOneBatchReadForTrackedMembers pins the read shape of both
+// member readers on one class store. MembersBatch reads every convoy's tracked
+// members in one batch read; MembersIn reads each convoy's in one. A member the
+// batch read did not return, and the lone member of a convoy that tracks one,
+// is read with Get, and no member is read both ways.
+func TestMembersShareOneBatchReadForTrackedMembers(t *testing.T) {
 	backing := beads.NewMemStore()
 	ids := seedMembershipShapes(t, backing)
+	trackedBy := map[string][]string{}
 	var tracked []string
 	for _, id := range ids {
 		deps, err := backing.DepList(id, "down")
 		if err != nil {
 			t.Fatalf("DepList(%s): %v", id, err)
 		}
-		tracked = append(tracked, trackedIDs(deps)...)
+		trackedBy[id] = trackedIDs(deps)
+		tracked = append(tracked, trackedBy[id]...)
 	}
 	sort.Strings(tracked)
+	held := func(id string) bool {
+		_, err := backing.Get(id)
+		return err == nil
+	}
 
-	readers := map[string]func(beads.Store) error{
-		"MembersIn": func(store beads.Store) error {
-			for _, id := range ids {
-				if _, err := MembersIn(MemberClasses{Convoy: store}, id, true); err != nil {
-					return err
+	t.Run("MembersBatch", func(t *testing.T) {
+		spy := &batchingStore{Store: backing}
+		if _, err := MembersBatch(spy, ids, true); err != nil {
+			t.Fatalf("MembersBatch: %v", err)
+		}
+		if len(spy.batches) != 1 {
+			t.Fatalf("batch reads = %v, want one for every convoy's members", spy.batches)
+		}
+		got := append([]string(nil), spy.batches[0]...)
+		sort.Strings(got)
+		if !reflect.DeepEqual(got, tracked) {
+			t.Fatalf("batch ids = %v, want each tracked member once (%v)", got, tracked)
+		}
+		var wantGets []string
+		for _, id := range tracked {
+			if !held(id) {
+				wantGets = append(wantGets, id)
+			}
+		}
+		if !reflect.DeepEqual(spy.gets, wantGets) {
+			t.Fatalf("Get calls = %v, want only the members the batch read did not return (%v)", spy.gets, wantGets)
+		}
+	})
+
+	t.Run("MembersIn", func(t *testing.T) {
+		spy := &batchingStore{Store: backing}
+		var wantBatches [][]string
+		var wantGets []string
+		for _, id := range ids {
+			if _, err := MembersIn(MemberClasses{Convoy: spy}, id, true); err != nil {
+				t.Fatalf("MembersIn(%s): %v", id, err)
+			}
+			members := trackedBy[id]
+			switch {
+			case len(members) == 1:
+				wantGets = append(wantGets, members[0])
+			case len(members) > 1:
+				wantBatches = append(wantBatches, members)
+				for _, m := range members {
+					if !held(m) {
+						wantGets = append(wantGets, m)
+					}
 				}
 			}
-			return nil
-		},
-		"MembersBatch": func(store beads.Store) error {
-			_, err := MembersBatch(store, ids, true)
-			return err
-		},
-	}
-	for name, read := range readers {
-		t.Run(name, func(t *testing.T) {
-			spy := &readSpyStore{Store: backing}
-			if err := read(spy); err != nil {
-				t.Fatalf("%s: %v", name, err)
-			}
-			if len(spy.gets) != 0 {
-				t.Fatalf("%s read members with Get %v; want keyed Lists", name, spy.gets)
-			}
-			var got []string
-			for _, q := range spy.keyedLists() {
-				if !q.IncludeClosed || q.TierMode != beads.TierBoth {
-					t.Fatalf("%s keyed List = %+v; want every status and both tiers", name, q)
-				}
-				got = append(got, q.IDs...)
-			}
-			sort.Strings(got)
-			if !reflect.DeepEqual(got, tracked) {
-				t.Fatalf("%s keyed ids = %v, want each tracked member once (%v)", name, got, tracked)
-			}
-			if name == "MembersBatch" && len(spy.keyedLists()) != 1 {
-				t.Fatalf("MembersBatch issued %d keyed Lists, want one for every convoy", len(spy.keyedLists()))
-			}
-		})
-	}
+		}
+		if !reflect.DeepEqual(spy.batches, wantBatches) {
+			t.Fatalf("batch reads = %v, want one per convoy tracking several members (%v)", spy.batches, wantBatches)
+		}
+		if !reflect.DeepEqual(spy.gets, wantGets) {
+			t.Fatalf("Get calls = %v, want %v", spy.gets, wantGets)
+		}
+	})
 }
 
 // seedMembershipShapes seeds every convoy shape a member read must handle:
@@ -157,9 +186,9 @@ func seedMembershipShapes(t *testing.T, store *beads.MemStore) []string {
 	convoyD, _ := store.Create(beads.Bead{Title: "convoy D", Type: "convoy"})
 
 	// Convoy E: an ephemeral (wisp-tier) tracked member. Members resolves each
-	// member through a tier-blind Get, so the batched keyed member read must
-	// span both tiers to return the real bead here rather than the dangling
-	// placeholder a tier-filtered read would leave.
+	// member through a tier-blind Get, so the shared member read must return
+	// the real bead here rather than the dangling placeholder a tier-filtered
+	// read would leave.
 	convoyE, _ := store.Create(beads.Bead{Title: "convoy E", Type: "convoy"})
 	e1, _ := store.Create(beads.Bead{Title: "e1", Type: "task", Status: "open", Ephemeral: true})
 	trackOrFatal(t, store, convoyE.ID, e1.ID)
@@ -167,7 +196,7 @@ func seedMembershipShapes(t *testing.T, store *beads.MemStore) []string {
 	return []string{convoyA.ID, convoyB.ID, convoyC.ID, convoyD.ID, convoyE.ID}
 }
 
-// membersByGet resolves a convoy's members the way MembersIn's keyed read must
+// membersByGet resolves a convoy's members the way MembersIn's shared read must
 // reproduce: each tracked member resolved alone with resolveMember.
 func membersByGet(t *testing.T, classes MemberClasses, convoyID string, includeClosed bool) []beads.Bead {
 	t.Helper()
