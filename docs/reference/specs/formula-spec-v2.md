@@ -186,6 +186,7 @@ declaration as an error.
 | `type` | string | `workflow` (default), `expansion`, or `aspect` |
 | `phase` | string | Legacy v1 materialization mechanics, not a v2 authoring choice: `"liquid"` (pour) or `"vapor"`. `phase = "vapor"` without `pour` compiles a root-only recipe — steps are not materialized as beads. This selects how v1 stores a run's work (see the section 0.1 hedge: the storage shape is implementation, not part of the definition of a formula); it is accepted for compatibility and must not be used to design new formulas |
 | `pour` | bool | Materialize each step as a bead row (checkpoint recovery). Default `false`. Monotonic through `extends`: any ancestor's `pour = true` sticks |
+| `retain_input_routes` | bool | Graph-only. Declares that the workflow reacts to its input without driving it, so starting it leaves the input's pool routes in place (section 3). Default `false`. Monotonic through `extends`: any ancestor's `retain_input_routes = true` sticks |
 | `catalog` | table | `{name, description}` opting the formula into workflow-catalog discovery (`gc formula catalog`) |
 | `template` | []table | Expansion template steps for `type = "expansion"` formulas (`{target}` / `{target.description}` placeholders) |
 | `compose` | table | Advanced composition rules: `bond_points`, `hooks`, `expand`, `map`, `branch`, `gate`, `aspects` (section 1.7) |
@@ -551,7 +552,9 @@ The v2 compiler must emit a flat, topologically ordered graph:
 **Root stamping.** The recipe root is type `task` with
 `gc.kind = "workflow"` plus a `gc.formula_contract` marker recording the
 contract identifier (the same literal value accepted by the deprecated
-`contract` key). Sling additionally stamps the root with
+`contract` key). A formula that declares `retain_input_routes = true` also
+stamps `gc.retain_input_routes = "true"` on the root. Sling additionally
+stamps the root with
 `gc.input_convoy_id` (targeted invocations), `gc.graphv2_root_key` (an
 idempotency key deduplicating repeat instantiations of the same workflow),
 and `gc.graphv2_vars.v1` (runtime variable snapshot). Non-batch
@@ -664,8 +667,11 @@ that from both directions:
   keeps any `gc.run_target` it carried, because that is the archived route it
   is restored from once the workflow is gone, and route recovery declines to
   promote an archived route back to `gc.routed_to` while a live workflow
-  drives the bead. A workflow that ends without cleanup does not strand its
-  work — the gate is the workflow's liveness, not a mark left on the bead.
+  drives the bead. A workflow that ends without cleanup therefore does not
+  strand a bead that carries an archived route — the gate is the workflow's
+  liveness, not a mark left on the bead. A bead whose only route was
+  `gc.routed_to` has nothing archived, so once the retire clears that route,
+  route recovery has nothing to restore it from.
 - *A second workflow is refused.* A **sling** invocation targeting work that
   a live v2 workflow already drives fails with `source bead <id> already has
   live workflow(s): <ids>`. The check keys on `gc.input_convoy_id` and, for a
@@ -693,6 +699,17 @@ overridden.
 A plain `gc sling <bead>` (no formula) is not covered by either rule: it
 still routes work a live workflow drives, which re-pools stalled work
 deliberately but is also how a second dispatch surface can reappear.
+
+A workflow that reacts to its input without driving it is not a dispatch
+surface for that work. A formula of this kind reads and annotates its input
+and leaves the dispatch to someone else, for example a triage pass that
+writes notes and then routes the bead to a pool itself. It declares
+`retain_input_routes = true`, and starting its workflow retires nothing:
+`gc.routed_to` on the attached bead and on every input-convoy member stays as
+it was. A pool route the bead already carries stays live while the workflow
+runs and after it ends. The cost is exclusivity, because the input stays
+claimable by its pool for the whole run. The second-workflow refusal still
+applies.
 
 **Attach on a split city.** A city that serves the graph coordination class
 from its own `[storage]` binding refuses most of `gc formula cook --attach`
@@ -1081,8 +1098,8 @@ supported requirements: formula_compiler`.
 
 ### Explicit declaration rule
 
-Graph-only constructs — `check`, `retry`, `drain`, `on_complete`, and
-reserved `gc.*` step metadata (the
+Graph-only constructs — `check`, `retry`, `drain`, `on_complete`, the
+top-level `retain_input_routes`, and reserved `gc.*` step metadata (the
 section 2 kind values, `gc.scope_name`, `gc.scope_role`, `gc.scope_ref`,
 `gc.continuation_group`, `gc.on_fail`) — require an explicit declaration.
 Compiling without one must fail with:

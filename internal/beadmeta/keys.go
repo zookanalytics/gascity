@@ -229,6 +229,7 @@ const (
 	ReasoningMetadataKey                = "gc.reasoning"
 	RequiredArtifactMetadataKey         = "gc.required_artifact"
 	RequiredArtifactsMetadataKey        = "gc.required_artifacts"
+	RetainInputRoutesMetadataKey        = "gc.retain_input_routes" // see formula.Formula.RetainInputRoutes
 	ReviewGateMetadataKey               = "gc.review_gate"
 	RetryAttemptMetadataKey             = "gc.retry_attempt" // see attempt.go
 	RetryCountMetadataKey               = "gc.retry_count"
@@ -630,6 +631,7 @@ var KnownMetadataKeys = []string{
 	ReasoningMetadataKey,
 	RequiredArtifactMetadataKey,
 	RequiredArtifactsMetadataKey,
+	RetainInputRoutesMetadataKey,
 	ReviewGateMetadataKey,
 	RetryAttemptMetadataKey,
 	RetryCountMetadataKey,
