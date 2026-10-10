@@ -49,6 +49,7 @@ for last do :; done
 printf 'partial binary' > "$last"
 exit 1
 `)
+	writeOfflineBrew(t, binDir)
 
 	makefile, err := os.ReadFile(filepath.Join(repoRoot, "Makefile"))
 	if err != nil {
