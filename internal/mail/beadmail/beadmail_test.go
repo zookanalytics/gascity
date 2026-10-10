@@ -351,8 +351,10 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, recipient) {
-				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+			// bd 1.0.4's query lexer rejects a bare '/', so the recipient may
+			// reach the supplemental wisp query only as a quoted value.
+			if strings.Contains(strings.ReplaceAll(cmd, `"`+recipient+`"`, ""), recipient) {
+				t.Fatalf("slash recipient reached the supplemental wisp query unquoted: %s", cmd)
 			}
 			return []byte(`[]`), nil
 		}
