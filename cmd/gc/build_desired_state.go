@@ -4126,6 +4126,7 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 	if err != nil {
 		return info, err
 	}
+	workDir = keepLiveTemplateWorkDir(bp, cfgAgent, qualifiedName, info, workDir)
 	patch := computePoolTriggerBindingPatch(info, request, workDir)
 	if len(patch) == 0 {
 		return info, nil
@@ -4144,6 +4145,45 @@ func bindPoolSessionTriggerBead(bp *agentBuildParams, cfgAgent *config.Agent, qu
 		return info, bindWriteFailure(request, err)
 	}
 	return boundInfo, nil
+}
+
+// keepLiveTemplateWorkDir returns the work dir the binding records for info,
+// given derivedWorkDir, the dir derived for the binding identity qualifiedName.
+// A pool capped at one session (config.Agent.UsesCanonicalSingletonPoolIdentity)
+// runs that session under the template identity, in the template's work dir.
+// When the cap rises while the session is active, syncSessionBeads moves it to
+// a concrete slot identity at once and leaves its work_dir alone, because the
+// process keeps running where it started. The binding derives the slot's own
+// dir from the new identity, so while the session stays active it keeps the
+// template dir instead, in either wake mode and whichever bead the session
+// holds. The first start after the session stops moves the record to the
+// slot's dir (repairConcretePoolTemplateWorkDirOverride). A derived dir other
+// than the slot's own dir, such as a pack workspace or a managed worktree,
+// comes from the work bead and is returned unchanged.
+func keepLiveTemplateWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, derivedWorkDir string) string {
+	if bp == nil || cfgAgent == nil || derivedWorkDir == "" || info.ManualSession || info.State != session.StateActive {
+		return derivedWorkDir
+	}
+	template := cfgAgent.QualifiedName()
+	if qualifiedName == template || !cfgAgent.SupportsMultipleSessions() || cfgAgent.UsesCanonicalSingletonPoolIdentity() {
+		return derivedWorkDir
+	}
+	recorded := strings.TrimSpace(info.WorkDirCanonical)
+	if recorded == "" {
+		recorded = strings.TrimSpace(info.WorkDir)
+	}
+	if recorded == "" || recorded == derivedWorkDir {
+		return derivedWorkDir
+	}
+	templateDir, err := resolveConfiguredWorkDirPathUnvalidated(bp.cityPath, bp.cityName, template, cfgAgent, bp.rigs)
+	if err != nil || !samePath(recorded, templateDir) {
+		return derivedWorkDir
+	}
+	slotDir, err := resolveConfiguredWorkDirPathUnvalidated(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	if err != nil || !samePath(derivedWorkDir, slotDir) {
+		return derivedWorkDir
+	}
+	return recorded
 }
 
 // bindWriteFailure marks a failed binding write on a managed-worktree

@@ -4745,6 +4745,287 @@ func TestRealizePoolDesiredSessionsLiveRetryPreservesLauncherWorkDir(t *testing.
 	}
 }
 
+// TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops runs the controller's
+// realize-then-sync order across a pool cap raise. A pool capped at one session
+// runs that session under its template identity, in the template's work dir.
+// Raising the cap moves the awake session to slot 1 at once, but its process
+// keeps running in the template dir, so its session bead keeps naming that dir
+// while it is awake, including after it claims its next bead. The first start
+// after the session stops moves the record to the slot's dir.
+func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
+	for _, wakeMode := range []string{"fresh", "resume"} {
+		t.Run("wake_mode="+wakeMode, func(t *testing.T) {
+			cityPath := t.TempDir()
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			clk := &clock.Fake{Time: time.Date(2026, 10, 9, 5, 15, 0, 0, time.UTC)}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+					WakeMode:          wakeMode,
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			templateDir := filepath.Join(cityPath, ".gc", "workspaces", "worker")
+			slotDir := filepath.Join(cityPath, ".gc", "workspaces", "worker-1")
+
+			// tick realizes the pool's requests and then syncs the session
+			// beads, the order the controller runs them in.
+			var stderr bytes.Buffer
+			tick := func(demand func(open []sessionpkg.Info) PoolDesiredState) map[string]TemplateParams {
+				t.Helper()
+				snapshot, err := loadSessionBeadSnapshot(store)
+				if err != nil {
+					t.Fatalf("loading session beads: %v", err)
+				}
+				bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, &stderr)
+				bp.sessionBeads = snapshot
+				desired := map[string]TemplateParams{}
+				realizePoolDesiredSessions(bp, &cfg.Agents[0], demand(snapshot.OpenInfos()), desired, &stderr)
+				syncSessionBeads(cityPath, store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, true)
+				return desired
+			}
+			// claimed is the demand for a bead the session claimed itself.
+			claimed := func(work beads.Bead) func([]sessionpkg.Info) PoolDesiredState {
+				return func(open []sessionpkg.Info) PoolDesiredState {
+					t.Helper()
+					states := ComputePoolDesiredStates(cfg, []beads.Bead{work}, open, nil)
+					if len(states) != 1 || len(states[0].Requests) != 1 {
+						t.Fatalf("demand for %s = %#v, want one request", work.ID, states)
+					}
+					if request := states[0].Requests[0]; request.Tier != "resume" || request.SessionBeadID != work.Assignee || request.WorkBeadID != work.ID {
+						t.Fatalf("request = %#v, want resume of %s for %s", request, work.Assignee, work.ID)
+					}
+					return states[0]
+				}
+			}
+			onlySession := func() beads.Bead {
+				t.Helper()
+				open, err := loadSessionBeads(store)
+				if err != nil {
+					t.Fatalf("loading session beads: %v", err)
+				}
+				var live []beads.Bead
+				for _, b := range open {
+					if b.Status != "closed" {
+						live = append(live, b)
+					}
+				}
+				if len(live) != 1 {
+					t.Fatalf("open session beads = %d, want 1; stderr=%q", len(live), stderr.String())
+				}
+				return live[0]
+			}
+			assertWorkDir := func(stage string, want string) {
+				t.Helper()
+				got := onlySession()
+				if dir := got.Metadata[beadmeta.WorkDirMetadataKey]; dir != want {
+					t.Fatalf("%s: gc.work_dir = %q, want %q", stage, dir, want)
+				}
+				if dir := got.Metadata[beadmeta.LegacyWorkDirMetadataKey]; dir != want {
+					t.Fatalf("%s: work_dir = %q, want %q", stage, dir, want)
+				}
+			}
+
+			// Capped at one session, the pool's only session takes the
+			// template identity and the template's work dir.
+			tick(func([]sessionpkg.Info) PoolDesiredState {
+				return PoolDesiredState{Template: "worker", Requests: []SessionRequest{{Template: "worker", Tier: "new", WorkBeadID: "wb-1"}}}
+			})
+			created := onlySession()
+			if got := created.Metadata["agent_name"]; got != "worker" {
+				t.Fatalf("capped agent_name = %q, want template identity %q", got, "worker")
+			}
+			assertWorkDir("capped create", templateDir)
+
+			// The session starts there and claims its bead.
+			if err := sp.Start(context.Background(), created.Metadata["session_name"], runtime.Config{WorkDir: templateDir}); err != nil {
+				t.Fatalf("starting fake runtime: %v", err)
+			}
+			if err := store.SetMetadataBatch(created.ID, map[string]string{"state": string(sessionpkg.StateAwake)}); err != nil {
+				t.Fatalf("marking session awake: %v", err)
+			}
+
+			// The cap rises while the session is awake. Its identity moves to
+			// slot 1 at once; its work_dir stays where the process runs.
+			cfg.Agents[0].MaxActiveSessions = intPtr(5)
+			tick(claimed(workBead("wb-1", "worker", created.ID, "in_progress", 2)))
+			moved := onlySession()
+			if got := moved.Metadata["agent_name"]; got != "worker-1" {
+				t.Fatalf("raised agent_name = %q, want slot identity %q", got, "worker-1")
+			}
+			if got := moved.Metadata["pool_slot"]; got != "1" {
+				t.Fatalf("raised pool_slot = %q, want 1", got)
+			}
+			assertWorkDir("cap raise", templateDir)
+
+			// The awake session finishes wb-1 and claims wb-2 itself. The
+			// binding moves the trigger to wb-2 but not the work_dir.
+			desired := tick(claimed(workBead("wb-2", "worker", created.ID, "in_progress", 2)))
+			if got := onlySession().Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "wb-2" {
+				t.Fatalf("trigger bead = %q, want wb-2", got)
+			}
+			assertWorkDir("next claim while awake", templateDir)
+
+			// The session stops. Its next start runs in the slot's dir and
+			// moves the record there.
+			if err := sp.Stop(created.Metadata["session_name"]); err != nil {
+				t.Fatalf("stopping fake runtime: %v", err)
+			}
+			if err := store.SetMetadataBatch(created.ID, map[string]string{"state": string(sessionpkg.StateAsleep)}); err != nil {
+				t.Fatalf("marking session asleep: %v", err)
+			}
+			stopped := onlySession()
+			tp, ok := desired[stopped.Metadata["session_name"]]
+			if !ok {
+				t.Fatalf("desired state has no entry for %q", stopped.Metadata["session_name"])
+			}
+			prepared, _, err := buildPreparedStartWithWorkDirResolver(startCandidate{
+				info: sessiontest.SeedBead(t, stopped),
+				tp:   tp,
+			}, cityPath, cfg, store, nil)
+			if err != nil {
+				t.Fatalf("preparing the next start: %v", err)
+			}
+			if prepared.cfg.WorkDir != slotDir {
+				t.Fatalf("next start work dir = %q, want slot dir %q", prepared.cfg.WorkDir, slotDir)
+			}
+			assertWorkDir("next start", slotDir)
+		})
+	}
+}
+
+func TestKeepLiveTemplateWorkDir(t *testing.T) {
+	root := t.TempDir()
+	cityPath := filepath.Join(root, "city")
+	if err := os.MkdirAll(cityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedCityPath := filepath.Join(root, "city-link")
+	if err := os.Symlink(cityPath, linkedCityPath); err != nil {
+		t.Skipf("symlink unsupported here: %v", err)
+	}
+	templateDir := filepath.Join(cityPath, ".gc", "workspaces", "worker")
+	slotDir := filepath.Join(cityPath, ".gc", "workspaces", "worker-1")
+	beadWorktree := filepath.Join(cityPath, ".gc", "worktrees", "wb-2")
+	pool := func(maxSessions int) *config.City {
+		return &config.City{
+			Workspace: config.Workspace{Name: "test-city"},
+			Agents: []config.Agent{{
+				Name:              "worker",
+				StartCommand:      "true",
+				WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+				MinActiveSessions: intPtr(0),
+				MaxActiveSessions: intPtr(maxSessions),
+			}},
+		}
+	}
+	tests := []struct {
+		name          string
+		maxSessions   int
+		qualifiedName string
+		metadata      map[string]string
+		derived       string
+		want          string
+	}{
+		{
+			name:          "live session keeps the template dir its process runs in",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAwake), beadmeta.WorkDirMetadataKey: templateDir, beadmeta.LegacyWorkDirMetadataKey: templateDir},
+			derived:       slotDir,
+			want:          templateDir,
+		},
+		{
+			name:          "legacy work_dir alone names the template dir",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateActive), beadmeta.LegacyWorkDirMetadataKey: templateDir},
+			derived:       slotDir,
+			want:          templateDir,
+		},
+		{
+			name:          "symlinked spelling of the template dir is kept as recorded",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata: map[string]string{
+				"state":                     string(sessionpkg.StateAwake),
+				beadmeta.WorkDirMetadataKey: filepath.Join(linkedCityPath, ".gc", "workspaces", "worker"),
+			},
+			derived: slotDir,
+			want:    filepath.Join(linkedCityPath, ".gc", "workspaces", "worker"),
+		},
+		{
+			name:          "stopped session takes the slot dir",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAsleep), beadmeta.WorkDirMetadataKey: templateDir},
+			derived:       slotDir,
+			want:          slotDir,
+		},
+		{
+			name:          "creating session takes the slot dir",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateCreating), beadmeta.WorkDirMetadataKey: templateDir},
+			derived:       slotDir,
+			want:          slotDir,
+		},
+		{
+			name:          "manual session takes the derived dir",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAwake), "manual_session": "true", beadmeta.WorkDirMetadataKey: templateDir},
+			derived:       slotDir,
+			want:          slotDir,
+		},
+		{
+			name:          "work bead's own dir follows the trigger",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAwake), beadmeta.WorkDirMetadataKey: templateDir},
+			derived:       beadWorktree,
+			want:          beadWorktree,
+		},
+		{
+			name:          "recorded dir that is not the template dir follows the binding",
+			maxSessions:   5,
+			qualifiedName: "worker-1",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAwake), beadmeta.WorkDirMetadataKey: beadWorktree},
+			derived:       slotDir,
+			want:          slotDir,
+		},
+		{
+			name:          "singleton pool binds the template identity",
+			maxSessions:   1,
+			qualifiedName: "worker",
+			metadata:      map[string]string{"state": string(sessionpkg.StateAwake), beadmeta.WorkDirMetadataKey: slotDir},
+			derived:       templateDir,
+			want:          templateDir,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := pool(tt.maxSessions)
+			bp := newAgentBuildParams("test-city", cityPath, cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), io.Discard)
+			info := sessiontest.SeedBead(t, beads.Bead{
+				ID:       "session-1",
+				Type:     sessionBeadType,
+				Status:   "open",
+				Labels:   []string{sessionBeadLabel},
+				Metadata: tt.metadata,
+			})
+			if got := keepLiveTemplateWorkDir(bp, &cfg.Agents[0], tt.qualifiedName, info, tt.derived); got != tt.want {
+				t.Fatalf("keepLiveTemplateWorkDir = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRealizePoolDesiredSessionsBudgetExhaustionStillAllowsLaterReuse(t *testing.T) {
 	maxWakes := 1
 	store := beads.NewMemStore()
