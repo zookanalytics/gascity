@@ -7142,7 +7142,7 @@ func materializeProviderOverlaysBeforeFingerprint(
 	// runs immediately after this staging on the SAME workDir (see
 	// prepareTemplateResolution), so it must be the sole writer of those files
 	// ON THE RECONCILE TICK. Staging them too leaves two writers with
-	// disagreeing hook-entry matchers and a permanent codex-hooks-drift hybrid.
+	// disagreeing hook-entry matchers and a permanent hybrid hook document.
 	// The runtime task-worktree staging path keeps staging them — it is their
 	// sole writer.
 	//
@@ -7175,27 +7175,25 @@ func materializeProviderOverlaysBeforeFingerprint(
 			fmt.Fprintf(stderr, "agent %q: overlay %q: %v\n", qualifiedName, overlayDir, err) //nolint:errcheck
 		}
 	}
-	normalizeStagedCodexHooks(bp, overlayProviders, qualifiedName, workDir, stderr)
+	stripStagedCodexHooks(bp, overlayProviders, qualifiedName, workDir, stderr)
 }
 
-// normalizeStagedCodexHooks rebinds a Codex hooks file that overlay staging
-// just wrote into workDir. Staging copies a pack's per-provider/codex overlay
-// verbatim — unbound to this city and with prompt hooks unwrapped — while
-// hooks.Install, the writer that applies the managed normalization, runs only
-// when install_agent_hooks is non-empty. An agent whose resolved provider is
-// codex stages that slot without declaring it, so nothing normalized the file.
+// stripStagedCodexHooks removes Gas City's managed hooks from a Codex agent's
+// workDir hooks file. A Codex session gets those hooks from its launch command
+// (hooks.CodexLaunchArgs), so a copy in a file Codex also reads, as it does for
+// a workDir that is not a linked git worktree, runs each of them twice. The
+// copies come from earlier staging and from pack overlays that ship gc's own
+// hook commands. Hook entries Gas City does not manage stay in the file.
 //
 // The codex-hooks-drift doctor check audits the same provider-derived surface
 // (agentUsesCodexHookSurface matches the resolved provider, not install hooks),
-// which left it permanently red: each reconciler tick re-staged the raw overlay
-// over whatever `gc doctor --fix` had just upgraded, so the check re-flagged
-// files it had already fixed and never went green (gc-beez).
-func normalizeStagedCodexHooks(bp *agentBuildParams, overlayProviders []string, qualifiedName, workDir string, stderr io.Writer) {
+// so a file this pass strips reads clean there.
+func stripStagedCodexHooks(bp *agentBuildParams, overlayProviders []string, qualifiedName, workDir string, stderr io.Writer) {
 	for _, name := range overlayProviders {
 		if !codexHookProviderName(name, bp.providers) {
 			continue
 		}
-		if err := hooks.NormalizeManagedCodexHooks(bp.fs, bp.cityPath, workDir); err != nil {
+		if err := hooks.StripManagedCodexHooks(bp.fs, workDir); err != nil {
 			fmt.Fprintf(stderr, "agent %q: codex hooks: %v\n", qualifiedName, err) //nolint:errcheck
 		}
 		return

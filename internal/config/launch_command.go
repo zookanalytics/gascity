@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -23,7 +24,8 @@ type ProviderLaunchCommand struct {
 // BuildProviderLaunchCommand composes the final provider launch command used
 // for session startup. It starts from the raw provider command, applies
 // schema-managed defaults plus any explicit option overrides, and appends a
-// provider-owned settings file when present.
+// provider-owned settings file when present and the arguments that register
+// Gas City's managed hooks for providers that take them at launch.
 //
 // When transport is "acp", the ACP-specific command (ACPCommand/ACPArgs) is
 // used as the base instead of the default Command/Args. Pass "" for the
@@ -45,7 +47,7 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		command = ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
 	}
 
-	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), command), nil
+	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), command)
 }
 
 // BuildProviderResumeCommand applies schema-managed option overrides to a
@@ -82,8 +84,9 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 }
 
 // BuildProviderLaunchCommandWithoutOptions composes the transport-specific
-// provider command plus any provider-owned settings file without applying
-// schema-managed defaults or explicit option overrides.
+// provider command plus any provider-owned settings file and launch hook
+// registration without applying schema-managed defaults or explicit option
+// overrides.
 //
 // Deferred agent-session creation uses this helper because option state is
 // stored separately in template_overrides and applied later at actual start
@@ -96,7 +99,7 @@ func BuildProviderLaunchCommandWithoutOptions(cityPath string, resolved *Resolve
 	if !IsValidSessionTransport(transport) {
 		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
 	}
-	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), providerLaunchBaseCommand(resolved, transport)), nil
+	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), providerLaunchBaseCommand(resolved, transport))
 }
 
 func providerLaunchBaseCommand(resolved *ResolvedProvider, transport string) string {
@@ -178,17 +181,40 @@ func unquoteSessionKeyTemplate(command string) string {
 	return strings.ReplaceAll(command, "'{{.SessionKey}}'", "{{.SessionKey}}")
 }
 
-func appendProviderSettings(cityPath, providerName, command string) ProviderLaunchCommand {
+func appendProviderSettings(cityPath, providerName, command string) (ProviderLaunchCommand, error) {
 	settingsPath, settingsRel := ProviderSettingsSource(cityPath, providerName)
 	if settingsPath != "" {
 		command = command + " " + fmt.Sprintf("--settings %q", settingsPath)
+	}
+	hookArgs, err := ProviderHookLaunchArgs(cityPath, providerName)
+	if err != nil {
+		return ProviderLaunchCommand{}, err
+	}
+	if len(hookArgs) > 0 {
+		command = command + " " + shellquote.Join(hookArgs)
 	}
 
 	return ProviderLaunchCommand{
 		Command:      command,
 		SettingsPath: settingsPath,
 		SettingsRel:  settingsRel,
+	}, nil
+}
+
+// ProviderHookLaunchArgs returns the arguments a launch of the given provider
+// family carries to register Gas City's managed hooks for that session. Codex
+// is the family that takes them this way: in a linked git worktree it reads no
+// hooks file from the session's directory. Every other family reads its hooks
+// from files, and gets none.
+func ProviderHookLaunchArgs(cityPath, family string) ([]string, error) {
+	if family != "codex" {
+		return nil, nil
 	}
+	args, err := hooks.CodexLaunchArgs(cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("registering Codex hooks: %w", err)
+	}
+	return args, nil
 }
 
 func providerSettingsFamily(resolved *ResolvedProvider) string {

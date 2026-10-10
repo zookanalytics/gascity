@@ -722,7 +722,8 @@ func completeResolvedProviderResumeCommand(rp *ResolvedProvider) {
 // (either auto-installed or manually). The determination considers:
 //
 //  1. Explicit override: agent.HooksInstalled is set → use that value.
-//  2. Claude-family always has hooks (via --settings override).
+//  2. Claude-family always has hooks (via --settings override), and
+//     Codex-family always has hooks (via its launch -c hooks override).
 //  3. Provider name appears in the resolved install_agent_hooks list.
 //  4. Otherwise: no hooks.
 //
@@ -737,10 +738,10 @@ func AgentHasHooks(agent *Agent, ws *Workspace, providerName string, cityProvide
 	if agent.HooksInstalled != nil {
 		return *agent.HooksInstalled
 	}
-	// 2. Claude-family always has hooks via --settings. Use BuiltinFamily
-	//    so wrapped custom providers (e.g. claude-max with
-	//    base = "builtin:claude") are correctly recognized.
-	if BuiltinFamily(providerName, cityProviders) == "claude" {
+	// 2. Claude-family and Codex-family always have hooks, registered on the
+	//    launch command. Use BuiltinFamily so wrapped custom providers (e.g.
+	//    claude-max with base = "builtin:claude") are correctly recognized.
+	if family := BuiltinFamily(providerName, cityProviders); family == "claude" || family == "codex" {
 		return true
 	}
 	// 3. Check install_agent_hooks (agent-level overrides workspace-level).

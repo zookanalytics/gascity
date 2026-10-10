@@ -3,12 +3,14 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "hooks",
     srcs = [
+        "codex.go",
         "hooks.go",
         "preserve.go",
     ],
     embedsrcs = [
         "config/README.md",
         "config/claude.json",
+        "config/codex.json",
     ],
     importpath = "github.com/gastownhall/gascity/internal/hooks",
     visibility = ["//:__subpackages__"],
@@ -24,10 +26,13 @@ go_library(
 go_test(
     name = "hooks_test",
     srcs = [
+        "codex_hooks_list_integration_test.go",
+        "codex_test.go",
         "hooks_family_test.go",
         "hooks_test.go",
         "overlay_provider_hook_path_shape_test.go",
         "preserve_test.go",
+        "supports_hooks_sync_test.go",
         "testenv_import_test.go",
     ],
     embed = [":hooks"],
@@ -38,6 +43,8 @@ go_test(
         "//internal/overlay",
         "//internal/shellquote",
         "//internal/testenv",
+        "//internal/testutil",
+        "@com_github_burntsushi_toml//:toml",
     ],
 )
 

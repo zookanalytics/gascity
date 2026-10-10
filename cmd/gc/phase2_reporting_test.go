@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	workertest "github.com/gastownhall/gascity/internal/worker/workertest"
 )
 
@@ -49,6 +50,9 @@ func startupCommandMaterializationResult(tc phase2ProviderCase, tp TemplateParam
 	case !containsOrderedArgs(tp.Command, tp.ResolvedProvider.ResolveDefaultArgs()):
 		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
 			fmt.Sprintf("Command = %q, want default args %v", tp.Command, tp.ResolvedProvider.ResolveDefaultArgs())).WithEvidence(evidence)
+	case tc.wantCodexHooksArg && codexHooksArgCount(tp.Command) != 1:
+		return workertest.Fail(tc.profileID, workertest.RequirementStartupCommandMaterialization,
+			fmt.Sprintf("Command = %q, want one -c hooks= launch hook registration", tp.Command)).WithEvidence(evidence)
 	case tc.wantSettingsArg:
 		settingsPath, ok := commandFlagValue(tp.Command, "--settings")
 		if !ok {
@@ -463,4 +467,16 @@ func phase2PreparedEvidence(tc phase2ProviderCase, prepared *preparedStart) map[
 	}
 
 	return evidence
+}
+
+// codexHooksArgCount counts the -c hooks= overrides in command.
+func codexHooksArgCount(command string) int {
+	count := 0
+	tokens := shellquote.Split(command)
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i] == "-c" && strings.HasPrefix(tokens[i+1], "hooks=") {
+			count++
+		}
+	}
+	return count
 }

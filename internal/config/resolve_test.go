@@ -1999,16 +1999,35 @@ func TestAgentHasHooks_InstallHooksMatch(t *testing.T) {
 func TestAgentHasHooks_InstallHooksNoMatch(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{InstallAgentHooks: []string{"claude"}}
-	if AgentHasHooks(agent, ws, "codex", nil) {
-		t.Error("codex not in install_agent_hooks should not have hooks")
+	if AgentHasHooks(agent, ws, "gemini", nil) {
+		t.Error("gemini not in install_agent_hooks should not have hooks")
 	}
 }
 
 func TestAgentHasHooks_NoHooksByDefault(t *testing.T) {
 	agent := &Agent{Name: "worker"}
 	ws := &Workspace{Name: "test"}
-	if AgentHasHooks(agent, ws, "codex", nil) {
-		t.Error("codex with no install_agent_hooks should not have hooks")
+	if AgentHasHooks(agent, ws, "gemini", nil) {
+		t.Error("gemini with no install_agent_hooks should not have hooks")
+	}
+}
+
+func TestAgentHasHooks_CodexAlways(t *testing.T) {
+	agent := &Agent{Name: "worker"}
+	ws := &Workspace{Name: "test"}
+	if !AgentHasHooks(agent, ws, "codex", nil) {
+		t.Error("codex should always have hooks: they ride its launch command")
+	}
+	base := "builtin:codex"
+	cityProviders := map[string]ProviderSpec{
+		"codex-mini": {Base: &base, Command: "codex"},
+	}
+	if !AgentHasHooks(agent, ws, "codex-mini", cityProviders) {
+		t.Error("codex-mini (wrapped codex) should be recognized as codex-family and have hooks")
+	}
+	no := false
+	if AgentHasHooks(&Agent{Name: "worker", HooksInstalled: &no}, ws, "codex", nil) {
+		t.Error("hooks_installed=false should override codex")
 	}
 }
 
@@ -2016,7 +2035,7 @@ func TestAgentHasHooks_ExplicitOverrideTrue(t *testing.T) {
 	yes := true
 	agent := &Agent{Name: "worker", HooksInstalled: &yes}
 	ws := &Workspace{Name: "test"}
-	if !AgentHasHooks(agent, ws, "codex", nil) {
+	if !AgentHasHooks(agent, ws, "gemini", nil) {
 		t.Error("hooks_installed=true should override to true")
 	}
 }

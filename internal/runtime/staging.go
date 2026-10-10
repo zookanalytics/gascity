@@ -182,7 +182,7 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 // which stages overlays and then immediately runs hooks.Install on the SAME
 // directory. Skipping the mergeable files here makes hooks.Install the sole
 // writer ON THE RECONCILE TICK, so the two writers can no longer disagree on
-// hook-entry matchers and leave a permanent codex-hooks-drift hybrid.
+// hook-entry matchers and leave a permanent hybrid hook document.
 //
 // Not a global invariant: for a persistent (non-task) agent the home dir is
 // also the session workDir, and session-start staging reaches these same paths
