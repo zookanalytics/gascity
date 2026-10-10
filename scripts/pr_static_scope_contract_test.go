@@ -217,6 +217,88 @@ func TestLintChangedBuildsNogoForChangedBazelPackages(t *testing.T) {
 	})
 }
 
+// TestLintChangedGoLintsAndVetsChangedPackages pins nogo's plain-Go twin, the
+// pre-commit lint step on hosts without bazel: golangci-lint and go vet over
+// the packages of the changed Go files lint-changed would select, and no
+// Bazel.
+func TestLintChangedGoLintsAndVetsChangedPackages(t *testing.T) {
+	t.Run("changed Go files select their packages", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"root.go":                   "package root\n",
+			"alpha/alpha.go":            "package alpha\n\nfunc Value() int { return 1 }\n",
+			"alpha/alpha_test.go":       "package alpha\n",
+			"alpha/testdata/fixture.go": "package fixture\n",
+			"beta/beta.go":              "package beta\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha_test.go"), "package alpha\n\n// changed\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "testdata", "fixture.go"), "package fixture\n\n// changed\n")
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "root.go"), "package root\n\n// changed\n")
+
+		fixture.resetCalls(t)
+		vetLog, env := fixture.withVetRecorder(t)
+		if output, err := fixture.runMakeTargetWithEnv("lint-changed-go", env...); err != nil {
+			t.Fatalf("lint-changed-go failed: %v\n%s", err, output)
+		}
+		fixture.requireCalls(t, []string{"run", ".", "./alpha"})
+		requireFramedCalls(t, "go vet", readFramedCalls(t, vetLog, "go vet"), [][]string{{"vet", ".", "./alpha"}})
+		fixture.requireBazelCalls(t)
+	})
+
+	t.Run("non-Go diff", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n",
+			"README.md":      "baseline\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "README.md"), "documentation only\n")
+
+		fixture.resetCalls(t)
+		vetLog, env := fixture.withVetRecorder(t)
+		if output, err := fixture.runMakeTargetWithEnv("lint-changed-go", env...); err != nil {
+			t.Fatalf("lint-changed-go failed for a non-Go diff: %v\n%s", err, output)
+		}
+		fixture.requireNoCalls(t)
+		requireFramedCalls(t, "go vet", readFramedCalls(t, vetLog, "go vet"), nil)
+	})
+}
+
+// TestLintEnvPinsTheGoModToolchain: golangci-lint type-checks the standard
+// library from source, so the lint targets run it under go.mod's Go rather
+// than whatever go, or GOTOOLCHAIN, the host carries. LINT_GOTOOLCHAIN
+// overrides the pin.
+func TestLintEnvPinsTheGoModToolchain(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+		want string
+	}{
+		// The fixture's go.mod says `go 1.23`, and its environment sets
+		// GOTOOLCHAIN=local, which the pin replaces.
+		{name: "go.mod's version", want: "go1.23"},
+		{name: "LINT_GOTOOLCHAIN override", env: []string{"LINT_GOTOOLCHAIN=local"}, want: "local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newPRStaticScopeFixture(t, map[string]string{
+				"alpha/alpha.go": "package alpha\n",
+			})
+			writeExecutable(t, fixture.fakeLint, `#!/bin/sh
+printf '%s\n' "${GOTOOLCHAIN-unset}" >> "$STATIC_SCOPE_LINT_LOG"
+`)
+			fixture.resetCalls(t)
+			if output, err := fixture.runMakeTargetWithEnv("lint-golangci", tc.env...); err != nil {
+				t.Fatalf("lint-golangci failed: %v\n%s", err, output)
+			}
+			body, err := os.ReadFile(fixture.lintLog)
+			if err != nil {
+				t.Fatalf("read fake golangci-lint log: %v", err)
+			}
+			if got := strings.TrimSpace(string(body)); got != tc.want {
+				t.Errorf("golangci-lint ran with GOTOOLCHAIN=%q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 type prStaticScopeFixture struct {
 	repoRoot           string
 	productionMakefile string
@@ -294,6 +376,40 @@ func (f prStaticScopeFixture) runMakeTarget(target string) (string, error) {
 }
 
 func (f prStaticScopeFixture) runMakeTargetWithRef(target, ref string) (string, error) {
+	return f.runMake(target, ref)
+}
+
+// runMakeTargetWithEnv runs target against HEAD with env appended to the
+// fixture's environment (a later entry wins).
+func (f prStaticScopeFixture) runMakeTargetWithEnv(target string, env ...string) (string, error) {
+	return f.runMake(target, "HEAD", env...)
+}
+
+// withVetRecorder returns the log a fake `go` records each `go vet` argv to,
+// NUL-framed, and the PATH entry that puts that fake first; every other go
+// subcommand runs the next go on PATH.
+func (f prStaticScopeFixture) withVetRecorder(t *testing.T) (string, []string) {
+	t.Helper()
+	vetLog := filepath.Join(t.TempDir(), "vet.calls")
+	bin := t.TempDir()
+	writeExecutable(t, filepath.Join(bin, "go"), `#!/bin/sh
+set -eu
+if [ "${1-}" = vet ]; then
+  printf 'CALL\000' >> "`+vetLog+`"
+  for arg in "$@"; do
+    printf 'ARG\000%s\000' "$arg" >> "`+vetLog+`"
+  done
+  printf 'END\000' >> "`+vetLog+`"
+  exit 0
+fi
+PATH="${PATH#*:}"
+export PATH
+exec go "$@"
+`)
+	return vetLog, []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH")}
+}
+
+func (f prStaticScopeFixture) runMake(target, ref string, env ...string) (string, error) {
 	cmd := makeCommand(
 		"--no-print-directory",
 		"-f", f.productionMakefile,
@@ -306,7 +422,7 @@ func (f prStaticScopeFixture) runMakeTargetWithRef(target, ref string) (string, 
 		target,
 	)
 	cmd.Dir = f.repoRoot
-	cmd.Env = f.commandEnv()
+	cmd.Env = append(f.commandEnv(), env...)
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -328,6 +444,7 @@ func (f prStaticScopeFixture) commandEnv() []string {
 			name == "GOENV" ||
 			name == "GOWORK" ||
 			name == "LINT_FLAGS" ||
+			name == "LINT_GOTOOLCHAIN" ||
 			name == "GIT_CONFIG" ||
 			strings.HasPrefix(name, "GIT_CONFIG_") {
 			continue

@@ -100,20 +100,35 @@ exit 1
 }
 
 // golangciLintGuardTarget is the prerequisite every lint/fmt target uses to get
-// a golangci-lint that matches GOLANGCI_LINT_VERSION.
+// a golangci-lint that matches GOLANGCI_LINT_VERSION, built with the Go the
+// lint targets run it under.
 const golangciLintGuardTarget = "golangci-lint-pinned"
 
-// fakeGolangciLint reports version in the layout golangci-lint itself uses, so
-// the guard's parse is exercised rather than bypassed.
-func fakeGolangciLint(version string) string {
+// fakeGolangciLint reports version and the Go that built it in the layout
+// golangci-lint itself uses, so the guard's parse is exercised rather than
+// bypassed.
+func fakeGolangciLint(version, builtWith string) string {
 	return fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "version" ]; then
-	echo "golangci-lint has version %s built with go1.26.6 from (unknown) on (unknown)"
+	echo "golangci-lint has version %s built with %s from (unknown) on (unknown)"
 	exit 0
 fi
 echo "unexpected golangci-lint invocation: $*" >&2
 exit 1
-`, version)
+`, version, builtWith)
+}
+
+// goModGo is the Go that go.mod's go directive names, as the Makefile's
+// LINT_GOTOOLCHAIN default reads it: go<version> from the first go line.
+func goModGo(t *testing.T, root string) string {
+	t.Helper()
+	for _, line := range strings.Split(readFile(t, root, "go.mod"), "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "go" {
+			return "go" + fields[1]
+		}
+	}
+	t.Fatal("go.mod no longer declares a go directive")
+	return ""
 }
 
 // golangciLintPin reads the pinned version out of the Makefile. CI parses the
@@ -140,17 +155,23 @@ type golangciLintGuardFixture struct {
 	installLog string
 	freshLint  string
 	pin        string
+	goModGo    string
 }
 
 // newGolangciLintGuardFixture points BIN_DIR at a scratch directory holding a
-// golangci-lint that reports installedVersion (empty means none installed), and
-// puts a `go` shim ahead of the real one that records `go install` and copies in
-// a binary reporting the pin instead of reaching the network. Every other `go`
-// invocation delegates, so the Makefile's parse-time `go env` calls still work.
-func newGolangciLintGuardFixture(t *testing.T, installedVersion string) *golangciLintGuardFixture {
+// golangci-lint that reports installedVersion built with installedGo (an empty
+// installedVersion means none installed), and puts a `go` shim ahead of the
+// real one. The shim records each `go install` with the GOTOOLCHAIN it ran
+// under and copies in a binary reporting the pin instead of reaching the
+// network. It answers `go env GOVERSION` as the go command does for a
+// GOTOOLCHAIN of the form go<version>, by naming that version, so no test
+// needs a second Go toolchain. Every other `go` invocation delegates, so the
+// Makefile's parse-time `go env` calls still work.
+func newGolangciLintGuardFixture(t *testing.T, installedVersion, installedGo string) *golangciLintGuardFixture {
 	t.Helper()
 	root := repoRoot(t)
 	pin := golangciLintPin(t, root)
+	modGo := goModGo(t, root)
 
 	tmp := t.TempDir()
 	binDir := filepath.Join(tmp, "bin")
@@ -161,18 +182,25 @@ func newGolangciLintGuardFixture(t *testing.T, installedVersion string) *golangc
 		}
 	}
 	if installedVersion != "" {
-		writeExecutable(t, filepath.Join(binDir, "golangci-lint"), fakeGolangciLint(installedVersion))
+		writeExecutable(t, filepath.Join(binDir, "golangci-lint"), fakeGolangciLint(installedVersion, installedGo))
 	}
 
 	freshLint := filepath.Join(tmp, "golangci-lint.fresh")
-	writeExecutable(t, freshLint, fakeGolangciLint(pin))
+	writeExecutable(t, freshLint, fakeGolangciLint(pin, modGo))
 
 	installLog := filepath.Join(tmp, "go-install.log")
 	writeExecutable(t, filepath.Join(shimDir, "go"), fmt.Sprintf(`#!/bin/sh
 if [ "$1" = "install" ]; then
-	printf '%%s\n' "$*" >> "%s"
+	printf 'GOTOOLCHAIN=%%s %%s\n' "${GOTOOLCHAIN-unset}" "$*" >> "%s"
 	cp -f "%s" "${GOBIN:?go install shim requires GOBIN}/golangci-lint"
 	exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = "env" ] && [ "$2" = "GOVERSION" ]; then
+	case "${GOTOOLCHAIN-}" in
+	go1.*) printf '%%s\n' "$GOTOOLCHAIN"; exit 0 ;;
+	esac
+	echo "go env GOVERSION shim: GOTOOLCHAIN=${GOTOOLCHAIN-unset} is not go<version>" >&2
+	exit 1
 fi
 PATH="%s"
 export PATH
@@ -186,20 +214,47 @@ exec go "$@"
 		installLog: installLog,
 		freshLint:  freshLint,
 		pin:        pin,
+		goModGo:    modGo,
 	}
 }
 
 func (f *golangciLintGuardFixture) run(t *testing.T, extraArgs ...string) {
 	t.Helper()
+	if out, err := f.runResult(extraArgs...); err != nil {
+		t.Fatalf("make %s: %v\n%s", golangciLintGuardTarget, err, out)
+	}
+}
+
+func (f *golangciLintGuardFixture) runResult(extraArgs ...string) (string, error) {
 	args := []string{"--no-print-directory", "-f", filepath.Join(f.repoRoot, "Makefile"), "BIN_DIR=" + f.binDir}
 	args = append(args, extraArgs...)
 	args = append(args, golangciLintGuardTarget)
 	cmd := makeCommand(args...)
 	cmd.Dir = f.repoRoot
-	cmd.Env = append(os.Environ(), "PATH="+f.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		if !strings.HasPrefix(entry, "LINT_GOTOOLCHAIN=") {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	cmd.Env = append(cmd.Env, "PATH="+f.shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("make %s: %v\n%s", golangciLintGuardTarget, err, out)
+	return string(out), err
+}
+
+// requireOneInstallUnder asserts the guard ran exactly one `go install` of the
+// pin, under GOTOOLCHAIN=toolchain.
+func (f *golangciLintGuardFixture) requireOneInstallUnder(t *testing.T, toolchain string) {
+	t.Helper()
+	installs := f.installs(t)
+	if len(installs) != 1 {
+		t.Fatalf("go install invocations = %d, want 1: %v", len(installs), installs)
+	}
+	if want := "GOTOOLCHAIN=" + toolchain + " "; !strings.HasPrefix(installs[0], want) {
+		t.Fatalf("go install %q did not run under %s", installs[0], strings.TrimSpace(want))
+	}
+	if want := "@v" + f.pin; !strings.Contains(installs[0], want) {
+		t.Fatalf("go install %q does not request the pin %q", installs[0], want)
 	}
 }
 
@@ -242,33 +297,27 @@ func (f *golangciLintGuardFixture) requirePinnedBinaryInstalled(t *testing.T) {
 // prerequisite makes every pin bump a silent no-op on a host that already has
 // golangci-lint, so the host keeps linting with the version it happened to have.
 func TestGolangciLintGuardReinstallsWhenInstalledVersionDriftsFromPin(t *testing.T) {
-	fixture := newGolangciLintGuardFixture(t, "0.0.1")
+	root := repoRoot(t)
+	fixture := newGolangciLintGuardFixture(t, "0.0.1", goModGo(t, root))
 
 	fixture.run(t)
 
-	installs := fixture.installs(t)
-	if len(installs) != 1 {
-		t.Fatalf("go install invocations = %d, want 1 for a stale binary: %v", len(installs), installs)
-	}
-	if want := "@v" + fixture.pin; !strings.Contains(installs[0], want) {
-		t.Fatalf("go install %q does not request the pin %q", installs[0], want)
-	}
+	fixture.requireOneInstallUnder(t, fixture.goModGo)
 	fixture.requirePinnedBinaryInstalled(t)
 }
 
 func TestGolangciLintGuardInstallsWhenBinaryIsMissing(t *testing.T) {
-	fixture := newGolangciLintGuardFixture(t, "")
+	fixture := newGolangciLintGuardFixture(t, "", "")
 
 	fixture.run(t)
 
-	if installs := fixture.installs(t); len(installs) != 1 {
-		t.Fatalf("go install invocations = %d, want 1 when nothing is installed: %v", len(installs), installs)
-	}
+	fixture.requireOneInstallUnder(t, fixture.goModGo)
 	fixture.requirePinnedBinaryInstalled(t)
 }
 
 func TestGolangciLintGuardLeavesAPinnedBinaryAlone(t *testing.T) {
-	fixture := newGolangciLintGuardFixture(t, golangciLintPin(t, repoRoot(t)))
+	root := repoRoot(t)
+	fixture := newGolangciLintGuardFixture(t, golangciLintPin(t, root), goModGo(t, root))
 
 	fixture.run(t)
 
@@ -277,12 +326,73 @@ func TestGolangciLintGuardLeavesAPinnedBinaryAlone(t *testing.T) {
 	}
 }
 
+// golangci-lint's formatters are compiled into it, so it formats as the gofmt
+// of the Go that built it does. A binary a newer Go built can flag files that
+// CI's linter, built with go.mod's Go, accepts. The pin therefore covers the Go
+// that built the binary as well as its version. That Go is the one the lint
+// targets run the linter under: go.mod's, unless LINT_GOTOOLCHAIN names
+// another.
+func TestGolangciLintGuardPinsTheGoThatBuildsTheLinter(t *testing.T) {
+	root := repoRoot(t)
+	modGo := goModGo(t, root)
+	// otherGo stands in for any Go other than go.mod's.
+	const otherGo = "go1.99.0"
+	for _, tc := range []struct {
+		name      string
+		builtWith string
+		args      []string
+		// wantInstallUnder is the GOTOOLCHAIN the one reinstall runs under;
+		// empty means the guard keeps the installed binary.
+		wantInstallUnder string
+	}{
+		{name: "built with go.mod's Go", builtWith: modGo},
+		{name: "built with another Go", builtWith: otherGo, wantInstallUnder: modGo},
+		{name: "LINT_GOTOOLCHAIN names another Go", builtWith: modGo, args: []string{"LINT_GOTOOLCHAIN=" + otherGo}, wantInstallUnder: otherGo},
+		{name: "built with the Go LINT_GOTOOLCHAIN names", builtWith: otherGo, args: []string{"LINT_GOTOOLCHAIN=" + otherGo}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newGolangciLintGuardFixture(t, golangciLintPin(t, root), tc.builtWith)
+
+			fixture.run(t, tc.args...)
+
+			if tc.wantInstallUnder == "" {
+				if installs := fixture.installs(t); len(installs) != 0 {
+					t.Fatalf("guard reinstalled a binary already at the pin and built with the lint Go: %v", installs)
+				}
+				return
+			}
+			fixture.requireOneInstallUnder(t, tc.wantInstallUnder)
+			fixture.requirePinnedBinaryInstalled(t)
+		})
+	}
+}
+
+// When go cannot say which Go LINT_GOTOOLCHAIN selects, the guard cannot tell
+// whether the installed binary is the pin, so it fails before keeping or
+// replacing it.
+func TestGolangciLintGuardFailsWhenTheLintGoCannotBeResolved(t *testing.T) {
+	root := repoRoot(t)
+	fixture := newGolangciLintGuardFixture(t, golangciLintPin(t, root), goModGo(t, root))
+
+	out, err := fixture.runResult("LINT_GOTOOLCHAIN=unresolvable")
+
+	if err == nil {
+		t.Fatalf("guard succeeded without resolving the lint Go:\n%s", out)
+	}
+	if want := "cannot resolve the Go that GOTOOLCHAIN=unresolvable selects"; !strings.Contains(out, want) {
+		t.Fatalf("guard output does not say %q:\n%s", want, out)
+	}
+	if installs := fixture.installs(t); len(installs) != 0 {
+		t.Fatalf("guard installed without resolving the lint Go: %v", installs)
+	}
+}
+
 // Several Makefile contract tests point GOLANGCI_LINT at a purpose-built fake
 // that answers one lint invocation and nothing else. The guard manages the
 // version of the binary it installs itself, so an explicitly supplied binary is
 // used as given.
 func TestGolangciLintGuardHonorsAnExplicitBinaryOverride(t *testing.T) {
-	fixture := newGolangciLintGuardFixture(t, "")
+	fixture := newGolangciLintGuardFixture(t, "", "")
 	supplied := filepath.Join(t.TempDir(), "golangci-lint")
 	writeExecutable(t, supplied, `#!/bin/sh
 echo "unexpected golangci-lint invocation: $*" >&2

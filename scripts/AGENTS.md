@@ -54,3 +54,9 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
+
+`.githooks/pre-commit` does the same per step. Where the command
+`NOGO_BAZEL` or `BAZEL` names (default `bazel`) is not on PATH, it runs
+`make lint-changed-go` in place of `make lint-changed` and `make check-docs-go`
+in place of `make check-docs`, each under the same kind of banner.
+`scripts/githooks_pre_commit_bazel_fallback_test.go` pins the choice.

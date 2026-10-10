@@ -17,29 +17,62 @@ if [ -z "$staged_go_files" ] && [ -z "$staged_web_src" ] && [ -z "$staged_docs" 
   exit 0
 fi
 
+# Lint and the docs sync test run under Bazel, as CI does. A step whose Bazel
+# command (NOGO_BAZEL or BAZEL, as the Makefile reads them; default bazel) is
+# not on PATH runs its plain-Go twin instead and says so loudly, because the
+# twin is not what CI enforces.
+bazel_on_path() {
+  command -v "${1%% *}" >/dev/null 2>&1
+}
+
+# announce_go_twin TWIN REPLACED BAZEL_COMMAND
+announce_go_twin() {
+  {
+    echo "pre-commit: ========================================================================"
+    echo "pre-commit: running make $1: NOT the $2 CI gates on."
+    echo "pre-commit: why: ${3%% *} is not on PATH"
+    echo "pre-commit: CI runs bazel test //... (.github/workflows/bazel.yml); a commit that passes"
+    echo "pre-commit: here can still fail there."
+    echo "pre-commit: fix: install bazelisk (engdocs/bazel-quickstart.md)"
+    echo "pre-commit: ========================================================================"
+  } >&2
+}
+
 if [ -n "$staged_go_files" ]; then
   printf '%s\n' "$staged_go_files" | scripts/precommit-format-staged-go
   printf '%s\n' "$staged_go_files" | xargs git add
 
   # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
   # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
-  # prints a `patch -p1` command for the ones with suggested fixes.
-  make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
+  # prints a `patch -p1` command for the ones with suggested fixes. Without
+  # bazel, golangci-lint and go vet check the same packages.
+  nogo_bazel="${NOGO_BAZEL:-bazel}"
+  if bazel_on_path "$nogo_bazel"; then
+    make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
+  else
+    announce_go_twin lint-changed-go "nogo lint and vet" "$nogo_bazel"
+    make lint-changed-go LINT_CHANGED_SCOPE=staged || exit 1
+  fi
+
+  # The three generators below build with cgo off. None needs cgo, and
+  # with it on their imports reach Dolt's ICU regex binding, which does
+  # not compile where the ICU headers are off the default include path,
+  # as Homebrew's keg-only icu4c is on macOS.
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
   # Mintlify schema in lockstep with whatever the server actually
   # serves.
-  go run ./cmd/genspec
+  CGO_ENABLED=0 go run ./cmd/genspec
   git add internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt
 
-  go generate ./internal/api/genclient
+  CGO_ENABLED=0 go generate ./internal/api/genclient
   git add internal/api/genclient/client_gen.go
 
   # Regenerate the config/schema docs derived from Go structs and
   # stage every generated artifact so commits do not leave the
   # worktree dirty.
-  go run ./cmd/genschema
+  CGO_ENABLED=0 go run ./cmd/genschema
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
   # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).
@@ -50,7 +83,13 @@ if [ -n "$staged_go_files" ]; then
 fi
 
 if [ -n "$staged_docs" ]; then
-  make check-docs
+  docs_bazel="${BAZEL:-bazel}"
+  if bazel_on_path "$docs_bazel"; then
+    make check-docs
+  else
+    announce_go_twin check-docs-go "bazel docs sync test" "$docs_bazel"
+    make check-docs-go
+  fi
 fi
 
 # Re-read the index rather than reusing the pre-hook staged_spec snapshot:
