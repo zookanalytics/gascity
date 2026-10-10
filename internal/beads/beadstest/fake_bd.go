@@ -273,7 +273,7 @@ func (f *FakeBd) list(flags map[string][]string) ([]byte, error) {
 
 // query answers bd's wisp-tier query: `bd query --json "ephemeral=true AND
 // k=v AND ..." [--all] [--limit N]`, ephemeral rows only, for the keys a
-// BdStore sends (id, parent, status, type, label, assignee).
+// BdStore sends (id, parent, status, type, label, assignee, metadata.<key>).
 func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, error) {
 	if len(positional) != 1 {
 		return nil, fmt.Errorf("fake bd query: want one expression, got %v", positional)
@@ -306,7 +306,14 @@ func (f *FakeBd) query(flags map[string][]string, positional []string) ([]byte, 
 		case "assignee":
 			query.Assignee = v
 		default:
-			return nil, fmt.Errorf("fake bd query: unsupported key %q", k)
+			field, isMetadata := strings.CutPrefix(k, "metadata.")
+			if !isMetadata || field == "" {
+				return nil, fmt.Errorf("fake bd query: unsupported key %q", k)
+			}
+			if query.Metadata == nil {
+				query.Metadata = make(map[string]string)
+			}
+			query.Metadata[field] = v
 		}
 	}
 	if !ephemeral {
