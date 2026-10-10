@@ -333,11 +333,11 @@ func statConfigPathState(cfg string) string {
 	return procPathStateLive
 }
 
-// discoverActiveTestRoots returns the test roots that live non-dolt processes
-// name in their argv: roots with a Go or Gas City test prefix under /tmp and
-// tempDir, and Go t.TempDir() roots under /var/tmp/gotmp, goTmpDir, and
-// homeDir's ~/.gotmp (see activeTestRootFromPath). goTmpDir is the Go temp
-// root the caller's test runs use, normally its GOTMPDIR.
+// discoverActiveTestRoots returns the test roots named in the argv of live
+// processes other than dolt sql-servers: Go or Gas City test-prefixed roots
+// under /tmp and tempDir, and Go t.TempDir() roots under /var/tmp/gotmp,
+// goTmpDir, and homeDir's ~/.gotmp (see activeTestRootFromPath). goTmpDir is
+// the Go temp root the caller's test runs use, normally its GOTMPDIR.
 func discoverActiveTestRoots(homeDir, tempDir, goTmpDir string) []string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
