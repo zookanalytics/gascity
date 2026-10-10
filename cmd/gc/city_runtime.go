@@ -2258,6 +2258,12 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// The staleAfter cutoff still protects in-flight dispatches regardless of
 	// which order they belong to, so a direct all-orders sweep is safe and
 	// recovers the jam without depending on any single order being scheduled.
+	// The tracking bead is each order's single-flight gate, so a run still in
+	// flight keeps it until the bead is orderTrackingSweepWatchdogStaleAfter
+	// past the timeout the run was launched with, which the bead records. By
+	// then the run has been killed, whatever timeout a later reload gave the
+	// order. Every other stale tracking bead is closed at
+	// orderTrackingSweepWatchdogStaleAfter.
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale tracking beads that are not closed.
@@ -2290,7 +2296,7 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	if !now.Before(cr.orderSweepWatchdogNotClosedDue) {
 		read = staleTrackingReadNotClosed
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, read)
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, read, true)
 	if read == staleTrackingReadNotClosed {
 		complete := storeErr == nil && sweepErr == nil && result.trackingClosed < orderTrackingSweepCloseBudget
 		cr.scheduleOrderSweepWatchdogNotClosed(now, complete)
