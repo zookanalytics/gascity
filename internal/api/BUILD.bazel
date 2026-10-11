@@ -12,6 +12,7 @@ go_library(
         "cache_read_model.go",
         "city_scope.go",
         "client.go",
+        "client_keyset_walk.go",
         "client_remote.go",
         "client_waits.go",
         "component_versions.go",
@@ -264,6 +265,7 @@ go_test(
         "cache_read_model_tier_test.go",
         "class_store_test.go",
         "client_extmsg_test.go",
+        "client_keyset_walk_test.go",
         "client_remote_test.go",
         "client_sling_test.go",
         "client_test.go",
@@ -462,6 +464,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//:repo_go_srcs",
         "//docs:reference_schema",
         "//internal/worker:operation_events.go",
     ],

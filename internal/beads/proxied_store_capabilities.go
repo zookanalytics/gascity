@@ -41,6 +41,7 @@ var (
 	_ ConditionalWritesResolveTargeter = (*ProxiedStore)(nil)
 	_ Counter                          = (*ProxiedStore)(nil)
 	_ DepMetadataReader                = (*ProxiedStore)(nil)
+	_ ExactBatchGetter                 = (*ProxiedStore)(nil)
 	_ ForeignIDCreator                 = (*ProxiedStore)(nil)
 	_ GraphApplyHandleProvider         = (*ProxiedStore)(nil)
 	_ ParentProjectionWaiter           = (*ProxiedStore)(nil)
