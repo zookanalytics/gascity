@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -132,13 +133,13 @@ func (s *Store) validatedBead(id string) (beads.Bead, error) {
 // stateFilter excludes closed sessions; stateFilter "all" includes everything.
 // Only session.Info is returned — no raw beads cross this boundary.
 func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
-	// IncludeClosed so the in-memory filter below can honor state=closed and
-	// state=all; sessionMatchesFilters drops closed beads for the default and
-	// non-closed filters, matching the shared session-list filtering semantics.
+	// Closed history is read only when the filter can keep a closed bead:
+	// it holds every session the city has ever run, and sessionMatchesFilters
+	// drops each closed row for the default and the non-closed filters anyway.
 	all, err := s.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		Sort:          beads.SortCreatedDesc,
-		IncludeClosed: true,
+		IncludeClosed: sessionStateFilterAdmitsClosed(stateFilter),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
@@ -202,6 +203,18 @@ func (s *Store) ListLabeledSessionInfosUnfiltered() ([]Info, error) {
 		out = append(out, infoFromPersistedBead(b))
 	}
 	return out, nil
+}
+
+// sessionStateFilterAdmitsClosed reports whether sessionMatchesFilters can keep
+// a closed session bead under stateFilter: "all", or a list naming "closed".
+func sessionStateFilterAdmitsClosed(stateFilter string) bool {
+	if stateFilter == "all" {
+		return true
+	}
+	if stateFilter == "" {
+		return false
+	}
+	return slices.Contains(strings.Split(stateFilter, ","), "closed")
 }
 
 // sessionMatchesFilters reports whether a session bead passes the state and

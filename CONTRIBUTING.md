@@ -57,10 +57,13 @@ from the live supervisor. The hook stages both spec copies so the
 committed spec never drifts from what the server actually serves. It also
 runs nogo (lint and vet) over the staged Go packages
 (`make lint-changed LINT_CHANGED_SCOPE=staged`) and `make check-docs` for
-Markdown/docs/spec changes. The pre-push hook runs `bazel test //...` when a
-push changes Go sources; if it has to fall back to plain `go test` (no
-Bazel installed, or no Go at `/usr/local/go` for the cache mode) it says so
-loudly, because that suite is not what CI enforces.
+Markdown/docs/spec changes. Without Bazel installed, it runs their plain-Go
+twins instead, `make lint-changed-go` (golangci-lint and `go vet` over the
+same packages) and `make check-docs-go`, and says so loudly. The pre-push
+hook runs `bazel test //...` when a push changes Go sources; if it has to
+fall back to plain `go test` (no Bazel installed, or no Go at
+`/usr/local/go` for the cache mode) it says so loudly too. Neither hook's
+fallback is what CI enforces.
 
 **Dashboard SPA.** The dashboard at `internal/api/dashboardspa/web/` is a
 TypeScript SPA that talks directly to the supervisor's OpenAPI-typed
