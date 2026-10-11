@@ -61,6 +61,9 @@ type gatherEnv struct {
 	// per env generation, when the memo is rebuilt, and memoizes what it
 	// resolves (templateMemo). Nil resolves nothing.
 	Templates func(env *reconcileEnv, now time.Time) templateResolver
+	// ClosedNamed is the controller's closed named-session index cache, which
+	// the external-reads lane reads the index through; nil reads it afresh.
+	ClosedNamed *closedNamedIndexCache
 	// LookPath is the transport check's provider binary lookup; nil checks
 	// nothing, as validateAgentSessionTransport does.
 	LookPath config.LookPathFunc
@@ -308,7 +311,7 @@ func k1Env(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg
 	}
 	return externalReadsEnv{
 		CityPath: e.CityPath, CityName: e.CityName, Cfg: env.Cfg, CityStore: dg.CityStore, RigStores: dg.RigStores,
-		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions,
+		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions, ClosedNamed: e.ClosedNamed,
 	}
 }
 
