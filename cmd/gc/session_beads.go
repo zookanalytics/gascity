@@ -1161,7 +1161,7 @@ func sweepAssignedWorkLegs(cityPath string, cfg *config.City, store beads.Store,
 // the session's reachable plan releases there (reachableCloseReleaseScope).
 //
 // The zero value resolves to the session bead's own store only — no city path,
-// no rigs, no bindings — which is the pre-gc-d9qnh single-store behaviour every
+// no rigs, no bindings — which is the pre-gc-d9qnh single-store behavior every
 // single-store test relies on.
 type closeReleaseScope struct {
 	cityPath string
@@ -1199,7 +1199,7 @@ func reachableCloseReleaseScope(cityPath string, cfg *config.City, rigStores map
 // first, then the plan's legs minus that store. Upstream's single-store release
 // only ever reached store, and a rig-bound session's claims may live on the
 // leading work arm as well as in its rig (openSessionReachableStoreRefInfo, the
-// hook fan-out), so dropping store here would be a behaviour removal, not a
+// hook fan-out), so dropping store here would be a behavior removal, not a
 // narrowing.
 func (s closeReleaseScope) walk(store beads.Store, info session.Info, identifiers []string, stderr io.Writer, visit func(index int, leg beads.Store)) bool {
 	if !s.reachable {
@@ -3962,7 +3962,7 @@ func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 // sessions/city store while its claims can live in a rig store or a relocated
 // binding, so a release that read only the session bead's store left that work
 // in_progress against a closed session with no lane to recover it. The zero
-// scope keeps the single-store behaviour.
+// scope keeps the single-store behavior.
 func closeBead(store beads.Store, expected session.Info, scope closeReleaseScope, reason string, now time.Time, stderr io.Writer) bool {
 	return closeBeadPreservingAssignees(store, expected, scope, reason, nil, now, stderr)
 }
