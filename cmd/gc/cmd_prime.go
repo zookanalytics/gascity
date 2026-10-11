@@ -8,7 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 	"time"
 
@@ -79,6 +79,10 @@ When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`
 
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
+When agents from two different packs share a bare agent-name, that name
+matches neither of them. gc prime then warns and outputs the default
+prompt. Use the qualified name to pick one, for example
+gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of silently falling
 back to the default prompt. Strict errors on:
@@ -87,6 +91,7 @@ back to the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
+  - agent name shared by agents from different packs (use a qualified name)
   - agent's prompt_template points at a file that cannot be read
 
 Strict does NOT error on agents whose config intentionally lacks a
@@ -220,9 +225,9 @@ func doPrime(args []string, stdout, stderr io.Writer) int { //nolint:unparam // 
 }
 
 // doPrimeWithMode's strict-mode contract: only states that would indicate
-// a user mistake (missing city config, no agent name, unknown agent name,
-// unreadable prompt_template file) error out. Supported minimal configs
-// (agent with no prompt_template at all, or a template that legitimately
+// a user mistake (missing city config, no agent name, unknown or ambiguous
+// agent name, unreadable prompt_template file) error out. Supported minimal
+// configs (agent with no prompt_template at all, or a template that legitimately
 // renders to empty output via conditional logic) and intentional quiet
 // states (suspended city/agent) remain silent even under --strict —
 // strict is a debugging aid, not a stricter mode for the whole command.
@@ -383,20 +388,30 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// Look up agent in config. First try qualified identity resolution
 	// (handles "rig/agent" and rig-context matching), then fall back to
 	// bare template name lookup (handles "gc prime polecat" for pool agents
-	// whose config name is "polecat" regardless of dir). Hook-driven manual
+	// whose config name is "polecat" regardless of dir). The bare lookup
+	// refuses a name that agents from different packs share, and that
+	// refusal is reported when no candidate resolves. Hook-driven manual
 	// sessions may have GC_ALIAS set to a user-facing alias that is not an
 	// agent name, so also try GC_TEMPLATE before falling back to the generic
 	// run-once prompt.
 	var resolvedAgents []config.Agent
+	var ambiguousErr error
 	agentCandidates := primeAgentCandidates(agentName, hookMode, cityPath)
 	for _, candidate := range agentCandidates {
 		a, ok := resolveAgentIdentity(cfg, candidate, currentRigContext(cfg))
 		if !ok {
-			a, ok = findAgentByName(cfg, candidate)
+			var ambiguous []string
+			a, ok, ambiguous = findAgentByName(cfg, candidate)
+			if len(ambiguous) > 0 && ambiguousErr == nil {
+				ambiguousErr = fmt.Errorf("agent %q is ambiguous: matches %s; use a qualified name", candidate, strings.Join(ambiguous, ", "))
+			}
 		}
 		if ok {
 			resolvedAgents = append(resolvedAgents, a)
 		}
+	}
+	if len(resolvedAgents) > 0 {
+		ambiguousErr = nil
 	}
 
 	// Strict preconditions: fail now, before any hook side effects or the
@@ -405,6 +420,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		switch {
 		case agentName == "":
 			fmt.Fprintf(stderr, "gc prime: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
+			return 1, nil
+		case ambiguousErr != nil:
+			fmt.Fprintf(stderr, "gc prime: %v\n", ambiguousErr) //nolint:errcheck
 			return 1, nil
 		case len(resolvedAgents) == 0:
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
@@ -520,6 +538,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// when the agent has no prompt_template and doesn't match a builtin
 	// worker prompt — a supported config shape, so the default prompt is
 	// the correct output even under --strict.
+	if ambiguousErr != nil {
+		fmt.Fprintf(stderr, "gc prime: %v\n", ambiguousErr) //nolint:errcheck
+	}
 	injection := primeHookContextSuffix(cityPath, sessionStartStore, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0, nil
@@ -963,29 +984,43 @@ func isPoolInstance(cfg *config.City, a config.Agent) bool {
 // findAgentByName looks up an agent by its bare config name, ignoring dir.
 // This allows "gc prime polecat" to find an agent with name="polecat" even
 // when it has dir="myrig". Also handles pool instance names: "polecat-3"
-// strips the "-N" suffix to match the base pool agent "polecat".
-// Returns the first match.
-func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
+// strips the "-N" suffix to match the base pool agent "polecat". An exact
+// name match takes precedence over a pool instance match.
+//
+// Every match must be the same agent. The copies of a rig-scoped agent
+// stamped into each rig share one binding-qualified name, so they count as one
+// agent and the first copy is returned. Matches with different
+// binding-qualified names come from different packs. For those the lookup
+// reports not found and returns the matches' qualified names, sorted, so the
+// caller can say which names to use instead.
+func findAgentByName(cfg *config.City, name string) (config.Agent, bool, []string) {
+	var matches []config.Agent
 	for _, a := range cfg.Agents {
 		if a.Name == name {
-			return a, true
+			matches = append(matches, a)
 		}
 	}
-	// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
-	for _, a := range cfg.Agents {
-		if a.SupportsInstanceExpansion() && !a.UsesCanonicalSingletonPoolIdentity() {
-			sp := scaleParamsFor(&a)
-			prefix := a.Name + "-"
-			if strings.HasPrefix(name, prefix) {
-				suffix := name[len(prefix):]
-				isUnlimited := sp.Max < 0
-				if n, err := strconv.Atoi(suffix); err == nil && n >= 1 && (isUnlimited || n <= sp.Max) {
-					return a, true
-				}
+	if len(matches) == 0 {
+		// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
+		for _, a := range cfg.Agents {
+			if _, isInstance := matchPoolInstance(a, name); isInstance {
+				matches = append(matches, a)
 			}
 		}
 	}
-	return config.Agent{}, false
+	if len(matches) == 0 {
+		return config.Agent{}, false, nil
+	}
+	first := matches[0].BindingQualifiedName()
+	if slices.ContainsFunc(matches[1:], func(m config.Agent) bool { return m.BindingQualifiedName() != first }) {
+		ambiguous := make([]string, 0, len(matches))
+		for _, m := range matches {
+			ambiguous = append(ambiguous, m.QualifiedName())
+		}
+		slices.Sort(ambiguous)
+		return config.Agent{}, false, ambiguous
+	}
+	return matches[0], true, nil
 }
 
 // buildPrimeContext constructs a PromptContext for gc prime. Uses GC_*

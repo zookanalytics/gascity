@@ -1521,7 +1521,7 @@ func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// findAgentByName unit tests (pool suffix stripping for gc prime)
+// findAgentByName unit tests (bare-name and pool suffix lookup for gc prime)
 // ---------------------------------------------------------------------------
 
 func TestFindAgentByNameExact(t *testing.T) {
@@ -1531,7 +1531,7 @@ func TestFindAgentByNameExact(t *testing.T) {
 			{Name: "polecat", Dir: "frontend"},
 		},
 	}
-	a, ok := findAgentByName(cfg, "mayor")
+	a, ok, _ := findAgentByName(cfg, "mayor")
 	if !ok {
 		t.Fatal("expected to find mayor")
 	}
@@ -1547,7 +1547,7 @@ func TestFindAgentByNamePoolInstance(t *testing.T) {
 		},
 	}
 	// "polecat-3" should strip suffix and match "polecat" pool.
-	a, ok := findAgentByName(cfg, "polecat-3")
+	a, ok, _ := findAgentByName(cfg, "polecat-3")
 	if !ok {
 		t.Fatal("expected to find polecat via pool suffix stripping")
 	}
@@ -1563,7 +1563,7 @@ func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
 		},
 	}
 	// "polecat-4" is out of range (max=3).
-	_, ok := findAgentByName(cfg, "polecat-4")
+	_, ok, _ := findAgentByName(cfg, "polecat-4")
 	if ok {
 		t.Error("polecat-4 should not match pool with max=3")
 	}
@@ -1575,7 +1575,7 @@ func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
 			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
 		},
 	}
-	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
+	if _, ok, _ := findAgentByName(cfg, "singleton-1"); ok {
 		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
 	}
 }
@@ -1587,7 +1587,7 @@ func TestFindAgentByNameUnlimitedPool(t *testing.T) {
 		},
 	}
 	// Any instance number should match an unlimited pool.
-	a, ok := findAgentByName(cfg, "polecat-99")
+	a, ok, _ := findAgentByName(cfg, "polecat-99")
 	if !ok {
 		t.Fatal("expected to find polecat-99 in unlimited pool")
 	}
@@ -1602,8 +1602,79 @@ func TestFindAgentByNameNoMatch(t *testing.T) {
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 		},
 	}
-	_, ok := findAgentByName(cfg, "nobody")
+	_, ok, ambiguous := findAgentByName(cfg, "nobody")
 	if ok {
 		t.Error("expected no match for nonexistent agent")
+	}
+	if len(ambiguous) != 0 {
+		t.Errorf("ambiguous = %q, want none for a name nothing matches", ambiguous)
+	}
+}
+
+func TestFindAgentByNameRefusesNameSharedByDifferentAgents(t *testing.T) {
+	// Two imports that each define "dog" are two agents. Neither may stand in
+	// for the other, whichever comes first in config order.
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "bd"},
+			{Name: "dog", BindingName: "gc-toolkit"},
+		},
+	}
+	a, ok, ambiguous := findAgentByName(cfg, "dog")
+	if ok {
+		t.Fatalf("findAgentByName(dog) resolved %q, want no match for a name two agents share", a.QualifiedName())
+	}
+	if want := []string{"bd.dog", "gc-toolkit.dog"}; !slices.Equal(ambiguous, want) {
+		t.Errorf("ambiguous = %q, want %q", ambiguous, want)
+	}
+}
+
+func TestFindAgentByNameResolvesRigCopiesOfOneAgent(t *testing.T) {
+	// A rig-scoped agent is stamped into every rig that imports it. The
+	// copies differ only by dir, so the bare name still names one agent.
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "alpha", BindingName: "tk"},
+			{Name: "polecat", Dir: "beta", BindingName: "tk"},
+		},
+	}
+	a, ok, ambiguous := findAgentByName(cfg, "polecat")
+	if !ok {
+		t.Fatalf("findAgentByName(polecat) found nothing (ambiguous=%q), want the rig copies to resolve", ambiguous)
+	}
+	if got := a.QualifiedName(); got != "alpha/tk.polecat" {
+		t.Errorf("QualifiedName = %q, want the first copy alpha/tk.polecat", got)
+	}
+}
+
+func TestFindAgentByNameRefusesPoolInstanceSharedByDifferentPools(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "bd", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "dog", BindingName: "gc-toolkit", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+		},
+	}
+	a, ok, ambiguous := findAgentByName(cfg, "dog-2")
+	if ok {
+		t.Fatalf("findAgentByName(dog-2) resolved %q, want no match for an instance two pools share", a.QualifiedName())
+	}
+	if want := []string{"bd.dog", "gc-toolkit.dog"}; !slices.Equal(ambiguous, want) {
+		t.Errorf("ambiguous = %q, want %q", ambiguous, want)
+	}
+}
+
+func TestFindAgentByNameExactNameBeatsPoolInstance(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+			{Name: "worker-2"},
+		},
+	}
+	a, ok, ambiguous := findAgentByName(cfg, "worker-2")
+	if !ok {
+		t.Fatalf("findAgentByName(worker-2) found nothing (ambiguous=%q), want the agent named worker-2", ambiguous)
+	}
+	if a.Name != "worker-2" {
+		t.Errorf("Name = %q, want worker-2 (an exact name outranks a pool instance)", a.Name)
 	}
 }
