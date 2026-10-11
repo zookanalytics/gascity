@@ -95,7 +95,7 @@ func TestFullBuildWritesDependencyFloorToSessionsClass(t *testing.T) {
 		stderr:        io.Discard,
 		storageRoutes: relocatedSessionRoutes(sessionsStore),
 	}
-	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "demo", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "demo", io.Discard, nil)
 
 	result := cr.buildDesiredState(cr.loadSessionBeadSnapshot(), nil)
 	floor := false

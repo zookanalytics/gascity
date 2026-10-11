@@ -93,7 +93,7 @@ func TestCmdStopWaitsForStandaloneControllerExit(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -272,7 +272,7 @@ func TestCmdStopForceDelegatesImmediateControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -348,7 +348,7 @@ func TestCmdStopForceEscalatesInProgressControllerStop(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, tomlPath, cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -1570,7 +1570,7 @@ func TestCmdStopMarginExhaustion(t *testing.T) {
 	var controllerStdout, controllerStderr lockedBuffer
 	done := make(chan struct{})
 	go func() {
-		runController(dir, nil, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
+		runController(dir, nil, filepath.Join(dir, "city.toml"), cfg, "", buildFn, nil, nil, sp, nil, nil, nil, nil, 0, events.Discard, nil, &controllerStdout, &controllerStderr)
 		close(done)
 	}()
 	t.Cleanup(func() {

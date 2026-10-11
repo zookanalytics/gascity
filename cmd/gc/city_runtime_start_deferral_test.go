@@ -50,7 +50,7 @@ func newControlDispatcherRuntime(t *testing.T) *CityRuntime {
 		stdout:        io.Discard,
 		stderr:        io.Discard,
 	}
-	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard, nil)
 	cr.setControllerState(&controllerState{
 		cfg:           cfg,
 		sp:            sp,

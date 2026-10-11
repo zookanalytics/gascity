@@ -440,7 +440,7 @@ func TestBeadReconcileTickHoldsAParkedSeat(t *testing.T) {
 				standaloneCityStore: store, sessionDrains: newDrainTracker(),
 				rec: rec, stdout: io.Discard, stderr: io.Discard,
 			}
-			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard)
+			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard, nil)
 			t.Cleanup(func() { cr.asyncStarts.wait(-1); cr.asyncStops.wait(-1) })
 			snap, err := loadSessionBeadSnapshot(store)
 			if err != nil {
@@ -507,7 +507,7 @@ func TestControlDispatcherTickHoldsAParkedSeat(t *testing.T) {
 				// No managed Dolt here: the preflight must not exec the beads script.
 				managedDoltHealth: func(context.Context, string) error { return nil },
 			}
-			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard)
+			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard, nil)
 			t.Cleanup(func() { cr.asyncStarts.wait(-1); cr.asyncStops.wait(-1) })
 
 			cr.controlDispatcherTick(context.Background())
