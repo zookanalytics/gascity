@@ -1187,6 +1187,13 @@ func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore 
 	return scopeGraphStore(cityPath, storePath, cfg, scopeStore)
 }
 
+// controlProviderIsBdWorkspace reports whether a scope with this beads provider
+// keeps its ledger in a bd workspace, which openControlStoreAtForCity opens as
+// a BdStore. A file or exec provider is opened through openStoreAtForCity.
+func controlProviderIsBdWorkspace(provider string) bool {
+	return provider != "file" && !strings.HasPrefix(provider, "exec:")
+}
+
 // openControlStoreAtForCity resolves the control store for a city or rig SCOPE.
 // It answers WHICH scope only; the coordination class — which database within
 // that scope — is applied by controlGraphStore at the point of use, because the
@@ -1195,7 +1202,7 @@ func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore 
 func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
-	if provider == "file" || strings.HasPrefix(provider, "exec:") {
+	if !controlProviderIsBdWorkspace(provider) {
 		return openStoreAtForCity(storePath, cityPath)
 	}
 	if samePath(scopeRoot, cityPath) {
