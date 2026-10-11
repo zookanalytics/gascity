@@ -151,7 +151,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 		Cfg:                     cfg,
 		SP:                      sp,
 		BuildFn:                 supervisorBuildAgentsFn(cityPath, contractCityName, stderr),
-		BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(cityPath, contractCityName, stderr),
+		BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(cityPath, contractCityName, stderr, nil),
 		Dops:                    newDrainOps(sp),
 		Rec:                     rec,
 		PoolSessions:            computePoolSessions(cfg, contractCityName, cityPath, sp),
