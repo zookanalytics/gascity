@@ -222,7 +222,11 @@ yet settled.
   otherwise also the pass that drops the last reference to it. That fetch is the
   last reference too, so it is given up only on a store-confirmed absence
   (`beads.ErrNotFound`); a read that merely failed is retained and retried, since
-  it may succeed next pass. What remains an
+  it may succeed next pass. A closed session whose accounting does not settle,
+  such as one whose model-usage sweep keeps missing its transcript, is retried at
+  most once every 10 minutes and dropped 24 hours after its close. Each attempt
+  still writes its compute fact, so a drop gives up only the model-usage tail.
+  What remains an
   under-count is narrower: a session whose close writes a state that is not
   compute-terminal (`gc_swept`, `failed-create`, `stranded-repair`) still records
   nothing, because the terminal-state predicate — not the open-set scan — rejects
