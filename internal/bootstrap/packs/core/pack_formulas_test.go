@@ -2,6 +2,9 @@ package core
 
 import (
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -470,5 +473,222 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 				t.Error("load-context creates a worktree before the owner-liveness gate; the gate must run first")
 			}
 		})
+	}
+}
+
+// TestWorktreeFormulasHoldOnALivePeerHoldingTheWorkTree pins the gate's second
+// owner signal, the work's tree, by running the gate against a real repository.
+//
+// The assignee records a claim, and a session running this workflow never
+// claims its work bead: the bead stays open and unassigned for the whole run,
+// so a gate that reads only the assignee passes a second dispatch while the
+// first is mid-flight. That session does hold the work's tree: the worktree
+// metadata.work_dir records, which workspace-setup adopts, and the worktree
+// with metadata.branch checked out. A tree outside this session's directory
+// belongs to the open session whose directory is the tree, or under whose
+// directory workspace-setup created it (<dir>/worktrees/<bead>).
+//
+// Liveness is still the gate. A holder absent from the session list is gone,
+// and its tree is this run's to adopt, which is how a re-dispatch recovers a
+// crashed run. A tree no session directory accounts for, and a session list
+// that cannot be read, fail closed.
+func TestWorktreeFormulasHoldOnALivePeerHoldingTheWorkTree(t *testing.T) {
+	for _, tool := range []string{"git", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available; the load-context gate requires it", tool)
+		}
+	}
+	// $ROOT/own is this session's directory and $ROOT/peer another session's.
+	// Both are linked worktrees of $ROOT/repo, as a pool session's directory
+	// is, so the gate lists the worktrees of the repository it works in.
+	const repoSetup = `set -e
+git init -q -b main "$ROOT/repo"
+git -C "$ROOT/repo" -c user.name=gate -c user.email=gate@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m init
+git -C "$ROOT/repo" worktree add -q --detach "$ROOT/own"
+git -C "$ROOT/repo" worktree add -q --detach "$ROOT/peer"
+`
+	const (
+		me   = `{"id":"s-me","session_name":"pool__worker-s-me","state":"active","work_dir":"$ROOT/own"}`
+		peer = `{"id":"s-peer","session_name":"pool__worker-s-peer","state":"active","work_dir":"$ROOT/peer"}`
+	)
+	cases := []struct {
+		name string
+		// setup lays out the work's tree after repoSetup has run.
+		setup string
+		bead  string
+		// sessions is the `gc session list --state all --json` answer; empty
+		// means the list cannot be read.
+		sessions string
+		wantHold bool
+		// tree is the held tree the escalation must name, relative to $ROOT.
+		tree       string
+		wantInMail []string
+	}{
+		{
+			name:     "live peer holds the recorded work_dir",
+			setup:    `git -C "$ROOT/repo" worktree add -q --detach "$ROOT/peer/worktrees/gc-w"`,
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/peer/worktrees/gc-w"}}]`,
+			sessions: `{"sessions":[` + me + `,` + peer + `]}`,
+			wantHold: true,
+			tree:     "peer/worktrees/gc-w",
+		},
+		{
+			name: "live peer has the branch checked out under this session's own claim",
+			setup: `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/peer/worktrees/gc-w"
+echo wip > "$ROOT/peer/worktrees/gc-w/wip.txt"`,
+			bead:       `[{"id":"gc-w","status":"in_progress","assignee":"s-me","metadata":{"branch":"polecat/gc-w"}}]`,
+			sessions:   `{"sessions":[` + me + `,` + peer + `]}`,
+			wantHold:   true,
+			tree:       "peer/worktrees/gc-w",
+			wantInMail: []string{"pool__worker-s-peer", "uncommitted paths: 1"},
+		},
+		{
+			name:     "a gone holder leaves its tree to adopt",
+			setup:    `git -C "$ROOT/repo" worktree add -q --detach "$ROOT/peer/worktrees/gc-w"`,
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/peer/worktrees/gc-w"}}]`,
+			sessions: `{"sessions":[` + me + `]}`,
+		},
+		{
+			name:     "this session's own tree is a resume",
+			setup:    `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/own/worktrees/gc-w"`,
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/own/worktrees/gc-w","branch":"polecat/gc-w"}}]`,
+			sessions: `{"sessions":[` + me + `,` + peer + `]}`,
+		},
+		{
+			name:     "an unreadable session list fails closed",
+			setup:    `git -C "$ROOT/repo" worktree add -q --detach "$ROOT/peer/worktrees/gc-w"`,
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/peer/worktrees/gc-w"}}]`,
+			wantHold: true,
+			tree:     "peer/worktrees/gc-w",
+		},
+		{
+			name:     "a tree no session directory accounts for fails closed",
+			setup:    `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/elsewhere/gc-w"`,
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"branch":"polecat/gc-w"}}]`,
+			sessions: `{"sessions":[` + me + `,` + peer + `]}`,
+			wantHold: true,
+			tree:     "elsewhere/gc-w",
+		},
+	}
+	skipEnv := map[string]struct{}{
+		"GC_AGENT": {}, "GC_ALIAS": {}, "GC_DIR": {}, "GC_SESSION_ID": {}, "GC_SESSION_NAME": {},
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {}, "GIT_COMMON_DIR": {}, "GIT_CONFIG_GLOBAL": {},
+		"GIT_CONFIG_NOSYSTEM": {}, "GIT_DIR": {}, "GIT_INDEX_FILE": {}, "GIT_OBJECT_DIRECTORY": {},
+		"GIT_WORK_TREE": {},
+	}
+	vars := strings.NewReplacer("{{convoy_id}}", "gc-convoy", "{{escalation_target}}", "human")
+	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
+		gate := vars.Replace(bashFenceContaining(t, formulaStep(t, readFormula(t, file), "load-context"), "OWNER_LIVE=0"))
+		if strings.Contains(gate, "{{") {
+			t.Fatalf("%s: the load-context gate carries an unsubstituted formula variable", file)
+		}
+		for _, tc := range cases {
+			t.Run(file+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				expand := strings.NewReplacer("$ROOT", root)
+				env := []string{
+					"ROOT=" + root,
+					"GIT_CONFIG_NOSYSTEM=1",
+					"GIT_CONFIG_GLOBAL=" + os.DevNull,
+				}
+				setupPath := filepath.Join(root, "setup.sh")
+				writeGateFixture(t, setupPath, repoSetup+tc.setup+"\n")
+				if out, err := runPackScript(t, setupPath, t.TempDir(), skipEnv, env); err != nil {
+					t.Fatalf("laying out the repository: %v\n%s", err, out)
+				}
+
+				sessionsAnswer := "exit 1"
+				if tc.sessions != "" {
+					sessionsPath := filepath.Join(root, "sessions.json")
+					writeGateFixture(t, sessionsPath, expand.Replace(tc.sessions))
+					sessionsAnswer = "cat '" + sessionsPath + "'"
+				}
+				binDir, logPath := fakeGCBin(t, `case "$1 $2" in
+"session list") `+sessionsAnswer+` ;;
+"hook current") echo gc-step ;;
+"bd show") echo '[{"id":"gc-step","metadata":{"gc.root_bead_id":"gc-root"}}]' ;;
+esac
+exit 0
+`)
+				beadPath := filepath.Join(root, "bead.json")
+				writeGateFixture(t, beadPath, expand.Replace(tc.bead))
+				gatePath := filepath.Join(root, "gate.sh")
+				writeGateFixture(t, gatePath, `cd "$GC_DIR" || exit 97
+WORK_BEAD_ID=gc-w
+WORK_BEAD_JSON=$(cat '`+beadPath+`')
+`+gate+`
+echo GATE-PASSED
+`)
+				out, err := runPackScript(t, gatePath, binDir, skipEnv, append(env,
+					"GC_DIR="+filepath.Join(root, "own"),
+					"GC_SESSION_ID=s-me",
+					"GC_SESSION_NAME=pool__worker-s-me",
+					"GC_AGENT=s-me",
+					"GC_ALIAS=",
+				))
+				logData, readErr := os.ReadFile(logPath)
+				if readErr != nil && !os.IsNotExist(readErr) {
+					t.Fatalf("reading the gc log: %v", readErr)
+				}
+				gcLog := string(logData)
+				parked := strings.Contains(gcLog, "gc bd update gc-step --status=blocked")
+
+				if !tc.wantHold {
+					if err != nil || !strings.Contains(out, "GATE-PASSED") || parked {
+						t.Fatalf("the gate held a dispatch it should pass (err=%v)\noutput:\n%s\ngc log:\n%s", err, out, gcLog)
+					}
+					return
+				}
+				if err == nil || strings.Contains(out, "GATE-PASSED") || !parked {
+					t.Fatalf("the gate passed a dispatch it must hold (err=%v)\noutput:\n%s\ngc log:\n%s", err, out, gcLog)
+				}
+				// The escalation names the held tree, by the resolved path git
+				// reports, so its work can be salvaged.
+				tree, evalErr := filepath.EvalSymlinks(filepath.Join(root, tc.tree))
+				if evalErr != nil {
+					t.Fatalf("resolving the held tree: %v", evalErr)
+				}
+				mailAt := strings.Index(gcLog, "gc mail send")
+				if mailAt < 0 {
+					t.Fatalf("the gate held without escalating\ngc log:\n%s", gcLog)
+				}
+				for _, want := range append([]string{tree}, tc.wantInMail...) {
+					if !strings.Contains(gcLog[mailAt:], want) {
+						t.Errorf("the escalation does not mention %q\ngc log:\n%s", want, gcLog)
+					}
+				}
+			})
+		}
+	}
+}
+
+// bashFenceContaining returns the body of the first bash fence in text whose
+// body contains marker.
+func bashFenceContaining(t *testing.T, text, marker string) string {
+	t.Helper()
+	const open, closing = "```bash\n", "\n```"
+	rest := text
+	for {
+		start := strings.Index(rest, open)
+		if start < 0 {
+			t.Fatalf("no bash fence contains %q", marker)
+		}
+		rest = rest[start+len(open):]
+		end := strings.Index(rest, closing)
+		if end < 0 {
+			t.Fatal("unterminated bash fence")
+		}
+		if body := rest[:end]; strings.Contains(body, marker) {
+			return body
+		}
+		rest = rest[end+len(closing):]
+	}
+}
+
+func writeGateFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
 	}
 }
