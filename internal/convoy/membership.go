@@ -230,28 +230,20 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 
 	// Legacy parent-child children for every convoy in one read, not one read
 	// per convoy: a per-convoy ParentID read costs a store round trip each. The
-	// native Dolt store answers ParentIDs from the parent-child edges that
-	// target the convoys. The query contract lets a store that does not push
-	// ParentIDs down return a superset instead, so the read is scan-authorized
-	// and the parent match is made here against the convoy set.
-	convoySet := make(map[string]bool, len(convoyIDs))
-	for _, id := range convoyIDs {
-		convoySet[id] = true
-	}
+	// store answers ParentIDs exactly, and the bd and native Dolt stores read
+	// only the parent-child edges that target the convoys and the children
+	// those edges name.
 	legacyRows, err := store.List(beads.ListQuery{
 		ParentIDs:     convoyIDs,
 		IncludeClosed: includeClosed,
 		Sort:          beads.SortCreatedAsc,
-		AllowScan:     true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing legacy convoy children: %w", err)
 	}
 	legacyByParent := make(map[string][]beads.Bead, len(convoyIDs))
 	for _, row := range legacyRows {
-		if convoySet[row.ParentID] {
-			legacyByParent[row.ParentID] = append(legacyByParent[row.ParentID], row)
-		}
+		legacyByParent[row.ParentID] = append(legacyByParent[row.ParentID], row)
 	}
 
 	depsByConvoy, err := downEdgesBatch(store, convoyIDs)
