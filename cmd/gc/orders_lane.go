@@ -197,11 +197,11 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	}
 
 	phaseStart = time.Now()
-	cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
+	report := cr.dispatchOrdersLocked(ctx, cityRoot, generation, cfg)
 	lane.notePass(time.Now(), reason)
 	if trace != nil {
 		trace.RecordControllerOperation(TraceSiteOrderDispatch, TraceReasonRetained, TraceOutcomeComplete,
-			"dispatch_orders", time.Since(phaseStart), nil)
+			"dispatch_orders", time.Since(phaseStart), report.traceFields())
 	}
 	if ctx.Err() != nil {
 		return
@@ -284,33 +284,84 @@ func (cr *CityRuntime) dispatchOrders(ctx context.Context, cityRoot string) {
 }
 
 // dispatchOrdersLocked is the dispatch body. passMu must be held; generation
-// and cfg come from orderPassConfig.
-func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) {
+// and cfg come from orderPassConfig. It reports how long each arm of the pass
+// took and what the dispatch did with its budget.
+func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string, generation uint64, cfg *config.City) orderPassReport {
+	var report orderPassReport
 	if ctx.Err() != nil {
-		return
+		return report
 	}
 	// A suspended city gets no order pass at all: dispatch already skips it,
 	// and the tracking and mail watchdogs below would read every scope's
 	// store, restarting the proxies suspension retired.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
-		return
+		return report
 	}
 	now := time.Now()
 	if !cr.wispIndexMigrationApplied {
 		cr.wispIndexMigrationApplied = true
 		cr.applyWispQueryIndexes(ctx)
 	}
-	cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now)
+	timeArm := func(took *time.Duration, arm func()) {
+		start := time.Now()
+		arm()
+		*took = time.Since(start)
+	}
+	timeArm(&report.rescan, func() { cr.rescanOrderDispatcherIfDue(cityRoot, cfg, generation, now) })
 	// Installs whatever is staged — this rescan's result, or a reload staged
 	// while the previous pass held the lock — before anything dispatches
 	// against the outgoing dispatcher.
-	cr.installPendingOrderDispatcherLocked(ctx)
-	cr.runOrderTrackingSweepWatchdog(cfg, now)
-	cr.runOrderTrackingRetentionWatchdog(cfg, now)
-	cr.runNudgeMailSweepWatchdog(cfg, now)
+	timeArm(&report.install, func() { cr.installPendingOrderDispatcherLocked(ctx) })
+	timeArm(&report.trackingSweep, func() { cr.runOrderTrackingSweepWatchdog(cfg, now) })
+	timeArm(&report.trackingRetention, func() { cr.runOrderTrackingRetentionWatchdog(cfg, now) })
+	timeArm(&report.nudgeMailSweep, func() { cr.runNudgeMailSweepWatchdog(cfg, now) })
 	if cr.od != nil {
-		cr.od.dispatch(ctx, cityRoot, now)
+		timeArm(&report.dispatch, func() { cr.od.dispatch(ctx, cityRoot, now) })
+		if m, ok := cr.od.(*memoryOrderDispatcher); ok {
+			report.stats, report.hasStats = m.lastPass, true
+		}
 	}
+	return report
+}
+
+// orderPassReport is how long each arm of one orders pass took, and what the
+// pass's dispatch did with its budget, for the pass's dispatch_orders trace
+// record. The arms run one after another under passMu, so a slow pass names
+// the arm that made it slow, and the dispatch stats say whether the pass ran
+// out of budget or which gate held orders back.
+type orderPassReport struct {
+	rescan            time.Duration
+	install           time.Duration
+	trackingSweep     time.Duration
+	trackingRetention time.Duration
+	nudgeMailSweep    time.Duration
+	dispatch          time.Duration
+	// hasStats reports whether a memory dispatcher ran, and so whether stats
+	// describes this pass.
+	hasStats bool
+	stats    orderDispatchPassStats
+}
+
+// traceFields renders the report as dispatch_orders trace fields.
+func (r orderPassReport) traceFields() map[string]any {
+	fields := map[string]any{
+		"rescan_ms":             r.rescan.Milliseconds(),
+		"install_ms":            r.install.Milliseconds(),
+		"tracking_sweep_ms":     r.trackingSweep.Milliseconds(),
+		"tracking_retention_ms": r.trackingRetention.Milliseconds(),
+		"nudge_mail_sweep_ms":   r.nudgeMailSweep.Milliseconds(),
+		"dispatch_ms":           r.dispatch.Milliseconds(),
+	}
+	if r.hasStats {
+		fields["budget"] = r.stats.budget
+		fields["dispatched"] = r.stats.dispatched
+		fields["unreached"] = r.stats.unreached
+		fields["gated_open_tracking"] = r.stats.gatedOpenTracking
+		fields["gated_open_work"] = r.stats.gatedOpenWork
+		fields["gate_failed_closed"] = r.stats.gateFailedClosed
+		fields["gate_backoff"] = r.stats.gateBackoff
+	}
+	return fields
 }
 
 // stageOrderDispatcher is the reload-side stage: it records next as the
@@ -349,12 +400,14 @@ func (cr *CityRuntime) stageOrderDispatcherLocked(lane *ordersLane, next orderDi
 	return summary
 }
 
-// scanOrderSet scans the order set, through the orderSetScan seam when set.
+// scanOrderSet scans the order set, through the orderSetScan seam when set. The
+// registrations the scan drops for their rig scope are logged through
+// cr.unboundRigScoped, which every supervisor scan shares.
 func (cr *CityRuntime) scanOrderSet(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
 	if cr.orderSetScan != nil {
 		return cr.orderSetScan(cityRoot, cfg, cmdName)
 	}
-	return scanOrderSetSnapshotFS(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName)
+	return scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName, &cr.unboundRigScoped)
 }
 
 // tryInstallPendingOrderDispatcher installs a staged dispatcher now if no pass
