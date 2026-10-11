@@ -233,19 +233,13 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 	// a store that offers the capability, one exact per-parent read otherwise,
 	// never a scan of the ledger. Rows carry their ParentID, so they are grouped
 	// here; assembleMembers applies the closed filter and the member order.
-	convoySet := make(map[string]bool, len(convoyIDs))
-	for _, id := range convoyIDs {
-		convoySet[id] = true
-	}
 	legacyRows, err := beads.ChildrenOfAny(store, convoyIDs, beads.IncludeClosed)
 	if err != nil {
 		return nil, fmt.Errorf("listing legacy convoy children: %w", err)
 	}
 	legacyByParent := make(map[string][]beads.Bead, len(convoyIDs))
 	for _, row := range legacyRows {
-		if convoySet[row.ParentID] {
-			legacyByParent[row.ParentID] = append(legacyByParent[row.ParentID], row)
-		}
+		legacyByParent[row.ParentID] = append(legacyByParent[row.ParentID], row)
 	}
 
 	depsByConvoy, err := downEdgesBatch(store, convoyIDs)

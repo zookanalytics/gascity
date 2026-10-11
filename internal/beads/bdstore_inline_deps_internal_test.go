@@ -731,11 +731,13 @@ func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T
 			}
 			stage.assertStillAnswers("after a healthy reconcile")
 
-			// The cost: the reconcile spends the one closed read the backing's
-			// own Ready spends, a `bd list --all` and its wisp-tier `bd query`.
+			// The cost: the reconcile spends one closed read. BdStore pushes the
+			// evicted blockers' ids down to bd (bdIDReads), so that read is one
+			// keyed `bd list --all --id=...`; the wisp-tier `bd query` is skipped
+			// because the durable read already returned every id.
 			reads := closedInclusiveReads(ledger.calls[before:reconciled])
-			if len(reads) != 2 || reads[0][1] != "list" || reads[1][1] != "query" {
-				t.Fatalf("the reconcile spent closed reads %v, want one `bd list --all` and one `bd query --all`", reads)
+			if len(reads) != 1 || reads[0][1] != "list" || !slices.Contains(reads[0], "--id=bd-blocker,bd-passed,bd-plain") {
+				t.Fatalf("the reconcile spent closed reads %v, want one keyed `bd list --all --id=bd-blocker,bd-passed,bd-plain`", reads)
 			}
 		})
 	}

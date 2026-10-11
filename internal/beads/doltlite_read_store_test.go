@@ -76,6 +76,39 @@ func TestDoltliteReadStoreHydratesParent(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreListsTheChildrenOfListedParents pins ParentIDs on the
+// DoltLite read path: the parent-child join answers it exactly, an empty entry
+// names no parent, and a limited read, which a two-table query would otherwise
+// answer through the bounded top-N selection that has no parent join, answers
+// too.
+func TestDoltliteReadStoreListsTheChildrenOfListedParents(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	for name, query := range map[string]ListQuery{
+		"listed beside a missing parent": {ParentIDs: []string{"gc-missing", "gc-parent"}},
+		"listed beside an empty entry":   {ParentIDs: []string{"", "gc-parent"}},
+		"limited":                        {ParentIDs: []string{"gc-parent"}, Limit: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := store.List(query)
+			if err != nil {
+				t.Fatalf("List(ParentIDs=%q): %v", query.ParentIDs, err)
+			}
+			if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-child"}) {
+				t.Fatalf("List(ParentIDs=%q) = %v, want [gc-child]", query.ParentIDs, ids)
+			}
+		})
+	}
+	got, err := store.List(ListQuery{ParentIDs: []string{""}})
+	if err != nil {
+		t.Fatalf("List(ParentIDs=[\"\"]): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List(ParentIDs=[\"\"]) = %v, want no bead", beadIDsOf(got))
+	}
+}
+
 func TestDoltliteReadStoreTypeFallbackCanSkipLabels(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
