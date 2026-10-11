@@ -145,6 +145,7 @@ go_test(
         "@com_github_gastownhall_gascity_packs//:gascity-packs",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_golang_x_mod//semver",
     ],
 )
 
