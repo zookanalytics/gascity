@@ -216,13 +216,14 @@ recovered from what was kept.
   (`closedUsageRetryInterval`, `closedUsageRetryWindow`). The 24 hours run from
   `closed_at`, else from the bead's update time, else from the first retry that
   found the session unsettled. The city store's beads carry no update time, so
-  lx-wisp-e9yi1 would take the last of these. Each
-  attempt writes the compute fact whether or not the model sweep settles, so a
-  drop gives up only the model-usage tail of a transcript that never resolved.
-  The cadence and the horizon are those of the closed-session backstop in
-  upstream gastownhall/gascity#6908, which reaches unsettled closed sessions
-  through a periodic list of closed session beads rather than an in-memory
-  set. Upstream main carries neither lane.
+  lx-wisp-e9yi1 would take the last of these. Each attempt writes the compute
+  fact whether or not the model sweep settles, so a drop gives up the
+  model-usage tail of a transcript that never resolved, and the compute fact
+  too only when the sink refused every write. The cadence and the horizon are
+  those of the closed-session backstop in upstream gastownhall/gascity#6908,
+  which reaches unsettled closed sessions through a periodic list of closed
+  session beads rather than an in-memory set. Upstream main carries neither
+  lane.
 
 ## What this does not change
 

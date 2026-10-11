@@ -225,8 +225,8 @@ yet settled.
   it may succeed next pass. A closed session whose accounting does not settle,
   such as one whose model-usage sweep keeps missing its transcript, is retried at
   most once every 10 minutes and dropped 24 hours after its close. Each attempt
-  still writes its compute fact, so a drop gives up only the model-usage tail.
-  What remains an
+  still writes its compute fact, so a drop gives up the model-usage tail, and the
+  compute fact too only when the sink refused every write. What remains an
   under-count is narrower: a session whose close writes a state that is not
   compute-terminal (`gc_swept`, `failed-create`, `stranded-repair`) still records
   nothing, because the terminal-state predicate — not the open-set scan — rejects

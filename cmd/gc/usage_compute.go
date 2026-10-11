@@ -46,9 +46,10 @@ const liveModelSweepMinInterval = 30 * time.Second
 
 // closedUsageRetryWindow is how long after its close the vanished lane keeps
 // retrying a closed session whose accounting has not settled. Each attempt
-// writes the compute fact whether or not the model sweep settles, so what a drop
-// at the window's end gives up is the model-usage tail of a transcript that
-// never resolved.
+// writes the compute fact whether or not the model sweep settles, so a drop at
+// the window's end gives up the model-usage tail of a transcript that never
+// resolved. It gives up the compute fact too only when the sink refused every
+// write.
 const closedUsageRetryWindow = 24 * time.Hour
 
 // closedUsageRetryInterval floors how often the vanished lane retries a closed
