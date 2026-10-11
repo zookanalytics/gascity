@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"maps"
@@ -12,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -111,6 +113,181 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(store)
 }
 
+// closedNamedIndexMaxAge bounds how long a controller reuses one closed
+// named-session index. A named session's close rebuilds the index through the
+// bead event feed or the open set; this bound covers a change neither shows: a
+// write that announces no bead event, such as a raw bd close, to a named
+// session no snapshot held open.
+const closedNamedIndexMaxAge = 10 * time.Minute
+
+// closedNamedIndexCache carries a controller's closed named-session index from
+// one demand pass to the next. A city runtime holds one, and its desired-state
+// builds, its control-dispatcher ticks and its v2 external-reads lane all read
+// through it.
+//
+// Building the index reads every session bead, closed ones included, so its
+// cost grows with the city's session history. Its answer changes only when a
+// named session closes, when a closed one is reopened or rewritten, or when the
+// session store is replaced. The next read builds again after any of these:
+//
+//   - a bead event carries a closed named-session bead, or the bead event feed
+//     reports a gap (noteBeadEvent, noteEventGap);
+//   - a named session the cache saw open has left the open set of the reader's
+//     session snapshot;
+//   - the store changes, the snapshot is degraded or absent, or the index is
+//     older than maxAge.
+//
+// Otherwise it answers from the last complete build. A failed build is returned
+// to its reader and is not kept.
+//
+// A build runs outside the lock, and only one runs at a time. A reader that
+// needs a build while one is running waits for it, then checks the result
+// against its own snapshot. A build that an event invalidated while it ran is
+// returned to its reader and is not kept.
+type closedNamedIndexCache struct {
+	maxAge time.Duration
+	now    func() time.Time
+
+	mu        sync.Mutex
+	built     bool
+	store     beads.Store
+	builtAt   time.Time
+	idx       session.ClosedNamedSessionBeadIndex
+	openNamed map[string]struct{}
+	// gen counts invalidations, so a build can tell whether one landed while
+	// it ran.
+	gen uint64
+	// building is closed when the running build ends, and nil when none runs.
+	building chan struct{}
+}
+
+// newClosedNamedIndexCache returns an empty cache bounded by
+// closedNamedIndexMaxAge.
+func newClosedNamedIndexCache() *closedNamedIndexCache {
+	return &closedNamedIndexCache{maxAge: closedNamedIndexMaxAge, now: time.Now}
+}
+
+// get returns store's closed named-session index for a reader whose open
+// session snapshot is snap, calling build only when the cached index cannot
+// stand for that reader.
+func (c *closedNamedIndexCache) get(store beads.Store, snap *sessionBeadSnapshot, build func(beads.Store) (session.ClosedNamedSessionBeadIndex, error)) (session.ClosedNamedSessionBeadIndex, error) {
+	openNamed, complete := openNamedSessionIDs(snap)
+	key := demandLabelKey(store)
+	c.mu.Lock()
+	for {
+		if complete && c.built && c.store == key && c.now().Sub(c.builtAt) < c.maxAge && containsEveryID(openNamed, c.openNamed) {
+			c.openNamed = openNamed
+			idx := c.idx
+			c.mu.Unlock()
+			return idx, nil
+		}
+		if c.building == nil {
+			break
+		}
+		running := c.building
+		c.mu.Unlock()
+		<-running
+		c.mu.Lock()
+	}
+	done := make(chan struct{})
+	c.building = done
+	gen, started := c.gen, c.now()
+	c.mu.Unlock()
+	// Released even when build panics: a slot left held would block every
+	// later reader for the life of the controller.
+	defer func() {
+		c.mu.Lock()
+		c.building = nil
+		c.mu.Unlock()
+		close(done)
+	}()
+
+	idx, err := build(store)
+	c.mu.Lock()
+	if complete && err == nil && c.gen == gen {
+		c.built, c.store, c.builtAt, c.idx, c.openNamed = true, key, started, idx, openNamed
+	}
+	c.mu.Unlock()
+	return idx, err
+}
+
+// noteBeadEvent drops the cached index when evt carries a bead the index can
+// find (session.ClosedNamedSessionBeadIndexed): a named session closed, or a
+// closed one was rewritten so that it counts. The controller's bead event feed
+// carries the closes this controller makes and the ones other gc processes
+// announce, so a named session that opened and closed between two snapshots,
+// which no snapshot can show, still rebuilds the index. An event for any other
+// bead, a close as failed-create included, or one whose payload does not
+// decode, changes nothing. A nil cache ignores the event.
+func (c *closedNamedIndexCache) noteBeadEvent(evt events.Event) {
+	// Most events are for beads that carry no named identity; skip decoding
+	// their payloads.
+	if c == nil || !bytes.Contains(evt.Payload, []byte(session.NamedSessionIdentityMetadata)) {
+		return
+	}
+	if b, ok := beads.DecodeBeadEventPayload(evt.Payload); ok && session.ClosedNamedSessionBeadIndexed(b) {
+		c.invalidate()
+	}
+}
+
+// noteEventGap drops the cached index: the bead event feed may have lost a
+// named session's close. A nil cache ignores the gap.
+func (c *closedNamedIndexCache) noteEventGap() {
+	if c == nil {
+		return
+	}
+	c.invalidate()
+}
+
+// invalidate drops the cached index, and keeps a build running now from
+// storing its result.
+func (c *closedNamedIndexCache) invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.built = false
+	c.gen++
+}
+
+// openNamedSessionIDs returns the IDs of snap's open sessions that carry a
+// configured named identity, and whether snap loaded completely: a degraded or
+// absent snapshot cannot show which named sessions closed.
+func openNamedSessionIDs(snap *sessionBeadSnapshot) (map[string]struct{}, bool) {
+	if snap == nil || snap.LoadError() != nil {
+		return nil, false
+	}
+	ids := make(map[string]struct{})
+	for _, info := range snap.OpenInfos() {
+		if info.Closed || session.NamedSessionIdentityInfo(info) == "" {
+			continue
+		}
+		ids[info.ID] = struct{}{}
+	}
+	return ids, true
+}
+
+// containsEveryID reports whether have holds every ID in want.
+func containsEveryID(have, want map[string]struct{}) bool {
+	for id := range want {
+		if _, ok := have[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// closedNamedCachedReads is the legacy demand reads with the closed
+// named-session index answered by a controller's closedNamedIndexCache for the
+// pass whose open session snapshot is snap.
+type closedNamedCachedReads struct {
+	legacyDemandReads
+	cache *closedNamedIndexCache
+	snap  *sessionBeadSnapshot
+}
+
+func (r closedNamedCachedReads) ClosedNamedIndex(store beads.Store) (session.ClosedNamedSessionBeadIndex, error) {
+	return r.cache.get(store, r.snap, r.legacyDemandReads.ClosedNamedIndex)
+}
+
 // demandLegCache classifies a demand leg: its CachingStore, behind the
 // bead-policy front door, and whether the leg is exact (the cache's backing
 // declares beads.CachedReadExact). A leg with no CachingStore is not exact.
@@ -141,9 +318,10 @@ func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
 //   - CachedReady: unavailable, so ReadyAll is the whole Ready answer.
 //   - ReadyLimit: none. The assigned Ready set is not truncated by
 //     max_wakes_per_tick (BEHAVIORS #31 F).
-//   - ClosedNamedIndex: the recording's copy, on every leg. No cache holds
-//     closed history, so the lane reads it live whether or not the leg is
-//     exact. Missing or expired, it is the zero index with an error, which
+//   - ClosedNamedIndex: the recording's copy, on every leg. No CachingStore
+//     holds closed history, so the lane reads it through the controller's
+//     closedNamedIndexCache whether or not the leg is exact. Missing or
+//     expired, it is the zero index with an error, which
 //     readyAssignedWorkAssignees reads as no closed phantom (fail open, as
 //     legacy does on a failed read).
 //

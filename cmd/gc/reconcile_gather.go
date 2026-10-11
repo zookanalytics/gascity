@@ -54,6 +54,9 @@ type gatherEnv struct {
 	Health       func() *providerHealthSnapshot
 	Episodes     func() (map[string]session.StartupHealthEpisode, error)
 	Suspension   func() suspensionstate.State
+	// ClosedNamed is the controller's closed named-session index cache, which
+	// the external-reads lane reads the index through; nil reads it afresh.
+	ClosedNamed *closedNamedIndexCache
 	// ResolveTemplate is resolveTemplateForSessionBeadInfo for one row under
 	// env, memoized per generation (templateMemo).
 	ResolveTemplate func(env *reconcileEnv, info session.Info) (TemplateParams, error)
@@ -238,7 +241,7 @@ func k1Env(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg
 	}
 	return externalReadsEnv{
 		CityPath: e.CityPath, CityName: e.CityName, Cfg: env.Cfg, CityStore: dg.CityStore, RigStores: dg.RigStores,
-		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions,
+		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions, ClosedNamed: e.ClosedNamed,
 	}
 }
 

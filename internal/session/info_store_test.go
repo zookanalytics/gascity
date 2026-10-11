@@ -148,6 +148,60 @@ func TestStoreListFiltersLikeCatalog(t *testing.T) {
 	}
 }
 
+// includeClosedRecordingStore records the IncludeClosed of every List it serves.
+type includeClosedRecordingStore struct {
+	beads.Store
+	includeClosed []bool
+}
+
+func (s *includeClosedRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.includeClosed = append(s.includeClosed, q.IncludeClosed)
+	return s.Store.List(q)
+}
+
+// TestStoreListReadsClosedHistoryOnlyWhenTheFilterKeepsIt pins that List asks
+// the store for closed session beads only under a state filter that can keep
+// one, and that every filter returns the same sessions as a read that always
+// includes closed history.
+func TestStoreListReadsClosedHistoryOnlyWhenTheFilterKeepsIt(t *testing.T) {
+	seed := []beads.Bead{
+		sessionBeadFixture("s-asleep", "open", map[string]string{"template": "polecat", "state": "asleep"}),
+		sessionBeadFixture("s-active", "open", map[string]string{"template": "mayor", "state": "active"}),
+		sessionBeadFixture("s-closed", "closed", map[string]string{"template": "polecat", "state": "asleep"}),
+	}
+	for _, tc := range []struct {
+		state, template string
+		wantClosedRead  bool
+	}{
+		{"", "", false},
+		{"", "polecat", false},
+		{"open", "", false},
+		{"asleep", "", false},
+		{"asleep,active", "", false},
+		{"all", "", true},
+		{"closed", "", true},
+		{"asleep,closed", "polecat", true},
+	} {
+		recorder := &includeClosedRecordingStore{Store: beads.NewMemStoreFrom(len(seed), seed, nil)}
+		got, err := NewStore(beads.SessionStore{Store: recorder}).List(tc.state, tc.template)
+		if err != nil {
+			t.Fatalf("List(%q, %q): %v", tc.state, tc.template, err)
+		}
+		if want := []bool{tc.wantClosedRead}; !reflect.DeepEqual(recorder.includeClosed, want) {
+			t.Errorf("List(%q, %q) read with IncludeClosed %v, want %v", tc.state, tc.template, recorder.includeClosed, want)
+		}
+		var wantIDs []string
+		for _, b := range seed {
+			if sessionMatchesFilters(b, tc.state, tc.template) {
+				wantIDs = append(wantIDs, b.ID)
+			}
+		}
+		if gotIDs := infoIDs(got); !reflect.DeepEqual(idSet(gotIDs), idSet(wantIDs)) {
+			t.Errorf("List(%q, %q) = %v, want %v", tc.state, tc.template, gotIDs, wantIDs)
+		}
+	}
+}
+
 // TestInfoFromPersistedBeadProjectionDeterminism asserts the persisted
 // projection is a deterministic, store-identity-independent function of the
 // bead's plain fields: the same bead seeded into two distinct store instances
