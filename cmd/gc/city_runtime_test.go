@@ -4805,7 +4805,7 @@ func TestControlDispatcherTickRepairsRigRouteAndRestartsRuntimeMissingDispatcher
 		stdout:        io.Discard,
 		stderr:        io.Discard,
 	}
-	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard, nil)
 	cs := &controllerState{
 		cfg:           cfg,
 		sp:            firstRuntime,
@@ -8241,7 +8241,7 @@ func newCapacityRefusingRuntime(t *testing.T, agentName, startCommand string, gu
 		// No managed Dolt here: the preflight must not exec the beads script.
 		managedDoltHealth: func(context.Context, string) error { return nil },
 	}
-	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard)
+	cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard, nil)
 	cr.setControllerState(&controllerState{
 		cfg:           cfg,
 		sp:            sp,
