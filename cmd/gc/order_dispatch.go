@@ -101,11 +101,6 @@ const (
 	orderTrackingRetentionWatchdogDeleteBudget = 100
 )
 
-// orderDispatchBudgetMaxIntervals bounds how many patrol intervals of dispatch
-// budget one pass can accrue (passDispatchBudget), and with it the burst a
-// single pass can launch after a slow one.
-const orderDispatchBudgetMaxIntervals = 4
-
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
 // constant so both load-time defaults and the runtime fallback stay in sync.
 var defaultOrderTrackingDeleteAfterClose = config.BeadPolicyConfig{
@@ -339,9 +334,9 @@ type memoryOrderDispatcher struct {
 	// budgetInterval is the wall-clock period maxDispatchesPerTick is a rate
 	// over: the patrol interval. Zero spends the cap once per pass
 	// (passDispatchBudget). budgetPassStart is when the previous pass's budget
-	// was computed, zero before the first pass and after restartBudget.
-	// budgetRemainder is what that pass accrued short of one more dispatch, in
-	// units where one dispatch costs budgetInterval nanoseconds.
+	// was computed, zero before the first pass. budgetRemainder is what that
+	// pass accrued short of one more dispatch, in units where one dispatch
+	// costs budgetInterval nanoseconds.
 	budgetInterval  time.Duration
 	budgetPassStart time.Time
 	budgetRemainder int64
@@ -363,7 +358,10 @@ type memoryOrderDispatcher struct {
 // orderDispatchPassStats is what one dispatch pass did with its budget, and why
 // it held back the orders it did not dispatch, for the pass's trace record.
 type orderDispatchPassStats struct {
-	// budget is the pass's allowance of budgeted dispatches, 0 when uncapped.
+	// budget is the pass's allowance of budgeted dispatches. Every pass of an
+	// unsuspended city computes one, at least 1 when capped, so 0 means the
+	// dispatcher is uncapped, which configuration cannot set: a
+	// max_dispatches_per_tick below 1 keeps the default.
 	budget int
 	// dispatched counts the dispatches the pass launched, budgeted or not,
 	// including the trigger-env failure records that stand in for one.
@@ -432,12 +430,15 @@ type orderTrackingSummary struct {
 // field stamped so they use independent scoped labels. routes is the caller's
 // resolved storage binding; nil is the identity routing of a single-store city.
 func buildOrderDispatcher(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher { //nolint:unparam // routes is nil in current callers but is the storage binding a production caller must pass
-	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan")
+	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan", nil)
 	return od
 }
 
-func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
-	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
+// buildOrderDispatcherWithSnapshot scans the order set and builds the
+// dispatcher over it. The scan logs the registrations it drops for their rig
+// scope through unbound (scanOrderSetSnapshotFSWith).
+func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderDispatcher, orderSetSnapshot) {
+	snapshot, err := scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, unbound)
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
@@ -449,17 +450,20 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 	return scanOrderSetSnapshotFSWith(fs, cityPath, cfg, stderr, cmdName, nil)
 }
 
-// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS with the handler for a
-// registration the scan drops for its rig scope. A nil handler logs every one
-// the scan reports.
-func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, onUnbound orderdiscovery.UnboundRigScopedHandler) (orderSetSnapshot, error) {
+// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS logging the
+// registrations the scan drops for their rig scope through unbound, which
+// leaves out a warning the previous scan through it already reported. A nil
+// unbound logs every one the scan reports.
+func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
 	}
-	if onUnbound == nil {
-		onUnbound = func(orderName string, boundRigs []string) {
-			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
-		}
+	var onUnbound orderdiscovery.UnboundRigScopedHandler = func(orderName string, boundRigs []string) {
+		logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+	}
+	scanned := func() {}
+	if unbound != nil {
+		onUnbound, scanned = unbound.scan(stderr, cmdName)
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		FS: fs,
@@ -481,42 +485,58 @@ func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, s
 	if err != nil {
 		return orderSetSnapshot{}, err
 	}
+	scanned()
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),
 	}, nil
 }
 
-// unboundRigScopedLog logs a registration the order scan drops for its rig
-// scope the first time a scan reports it, and again only when its warning
-// changes. The drop is expected for a rig-scoped order in a pack every rig
-// imports, and the order set is rescanned by the orders lane every
-// orderRescanInterval and by every same-revision config reload, so an
-// unchanged warning repeated on each rescan buries the log; a changed one is
-// news.
+// unboundRigScopedLog logs the registrations order-set scans drop for their
+// rig scope. A scan logs only the warnings the previous scan did not report: a
+// warning every scan repeats unchanged is logged once, a changed one is
+// logged, and so is one that goes away and later comes back. The drop is
+// expected for a rig-scoped order in a pack every rig imports, and the
+// supervisor scans the order set at start, on every config reload, and every
+// orderRescanInterval on the orders lane, so logging every warning of every
+// scan buries the log.
 type unboundRigScopedLog struct {
-	mu   sync.Mutex
-	last map[string]string // order name -> the warning last logged for it
+	mu sync.Mutex
+	// last is the warnings of the latest completed scan, by order name. A scan
+	// in progress adds each warning it logs, so a scan running beside it does
+	// not log that warning again.
+	last map[string]string
 }
 
-// handler returns the scan handler that logs through l, prefixed with
-// cmdName.
-func (l *unboundRigScopedLog) handler(stderr io.Writer, cmdName string) orderdiscovery.UnboundRigScopedHandler {
-	return func(orderName string, boundRigs []string) {
+// scan begins one scan logged through l, prefixed with cmdName. It returns the
+// handler the scan reports its dropped registrations to, and scanned, which the
+// caller runs once the scan has completed to make the scan's warnings the set
+// the next scan is compared with. A scan that fails does not run scanned, so a
+// warning it did not reach is not taken for gone.
+func (l *unboundRigScopedLog) scan(stderr io.Writer, cmdName string) (report orderdiscovery.UnboundRigScopedHandler, scanned func()) {
+	reported := make(map[string]string)
+	report = func(orderName string, boundRigs []string) {
 		msg := orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)
 		l.mu.Lock()
-		repeat := l.last[orderName] == msg
-		if !repeat {
+		reported[orderName] = msg
+		news := l.last[orderName] != msg
+		if news {
 			if l.last == nil {
 				l.last = make(map[string]string)
 			}
 			l.last[orderName] = msg
 		}
 		l.mu.Unlock()
-		if !repeat {
+		if news {
 			logDispatchError(stderr, "%s: %s", cmdName, msg)
 		}
 	}
+	scanned = func() {
+		l.mu.Lock()
+		l.last = reported
+		l.mu.Unlock()
+	}
+	return report, scanned
 }
 
 func orderSetSignature(aa []orders.Order) string {
@@ -708,7 +728,6 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	if m.cfg != nil {
 		st, _ := loadSuspensionState(fsys.OSFS{}, m.cityPath)
 		if citySuspendedWithState(m.cfg, st) {
-			m.restartBudget()
 			return
 		}
 	}
@@ -735,24 +754,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}()
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex(m.stderr)
-	budgetSpent := 0
 
 	total := len(m.aa)
-	if total == 0 {
-		return
-	}
-	budget := m.passDispatchBudget(now)
-	m.lastPass.budget = budget
 	start := 0
-	if budget > 0 {
+	if m.maxDispatchesPerTick > 0 && total > 0 {
 		start = m.nextDispatchStart % total
-	}
-	spendDispatchBudget := func(idx int) bool {
-		budgetSpent++
-		if budget > 0 {
-			m.nextDispatchStart = (idx + 1) % total
-		}
-		return budget > 0 && budgetSpent >= budget
 	}
 
 	// Phase 1: resolve and open-tracking-gate every order, in rotation order.
@@ -873,6 +879,16 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			budgeted = append(budgeted, cand)
 		}
 	}
+	budget := m.passDispatchBudget(now, len(budgeted))
+	m.lastPass.budget = budget
+	budgetSpent := 0
+	spendDispatchBudget := func(idx int) bool {
+		budgetSpent++
+		if budget > 0 {
+			m.nextDispatchStart = (idx + 1) % total
+		}
+		return budget > 0 && budgetSpent >= budget
+	}
 	for _, cand := range unbudgeted {
 		if m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
 			m.lastPass.dispatched++
@@ -892,30 +908,32 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 }
 
 // passDispatchBudget returns how many budgeted dispatches the pass beginning at
-// now may launch, and 0 when dispatch is uncapped.
+// now may launch, and 0 when dispatch is uncapped. rotation is the number of
+// budgeted candidates the pass has, each of which it dispatches at most once.
 //
 // maxDispatchesPerTick is a rate: that many dispatches for each budgetInterval
 // of wall time. A pass accrues it for the time since the previous pass began,
-// so the rate holds when passes slow down. A pass's length is store latency,
-// maintenance arms and the lane's duty cycle, none of which the cap limits. A
-// cap spent once per pass would let a slow stretch cut the dispatch rate for
-// every order at once: with more due orders than one pass's budget, each order
-// waits a whole rotation between dispatches, and the rotation grows with the
-// pass. Accrual keeps three bounds:
+// so the rate holds when passes slow down or the lane skips them. A pass's
+// length is store latency, maintenance arms and the lane's duty cycle, none of
+// which the cap limits. A cap spent once per pass would let a slow stretch cut
+// the dispatch rate for every order at once: with more due orders than one
+// pass's budget, each order waits a whole rotation between dispatches, and the
+// rotation grows with the pass. Accrual keeps three bounds:
 //
 //   - A pass never gets less than maxDispatchesPerTick, which is also what the
-//     first pass gets, and the first pass after restartBudget.
-//   - A pass never gets more than orderDispatchBudgetMaxIntervals intervals'
-//     worth, which bounds the burst one pass launches after a long gap.
+//     first pass gets.
+//   - A pass never gets more than its rotation. One rotation is the most a
+//     pass can dispatch, so it bounds the burst after a long gap: each due
+//     order once.
 //   - Only the fraction of a dispatch carries to the next pass. Budget a pass
 //     leaves unspent because fewer orders were due is dropped, so a quiet
 //     stretch builds no burst.
-func (m *memoryOrderDispatcher) passDispatchBudget(now time.Time) int {
+func (m *memoryOrderDispatcher) passDispatchBudget(now time.Time, rotation int) int {
 	if m.maxDispatchesPerTick <= 0 {
 		return 0
 	}
 	floor := m.maxDispatchesPerTick
-	ceiling := floor * orderDispatchBudgetMaxIntervals
+	ceiling := max(floor, rotation)
 	prev := m.budgetPassStart
 	m.budgetPassStart = now
 	if prev.IsZero() || m.budgetInterval <= 0 || !now.After(prev) {
@@ -923,31 +941,25 @@ func (m *memoryOrderDispatcher) passDispatchBudget(now time.Time) int {
 		return floor
 	}
 	elapsed := now.Sub(prev)
-	// A gap of the full accrual, or one long enough to overflow the product
-	// below, gets the ceiling.
-	if elapsed/m.budgetInterval >= orderDispatchBudgetMaxIntervals || int64(floor) > (math.MaxInt64-m.budgetRemainder)/int64(elapsed) {
+	// A gap whose whole intervals alone accrue the ceiling, or one long enough
+	// to overflow the product below, gets the ceiling.
+	if elapsed/m.budgetInterval >= time.Duration(ceiling) || int64(floor) > (math.MaxInt64-m.budgetRemainder)/int64(elapsed) {
 		m.budgetRemainder = 0
 		return ceiling
 	}
 	// Integer accrual, so fractional dispatches add up exactly across passes.
-	// elapsed is under orderDispatchBudgetMaxIntervals intervals and the
-	// remainder under one, so budget is at most ceiling.
 	accrued := int64(floor)*int64(elapsed) + m.budgetRemainder
-	budget := int(accrued / int64(m.budgetInterval))
+	budget := accrued / int64(m.budgetInterval)
 	m.budgetRemainder = accrued % int64(m.budgetInterval)
-	if budget < floor {
+	switch {
+	case budget < int64(floor):
 		m.budgetRemainder = 0
 		return floor
+	case budget >= int64(ceiling):
+		m.budgetRemainder = 0
+		return ceiling
 	}
-	return budget
-}
-
-// restartBudget makes the next pass's budget a first pass's: the configured cap,
-// with nothing accrued. The orders lane calls it after a pass it deliberately
-// did not dispatch (FS pressure, a suspended city), so the time the lane spent
-// not dispatching does not accrue into a burst on the pass that resumes.
-func (m *memoryOrderDispatcher) restartBudget() {
-	m.budgetPassStart, m.budgetRemainder = time.Time{}, 0
+	return int(budget)
 }
 
 // dueConditionCandidate reports whether a candidate is a condition-triggered

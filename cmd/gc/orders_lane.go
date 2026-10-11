@@ -182,7 +182,6 @@ func (cr *CityRuntime) runOrdersLanePass(ctx context.Context, cityRoot, reason s
 	}()
 
 	if cr.ordersLaneShouldSkipForFSPressureLocked(lane, trace, reason) {
-		cr.restartOrderDispatchBudgetLocked()
 		completion = TraceCompletionCompleted
 		return
 	}
@@ -296,7 +295,6 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 	// and the tracking and mail watchdogs below would read every scope's
 	// store, restarting the proxies suspension retired.
 	if effectiveCitySuspended(cfg, loadSuspensionStateBestEffort(cr.cityPath)) {
-		cr.restartOrderDispatchBudgetLocked()
 		return report
 	}
 	now := time.Now()
@@ -366,15 +364,6 @@ func (r orderPassReport) traceFields() map[string]any {
 	return fields
 }
 
-// restartOrderDispatchBudgetLocked restarts the live dispatcher's budget
-// accrual after a pass the lane deliberately did not dispatch
-// (memoryOrderDispatcher.restartBudget). passMu must be held.
-func (cr *CityRuntime) restartOrderDispatchBudgetLocked() {
-	if m, ok := cr.od.(*memoryOrderDispatcher); ok {
-		m.restartBudget()
-	}
-}
-
 // stageOrderDispatcher is the reload-side stage: it records next as the
 // dispatcher the lane should run and the order set it was built from, bumps
 // the order-set generation so an in-flight lane rescan cannot overwrite it,
@@ -411,14 +400,14 @@ func (cr *CityRuntime) stageOrderDispatcherLocked(lane *ordersLane, next orderDi
 	return summary
 }
 
-// scanOrderSet scans the order set, through the orderSetScan seam when set. A
-// registration the scan drops for its rig scope is logged once, and again only
-// when its warning changes (unboundRigScopedLog).
+// scanOrderSet scans the order set, through the orderSetScan seam when set. The
+// registrations the scan drops for their rig scope are logged through
+// cr.unboundRigScoped, which every supervisor scan shares.
 func (cr *CityRuntime) scanOrderSet(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
 	if cr.orderSetScan != nil {
 		return cr.orderSetScan(cityRoot, cfg, cmdName)
 	}
-	return scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName, cr.unboundRigScoped.handler(cr.stderr, cmdName))
+	return scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName, &cr.unboundRigScoped)
 }
 
 // tryInstallPendingOrderDispatcher installs a staged dispatcher now if no pass

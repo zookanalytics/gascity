@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // run() waits for the orders lane before returning. A startup step that gives
@@ -460,28 +461,38 @@ func TestOrdersLanePassTraceRecordsArmsAndBudget(t *testing.T) {
 	}
 }
 
-// A pass the lane does not dispatch because the city is suspended restarts the
-// budget accrual, so the first pass after the resume gets the configured cap
-// instead of the suspension's worth of accrual.
-func TestOrdersLaneSuspendedPassRestartsTheBudget(t *testing.T) {
+// The orders a suspended city holds back wait through the suspension just as
+// they wait through a slow pass, so the budget keeps accruing over it: the
+// first pass after the resume dispatches the patrol intervals the suspension
+// spanned, not the configured cap.
+func TestOrdersLaneSuspendedPassesKeepTheBudgetAccruing(t *testing.T) {
 	store := beads.NewMemStore()
-	names := make([]string, 20)
+	names := make([]string, 50)
 	for i := range names {
 		names[i] = fmt.Sprintf("cooldown-%02d", i)
 	}
 	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
-	// The last pass before the suspension, ten minutes ago.
-	m.budgetPassStart = time.Now().Add(-10 * time.Minute)
+	// The last pass before the suspension, five minutes ago.
+	m.budgetPassStart = time.Now().Add(-5 * time.Minute)
 	cr := ordersLaneTestRuntime(t, m, "1h", nil)
+	setCitySuspended := func(suspended bool) {
+		t.Helper()
+		if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &suspended); err != nil {
+			t.Fatalf("writing the city's suspension state: %v", err)
+		}
+	}
 
-	t.Setenv("GC_SUSPENDED", "1")
+	setCitySuspended(true)
 	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
-	t.Setenv("GC_SUSPENDED", "")
+	if got := countOrderTrackingRuns(t, store); got != 0 {
+		t.Fatalf("tracking runs from a suspended city's pass = %d, want 0", got)
+	}
+	setCitySuspended(false)
 	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 	drainOrderDispatch(t, m)
 
-	if got := countOrderTrackingRuns(t, store); got != 2 {
-		t.Fatalf("tracking runs after the resume = %d, want 2: the suspension's ten minutes must not accrue into the resuming pass", got)
+	if got := countOrderTrackingRuns(t, store); got != 20 {
+		t.Fatalf("tracking runs after the resume = %d, want 20: the ten intervals the suspension spanned accrue 2 each", got)
 	}
 }
 

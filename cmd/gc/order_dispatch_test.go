@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -154,30 +155,60 @@ interval = "1m"
 	}
 }
 
-// TestUnboundRigScopedLogRepeatsOnlyAChangedWarning: a rig-scoped order in a
-// pack every rig imports reports its dropped city registration on every scan,
-// and the order set is rescanned every orderRescanInterval and on every
-// same-revision config reload. The warning is logged when a scan first reports
-// it and again only when it changes.
-func TestUnboundRigScopedLogRepeatsOnlyAChangedWarning(t *testing.T) {
+// TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport: a rig-scoped
+// order in a pack every rig imports reports its dropped city registration on
+// every scan, and the supervisor scans the order set at start, on every config
+// reload and every orderRescanInterval. A scan logs only the warnings the
+// previous completed scan did not report: an unchanged warning is logged once,
+// a changed one is logged, and so is one that goes away for a scan and comes
+// back.
+func TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport(t *testing.T) {
 	var stderr bytes.Buffer
 	var l unboundRigScopedLog
-	report := l.handler(&stderr, "gc patrol: order scan")
-	report("sweep", []string{"alpha", "beta"})
-	report("sweep", []string{"alpha", "beta"})
-	report("other", []string{"alpha"})
-	report("sweep", []string{"alpha"})
-	report("sweep", []string{"alpha", "beta"})
+	type drop struct {
+		order string
+		rigs  []string
+	}
+	// scan runs one scan that reports drops, and completes it unless failed.
+	scan := func(failed bool, drops ...drop) {
+		report, scanned := l.scan(&stderr, "gc patrol: order scan")
+		for _, d := range drops {
+			report(d.order, d.rigs)
+		}
+		if !failed {
+			scanned()
+		}
+	}
+	sweepOnTwo := drop{"sweep", []string{"alpha", "beta"}}
+	sweepOnOne := drop{"sweep", []string{"alpha"}}
+	other := drop{"other", []string{"alpha"}}
+	scan(false, sweepOnTwo, other) // both new
+	scan(false, sweepOnTwo, other) // both unchanged
+	scan(false, sweepOnOne, other) // sweep's warning changed
+	scan(false, other)             // sweep's warning went away
+	scan(false, sweepOnOne, other) // and came back unchanged
+	scan(true)                     // a scan that failed before reaching either
+	scan(false, sweepOnOne, other) // left nothing to log again
+
+	// Two scans in flight at once, as when a config reload's scan overlaps the
+	// lane's rescan: a new warning is logged by the first to report it.
+	reportFirst, scannedFirst := l.scan(&stderr, "gc patrol: order scan")
+	reportSecond, scannedSecond := l.scan(&stderr, "gc patrol: order scan")
+	reportFirst("late", []string{"beta"})
+	reportSecond("late", []string{"beta"})
+	scannedFirst()
+	scannedSecond()
 
 	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
 	want := []struct{ order, rigs string }{
 		{"sweep", "alpha, beta"},
 		{"other", "alpha"},
 		{"sweep", "alpha"},
-		{"sweep", "alpha, beta"},
+		{"sweep", "alpha"},
+		{"late", "beta"},
 	}
 	if len(lines) != len(want) {
-		t.Fatalf("logged %d warnings, want %d (an unchanged repeat is not logged):\n%s", len(lines), len(want), stderr.String())
+		t.Fatalf("logged %d warnings, want %d (a warning the previous scan reported unchanged is not logged):\n%s", len(lines), len(want), stderr.String())
 	}
 	for i, w := range want {
 		if !strings.HasPrefix(lines[i], `gc patrol: order scan: order "`+w.order+`" declares scope = "rig"`) ||
@@ -226,6 +257,48 @@ func TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
 	}
 	if n := strings.Count(stderr.String(), `order "sweep" declares scope = "rig"`); n != 1 {
 		t.Fatalf("dropped-registration warnings across three scans = %d, want 1:\n%s", n, stderr.String())
+	}
+}
+
+// TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce: the scan
+// at start, the scan a config reload rebuilds the dispatcher from, and the
+// orders lane's rescan all log through the runtime's one unboundRigScoped, so
+// a dropped rig-scope registration none of them changes is logged once.
+func TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	// A city-local order declaring rig scope: no rig imports it, so every scan
+	// drops its city registration and reports the drop.
+	if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cr, _, _ := newPublicationTestRuntime(t, cityPath, runtime.NewFake(), io.Discard, &stderr)
+	const warning = `order "sweep" declares scope = "rig"`
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings from the start scan = %d, want 1:\n%s", n, stderr.String())
+	}
+
+	// A reload that changes the config revision rebuilds the dispatcher from a
+	// fresh scan.
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual); reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
+	// The orders lane's rescan.
+	if _, err := cr.scanOrderSet(cityPath, cr.cfg, "gc patrol: order scan"); err != nil {
+		t.Fatalf("lane rescan: %v", err)
+	}
+
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings across the start scan, a reload and a rescan = %d, want 1:\n%s", n, stderr.String())
 	}
 }
 
@@ -1925,7 +1998,7 @@ func alwaysDueCooldownDispatcher(t *testing.T, store beads.Store, interval time.
 
 // TestOrderDispatchBudgetAccruesPerPatrolInterval pins the budget as a rate:
 // max_dispatches_per_tick dispatches for each patrol interval of wall time,
-// however long the passes between them take.
+// however long the passes between them take, up to one rotation.
 //
 // A pass's length is store latency, maintenance arms and the lane's duty cycle,
 // none of which the cap is about. With more due orders than one pass's budget,
@@ -1945,6 +2018,8 @@ func TestOrderDispatchBudgetAccruesPerPatrolInterval(t *testing.T) {
 	// pass time in the past would leave a fired order not yet due again.
 	at := time.Now()
 	total := 0
+	// Every order is due on every pass, so each pass dispatches its whole
+	// budget.
 	for _, pass := range []struct {
 		gap  time.Duration
 		want int
@@ -1956,39 +2031,54 @@ func TestOrderDispatchBudgetAccruesPerPatrolInterval(t *testing.T) {
 		{50 * time.Second, 3, "5/3 of an interval accrues 3 1/3; the third carries"},
 		{50 * time.Second, 3, "3 1/3 plus the carried third is 3 2/3; two thirds carry"},
 		{50 * time.Second, 4, "3 1/3 plus the carried two thirds is exactly 4"},
-		{10 * time.Minute, 8, "a long gap accrues at most four intervals"},
+		{8 * time.Minute, 32, "sixteen intervals, the gap a 7.5-minute pass and the idle interval after it leave, accrue in full"},
+		{30 * time.Minute, 40, "sixty intervals accrue more than one rotation, which is each order once"},
 	} {
 		at = at.Add(pass.gap)
 		m.dispatch(context.Background(), cityPath, at)
 		drainOrderDispatch(t, m)
 		total += pass.want
+		if m.lastPass.budget != pass.want {
+			t.Fatalf("budget of a pass %s after the previous one = %d, want %d: %s", pass.gap, m.lastPass.budget, pass.want, pass.why)
+		}
 		if got := countOrderTrackingRuns(t, store); got != total {
 			t.Fatalf("tracking runs after a pass %s after the previous one = %d, want %d: %s", pass.gap, got, total, pass.why)
 		}
 	}
 }
 
-// TestOrderDispatchBudgetRestartsAfterASkippedPass: time the lane spent not
-// dispatching on purpose (FS pressure, a suspended city) is not a slow pass,
-// and accruing it would turn the pass that resumes into a burst.
-func TestOrderDispatchBudgetRestartsAfterASkippedPass(t *testing.T) {
+// TestOrderDispatchBudgetCountsAPassWithNoOrders: a pass computes its budget
+// whether or not it has orders to rotate over, so the previous pass a rebuilt
+// dispatcher accrues from is the last pass, not the last pass that had orders.
+func TestOrderDispatchBudgetCountsAPassWithNoOrders(t *testing.T) {
 	store := beads.NewMemStore()
-	names := make([]string, 20)
+	cityPath := t.TempDir()
+	names := make([]string, 40)
 	for i := range names {
 		names[i] = fmt.Sprintf("cooldown-%02d", i)
 	}
-	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
-	cityPath := t.TempDir()
-
+	first := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
 	at := time.Now()
-	m.dispatch(context.Background(), cityPath, at)
-	drainOrderDispatch(t, m)
-	m.restartBudget()
-	m.dispatch(context.Background(), cityPath, at.Add(10*time.Minute))
-	drainOrderDispatch(t, m)
+	first.dispatch(context.Background(), cityPath, at)
+	drainOrderDispatch(t, first)
+
+	// Ten minutes of passes by a dispatcher with no orders, then a rebuild
+	// that has them again.
+	empty := newMemoryOrderDispatcher(nil, nil, cityPath, &config.City{}, events.Discard, &bytes.Buffer{})
+	t.Cleanup(empty.dispatchCancel)
+	empty.maxDispatchesPerTick, empty.budgetInterval = 2, 30*time.Second
+	cr := &CityRuntime{od: first}
+	cr.replaceOrderDispatcher(empty)
+	for gap := 30 * time.Second; gap <= 10*time.Minute; gap += 30 * time.Second {
+		empty.dispatch(context.Background(), cityPath, at.Add(gap))
+	}
+	next := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	cr.replaceOrderDispatcher(next)
+	next.dispatch(context.Background(), cityPath, at.Add(10*time.Minute+30*time.Second))
+	drainOrderDispatch(t, next)
 
 	if got := countOrderTrackingRuns(t, store); got != 4 {
-		t.Fatalf("tracking runs = %d, want 4: the pass after a restart must get the configured cap, not ten minutes of accrual", got)
+		t.Fatalf("tracking runs = %d, want 4: 2 before the empty stretch, then one interval's accrual of 2 since its last pass", got)
 	}
 }
 

@@ -203,19 +203,21 @@ the tick never waits on order gates.
   how many clock-driven orders (cooldown, cron and event triggers) a pass
   dispatches; due condition orders are outside it. The cap is a rate over
   the patrol interval. A pass may dispatch the cap once for each patrol
-  interval since the previous pass began, never less than the cap and never
-  more than four intervals' worth, and only the fraction of a dispatch
-  carries to the next pass. A pass's length is store latency, the
+  interval since the previous pass began, and only the fraction of a
+  dispatch carries to the next pass. A pass's length is store latency, the
   maintenance arms and the duty cycle, none of which the cap is about, and a
   cap spent once per pass would let a slow stretch cut the dispatch rate for
-  every order at once. When more orders are due than a pass may dispatch,
-  the pass serves them in a rotation that resumes after the last order it
-  dispatched, so each due order waits at most one rotation: the due orders
-  divided by the dispatch rate. A reload or rescan that rebuilds the
+  every order at once. A pass the lane skips for FS pressure or a suspended
+  city keeps the orders waiting just as a slow pass does, so the accrual
+  runs through it. A pass never gets less than the cap, which is what the
+  first pass after a start gets. It never gets more than one rotation,
+  because it cannot dispatch an order twice, so the burst after a long gap
+  is each due order once. When more orders are due than a pass may
+  dispatch, the pass serves them in a rotation that resumes after the last
+  order it dispatched, so each due order waits at most one rotation: the due
+  orders divided by the dispatch rate. A reload or rescan that rebuilds the
   dispatcher resumes the rotation at the same order, found by name, and
-  keeps the budget accruing. A pass the lane skips for FS pressure or a
-  suspended city restarts the accrual, so the pass that resumes dispatches
-  the plain cap rather than a burst.
+  keeps the budget accruing.
 - **Visibility.** Each tick that wakes the lane (so not a pressure-skipped
   or canceled tick) records a `wake_orders_lane` operation whose
   `backstop_ran`, `backstop_age_seconds` and `backstop_last_reason` fields

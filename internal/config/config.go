@@ -2248,23 +2248,23 @@ type OrdersConfig struct {
 	// rotation that resumes where the previous orders-lane pass stopped. The
 	// key keeps its historical name from when order dispatch ran once per
 	// controller tick. An orders-lane pass may dispatch this many for each
-	// patrol interval since the previous pass began, up to four intervals'
-	// worth, so a slow pass does not lower the dispatch rate. A pass sooner
-	// than one interval still dispatches this many, and so does the first pass
-	// after a start, after the city resumes, or after a pass skipped for FS
-	// pressure. Unset keeps the built-in default of 4; set to 1 to drain
-	// overdue cooldown orders one per pass at cold start instead of firing
-	// several concurrent goroutines at once. Condition-triggered orders are
-	// outside this budget: a passing check means work is pending right now, so
-	// they dispatch on the pass that observes it. The open-tracking and
-	// open-work gates still run for them (unless the order sets no_work_gate),
-	// but those gates are keyed per order and only hold back a redispatch of an
-	// order whose previous run is still moving, so they do not bound the pass
-	// as a whole: a pass launches at most its budget plus one dispatch per
-	// condition order whose check passed on that pass. That second term grows
-	// with how many condition orders a city defines, not with this setting, and
-	// at cold start, before any tracking bead exists, neither gate holds a
-	// simultaneously-due set back.
+	// patrol interval since the previous pass began, so a slow pass, or one
+	// the lane skips, does not lower the dispatch rate. A pass dispatches at
+	// most one rotation, each due order once. A pass sooner than one interval
+	// still dispatches this many, and so does the first pass after a start.
+	// Unset keeps the built-in default of 4; set to 1 to drain overdue
+	// cooldown orders at cold start one per patrol interval, instead of firing
+	// several concurrent goroutines on the first pass. Condition-triggered
+	// orders are outside this budget: a passing check means work is pending
+	// right now, so they dispatch on the pass that observes it. The
+	// open-tracking and open-work gates still run for them (unless the order
+	// sets no_work_gate), but those gates are keyed per order and only hold
+	// back a redispatch of an order whose previous run is still moving, so they
+	// do not bound the pass as a whole: a pass launches at most its budget plus
+	// one dispatch per condition order whose check passed on that pass. That
+	// second term grows with how many condition orders a city defines, not with
+	// this setting, and at cold start, before any tracking bead exists,
+	// neither gate holds a simultaneously-due set back.
 	MaxDispatchesPerTick *int `toml:"max_dispatches_per_tick,omitempty"`
 	// Overrides apply per-order field overrides after scanning.
 	// Each override targets an order by name and optionally by rig.
