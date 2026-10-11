@@ -607,6 +607,37 @@ func TestSupportsIDLookup(t *testing.T) {
 	}
 }
 
+// A transcript reader wants the session's transcript wherever its provider
+// filed it. The stale-resume guard asks whether a resume started in workDir
+// finds the transcript in workDir's own project folders.
+func TestKeyedClaudeTranscriptInAnotherProjectFolder(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "worker-1")
+	launchDir := filepath.Join(workDir, "worktrees", "bead-1")
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	slugDir := filepath.Join(base, sessionlog.ProjectSlug(launchDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, key+".jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := DiscoverKeyedPath([]string{base}, "claude", workDir, key); got != want {
+		t.Fatalf("DiscoverKeyedPath() = %q, want %q", got, want)
+	}
+	if got := DiscoverPath([]string{base}, "claude/tmux-cli", workDir, key); got != want {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, want)
+	}
+	if exists, probeable := HasKeyedTranscript([]string{base}, "claude", workDir, key); !probeable || exists {
+		t.Fatalf("HasKeyedTranscript(workDir) = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+	}
+	if exists, probeable := HasKeyedTranscript([]string{base}, "claude", launchDir, key); !probeable || !exists {
+		t.Fatalf("HasKeyedTranscript(launchDir) = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+	}
+}
+
 func TestHasKeyedTranscript(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")

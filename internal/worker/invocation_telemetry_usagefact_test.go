@@ -475,6 +475,85 @@ func TestFactorySweepSessionModelUsageClaude(t *testing.T) {
 	}
 }
 
+// TestFactorySweepSessionModelUsageClaudeTranscriptOutsideWorkDirFolder covers a
+// keyed claude session whose transcript is filed under a different project
+// folder than its work_dir's, as for a pool session started in the per-bead
+// worktree of the work it holds. The sweep finds the transcript by its session
+// key, records its usage, and settles, so the interval can commit.
+func TestFactorySweepSessionModelUsageClaudeTranscriptOutsideWorkDirFolder(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+	const sessionKey = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	if err := store.SetMetadata(id, "session_key", sessionKey); err != nil {
+		t.Fatal(err)
+	}
+
+	launchSlugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(filepath.Join(workDir, "worktrees", "bead-1")))
+	if err := os.MkdirAll(launchSlugDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", launchSlugDir, err)
+	}
+	transcriptPath := filepath.Join(launchSlugDir, sessionKey+".jsonl")
+	writeWorkerTestJSONL(t, transcriptPath, []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+		usageEntryWithMessageID("u2", "msg-2", 200, 100, 0, 0),
+	})
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1, 0).UTC()
+
+	if path, settled := factory.DiscoverSweepTranscript(id, b.Metadata, now); path != transcriptPath || !settled {
+		t.Fatalf("DiscoverSweepTranscript() = (%q, settled=%v), want (%q, true)", path, settled, transcriptPath)
+	}
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("sweep of a transcript found by its session key must report settled")
+	}
+	if emitted != 2 {
+		t.Fatalf("emitted = %d, want 2", emitted)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(facts) != 2 {
+		t.Fatalf("want 2 model facts, got %d: %+v", len(facts), facts)
+	}
+}
+
 // TestDiscoverSweepTranscriptCodexBoundedToInterval pins P2-1: the codex sweep
 // discovery is bounded to the awake interval's day window (plus the UUIDv7 hint),
 // NOT the unbounded date-tree walk, so a large codex history cannot stall the
