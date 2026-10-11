@@ -24,9 +24,9 @@ import (
 // so a metadata query cannot be counted exactly in SQL and returns
 // ErrCountUnsupported. The wisp and both tiers also return
 // ErrCountUnsupported because their tier filters and unions are still applied
-// List-side, and CreatedBefore/ParentID filters return ErrCountUnsupported
-// because List applies them with Go-side semantics a single COUNT cannot
-// reproduce. Limited queries are excluded because the Counter contract is
+// List-side, and CreatedBefore/ParentID/ParentIDs filters return
+// ErrCountUnsupported because List applies them with Go-side semantics a
+// single COUNT cannot reproduce. Limited queries are excluded because the Counter contract is
 // List cardinality parity, not full-result total cardinality. UpdatedBefore
 // is excluded for the same reason as CreatedBefore: buildDoltliteTableQuery
 // deliberately emits an OVER-ADMITTING predicate for both
@@ -144,7 +144,7 @@ func doltliteCountSupported(query ListQuery) bool {
 	if query.TierMode != TierIssues {
 		return false
 	}
-	if query.ParentID != "" {
+	if query.ParentID != "" || len(query.ParentIDs) > 0 {
 		return false
 	}
 	if !query.CreatedBefore.IsZero() || !query.UpdatedBefore.IsZero() {
