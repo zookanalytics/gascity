@@ -66,6 +66,10 @@
     },
     "drain_acknowledged": {
       "type": "boolean"
+    },
+    "step_reminder": {
+      "description": "The claimed bead rendered as the <system-reminder> block gc nudge and gc prime --hook deliver: its title, id, and description. Present on a work result when the bead has a description.",
+      "type": "string"
     }
   },
   "allOf": [
