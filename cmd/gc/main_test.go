@@ -246,7 +246,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	hostRoots, err := adoptPerRunTMPDIR(testTempRoot)
 	if err != nil {
 		panic(err)
 	}
@@ -274,7 +274,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
+	sweepLegacyCmdGCFixtureDirs(hostRoots.tmp)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -316,7 +316,7 @@ func TestMain(m *testing.M) {
 	// children above keep the real installer: their scripts run follow-on
 	// commands that need the installed imports.
 	configureInitRemoteImportsForTests()
-	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, hostRoots, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like

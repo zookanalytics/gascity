@@ -681,7 +681,7 @@ func TestClassifyDoltProcess_ProtectsLiveTestUnderFleetGotmpRoot(t *testing.T) {
 
 	// The live test process itself is what advertises the root, exactly as
 	// discoverActiveTestRootsFromPS would observe it in another process's argv.
-	root, ok := activeTestRootFromPath(cfg, "/home/u", "/tmp")
+	root, ok := activeTestRootFromPath(cfg, "/home/u", "/tmp", "")
 	if !ok {
 		t.Fatalf("activeTestRootFromPath(%q) = _, false; want the enclosing test root", cfg)
 	}
@@ -704,21 +704,28 @@ func TestClassifyDoltProcess_ProtectsLiveTestUnderFleetGotmpRoot(t *testing.T) {
 	}
 }
 
-// TestActiveTestRootFromPath_GotmpdirEnvRoot covers the $GOTMPDIR half of the
+// TestActiveTestRootFromPath_GoTmpDirRoot covers the $GOTMPDIR half of the
 // pairing: a host whose Go temp root differs from the AGENTS.md-pinned
 // /var/tmp/gotmp is still protectable, and a sibling that does not start with
-// "Test" is still not mistaken for a test root.
-func TestActiveTestRootFromPath_GotmpdirEnvRoot(t *testing.T) {
+// "Test" is still not mistaken for a test root. The root comes from the
+// goTmpDir argument, not the environment: cmd/gc's TestMain points its own
+// GOTMPDIR at a fresh per-run root and passes the GOTMPDIR it inherited.
+func TestActiveTestRootFromPath_GoTmpDirRoot(t *testing.T) {
 	gotmp := "/var/tmp/host-gotmp"
-	t.Setenv("GOTMPDIR", gotmp)
+	envGotmp := "/var/tmp/per-run-gotmp"
+	t.Setenv("GOTMPDIR", envGotmp)
 
-	root, ok := activeTestRootFromPath(gotmp+"/TestDoltThing12345/001/x/dolt-config.yaml", "/home/u", "/tmp")
+	root, ok := activeTestRootFromPath(gotmp+"/TestDoltThing12345/001/x/dolt-config.yaml", "/home/u", "/tmp", gotmp)
 	if !ok || root != gotmp+"/TestDoltThing12345" {
 		t.Errorf("activeTestRootFromPath(direct Test* child) = (%q, %v), want (%q, true)", root, ok, gotmp+"/TestDoltThing12345")
 	}
 
-	if root, ok := activeTestRootFromPath(gotmp+"/buildcache/001/x/dolt-config.yaml", "/home/u", "/tmp"); ok {
+	if root, ok := activeTestRootFromPath(gotmp+"/buildcache/001/x/dolt-config.yaml", "/home/u", "/tmp", gotmp); ok {
 		t.Errorf("activeTestRootFromPath(non-Test sibling) = (%q, true), want ok=false", root)
+	}
+
+	if root, ok := activeTestRootFromPath(envGotmp+"/TestDoltThing12345/001/x/dolt-config.yaml", "/home/u", "/tmp", gotmp); ok {
+		t.Errorf("activeTestRootFromPath(Test* child of the GOTMPDIR environment variable) = (%q, true), want ok=false: the goTmpDir argument names the root", root)
 	}
 }
 

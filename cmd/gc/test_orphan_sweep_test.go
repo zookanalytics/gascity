@@ -207,25 +207,38 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 	}
 }
 
+// hostTempRoots are the temp roots the test binary inherited, captured by
+// adoptPerRunTMPDIR before it points TMPDIR and GOTMPDIR at the per-run root.
+// Earlier and concurrent runs leave their temp dirs, test roots, and Dolt
+// stores under these roots, so every startup sweep that looks for them must
+// read these values rather than os.TempDir() or GOTMPDIR at call time.
+type hostTempRoots struct {
+	// tmp is os.TempDir() as inherited: TMPDIR, or the platform default
+	// when TMPDIR is unset.
+	tmp string
+	// goTmp is the inherited GOTMPDIR, empty when it was unset.
+	goTmp string
+}
+
 // adoptPerRunTMPDIR points TMPDIR and GOTMPDIR at newTMPDIR for the rest of
-// the test binary's life and returns the host temp root that was in effect
-// beforehand, so callers can sweep legacy fixture dirs left there by prior
-// runs. os.TempDir() re-reads TMPDIR on every call, so the host root must be
-// captured before this override — capturing it afterward would instead
-// return newTMPDIR's own fresh, empty directory (ga-lygcyb).
+// the test binary's life and returns the host temp roots that were in effect
+// beforehand, so callers can sweep what prior runs left there. os.TempDir()
+// re-reads TMPDIR on every call, so the host roots must be captured before
+// this override — capturing them afterward would instead return newTMPDIR's
+// own fresh, empty directory (ga-lygcyb).
 //
 // t.TempDir() creates its directory under GOTMPDIR when that is set and under
 // TMPDIR otherwise. Pinning TMPDIR alone would let every test's temp dir, and
 // any Dolt server a test starts in one, escape the per-run root that the dolt
 // leak guard watches and the startup sweep classifies by owner PID.
-func adoptPerRunTMPDIR(newTMPDIR string) (hostTmpRoot string, err error) {
-	hostTmpRoot = os.TempDir()
+func adoptPerRunTMPDIR(newTMPDIR string) (hostTempRoots, error) {
+	host := hostTempRoots{tmp: os.TempDir(), goTmp: os.Getenv("GOTMPDIR")}
 	for _, key := range []string{"TMPDIR", "GOTMPDIR"} {
 		if err := os.Setenv(key, newTMPDIR); err != nil {
-			return "", fmt.Errorf("setting %s to the per-run temp root: %w", key, err)
+			return hostTempRoots{}, fmt.Errorf("setting %s to the per-run temp root: %w", key, err)
 		}
 	}
-	return hostTmpRoot, nil
+	return host, nil
 }
 
 // sweepLegacyCmdGCFixtureDirs removes stale legacy fixture dirs for the five
