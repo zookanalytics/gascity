@@ -1180,6 +1180,15 @@ golangci-lint; staticcheck findings are suppressed by check name
 | `make lint` (= `make vet`) | `bazel build --keep_going --output_groups=nogo_fix //...`: every package's nogo analysis, no linking. |
 | `make lint-changed` | The same for the Bazel packages of changed Go files (`LINT_CHANGED_SCOPE=staged\|tracked\|worktree`); pre-commit uses `staged`. |
 | `make lint-golangci`, `make vet-go` | golangci-lint and `go vet` outside Bazel, for the macOS quality job (darwin-only files the Linux nogo build does not compile). |
+| `make lint-changed-go` | golangci-lint and `go vet` over the packages of changed Go files, outside Bazel; pre-commit runs it, with a banner, where bazel is not installed. |
+
+The golangci-lint targets run the linter under `go.mod`'s Go
+(`LINT_GOTOOLCHAIN` overrides it). The linter type-checks the standard
+library from source, and it cannot load the standard library of a Go newer
+than the one that built it. `make golangci-lint-pinned` builds the linter
+with that same Go and replaces a binary another Go built. The linter's
+formatters are compiled in and format as the gofmt of the Go that built it,
+so a linter built by a newer Go can flag files that CI's linter accepts.
 
 `tools/nogo/config.json` scopes the analyzers the way golangci-lint saw the
 tree (no external repos, generated `_gen.go` files, testdata) and carries the
