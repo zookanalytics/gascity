@@ -3,58 +3,78 @@ package beads
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 )
 
-// bdListIDFlagMaxBytes bounds the value of the one --id argument a bd list
-// read sends. Linux refuses a single argument longer than 128 KiB
+// bdListIDFlagMaxBytes bounds the value of one --id argument and the length of
+// one quoted id. Linux refuses a single argument longer than 128 KiB
 // (MAX_ARG_STRLEN), and the bound keeps half of that as margin: about 6,000
-// ids of ten bytes.
+// ids of ten bytes in one --id value.
 const bdListIDFlagMaxBytes = 64 << 10
 
-// bdListIDFilter returns the --id value that selects ids in bd list: the
-// distinct non-empty ids, sorted so the argv does not depend on the caller's
-// order, joined with commas. ok is false when the list cannot be sent that
-// way. bd splits the value on commas and trims each id, so an id holding a
-// comma or edge whitespace would reach bd as a different id and its bead would
-// be lost, and a value over bdListIDFlagMaxBytes may not survive exec. Such a
-// list is read without --id and matched in Go.
-func bdListIDFilter(ids []string) (string, bool) {
-	seen := make(map[string]bool, len(ids))
-	distinct := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if id == "" || seen[id] {
-			continue
+// bdIDReads returns the reads that select ids, given listArgs, the bd list
+// read the query's other filters spell. Every id is read by id, so the reads
+// are bounded by the ids however many there are.
+//
+// bd list splits an --id value on commas and trims each id. The ids that
+// survive that unchanged are sorted, so the argv does not depend on the
+// caller's order, and sent in --id values of at most bdListIDFlagMaxBytes,
+// one bd list read per value. An id holding a comma or edge whitespace is read
+// alone through bd query, whose quoted id= clause selects it exactly from
+// either table; includeClosed adds --all to that read, as it does to the bd
+// list read. ok is false when an id fits neither read: bd's query lexer reads
+// one byte at a time, so a NUL or non-ASCII byte reaches the comparison
+// altered, and an id over the bound may not survive exec. The caller then
+// reads every row and matches the ids in Go.
+func bdIDReads(listArgs, ids []string, includeClosed bool) (reads [][]string, ok bool) {
+	var listed []string
+	for _, id := range distinctNonEmpty(ids) {
+		switch {
+		case len(id) > bdListIDFlagMaxBytes:
+			return nil, false
+		case !strings.Contains(id, ",") && strings.TrimSpace(id) == id:
+			listed = append(listed, id)
+		case bdQueryCanQuoteID(id):
+			read := []string{"query", "--json", "id=" + quoteBdQueryString(id)}
+			if includeClosed {
+				read = append(read, "--all")
+			}
+			reads = append(reads, append(read, "--limit", "0"))
+		default:
+			return nil, false
 		}
-		if strings.Contains(id, ",") || strings.TrimSpace(id) != id {
-			return "", false
+	}
+	sort.Strings(listed)
+	byValue := make([][]string, 0, 1)
+	for start := 0; start < len(listed); {
+		end, size := start, 0
+		for end < len(listed) && (end == start || size+1+len(listed[end]) <= bdListIDFlagMaxBytes) {
+			if end > start {
+				size++
+			}
+			size += len(listed[end])
+			end++
 		}
-		seen[id] = true
-		distinct = append(distinct, id)
+		read := slices.Clip(listArgs)
+		byValue = append(byValue, append(read, "--id="+strings.Join(listed[start:end], ",")))
+		start = end
 	}
-	if len(distinct) == 0 {
-		return "", false
-	}
-	sort.Strings(distinct)
-	value := strings.Join(distinct, ",")
-	if len(value) > bdListIDFlagMaxBytes {
-		return "", false
-	}
-	return value, true
+	return append(byValue, reads...), true
 }
 
-// namesNoBead reports whether an IDs selector can match nothing: every entry
-// is empty, and no bead holds the empty id.
-func namesNoBead(ids []string) bool {
-	for _, id := range ids {
-		if id != "" {
+// bdQueryCanQuoteID reports whether quoteBdQueryString carries id to bd's query
+// comparison unchanged: no NUL and no non-ASCII byte.
+func bdQueryCanQuoteID(id string) bool {
+	for i := 0; i < len(id); i++ {
+		if id[i] == 0 || id[i] >= 0x80 {
 			return false
 		}
 	}
-	return len(ids) > 0
+	return true
 }
 
 // listChildren answers a query scoped to ParentIDs with the beads whose
@@ -71,7 +91,7 @@ func namesNoBead(ids []string) bool {
 // alongside narrows the parents to itself. On a backend that cannot read
 // edges, every row is read instead and kept to the same parents.
 func (s *BdStore) listChildren(query ListQuery) ([]Bead, error) {
-	parents := listedParentIDs(query)
+	parents := distinctNonEmpty(query.ParentIDs)
 	if query.ParentID != "" {
 		if !slices.Contains(parents, query.ParentID) {
 			return []Bead{}, nil
@@ -98,10 +118,20 @@ func (s *BdStore) listChildren(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("bd list: reading the parent-child edges of %d parent(s): %w", len(parents), err)
 	}
 	rows, err := s.listByTier(childQuery)
-	if err != nil && !IsPartialResult(err) {
-		return nil, err
+	var partial *PartialResultError
+	if err != nil && !errors.As(err, &partial) {
+		return nil, fmt.Errorf("bd list: reading the children of %d parent(s): %w", len(parents), err)
 	}
-	return ApplyListQuery(keepChildrenOf(rows, parents), query), err
+	kept := ApplyListQuery(rows, query)
+	if partial == nil {
+		return kept, nil
+	}
+	// A partial read that kept no child of these parents is no answer about
+	// them, the way listViaBDList treats a partial read that matched nothing.
+	if len(kept) == 0 {
+		return nil, fmt.Errorf("bd list: reading the children of %d parent(s): the read was partial and kept no child: %w", len(parents), partial.Err)
+	}
+	return kept, fmt.Errorf("bd list: reading the children of %d parent(s): %w", len(parents), err)
 }
 
 // keepIDsIn returns the ids that also appear in within, or every id when
@@ -125,21 +155,14 @@ func keepIDsIn(ids, within []string) []string {
 
 // parentChildIDs returns the ids of the beads holding a parent-child edge to
 // one of parents, distinct and sorted. One bd dep list --direction=up
-// --type=parent-child names every parent. Every supported bd answers it with
-// the dependent issues, read from both dependency tables, so wisp children are
-// named too.
-//
-// A lone parent is spelled twice. bd reads two or more ids in batch mode, which
-// skips an id it cannot resolve, where a single id it cannot resolve fails the
-// command. Spelled twice, a parent bd cannot find has no children, as in a
-// batch. bd may list the children of a repeated id once per spelling, so the
-// ids are deduplicated.
+// --type=parent-child names every parent, spelled by bdDepListBatchArgs so that
+// a parent bd cannot find has no children rather than failing the read. Every
+// supported bd answers it with the dependent issues, read from both dependency
+// tables, so wisp children are named too. bd may list a child once per
+// spelling of a repeated parent, and once per listed parent it holds an edge
+// to, so the ids are deduplicated.
 func (s *BdStore) parentChildIDs(parents []string) ([]string, error) {
-	args := append([]string{"dep", "list"}, parents...)
-	if len(parents) == 1 {
-		args = append(args, parents[0])
-	}
-	args = append(args, "--direction=up", "--type=parent-child", "--json")
+	args, _ := bdDepListBatchArgs(parents, "--direction=up", "--type=parent-child")
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
 		return nil, err
@@ -148,23 +171,18 @@ func (s *BdStore) parentChildIDs(parents []string) ([]string, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, nil
 	}
-	var rows []struct {
-		ID             string `json:"id"`
-		DependencyType string `json:"dependency_type"`
-	}
+	var rows []bdDepIssue
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, fmt.Errorf("bd dep list: parsing JSON: raw=%q: %w", truncateRawOutput(data, 200), err)
 	}
 	s.noteServerRows(len(rows))
-	seen := make(map[string]bool, len(rows))
 	children := make([]string, 0, len(rows))
 	for _, row := range rows {
-		if row.DependencyType != "parent-child" || row.ID == "" || seen[row.ID] {
-			continue
+		if row.DepType == "parent-child" {
+			children = append(children, row.ID)
 		}
-		seen[row.ID] = true
-		children = append(children, row.ID)
 	}
+	children = distinctNonEmpty(children)
 	sort.Strings(children)
 	return children, nil
 }

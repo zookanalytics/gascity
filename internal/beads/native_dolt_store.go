@@ -1856,7 +1856,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
-	listed := listedParentIDs(query)
+	listed := distinctNonEmpty(query.ParentIDs)
 	if len(query.ParentIDs) > 0 && len(listed) == 0 {
 		return []Bead{}, nil
 	}
@@ -1881,7 +1881,7 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 				filter.IDs = children
 			case len(listed) > 0:
 				// Nothing narrows the search to the listed parents but
-				// keepChildrenOf below, so a backing limit would cut the page
+				// ApplyListQuery below, so a backing limit would cut the page
 				// before it runs.
 				filter.Limit = 0
 			}
@@ -1902,9 +1902,6 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 			beads = append(beads, bead)
 		}
 		s.noteRows(len(issues))
-		if len(listed) > 0 {
-			beads = keepChildrenOf(beads, listed)
-		}
 		out = ApplyListQuery(beads, query)
 		return nil
 	})
@@ -1912,20 +1909,6 @@ func (s *NativeDoltStore) List(query ListQuery) ([]Bead, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-// listedParentIDs returns the distinct non-empty ids in query.ParentIDs.
-func listedParentIDs(query ListQuery) []string {
-	seen := make(map[string]bool, len(query.ParentIDs))
-	parents := make([]string, 0, len(query.ParentIDs))
-	for _, id := range query.ParentIDs {
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		parents = append(parents, id)
-	}
-	return parents
 }
 
 // nativeParentChildIDs returns the ids of the beads that hold a parent-child
@@ -2019,21 +2002,6 @@ func nativeParentChildEdgesOf(ctx context.Context, querier beadslib.DependentQue
 		}
 		after = last.ID
 	}
-}
-
-// keepChildrenOf returns the beads whose ParentID is one of parents.
-func keepChildrenOf(beads []Bead, parents []string) []Bead {
-	set := make(map[string]bool, len(parents))
-	for _, id := range parents {
-		set[id] = true
-	}
-	kept := beads[:0]
-	for _, b := range beads {
-		if set[b.ParentID] {
-			kept = append(kept, b)
-		}
-	}
-	return kept
 }
 
 // ListOpen returns non-closed beads by default, or beads with the given status.

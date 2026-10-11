@@ -579,9 +579,6 @@ func TestNativeDoltStoreParentListMatchesUpstreamParentFilter(t *testing.T) {
 			}
 			beads = append(beads, bead)
 		}
-		if len(query.ParentIDs) > 0 {
-			beads = keepChildrenOf(beads, query.ParentIDs)
-		}
 		return ApplyListQuery(beads, query)
 	}
 

@@ -394,22 +394,16 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	// single batched store.List(ParentIDs=...) call. This replaces the former
 	// per-bead store.List(ParentID=...) fan-out — an N+1 (one round-trip per bead)
 	// that serialized on a single read connection and dominated graph-read latency
-	// under load. The returned beads are filtered in memory against the level's
-	// parent set, so the result is correct even on a backend that does not honor
-	// ParentIDs (such a backend returns a superset, which the filter narrows).
+	// under load. The store answers ParentIDs exactly, so every returned bead is
+	// a child of the level.
 	frontier := make([]string, 0, len(graphBeads))
 	for _, b := range graphBeads {
 		frontier = append(frontier, b.ID)
 	}
 	for len(frontier) > 0 {
-		frontierSet := make(map[string]bool, len(frontier))
-		for _, id := range frontier {
-			frontierSet[id] = true
-		}
 		children, err := store.List(beads.ListQuery{
 			ParentIDs:     frontier,
 			IncludeClosed: true,
-			AllowScan:     true,
 			Sort:          beads.SortCreatedAsc,
 			TierMode:      beads.TierBoth,
 		})
@@ -418,9 +412,6 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 		}
 		var next []string
 		for _, child := range children {
-			if !frontierSet[child.ParentID] {
-				continue
-			}
 			addParentEdge(child.ParentID, child.ID)
 			if _, seen := beadIndex[child.ID]; !seen {
 				upsert(child)

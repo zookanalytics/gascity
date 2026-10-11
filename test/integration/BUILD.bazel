@@ -153,6 +153,7 @@ go_test(
         "@com_github_pb33f_libopenapi_validator//:libopenapi-validator",
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
+        "@org_golang_x_mod//semver",
     ],
 )
 
