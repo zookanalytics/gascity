@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"golang.org/x/mod/semver"
 )
 
 const (
@@ -483,6 +485,283 @@ func TestBdStoreEphemeralMetadataClauseMatchesGoFilter(t *testing.T) {
 			}
 			if !sameIDSet(bdIDs, tc.want) {
 				t.Fatalf("bd query %q = %v, want exactly %v", wantExpr, bdIDs, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdStoreIDsListReadsByID proves the IDs pushdown against a real bd and
+// Dolt. An IDs list reaches bd list as --id, in chunks when it is long, and an
+// id --id cannot carry is read alone through a quoted bd query.
+func TestBdStoreIDsListReadsByID(t *testing.T) {
+	requireDoltIntegration(t)
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, filepath.Join(rootDir, "dolt"))
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitInitWorkspace(t, wsDir)
+	runBDInit(t, env, wsDir, "pq", serverPort)
+
+	runner := isolatedBdStoreCommandRunner(env)
+	var mu sync.Mutex
+	var sent []string
+	store := beads.NewBdStore(wsDir, func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			mu.Lock()
+			sent = append(sent, strings.Join(args, " "))
+			mu.Unlock()
+		}
+		return runner(dir, name, args...)
+	})
+	resetSent := func() {
+		mu.Lock()
+		sent = nil
+		mu.Unlock()
+	}
+	sentSoFar := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), sent...)
+	}
+
+	// Every bead here is a wisp, for the reason
+	// TestBdStoreEphemeralMetadataClauseMatchesGoFilter gives: an issues-table
+	// bead keeps the oldest supported bd from running this test.
+	// TestBdStoreIDReadsSelectIssuesTableRows covers issues-table rows.
+	create := func(title, parent string) string {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: title, Type: "task", Ephemeral: true, ParentID: parent})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+		return b.ID
+	}
+	one := create("parent one", "")
+	two := create("parent two", "")
+	unlisted := create("unlisted parent", "")
+	childOfOne := create("child of one", one)
+	childOfTwo := create("child of two", two)
+	grandchild := create("grandchild", childOfOne)
+	create("child of the unlisted parent", unlisted)
+	blocked := create("blocked by parent one", "")
+	if err := store.DepAdd(blocked, one, "blocks"); err != nil {
+		t.Fatalf("DepAdd(%s blocks on %s): %v", blocked, one, err)
+	}
+	if err := store.Close(childOfTwo); err != nil {
+		t.Fatalf("Close(%s): %v", childOfTwo, err)
+	}
+	missing := "pq-missing"
+
+	t.Run("ids", func(t *testing.T) {
+		resetSent()
+		want := []string{childOfOne, grandchild}
+		got, err := store.List(beads.ListQuery{IDs: []string{grandchild, missing, childOfOne}, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List(IDs): %v", err)
+		}
+		gotIDs := make([]string, 0, len(got))
+		for _, b := range got {
+			gotIDs = append(gotIDs, b.ID)
+		}
+		if !sameIDSet(gotIDs, want) {
+			t.Fatalf("List(IDs) = %v, want %v", gotIDs, want)
+		}
+		ids := []string{childOfOne, grandchild, missing}
+		slices.Sort(ids)
+		wantFlag := "--id=" + strings.Join(ids, ",")
+		commands := sentSoFar()
+		if !slices.ContainsFunc(commands, func(c string) bool { return strings.HasPrefix(c, "list ") && strings.Contains(c, wantFlag) }) {
+			t.Fatalf("bd commands = %q, want a bd list carrying %s", commands, wantFlag)
+		}
+	})
+
+	t.Run("an id bd list cannot carry", func(t *testing.T) {
+		odd, err := store.Create(beads.Bead{ID: "pq-odd,1", Title: "id holding a comma", Type: "task", Ephemeral: true})
+		if err != nil {
+			t.Fatalf("Create(pq-odd,1): %v", err)
+		}
+		if odd.ID != "pq-odd,1" {
+			t.Fatalf("created id = %q, want pq-odd,1", odd.ID)
+		}
+		resetSent()
+		got, err := store.List(beads.ListQuery{IDs: []string{odd.ID, childOfOne}, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List(IDs): %v", err)
+		}
+		gotIDs := make([]string, 0, len(got))
+		for _, b := range got {
+			gotIDs = append(gotIDs, b.ID)
+		}
+		if !sameIDSet(gotIDs, []string{odd.ID, childOfOne}) {
+			t.Fatalf("List(IDs) = %q, want [%q %q]", gotIDs, odd.ID, childOfOne)
+		}
+		commands := sentSoFar()
+		quoted := `query --json id="pq-odd,1" --all --limit 0`
+		if !slices.Contains(commands, quoted) {
+			t.Fatalf("bd commands = %q, want the quoted read %q", commands, quoted)
+		}
+		for _, c := range commands {
+			if strings.HasPrefix(c, "list ") && !strings.Contains(c, " --id="+childOfOne) {
+				t.Fatalf("bd list %q, want only the read of --id=%s; all: %q", c, childOfOne, commands)
+			}
+		}
+	})
+
+	t.Run("a long id list", func(t *testing.T) {
+		ids := []string{grandchild, childOfOne}
+		for i := range 7000 {
+			ids = append(ids, fmt.Sprintf("pq-zz%07d", i))
+		}
+		resetSent()
+		got, err := store.List(beads.ListQuery{IDs: ids, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatalf("List(IDs): %v", err)
+		}
+		gotIDs := make([]string, 0, len(got))
+		for _, b := range got {
+			gotIDs = append(gotIDs, b.ID)
+		}
+		if !sameIDSet(gotIDs, []string{childOfOne, grandchild}) {
+			t.Fatalf("List(%d IDs) = %v, want [%s %s]", len(ids), gotIDs, childOfOne, grandchild)
+		}
+		reads := 0
+		for _, c := range sentSoFar() {
+			if !strings.HasPrefix(c, "list ") {
+				continue
+			}
+			_, value, ok := strings.Cut(c, " --id=")
+			if !ok {
+				t.Fatalf("bd list read without an id filter: %.200q", c)
+			}
+			if len(value) > 64<<10 {
+				t.Fatalf("an --id value is %d bytes, over 64 KiB", len(value))
+			}
+			reads++
+		}
+		if reads < 2 {
+			t.Fatalf("bd list reads = %d, want the %d ids split across at least 2", reads, len(ids))
+		}
+	})
+}
+
+var realBDVersionPattern = regexp.MustCompile(`bd version (\d+\.\d+\.\d+[0-9A-Za-z.+-]*)`)
+
+// requireRealBDAtLeast skips the test when the real bd reports a version below
+// minVersion, a semver string such as "v1.3.1-0", which admits that release's
+// candidates. feature names what the older bd lacks, for the skip message. An
+// older bd is a supported pin, so this is a skip and not a failure.
+func requireRealBDAtLeast(t *testing.T, minVersion, feature string) {
+	t.Helper()
+	cmd := exec.Command(realBDBinary, "version")
+	cmd.Dir = t.TempDir()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s version: %v\n%s", realBDBinary, err, out)
+	}
+	m := realBDVersionPattern.FindStringSubmatch(string(out))
+	if m == nil {
+		t.Fatalf("cannot parse a bd version from %q", out)
+	}
+	if semver.Compare("v"+m[1], minVersion) < 0 {
+		t.Skipf("bd %s predates %s (needs %s); set %s to a newer bd", m[1], feature, minVersion, integrationRealBDBinaryEnv)
+	}
+}
+
+// TestBdStoreIDReadsSelectIssuesTableRows proves the id reads against
+// issues-table rows on a real bd and Dolt: the --id read alone returns
+// issues-table rows, and a wisp row beside them, with no read of every row
+// and no wisp read. It needs bd 1.3.1: once a workspace holds an issues-table
+// bead, bd 1.0.4 auto-imports issues.jsonl on its next command, and BdStore
+// refuses that as a silent fallback.
+func TestBdStoreIDReadsSelectIssuesTableRows(t *testing.T) {
+	requireDoltIntegration(t)
+	requireRealBDAtLeast(t, "v1.3.1-0", "a server-mode workspace that holds issues-table beads without auto-importing issues.jsonl")
+	env := newIsolatedToolEnv(t, true)
+
+	rootDir := t.TempDir()
+	wsDir := filepath.Join(rootDir, "ws")
+	serverPort := startSharedDoltServer(t, env, filepath.Join(rootDir, "dolt"))
+	if err := os.MkdirAll(wsDir, 0o755); err != nil {
+		t.Fatalf("creating workspace: %v", err)
+	}
+	gitInitWorkspace(t, wsDir)
+	runBDInit(t, env, wsDir, "iq", serverPort)
+
+	runner := isolatedBdStoreCommandRunner(env)
+	var mu sync.Mutex
+	var sent []string
+	store := beads.NewBdStore(wsDir, func(dir, name string, args ...string) ([]byte, error) {
+		if name == "bd" {
+			mu.Lock()
+			sent = append(sent, strings.Join(args, " "))
+			mu.Unlock()
+		}
+		return runner(dir, name, args...)
+	})
+
+	create := func(title, parent string, ephemeral bool) string {
+		t.Helper()
+		b, err := store.Create(beads.Bead{Title: title, Type: "task", ParentID: parent, Ephemeral: ephemeral})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+		return b.ID
+	}
+	one := create("parent one", "", false)
+	two := create("parent two", "", false)
+	childOfOne := create("child of one", one, false)
+	childOfTwo := create("child of two", two, false)
+	wispOfOne := create("wisp child of one", one, true)
+	create("unrelated", "", false)
+	if err := store.Close(childOfTwo); err != nil {
+		t.Fatalf("Close(%s): %v", childOfTwo, err)
+	}
+
+	cases := []struct {
+		name  string
+		query beads.ListQuery
+		want  []string
+	}{
+		{name: "ids, both tiers", query: beads.ListQuery{IDs: []string{wispOfOne, childOfTwo, childOfOne}, IncludeClosed: true, TierMode: beads.TierBoth}, want: []string{childOfOne, childOfTwo, wispOfOne}},
+		{name: "ids", query: beads.ListQuery{IDs: []string{childOfTwo, childOfOne}, IncludeClosed: true}, want: []string{childOfOne, childOfTwo}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mu.Lock()
+			sent = nil
+			mu.Unlock()
+			got, err := store.List(tc.query)
+			if err != nil {
+				t.Fatalf("List(%s): %v", tc.name, err)
+			}
+			gotIDs := make([]string, 0, len(got))
+			for _, b := range got {
+				gotIDs = append(gotIDs, b.ID)
+			}
+			if !sameIDSet(gotIDs, tc.want) {
+				t.Fatalf("List(%s) = %v, want %v", tc.name, gotIDs, tc.want)
+			}
+			mu.Lock()
+			commands := append([]string(nil), sent...)
+			mu.Unlock()
+			idReads := 0
+			for _, c := range commands {
+				switch {
+				case strings.HasPrefix(c, "query "):
+					t.Fatalf("bd query %q ran; the --id read returned every row; all: %q", c, commands)
+				case strings.HasPrefix(c, "list "):
+					if !strings.Contains(c, " --id=") {
+						t.Fatalf("bd list %q read without an id filter; all: %q", c, commands)
+					}
+					idReads++
+				}
+			}
+			if idReads != 1 {
+				t.Fatalf("bd list reads = %d, want the one --id read; all: %q", idReads, commands)
 			}
 		})
 	}

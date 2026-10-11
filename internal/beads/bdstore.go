@@ -3011,9 +3011,15 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 }
 
 // List returns beads matching the query via bd list and bd query.
+//
+// An IDs query reads only those ids (bdIDReads). IDs whose every entry is
+// empty name no bead, so they read nothing.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
+	}
+	if len(query.IDs) > 0 && len(distinctNonEmpty(query.IDs)) == 0 {
+		return []Bead{}, nil
 	}
 
 	found, err := s.listByTier(query)
@@ -3150,13 +3156,77 @@ func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []
 	return filtered, nil
 }
 
-// fetchViaBDList runs `bd list` for query and returns the raw rows (before
-// applyListQuery's client-side filter/sort/limit) plus a partial-parse error
-// if parseIssuesTolerant dropped any. Split out of listViaBDList so the
-// assignee fan-out above can combine several independently-predicated reads'
-// raw rows before a single applyListQuery pass runs over all of them,
-// instead of each read sorting and limiting on its own.
+// fetchViaBDList runs the bd list read for query (readBDList) and returns the
+// raw rows (before applyListQuery's client-side filter/sort/limit) plus a
+// partial-parse error if parseIssuesTolerant dropped any. The assignee fan-out
+// above combines several independently-predicated reads' raw rows before a
+// single applyListQuery pass runs over all of them, instead of each read
+// sorting and limiting on its own.
 func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, error) {
+	read, err := s.readBDList(query)
+	if err != nil {
+		return nil, nil, err
+	}
+	return read.rows, read.partial(), nil
+}
+
+// bdListRead holds the rows a bd list read returned, before the query is
+// matched against them in Go.
+type bdListRead struct {
+	rows []Bead
+	// parseErr joins the failures of the rows bd returned that did not parse.
+	parseErr error
+}
+
+// matched returns the rows that match query, sorted and cut to its limit. A
+// read that dropped rows it could not parse is partial: it reports a
+// PartialResultError beside the rows that match, so callers can tell a
+// complete list from one that silently dropped entries, and a plain error
+// when none match. Treating a partial list as authoritative has driven a
+// runaway cache-reconcile loop in the past (synthesizing bead.closed for beads
+// that were merely dropped by parseIssuesTolerant).
+func (r bdListRead) matched(query ListQuery) ([]Bead, error) {
+	filtered := applyListQuery(r.rows, query)
+	if r.parseErr == nil {
+		return filtered, nil
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("bd list: %w", r.parseErr)
+	}
+	return filtered, &PartialResultError{Op: "bd list", Err: r.parseErr}
+}
+
+// partial is the PartialResultError a read that dropped rows it could not
+// parse reports beside its rows, or nil for a complete read.
+func (r bdListRead) partial() *PartialResultError {
+	if r.parseErr == nil {
+		return nil
+	}
+	return &PartialResultError{Op: "bd list", Err: r.parseErr}
+}
+
+// holdsEveryID reports whether the read returned a row for each id ids names,
+// and dropped no row it could not parse. IDs that name no bead hold nothing.
+func (r bdListRead) holdsEveryID(ids []string) bool {
+	want := distinctNonEmpty(ids)
+	if len(want) == 0 || r.parseErr != nil {
+		return false
+	}
+	returned := make(map[string]bool, len(r.rows))
+	for _, b := range r.rows {
+		returned[b.ID] = true
+	}
+	for _, id := range want {
+		if !returned[id] {
+			return false
+		}
+	}
+	return true
+}
+
+// readBDList runs the bd list read for query. An IDs query is read by id
+// (bdIDReads), so the read is bounded by the ids rather than by the store.
+func (s *BdStore) readBDList(query ListQuery) (bdListRead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3203,24 +3273,35 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 		args = append(args, "--skip-labels")
 	}
 
-	out, err := s.runBDTransientRead(args...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("bd list: %w", err)
+	reads := [][]string{args}
+	if len(serverQuery.IDs) > 0 {
+		if byID, ok := bdIDReads(args, serverQuery.IDs, serverQuery.IncludesClosed()); ok {
+			reads = byID
+		}
 	}
-	issues, parseErr := parseIssuesTolerant(extractJSON(out))
-	// Latched from what bd RETURNED, before applyListQuery: a store that
+	var issues []bdIssue
+	var parseErrs []error
+	for _, read := range reads {
+		out, err := s.runBDTransientRead(read...)
+		if err != nil {
+			return bdListRead{}, fmt.Errorf("bd %s: %w", read[0], err)
+		}
+		parsed, parseErr := parseIssuesTolerant(extractJSON(out))
+		issues = append(issues, parsed...)
+		if parseErr != nil {
+			parseErrs = append(parseErrs, parseErr)
+		}
+	}
+	// Latched from what bd RETURNED, before the Go-side match: a store that
 	// answered with rows is the populated one, whatever this query's filters
 	// then reduce that to.
 	s.noteServerRows(len(issues))
-	result := make([]Bead, len(issues))
+	rows := make([]Bead, len(issues))
 	for i := range issues {
-		result[i] = issues[i].toBead()
+		rows[i] = issues[i].toBead()
 	}
-	s.noteInlineDependencyProjection(issues, result)
-	if parseErr != nil {
-		return result, &PartialResultError{Op: "bd list", Err: parseErr}, nil
-	}
-	return result, nil, nil
+	s.noteInlineDependencyProjection(issues, rows)
+	return bdListRead{rows: rows, parseErr: errors.Join(parseErrs...)}, nil
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
@@ -3245,9 +3326,10 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs bound the read to one row per id already. An id list spans several
+	// reads (bdIDReads), or one unfiltered read matched in Go, and a bd-side
+	// limit on any of them would cut rows before the merged result is sorted
+	// and limited.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
@@ -3278,12 +3360,53 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 }
 
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
+	return s.listWithWispLeg(query, TierWisps, "bd list wisps tier")
+}
+
+// listWithWispLeg answers a TierWisps or TierBoth query from two legs: bd
+// list, read in listTier, and the bd query wisp leg (listEphemeral), which
+// returns wisps the bd list leg's defaults leave out, such as a pinned wisp
+// when the read is not closed-inclusive.
+//
+// An IDs query skips the wisp leg when the bd list leg returned a row for
+// every id. The wisp leg answers only those ids, an id lives on one plane, and
+// bd list reads the wisp plane for the ids too and marks its rows ephemeral, so
+// the wisp leg could only repeat rows the merge already holds. It would read
+// every wisp row to do so, since a bd query clause names one id.
+func (s *BdStore) listWithWispLeg(query ListQuery, listTier TierMode, op string) ([]Bead, error) {
 	listQ := query
-	listQ.TierMode = TierWisps
+	listQ.TierMode = listTier
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	pair := s.listTierPair(listQ, ephemeralQ)
-	return mergeListTierResults(query, "bd list wisps tier", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+	if len(distinctNonEmpty(query.IDs)) == 0 {
+		// No ids to decide the wisp leg on: the two legs are independent
+		// reads, so they run at once (listTierPair). listViaBDList does the
+		// two-or-more-assignee fan-out itself.
+		pair := s.listTierPair(listQ, ephemeralQ)
+		return mergeListTierResults(query, op, pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+	}
+
+	// An IDs query reads the bd list leg first: whether the wisp leg is
+	// needed is known only once that leg has answered.
+	var listResult []Bead
+	var listErr error
+	if listTier != TierWisps && len(listQ.Assignees) >= 2 && nativeListFanOutAssignees(listQ) != nil {
+		// Two or more assignees fan out to one predicated read per assignee
+		// (listViaBDList), which reports no per-id coverage, so the wisp leg
+		// below is read as it always was.
+		listResult, listErr = s.listViaBDList(listQ)
+	} else {
+		var read bdListRead
+		read, listErr = s.readBDList(listQ)
+		if listErr == nil {
+			listResult, listErr = read.matched(listQ)
+			if read.holdsEveryID(query.IDs) {
+				return mergeListTierResults(query, op, listResult, listErr, nil, nil)
+			}
+		}
+	}
+	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	return mergeListTierResults(query, op, listResult, listErr, ephemeralResult, ephemeralErr)
 }
 
 // tierPairResult is what listTierPair read from each tier.
@@ -3324,6 +3447,11 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
 	clauses, serverFilteredOnly = appendBdQueryMetadataClauses(clauses, serverFilteredOnly, serverQuery.Metadata)
+	// A bd query clause names one id, so IDs are matched in Go after the read,
+	// and a bd-side limit would cut the tier before that match.
+	if len(serverQuery.IDs) > 0 {
+		serverFilteredOnly = false
+	}
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
@@ -3588,12 +3716,7 @@ func isBdQueryMetadataValue(value string) bool {
 }
 
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
-	listQ := query
-	listQ.TierMode = TierBoth
-	ephemeralQ := query
-	ephemeralQ.TierMode = TierWisps
-	pair := s.listTierPair(listQ, ephemeralQ)
-	return mergeListTierResults(query, "bd list both tiers", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+	return s.listWithWispLeg(query, TierBoth, "bd list both tiers")
 }
 
 func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
