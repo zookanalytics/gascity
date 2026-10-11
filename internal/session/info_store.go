@@ -132,13 +132,13 @@ func (s *Store) validatedBead(id string) (beads.Bead, error) {
 // stateFilter excludes closed sessions; stateFilter "all" includes everything.
 // Only session.Info is returned — no raw beads cross this boundary.
 func (s *Store) List(stateFilter, templateFilter string) ([]Info, error) {
-	// IncludeClosed so the in-memory filter below can honor state=closed and
-	// state=all; sessionMatchesFilters drops closed beads for the default and
-	// non-closed filters, matching the shared session-list filtering semantics.
+	// Closed history is read only when the filter can keep a closed bead:
+	// it holds every session the city has ever run, and sessionMatchesFilters
+	// drops each closed row for the default and the non-closed filters anyway.
 	all, err := s.store.List(beads.ListQuery{
 		Label:         LabelSession,
 		Sort:          beads.SortCreatedDesc,
-		IncludeClosed: true,
+		IncludeClosed: StateFilterIncludesClosed(stateFilter),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing sessions: %w", err)
