@@ -284,7 +284,7 @@ Violations indicate bugs.
   re-firing on the next lane pass while the dispatch goroutine is
   still running.
 
-- **The tracking watchdog never closes a run inside its timeout**: The
+- **Automated stale sweeps never close a run inside its timeout**: The
   open tracking bead is the order's single-flight gate. Each lane pass
   runs a watchdog, at most every 30s, that closes stale open tracking
   beads for every order, so a bead no dispatch closed cannot jam its
@@ -295,8 +295,10 @@ Violations indicate bugs.
   keeps its bead until the bead is 2m older than that recorded timeout.
   By then the run has been killed, even if a reload has since shortened
   the order's timeout or `max_timeout`. Any other open tracking bead is
-  closed at 2m. `gc order sweep-tracking` applies its `--stale-after`
-  alone.
+  closed at 2m. `gc order sweep-tracking`, which the core
+  `order-tracking-sweep` maintenance order runs every minute, applies
+  the same rule with its `--stale-after` in place of 2m, unless an
+  operator passes `--ignore-run-timeouts`.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
