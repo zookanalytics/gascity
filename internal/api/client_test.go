@@ -1171,11 +1171,14 @@ func TestClientListConvoys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListConvoys: %v", err)
 	}
-	if len(got.Body) != 1 {
-		t.Fatalf("items = %d, want 1", len(got.Body))
+	if len(got.Body.Items) != 1 {
+		t.Fatalf("items = %d, want 1", len(got.Body.Items))
 	}
-	if got.Body[0].ID != "gc-1" || got.Body[0].Title != "deploy" || got.Body[0].Type != "convoy" {
-		t.Errorf("got[0] = %+v", got.Body[0])
+	if got.Body.Items[0].ID != "gc-1" || got.Body.Items[0].Title != "deploy" || got.Body.Items[0].Type != "convoy" {
+		t.Errorf("got[0] = %+v", got.Body.Items[0])
+	}
+	if got.Body.Partial || len(got.Body.PartialErrors) != 0 {
+		t.Errorf("partial = %v %q, want a complete read", got.Body.Partial, got.Body.PartialErrors)
 	}
 	if got.AgeSeconds != 1.25 {
 		t.Errorf("AgeSeconds = %v, want 1.25", got.AgeSeconds)
@@ -1307,7 +1310,10 @@ func TestCacheAgeFromResponse(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox(t *testing.T) {
+// TestClientMailInboxSummary proves the summary is one single-row request
+// whose list metadata, not its rows, carries the answer: total counts the
+// whole inbox and the partial-read state names the failed provider.
+func TestClientMailInboxSummary(t *testing.T) {
 	var gotQuery string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/mail" {
@@ -1328,15 +1334,12 @@ func TestClientListMailInbox(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	got, err := c.ListMailInbox("mayor", "")
+	got, err := c.MailInboxSummary("mayor", "")
 	if err != nil {
-		t.Fatalf("ListMailInbox: %v", err)
-	}
-	if len(got.Body.Items) != 1 || got.Body.Items[0].ID != "msg-1" || got.Body.Items[0].From != "alice" {
-		t.Errorf("got.Body = %+v", got.Body)
+		t.Fatalf("MailInboxSummary: %v", err)
 	}
 	if got.Body.Total != 1 || !got.Body.Partial {
-		t.Errorf("list metadata = total:%d partial:%v, want total:1 partial:true", got.Body.Total, got.Body.Partial)
+		t.Errorf("summary = total:%d partial:%v, want total:1 partial:true", got.Body.Total, got.Body.Partial)
 	}
 	if len(got.Body.PartialErrors) != 1 || !strings.Contains(got.Body.PartialErrors[0], "store_slow:") {
 		t.Errorf("PartialErrors = %v, want store_slow entry", got.Body.PartialErrors)
@@ -1344,12 +1347,12 @@ func TestClientListMailInbox(t *testing.T) {
 	if got.AgeSeconds != 2 {
 		t.Errorf("AgeSeconds = %v, want 2", got.AgeSeconds)
 	}
-	if !strings.Contains(gotQuery, "agent=mayor") {
-		t.Errorf("query = %q, missing agent=mayor", gotQuery)
+	if q, err := url.ParseQuery(gotQuery); err != nil || q.Get("agent") != "mayor" || q.Get("limit") != "1" {
+		t.Errorf("query = %q, want agent=mayor and limit=1", gotQuery)
 	}
 }
 
-func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
+func TestClientMailInboxSummary_CacheNotLiveFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1362,7 +1365,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1371,7 +1374,7 @@ func TestClientListMailInbox_CacheNotLiveFallback(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
+func TestClientMailInboxSummary_StoreSlowDoesNotFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/problem+json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -1384,7 +1387,7 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1399,12 +1402,12 @@ func TestClientListMailInbox_StoreSlowDoesNotFallback(t *testing.T) {
 	}
 }
 
-func TestClientListMailInbox_ConnErrorFallback(t *testing.T) {
+func TestClientMailInboxSummary_ConnErrorFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.ListMailInbox("mayor", "")
+	_, err := c.MailInboxSummary("mayor", "")
 	if err == nil {
 		t.Fatal("expected connection error, got nil")
 	}

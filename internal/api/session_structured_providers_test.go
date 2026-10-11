@@ -1750,6 +1750,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 }
 
 func TestLegacySessionTranscriptStructuredGracefullyDowngrades(t *testing.T) {
+	isolateProviderDiscovery(t)
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 

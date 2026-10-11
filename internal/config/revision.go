@@ -241,6 +241,8 @@ type WatchTarget struct {
 // WatchTargets returns the set of paths that should be watched for config
 // changes. Config source directories are shallow; city roots discover
 // convention subdirectories; pack roots and convention roots are recursive.
+// The recursive targets are the directories Revision hashes, each hashed with
+// IsIgnoredPackRuntimePath applied relative to itself.
 func WatchTargets(prov *Provenance, cfg *City, cityRoot string) []WatchTarget {
 	seen := make(map[string]int)
 	var targets []WatchTarget

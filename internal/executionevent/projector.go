@@ -710,7 +710,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 			continue
 		}
 		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
-		emitted += reconcileRoots(recorder, graphStore, roots, idx, actor)
+		emitted += reconcileRoots(recorder, graphStore, roots, idx, nil, actor)
 	}
 	return emitted
 }
@@ -904,6 +904,54 @@ type CompletionBackstop struct {
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
 	index CompletedFactIndex
+	// emptyListings carries the closed roots whose step listing came back empty
+	// from one sweep to the next, so a root with no steps converges without a
+	// single empty answer stamping it.
+	emptyListings emptyListingRecord
+}
+
+// emptyListingKey names one root at one position of the store fan.
+type emptyListingKey struct {
+	store int
+	root  string
+}
+
+// emptyListingRecord remembers which closed roots the last complete sweep
+// listed with no step rows. An empty listing is the true answer for a closed
+// root whose member rows are gone or carry no gc.step_id, and it is also what a
+// wedged store answering empty-with-nil returns for a root that has steps. One
+// answer cannot tell the two apart, so an empty listing converges a root only
+// when the previous sweep, over the same store fan, listed that root empty too.
+type emptyListingRecord struct {
+	// previous holds the roots the last complete sweep listed empty, and
+	// signature the store fan that sweep ran over.
+	previous  map[emptyListingKey]struct{}
+	signature string
+	// current holds the roots this sweep has listed empty so far.
+	current map[emptyListingKey]struct{}
+}
+
+// confirm records that key listed empty in this sweep, over the store fan
+// signature names, and reports whether the previous complete sweep listed it
+// empty over the same fan.
+func (r *emptyListingRecord) confirm(signature string, key emptyListingKey) bool {
+	if r.current == nil {
+		r.current = map[emptyListingKey]struct{}{}
+	}
+	r.current[key] = struct{}{}
+	if r.signature != signature {
+		return false
+	}
+	_, confirmed := r.previous[key]
+	return confirmed
+}
+
+// completeSweep makes this sweep's empty listings the record the next sweep
+// confirms against.
+func (r *emptyListingRecord) completeSweep(signature string) {
+	r.previous = r.current
+	r.signature = signature
+	r.current = nil
 }
 
 // CompletionBackstopResult is one chunk's outcome.
@@ -977,7 +1025,11 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			}
 		}
 		chunk := remaining[:budget]
-		result.Emitted += reconcileRoots(recorder, graphStore, chunk, &b.index, actor)
+		storeIndex := b.storeIndex
+		confirmEmpty := func(rootID string) bool {
+			return b.emptyListings.confirm(b.sweepStoreSignature, emptyListingKey{store: storeIndex, root: rootID})
+		}
+		result.Emitted += reconcileRoots(recorder, graphStore, chunk, &b.index, confirmEmpty, actor)
 		result.RootsVisited += len(chunk)
 		if len(chunk) > 0 {
 			b.afterRootID = chunk[len(chunk)-1].ID
@@ -988,6 +1040,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 	}
 	b.storeIndex = 0
 	b.afterRootID = ""
+	b.emptyListings.completeSweep(b.sweepStoreSignature)
 	result.SweepComplete = true
 	return result
 }
@@ -1015,6 +1068,7 @@ func (b *CompletionBackstop) prepareSweep(storeSignature string) {
 	b.storeRoots = nil
 	b.storeRootsLoaded = false
 	b.skippedConverged = 0
+	b.emptyListings.current = nil
 	b.sweepVisitsStamped = b.VisitStamped
 	b.sweepStoreSignature = storeSignature
 }
@@ -1117,8 +1171,10 @@ func storeFanSignature(graphStores []beads.GraphStore) string {
 // reconcileRoots projects the closed steps of the supplied roots and records the
 // completion facts the journal is missing. The index is updated as it goes so
 // one pass cannot emit the same fact twice across stores. Each root's converged
-// stamp is written or cleared from the signals its step pass gathered.
-func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, actor string) int {
+// stamp is written or cleared from the signals its step pass gathered, and
+// confirmEmpty decides a closed root that listed no step rows (see
+// applyConvergenceStamp).
+func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, confirmEmpty func(rootID string) bool, actor string) int {
 	emitted := 0
 	for _, root := range roots {
 		if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
@@ -1131,7 +1187,7 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 		}
 		emittedForRoot, unconfirmedForRoot, everyStepClosed := reconcileRootSteps(recorder, root, rows, completed, actor)
 		emitted += emittedForRoot
-		applyConvergenceStamp(graphStore, root, len(rows), emittedForRoot, unconfirmedForRoot, everyStepClosed)
+		applyConvergenceStamp(graphStore, root, len(rows), emittedForRoot, unconfirmedForRoot, everyStepClosed, confirmEmpty)
 	}
 	return emitted
 }
@@ -1180,29 +1236,47 @@ func reconcileRootSteps(recorder events.Recorder, root beads.Bead, rows []stepRo
 // applyConvergenceStamp writes or clears root's converged stamp from the signals
 // reconcileRootSteps gathered. Both writes are best-effort: a failed stamp
 // re-proves and a failed clear re-heals on the next sweep.
-func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCount, emittedForRoot, unconfirmedForRoot int, everyStepClosed bool) {
+//
+// confirmEmpty answers for a closed root whose listing held no step rows: it
+// reports whether the previous sweep listed the same root empty. A caller that
+// keeps no record across passes supplies nil, and an empty listing then never
+// stamps.
+func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCount, emittedForRoot, unconfirmedForRoot int, everyStepClosed bool, confirmEmpty func(rootID string) bool) {
 	stamped := strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != ""
-	// VERIFIED convergence only: this pass emitted NOTHING for the root AND every
-	// surviving witness was JOURNAL-CONFIRMED (read back by the warm index), not a
-	// self-added phantom. A key this process merely add()ed for a best-effort
-	// Record that may have been silently dropped is unconfirmed and blocks the
-	// stamp (unconfirmedForRoot > 0) until a later journal read confirms the fact
-	// really landed — otherwise a dropped append would stamp a PERMANENT fact loss
-	// (the review's critical). A pass that emitted stamps nothing either: its
-	// Record calls are fire-and-forget, so the root converges a sweep later,
-	// forever after. rowCount > 0 keeps a transiently empty step listing (a store
-	// wedge answering empty-with-nil) from vacuously proving convergence. The stamp
-	// only ever applies to a closed root.
-	converged := emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && rowCount > 0 &&
-		strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+	closed := strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+	var converged bool
+	if rowCount == 0 && closed {
+		// A closed root that lists no step rows has no fact to emit, now or later:
+		// its member rows are gone, or they carry no gc.step_id and never qualify
+		// as steps. A wedged store answering empty-with-nil gives the same answer
+		// for a root that has steps, so one empty listing proves nothing either
+		// way. It never clears a stamp, and it stamps a root only when the previous
+		// sweep listed the root empty too.
+		if stamped || confirmEmpty == nil {
+			return
+		}
+		converged = confirmEmpty(root.ID)
+	} else {
+		// VERIFIED convergence only: this pass emitted NOTHING for the root AND
+		// every surviving witness was JOURNAL-CONFIRMED (read back by the warm
+		// index), not a self-added phantom. A key this process merely add()ed for a
+		// best-effort Record that may have been silently dropped is unconfirmed and
+		// blocks the stamp (unconfirmedForRoot > 0) until a later journal read
+		// confirms the fact really landed — otherwise a dropped append would stamp
+		// a PERMANENT fact loss (the review's critical). A pass that emitted stamps
+		// nothing either: its Record calls are fire-and-forget, so the root
+		// converges a sweep later, forever after. The stamp only ever applies to a
+		// closed root.
+		converged = emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && closed
+	}
 	switch {
 	case converged && !stamped:
 		_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
 	case stamped && !converged:
 		// A stamped root this pass could still emit for — one with an unconfirmed
-		// witness, open steps, or an invisible listing — carries a STALE stamp (a
-		// hand-reopened step, a vacuous stamp from a past wedge, or a false stamp a
-		// since-fixed phantom left behind), OR a root that has REOPENED
+		// witness or open steps — carries a STALE stamp (a hand-reopened step, a
+		// stamp a wedge left by answering empty on two consecutive sweeps, or a
+		// false stamp a since-fixed phantom left behind), OR a root that has REOPENED
 		// (root.Status != closed) while its step rows stayed closed (a converged
 		// root re-driven/retried). The stamp only ever applies to a closed root, so
 		// a stamped non-closed root is always stale. Clear it so the sweeps resume

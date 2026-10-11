@@ -9,8 +9,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -2013,6 +2018,105 @@ name = "mayor"
 	return cityPath
 }
 
+// partialConvoyListHandler serves a /convoys page the server marked partial
+// because one rig store failed to read.
+func partialConvoyListHandler(t *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !strings.HasSuffix(r.URL.Path, "/convoys") {
+			t.Errorf("unexpected request %s after a partial convoy list", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "gc-1", "title": "sprint", "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"},
+			},
+			"total":          1,
+			"partial":        true,
+			"partial_errors": []string{"rig beta: store closed"},
+		})
+	})
+}
+
+// manyConvoys is the open-convoy count manyConvoysHandler serves: several times
+// convoyProgressConcurrency, so the progress reads need more than one batch.
+const manyConvoys = 3 * convoyProgressConcurrency
+
+// manyConvoysHandler serves manyConvoys open convoys, gc-1 through gc-N, and a
+// check for gc-i reporting i of manyConvoys children closed, so each rendered
+// row shows whether it got its own convoy's progress. failID, when set, makes
+// that convoy's check answer 500. The first check waits until a second check is
+// in flight beside it, and the test fails if none arrives, because then the
+// checks ran one at a time. It also fails if more than
+// convoyProgressConcurrency checks are ever in flight together.
+func manyConvoysHandler(failID string) convoyMatrixHandler {
+	return func(t *testing.T) http.Handler {
+		var inFlight, maxInFlight atomic.Int32
+		var firstWaited atomic.Bool
+		together := make(chan struct{})
+		var closeTogether sync.Once
+		t.Cleanup(func() {
+			if n := maxInFlight.Load(); n > convoyProgressConcurrency {
+				t.Errorf("checks in flight together = %d, want at most %d", n, convoyProgressConcurrency)
+			}
+		})
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.HasSuffix(r.URL.Path, "/convoys") {
+				items := make([]map[string]any, 0, manyConvoys)
+				for i := manyConvoys; i >= 1; i-- {
+					items = append(items, map[string]any{"id": fmt.Sprintf("gc-%d", i), "title": fmt.Sprintf("convoy-%d", i), "issue_type": "convoy", "status": "open", "created_at": "2026-04-23T10:00:00Z"})
+				}
+				json.NewEncoder(w).Encode(map[string]any{"items": items, "total": manyConvoys}) //nolint:errcheck
+				return
+			}
+			n := inFlight.Add(1)
+			defer inFlight.Add(-1)
+			for {
+				prev := maxInFlight.Load()
+				if n <= prev || maxInFlight.CompareAndSwap(prev, n) {
+					break
+				}
+			}
+			if n >= 2 {
+				closeTogether.Do(func() { close(together) })
+			}
+			if !firstWaited.Swap(true) {
+				select {
+				case <-together:
+				case <-time.After(10 * time.Second):
+					t.Error("no second convoy check arrived while the first was in flight; the checks ran one at a time")
+				}
+			}
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v0/city/test-city/convoy/"), "/check")
+			if id == failID {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]any{"status": http.StatusInternalServerError, "title": "Internal Server Error", "detail": "internal: check exploded"}) //nolint:errcheck
+				return
+			}
+			closed, err := strconv.Atoi(strings.TrimPrefix(id, "gc-"))
+			if err != nil {
+				t.Errorf("check for unexpected convoy %q", id)
+			}
+			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": manyConvoys, "closed": closed, "complete": closed == manyConvoys}) //nolint:errcheck
+		})
+	}
+}
+
+// wantEveryConvoysOwnProgress checks that stdout lists each of manyConvoys
+// convoys with the progress its own check reported.
+func wantEveryConvoysOwnProgress(t *testing.T, stdout string) {
+	t.Helper()
+	for i := 1; i <= manyConvoys; i++ {
+		row := regexp.MustCompile(fmt.Sprintf(`(?m)^gc-%d\s+convoy-%d\s+%d/%d closed$`, i, i, i, manyConvoys))
+		if !row.MatchString(stdout) {
+			t.Errorf("stdout has no row for gc-%d showing %d/%d closed:\n%s", i, i, manyConvoys, stdout)
+		}
+	}
+}
+
 func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -2024,6 +2128,7 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 		wantReason   string
 		wantStderr   string
 		wantStdout   string
+		check        func(t *testing.T, stdout string)
 	}{
 		{
 			name:       "api-happy-path",
@@ -2031,6 +2136,27 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 			wantExit:   0,
 			wantRoute:  "api",
 			wantStdout: "sprint",
+		},
+		{
+			name:       "api-partial-list-falls-back",
+			handler:    partialConvoyListHandler,
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "partial-read",
+		},
+		{
+			name:      "api-progress-checks-run-in-parallel",
+			handler:   manyConvoysHandler(""),
+			wantExit:  0,
+			wantRoute: "api",
+			check:     wantEveryConvoysOwnProgress,
+		},
+		{
+			name:       "api-failed-progress-check-falls-back",
+			handler:    manyConvoysHandler(fmt.Sprintf("gc-%d", manyConvoys/2)),
+			wantExit:   0,
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
 		},
 		{
 			name:       "api-cache-not-live",
@@ -2093,6 +2219,9 @@ func TestRouteConvoyList_SixRowMatrix(t *testing.T) {
 			}
 			if tc.wantStdout != "" && !strings.Contains(stdout.String(), tc.wantStdout) {
 				t.Errorf("stdout missing %q:\n%s", tc.wantStdout, stdout.String())
+			}
+			if tc.check != nil {
+				tc.check(t, stdout.String())
 			}
 			if tc.wantRoute == "fallback" {
 				if !strings.Contains(stdout.String(), "No open convoys") {

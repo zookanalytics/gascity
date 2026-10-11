@@ -449,7 +449,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		cr, err := c.ListWaits(stateFilter, sessionFilter)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			emitWaitListPartialNotice(stderr, cr.Body)
+			emitWaitListReadNotices(stderr, cr.Body)
 			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 		}
 		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
@@ -458,7 +458,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 			lr, lerr := c.ListWaitsViaBeads()
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
-				emitWaitListPartialNotice(stderr, lr.Body)
+				emitWaitListReadNotices(stderr, lr.Body)
 				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 			}
 			err = lerr
@@ -475,12 +475,18 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 	return doWaitListFallback(cityPath, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 }
 
-// emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr
-// without failing the command, matching the generic /beads partial contract: the
-// surviving rows still render, and the operator sees the degradation. The typed
-// /waits rung carries Partial/PartialErrors; the legacy generic-beads rung never
-// sets them, so this is a no-op there.
-func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
+// emitWaitListReadNotices surfaces an incomplete wait read on stderr without
+// failing the command: the rows the read returned still render, and the
+// operator sees why the list may be short. A capped read, which either API rung
+// can report, gets the local store leg's capped notice; api.WaitList carries no
+// scope label, so the notice names only the limit. A degraded (partial) read
+// follows the generic /beads partial contract; only the typed /waits rung
+// carries Partial/PartialErrors.
+func emitWaitListReadNotices(stderr io.Writer, wl api.WaitList) {
+	if wl.Capped {
+		limitErr := beads.LookupLimitError{Kind: "wait", Limit: waitLookupLimit}
+		fmt.Fprintf(stderr, "gc wait list: %v; showing capped results\n", limitErr) //nolint:errcheck
+	}
 	if !wl.Partial {
 		return
 	}

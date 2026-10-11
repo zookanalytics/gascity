@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -634,4 +635,119 @@ func TestOrderDispatchNoWorkGateSkipsTrackingGateDirectly(t *testing.T) {
 	if got := store.gateCalls(); got != 0 {
 		t.Errorf("NoWorkGate order must issue ZERO gate queries; got %d", got)
 	}
+}
+
+// slowGateIndexStore makes every per-pass gate index scan take readDelay and
+// counts the scans. The delay is a receive on time.After, so it costs virtual
+// time only: use it inside a synctest bubble, where the gate bounds the scan
+// races against are virtual as well and which one ends first is exact.
+type slowGateIndexStore struct {
+	beads.Store
+	readDelay time.Duration
+	scans     atomic.Int32
+}
+
+func (s *slowGateIndexStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if isOrderGateIndexQuery(q) {
+		s.scans.Add(1)
+		<-time.After(s.readDelay)
+	}
+	return s.Store.List(q)
+}
+
+// waitOutScans advances the bubble clock by one scan's delay, so every scan a
+// pass abandoned finishes before the test returns. Time stops when a synctest
+// bubble's test function returns, and a scan still waiting out its delay then
+// deadlocks the bubble.
+func (s *slowGateIndexStore) waitOutScans() {
+	<-time.After(s.readDelay)
+}
+
+// slowStoreGateOrders are three non-idempotent cooldown orders on one store, so
+// a gate that times out fails closed and only a gate that reads an answer
+// dispatches.
+func slowStoreGateOrders() []orders.Order {
+	return []orders.Order{
+		{Name: "first-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		{Name: "second-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+		{Name: "third-sweep", Trigger: "cooldown", Interval: "1m", Exec: "true"},
+	}
+}
+
+// TestOrderDispatchSlowStoreIndexReadIsSharedAcrossGates covers a store whose
+// index scan outlasts one gate bound but not two. The first order's gate times
+// out at its own bound and fails closed. The second order's gate waits on the
+// scan already in flight, reads its answer when it lands, and dispatches; the
+// third reads the finished scan. The store serves one scan for the pass, and
+// the pass ends when the scan does.
+//
+// A gate that started its own scan instead would time out as well, because its
+// scan takes just as long, and its order would fail closed with one more scan
+// of the slow store behind it.
+func TestOrderDispatchSlowStoreIndexReadIsSharedAcrossGates(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &slowGateIndexStore{Store: beads.NewMemStore(), readDelay: orderGateTimeout * 5 / 4}
+		defer store.waitOutScans()
+		now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+		ad := buildOrderDispatcherFromListExec(slowStoreGateOrders(), store, nil, successfulExec, nil)
+		if ad == nil {
+			t.Fatal("expected non-nil dispatcher")
+		}
+
+		start := time.Now()
+		ad.dispatch(context.Background(), t.TempDir(), now)
+		pass := time.Since(start)
+		ad.drain(context.Background())
+
+		if got := store.scans.Load(); got != 1 {
+			t.Errorf("the pass issued %d index scans of the slow store, want 1 shared by every gate", got)
+		}
+		if got := trackingBeads(t, store.Store, "order-run:first-sweep"); len(got) != 0 {
+			t.Errorf("first-sweep's gate should time out at its own bound and fail closed; got %d tracking beads", len(got))
+		}
+		for _, name := range []string{"second-sweep", "third-sweep"} {
+			if got := trackingBeads(t, store.Store, "order-run:"+name); len(got) == 0 {
+				t.Errorf("%s should read the shared scan's answer and dispatch; no tracking bead was created", name)
+			}
+		}
+		if pass >= 2*orderGateTimeout {
+			t.Errorf("pass took %s, want it to end when the %s scan lands, inside the second gate's bound", pass, store.readDelay)
+		}
+	})
+}
+
+// TestOrderDispatchGateWaitingOnSharedReadKeepsItsOwnBound covers a store whose
+// index scan outlasts every gate's bound. Waiting on a shared scan runs inside
+// the gate goroutine, so each gate is still abandoned at its own bound and every
+// order fails closed, exactly as it does when each gate reads for itself. The
+// pass is as long as before; what sharing changes is the store load, one scan
+// for the pass rather than one per order.
+func TestOrderDispatchGateWaitingOnSharedReadKeepsItsOwnBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := &slowGateIndexStore{Store: beads.NewMemStore(), readDelay: 10 * orderGateTimeout}
+		defer store.waitOutScans()
+		now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+		aa := slowStoreGateOrders()
+		ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+		if ad == nil {
+			t.Fatal("expected non-nil dispatcher")
+		}
+
+		start := time.Now()
+		ad.dispatch(context.Background(), t.TempDir(), now)
+		pass := time.Since(start)
+		ad.drain(context.Background())
+
+		if got := store.scans.Load(); got != 1 {
+			t.Errorf("the pass issued %d index scans of the slow store, want 1 shared by every gate", got)
+		}
+		for _, a := range aa {
+			if got := trackingBeads(t, store.Store, "order-run:"+a.Name); len(got) != 0 {
+				t.Errorf("%s's gate should time out at its own bound and fail closed; got %d tracking beads", a.Name, len(got))
+			}
+		}
+		if bound := time.Duration(len(aa)) * orderGateTimeout; pass > bound {
+			t.Errorf("pass took %s, longer than one gate bound per order (%s): a gate waited past its own bound", pass, bound)
+		}
+	})
 }

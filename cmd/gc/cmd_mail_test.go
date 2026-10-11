@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -4713,6 +4713,41 @@ func assertMailRouteLog(t *testing.T, stderrStr, wantRoute, wantReason string) {
 	}
 }
 
+// largeInboxMailCheckHandler answers one single-row page of an inbox holding
+// more unread messages than one server page, and fails the test unless the
+// check made exactly that one request: the page's total is the whole count.
+func largeInboxMailCheckHandler(t *testing.T) http.Handler {
+	var requests atomic.Int32
+	t.Cleanup(func() {
+		if n := requests.Load(); n != 1 {
+			t.Errorf("mail list requests = %d, want 1", n)
+		}
+	})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if got := r.URL.Query().Get("limit"); got != "1" {
+			t.Errorf("limit query = %q, want 1", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+			"items": []map[string]any{
+				{"id": "msg-2500", "from": "alice", "to": "mayor", "subject": "hi", "body": "hello", "created_at": "2026-04-23T10:00:00Z", "read": false},
+			},
+			"total":       2500,
+			"next_cursor": "page2",
+		})
+	})
+}
+
+// nonJSONMailCheckHandler answers 200 with a body no list decode accepts, the
+// way a proxy in front of a degraded server can.
+func nonJSONMailCheckHandler(_ *testing.T) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, "<html>upstream unavailable</html>") //nolint:errcheck
+	})
+}
+
 func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -4731,6 +4766,20 @@ func TestRouteMailCheck_SixRowMatrix(t *testing.T) {
 			wantExit:   0,
 			wantRoute:  "api",
 			wantStdout: "1 unread message(s)",
+		},
+		{
+			name:       "api-large-inbox-counts-in-one-request",
+			handler:    largeInboxMailCheckHandler,
+			wantExit:   0,
+			wantRoute:  "api",
+			wantStdout: "2500 unread message(s) for mayor",
+		},
+		{
+			name:       "api-non-json-body-fallback",
+			handler:    nonJSONMailCheckHandler,
+			wantExit:   1, // fallback hits empty fake provider
+			wantRoute:  "fallback",
+			wantReason: "conn-refused",
 		},
 		{
 			name:       "api-cache-not-live",
@@ -5254,22 +5303,19 @@ name = "mayor"
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
-func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
-	cr := api.CachedRead[api.MailListView]{
-		Body: api.MailListView{
-			Items: []mail.Message{{
-				ID:        "msg-1",
-				From:      "human",
-				To:        "mayor",
-				Body:      "review this",
-				CreatedAt: time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC),
-			}},
-		},
+// TestMailCheckInjectCodexUsesUserPromptSubmit proves an injecting mail check
+// in Codex hook format names the UserPromptSubmit event. Injection always
+// reads the local provider, so the local render is the one hook output path.
+func TestMailCheckInjectCodexUsesUserPromptSubmit(t *testing.T) {
+	mp := mail.NewFake()
+	if _, err := mp.Send("human", "mayor", "", "review this"); err != nil {
+		t.Fatalf("send: %v", err)
 	}
 
-	var stdout bytes.Buffer
-	if code := renderMailCheckFromAPI(cr, "mayor", true, hookOutputFormatCodex, &stdout); code != 0 {
-		t.Fatalf("renderMailCheckFromAPI = %d, want 0", code)
+	var stdout, stderr bytes.Buffer
+	target := resolvedMailTarget{display: "mayor", recipients: []string{"mayor"}}
+	if code := doMailCheckTargetWithFormat(mp, target, true, hookOutputFormatCodex, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailCheckTargetWithFormat = %d, want 0; stderr=%q", code, stderr.String())
 	}
 	var out struct {
 		HookSpecificOutput struct {

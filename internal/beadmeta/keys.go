@@ -192,11 +192,13 @@ const (
 	// CompletionFactsConvergedMetadataKey stamps a graph.v2 workflow root whose
 	// completion facts the completions backstop has fully reconciled: the root
 	// is closed, every listed step is closed, and every emittable fact is in
-	// the journal. A closed root's steps never change again, so the stamp is
-	// terminal and the backstop sweep skips stamped roots instead of paying a
-	// per-root step listing to rediscover a converged state every hour
-	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
-	// lane, which reacts to the close events themselves.
+	// the journal. A closed root that two consecutive sweeps list with no steps
+	// is stamped too, since it has no fact to emit. A closed root's steps never
+	// change again, so the stamp is terminal and the backstop sweep skips
+	// stamped roots instead of paying a per-root step listing to rediscover a
+	// converged state every hour (ga-wevcl). Live closes on stamped roots
+	// remain covered by the delta lane, which reacts to the close events
+	// themselves.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
 	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"

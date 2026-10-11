@@ -315,7 +315,8 @@ func TestWaitListJSONSessionFilterWiresFileStore(t *testing.T) {
 	if len(payload.Waits) != 1 || payload.Waits[0].ID != targetWait.ID || payload.Waits[0].SessionID != "target-session" {
 		t.Fatalf("waits = %+v, want only target %s", payload.Waits, targetWait.ID)
 	}
-	if strings.Contains(stdout.String(), otherWait.ID) {
+	// The payload's city_path is a temp dir.
+	if strings.Contains(withoutTempRoot(stdout.String()), otherWait.ID) {
 		t.Fatalf("wait list output included non-target wait %s: %s", otherWait.ID, stdout.String())
 	}
 }

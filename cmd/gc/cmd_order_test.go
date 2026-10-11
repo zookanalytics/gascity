@@ -3318,6 +3318,64 @@ prefix = "fe"
 	}
 }
 
+func TestOrderRunExecTrackedRecordsRunTimeout(t *testing.T) {
+	// The tracking bead a manual exec run holds open is the order's
+	// single-flight gate for the controller too, and the controller's watchdog
+	// keeps it only as long as the timeout the bead records. That must be the
+	// timeout the run is killed at: the order's, capped by max_timeout.
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[orders]
+max_timeout = "30s"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:     "long-pass",
+		Rig:      "frontend",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Timeout:  "300s",
+		Exec:     "true",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all := trackingBeads(t, store, orders.RunLabel(a.ScopedName()))
+	if len(all) != 1 {
+		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	}
+	run, ok := orders.RunFromTrackingBead(all[0])
+	if !ok {
+		t.Fatalf("tracking bead %+v does not decode as an order run", all[0])
+	}
+	if run.Timeout != 30*time.Second {
+		t.Fatalf("recorded run timeout = %s, want 30s (the order's 300s capped by max_timeout)", run.Timeout)
+	}
+}
+
 func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	// The refusal quotes the offending backend name, so naming it as the

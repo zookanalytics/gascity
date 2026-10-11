@@ -603,6 +603,39 @@ func (s *ProxiedStore) Get(id string) (Bead, error) {
 	return Bead{}, s.classifyReadError(err)
 }
 
+// GetExactBatch reads ids with the native leaf's exact batch read, the read Get
+// makes for each id. An id the relocated-class guard refuses is left unresolved,
+// so the caller's Get reports the refusal, and so is every id the native leaf
+// does not answer, which Get's fallback to the bd leaf answers. A demoted store
+// forwards to the bd leaf, as Get does.
+func (s *ProxiedStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	native := s.nativeLeaf()
+	if native == nil {
+		getter, ok := s.bd.(ExactBatchGetter)
+		if !ok {
+			return nil, nil, ErrExactBatchGetUnsupported
+		}
+		return getter.GetExactBatch(ids)
+	}
+	allowed := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if s.guardRelocatedIDs("get "+id, id) == nil {
+			allowed = append(allowed, id)
+		}
+	}
+	found, _, err := native.GetExactBatch(allowed)
+	if err != nil {
+		return nil, nil, s.classifyReadError(err)
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
+}
+
 // List reads beads matching a query.
 func (s *ProxiedStore) List(query ListQuery) ([]Bead, error) {
 	beads, err := s.readLeaf().List(query)

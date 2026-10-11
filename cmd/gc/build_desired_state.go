@@ -515,6 +515,25 @@ func buildDesiredStateWithSessionBeadsAt(
 	trace *sessionReconcilerTraceCycle,
 	stderr io.Writer,
 ) DesiredStateResult {
+	return buildDesiredStateWithClosedNamedIndexAt(cityName, cityPath, beaconTime, poolDecisionTime, cfg, sp, store, rigStores, sessionBeads, trace, stderr, nil)
+}
+
+// buildDesiredStateWithClosedNamedIndexAt is buildDesiredStateWithSessionBeadsAt
+// for a controller that builds desired state pass after pass: closedNamed
+// carries the closed named-session index between its passes. A nil closedNamed
+// reads the index afresh on every pass.
+func buildDesiredStateWithClosedNamedIndexAt(
+	cityName, cityPath string,
+	beaconTime, poolDecisionTime time.Time,
+	cfg *config.City,
+	sp runtime.Provider,
+	store beads.Store,
+	rigStores map[string]beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	trace *sessionReconcilerTraceCycle,
+	stderr io.Writer,
+	closedNamed *closedNamedIndexCache,
+) DesiredStateResult {
 	citySt, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if effectiveCitySuspended(cfg, citySt) {
 		return DesiredStateResult{}
@@ -581,6 +600,9 @@ func buildDesiredStateWithSessionBeadsAt(
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
 	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned)
+	if closedNamed != nil {
+		assignedReadyCache.reads = closedNamedCachedReads{cache: closedNamed, snap: sessionBeads}
+	}
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)

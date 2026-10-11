@@ -178,6 +178,12 @@ type CityRuntime struct {
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
 
+	// closedNamed is the closed named-session index cache this runtime's
+	// desired-state builds, control-dispatcher ticks and v2 external-reads
+	// lane share (closedNamedIndex).
+	closedNamed     *closedNamedIndexCache
+	closedNamedOnce sync.Once
+
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
 	// clocks below; created on first use.
@@ -400,7 +406,12 @@ type CityRuntimeParams struct {
 	Publication             supervisor.PublicationConfig
 	BuildFn                 func(*config.City, runtime.Provider, beads.Store) DesiredStateResult
 	BuildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult
-	Dops                    drainOps
+	// ClosedNamedIndex is the closed named-session index cache the entry
+	// point handed BuildFnWithSessionBeads. The runtime's control-dispatcher
+	// ticks and v2 external-reads lane read through it too, so one cache
+	// serves the city. Nil gives the runtime a cache of its own.
+	ClosedNamedIndex *closedNamedIndexCache
+	Dops             drainOps
 
 	Rec events.Recorder
 
@@ -538,6 +549,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		publication:             p.Publication,
 		buildFn:                 p.BuildFn,
 		buildFnWithSessionBeads: p.BuildFnWithSessionBeads,
+		closedNamed:             p.ClosedNamedIndex,
 		dops:                    p.Dops,
 		ct:                      ct,
 		it:                      it,
@@ -2116,18 +2128,18 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 		}
 		return
 	}
-	// Sweep stale tracking beads for ALL orders (nil filter), not just
-	// order-tracking-sweep's own. The old narrow scope only swept the sweep
-	// order's tracking so that order could bootstrap and clean the rest — a
-	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
-	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
-	// Closed-history retention is intentionally left to the maintenance exec
-	// order or the gc order sweep-tracking CLI; the watchdog only recovers
-	// stale open tracking beads.
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget)
+	// Sweep stale tracking beads for ALL orders (nil filter), so a jammed
+	// order recovers without depending on any one order, such as
+	// order-tracking-sweep, being scheduled to clean the rest. The open
+	// tracking bead is each order's single-flight gate, so a run still in
+	// flight keeps it until the bead is orderTrackingSweepWatchdogStaleAfter
+	// past the timeout the run was launched with, which the bead records. By
+	// then the run has been killed, whatever timeout a later reload gave the
+	// order. Every other open tracking bead is closed at
+	// orderTrackingSweepWatchdogStaleAfter. Closed-history retention is left
+	// to the maintenance exec order or the gc order sweep-tracking CLI; the
+	// watchdog only recovers stale open tracking beads.
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, true)
 	if err := errors.Join(storeErr, sweepErr); err != nil {
 		if cr.stderr != nil {
 			fmt.Fprintf(cr.stderr, "%s: order tracking sweep watchdog: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -4037,6 +4049,20 @@ func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
 	}
 }
 
+// closedNamedIndex is the closed named-session index cache this runtime
+// shares among its desired-state builds, its control-dispatcher ticks and its
+// v2 external-reads lane, and whose bead events its wake delivers
+// (initWake). newCityRuntime takes it from its params; a runtime built without
+// one gets its own on first use.
+func (cr *CityRuntime) closedNamedIndex() *closedNamedIndexCache {
+	cr.closedNamedOnce.Do(func() {
+		if cr.closedNamed == nil {
+			cr.closedNamed = newClosedNamedIndexCache()
+		}
+	})
+	return cr.closedNamed
+}
+
 func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 	if cr.legacySessionEntry("control_dispatcher_tick") {
 		return
@@ -4063,7 +4089,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 
 	sessionBeads := cr.loadSessionBeadSnapshot()
 	tickTime := time.Now()
-	wfcResult := buildDesiredStateWithSessionBeadsAt(
+	wfcResult := buildDesiredStateWithClosedNamedIndexAt(
 		cr.cityName,
 		cr.cityPath,
 		tickTime,
@@ -4075,6 +4101,10 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		sessionBeads,
 		nil,
 		cr.stderr,
+		// The tick narrows the config to the dispatcher agents but keeps
+		// every named session, so with an on_demand one it consults the
+		// closed named-session index on every tick.
+		cr.closedNamedIndex(),
 	)
 	desiredState := wfcResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(filteredCfg, cr.cityName, sessionBeads)

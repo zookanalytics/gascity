@@ -2301,6 +2301,7 @@ func startOneCity(
 	var cityRuntime *CityRuntime
 	if err := runPostPrepareStep("building_city_runtime", func() error {
 		var runtimeErr error
+		closedNamed := newClosedNamedIndexCache()
 		cityRuntime, runtimeErr = newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 			CityPath:                path,
 			CityName:                cityName,
@@ -2311,7 +2312,8 @@ func startOneCity(
 			SP:                      sp,
 			Publication:             publication,
 			BuildFn:                 supervisorBuildAgentsFn(path, cityName, stderr),
-			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr),
+			BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(path, cityName, stderr, closedNamed),
+			ClosedNamedIndex:        closedNamed,
 			Dops:                    dops,
 			Rec:                     rec,
 			PoolSessions:            poolSessions,
@@ -2940,10 +2942,14 @@ func supervisorBuildAgentsFn(cityPath, cityName string, stderr io.Writer) func(*
 	}
 }
 
-func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
+// supervisorBuildAgentsFnWithSessionBeads returns a BuildFnWithSessionBeads
+// suitable for CityRuntimeParams, with a stable beacon timestamp. closedNamed
+// carries the closed named-session index from one build to the next; nil reads
+// it afresh on every build.
+func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr io.Writer, closedNamed *closedNamedIndexCache) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	beaconTime := time.Now()
 	return func(c *config.City, sp runtime.Provider, store beads.Store, rigStores map[string]beads.Store, sessionBeads *sessionBeadSnapshot, trace *sessionReconcilerTraceCycle) DesiredStateResult {
-		return buildDesiredStateWithSessionBeadsAt(
+		return buildDesiredStateWithClosedNamedIndexAt(
 			cityName,
 			cityPath,
 			beaconTime,
@@ -2955,6 +2961,7 @@ func supervisorBuildAgentsFnWithSessionBeads(cityPath, cityName string, stderr i
 			sessionBeads,
 			trace,
 			stderr,
+			closedNamed,
 		)
 	}
 }
