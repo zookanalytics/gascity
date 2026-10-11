@@ -546,6 +546,10 @@ type desiredStateOptions struct {
 	// readOnly resolves every agent with read-only build params
 	// (agentBuildParams.readOnly): the build writes nothing.
 	readOnly bool
+	// closedNamed carries the closed named-session index between the passes
+	// of a controller that builds desired state pass after pass. Nil reads
+	// the index afresh on every pass.
+	closedNamed *closedNamedIndexCache
 }
 
 func buildDesiredStateWithSessionBeadsAt(
@@ -645,6 +649,9 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 	// scale-check and named-session probes read after those writes and share a
 	// second cache created below. See readyDemandCache.
 	assignedReadyCache := newTracedReadyDemandCache(pass, demandReadPointAssigned).withCrossStoreGate(cityPath, cfg, store, rigStores, suspendedRigPaths)
+	if opts.closedNamed != nil {
+		assignedReadyCache.reads = closedNamedCachedReads{cache: opts.closedNamed, snap: sessionBeads}
+	}
 	if store != nil {
 		subPhaseStart = trace.demandNow()
 		assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, readyAssigned, storePartial = collectAssignedWorkBeadsWithStores(cityPath, cfg, store, rigStores, suspendedRigPaths, sessionBeads, assignedReadyCache)
