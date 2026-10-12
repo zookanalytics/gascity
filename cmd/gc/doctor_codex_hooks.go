@@ -15,17 +15,14 @@ import (
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
+// codexHooksDriftCheck audits the Codex hooks files Codex reads for the city's
+// Codex agents for copies of Gas City's managed hooks.
 type codexHooksDriftCheck struct {
-	cityPath string
-	dirs     []string
+	dirs []string
 }
 
-func newCodexHooksDriftCheck(cityPath string, dirs []string) *codexHooksDriftCheck {
-	cityPath = strings.TrimSpace(cityPath)
-	if cityPath != "" {
-		cityPath = filepath.Clean(cityPath)
-	}
-	return &codexHooksDriftCheck{cityPath: cityPath, dirs: cleanCodexHookDirs(dirs)}
+func newCodexHooksDriftCheck(dirs []string) *codexHooksDriftCheck {
+	return &codexHooksDriftCheck{dirs: cleanCodexHookDirs(dirs)}
 }
 
 func codexHookWorkDirs(cityPath string, cfg *config.City) []string {
@@ -186,47 +183,48 @@ func (c *codexHooksDriftCheck) Name() string { return "codex-hooks-drift" }
 
 func (c *codexHooksDriftCheck) CanFix() bool { return true }
 
+// Fix removes Gas City's managed hook entries from each audited Codex hooks
+// file, keeping every entry Gas City does not manage.
 func (c *codexHooksDriftCheck) Fix(_ *doctor.CheckContext) error {
 	for _, dir := range c.dirs {
-		if !codexHooksNeedUpgrade(filepath.Join(dir, ".codex", "hooks.json"), c.cityPath) {
+		if !codexHooksHaveManagedEntries(filepath.Join(dir, ".codex", "hooks.json")) {
 			continue
 		}
-		if err := hooks.Install(fsys.OSFS{}, c.cityPath, dir, []string{"codex"}); err != nil {
-			return fmt.Errorf("upgrading Codex hooks in %s: %w", dir, err)
+		if err := hooks.StripManagedCodexHooks(fsys.OSFS{}, dir); err != nil {
+			return fmt.Errorf("removing managed Codex hooks from %s: %w", dir, err)
 		}
 	}
 	return nil
 }
 
+// Run reports each audited Codex hooks file that holds a Gas City managed hook
+// entry. Every managed Codex session gets those hooks from its launch command,
+// so a copy in a file Codex reads for the session runs each hook a second
+// time. The audited directories are the ones Codex reads project hooks from
+// for a Codex agent: the agent's work directory, the city root above a work
+// directory inside the city, and a rig's main checkout, whose .codex is where
+// Codex looks for a linked worktree of that rig.
 func (c *codexHooksDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	var stale []string
+	var duplicates []string
 	for _, dir := range c.dirs {
 		path := filepath.Join(dir, ".codex", "hooks.json")
-		if codexHooksNeedUpgrade(path, c.cityPath) {
-			stale = append(stale, path)
+		if codexHooksHaveManagedEntries(path) {
+			duplicates = append(duplicates, path)
 		}
 	}
-	if len(stale) == 0 {
-		return okCheck(c.Name(), "Codex hooks are current or user-owned")
+	if len(duplicates) == 0 {
+		return okCheck(c.Name(), "no Codex hooks file repeats the hooks Codex sessions get at launch")
 	}
 	return warnCheck(c.Name(),
-		fmt.Sprintf("%d managed Codex hook file(s) need upgrade", len(stale)),
-		"run `gc doctor --fix` or restart the city to upgrade managed Codex hooks",
-		stale)
+		fmt.Sprintf("%d Codex hooks file(s) repeat Gas City's managed hooks", len(duplicates)),
+		"Codex sessions get Gas City's hooks from their launch command, so a copy in these files runs each hook twice; run `gc doctor --fix` to remove the copies",
+		duplicates)
 }
 
-func codexHooksNeedUpgrade(path, cityPath string) bool {
+func codexHooksHaveManagedEntries(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
-	return hooks.CodexHooksNeedManagedUpgrade(data, cityPath)
-}
-
-func codexHooksMissingPreCompact(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	return hooks.CodexHooksMissingManagedPreCompact(data)
+	return hooks.CodexHooksHaveManagedEntries(data)
 }

@@ -30,6 +30,7 @@ test_suite(
         "//internal/beads/exec:exec_test",
         "//internal/beads:beads_test",
         "//internal/credentialprovider:credentialprovider_test",
+        "//internal/hooks:hooks_test",
         "//internal/orders:orders_test",
         "//internal/processgroup:processgroup_test",
         "//internal/runtime/acp:acp_test",

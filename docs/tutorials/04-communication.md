@@ -130,14 +130,15 @@ that Claude reads on every session start. No TOML in `pack.toml` or `city.toml`
 is needed for the default behavior — `grep install_agent_hooks` in a fresh city
 turns up nothing.
 
-Claude is the only provider wired automatically. To run an agent on a different
-provider — say you moved the mayor to Codex — list that provider in
-`install_agent_hooks` on the agent, and Gas City installs its hook files into the
-agent's working directory:
+Codex is wired automatically too: Gas City passes its hooks on each Codex
+session's launch command, so they apply in whatever directory the session works
+in. To run an agent on another provider — say you moved the mayor to Gemini —
+list that provider in `install_agent_hooks` on the agent, and Gas City installs
+its hook files into the agent's working directory:
 
 ```toml
 # agents/mayor/agent.toml — install hook files for this agent's provider
-install_agent_hooks = ["codex"]
+install_agent_hooks = ["gemini"]
 ```
 
 Agent-local overrides live in `agents/<name>/agent.toml`. (You can also set

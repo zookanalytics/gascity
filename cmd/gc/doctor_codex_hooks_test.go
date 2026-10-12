@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,84 +8,82 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
-	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
-func TestCodexHooksDriftCheckReportsManagedMissingPreCompact(t *testing.T) {
-	dir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, dir, `{
+// managedCodexHooksForDoctorTest is a Codex hooks file holding Gas City's
+// managed hooks next to an operator's own hook.
+const managedCodexHooksForDoctorTest = `{
   "hooks": {
     "SessionStart": [{
+      "matcher": "startup",
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	check := newCodexHooksDriftCheck(dir, []string{dir})
-	result := check.Run(&doctor.CheckContext{})
-
-	if result.Status != doctor.StatusWarning {
-		t.Fatalf("status = %v, want warning; message=%s", result.Status, result.Message)
-	}
-	if !strings.Contains(result.Message, "need upgrade") {
-		t.Fatalf("message = %q, want need upgrade", result.Message)
-	}
-}
-
-func TestCodexHooksDriftCheckPassesCurrentHooks(t *testing.T) {
-	dir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, dir, fmt.Sprintf(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city %s prime --hook --hook-format codex"
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city /old/city prime --hook --hook-format codex"
       }]
     }],
     "PreCompact": [{
       "hooks": [{
         "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city %s handoff --auto --hook-format codex \"context cycle\""
+        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" handoff --auto --hook-format codex \"context cycle\""
+      }]
+    }],
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{
+        "type": "command",
+        "command": "/opt/operator-guard.sh"
       }]
     }]
   }
-}`, shellquote.Quote(dir), shellquote.Quote(dir)))
+}`
 
-	check := newCodexHooksDriftCheck(dir, []string{dir})
+func TestCodexHooksDriftCheckReportsManagedCopies(t *testing.T) {
+	dir := t.TempDir()
+	writeCodexHooksForDoctorTest(t, dir, managedCodexHooksForDoctorTest)
+
+	check := newCodexHooksDriftCheck([]string{dir})
 	result := check.Run(&doctor.CheckContext{})
 
-	if result.Status != doctor.StatusOK {
-		t.Fatalf("status = %v, want ok; message=%s", result.Status, result.Message)
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning; message=%s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "repeat Gas City's managed hooks") {
+		t.Fatalf("message = %q, want it to name the repeated managed hooks", result.Message)
+	}
+	if want := filepath.Join(dir, ".codex", "hooks.json"); len(result.Details) != 1 || result.Details[0] != want {
+		t.Fatalf("details = %q, want [%s]", result.Details, want)
 	}
 }
 
-func TestCodexHooksDriftCheckIgnoresCustomHooks(t *testing.T) {
-	dir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, dir, `{
+func TestCodexHooksDriftCheckPassesFilesWithoutManagedEntries(t *testing.T) {
+	custom := t.TempDir()
+	writeCodexHooksForDoctorTest(t, custom, `{
   "hooks": {
     "UserPromptSubmit": [{
       "hooks": [{
         "type": "command",
-        "command": "printf custom-codex-hook"
+        "command": "FOO=1 gc mail check --inject --hook-format codex"
       }]
     }]
   }
 }`)
+	malformed := t.TempDir()
+	writeCodexHooksForDoctorTest(t, malformed, `{not-json`)
+	missing := t.TempDir()
 
-	check := newCodexHooksDriftCheck(dir, []string{dir})
+	check := newCodexHooksDriftCheck([]string{custom, malformed, missing})
 	result := check.Run(&doctor.CheckContext{})
 
 	if result.Status != doctor.StatusOK {
-		t.Fatalf("status = %v, want ok for user-owned hooks; message=%s", result.Status, result.Message)
+		t.Fatalf("status = %v, want ok; message=%s details=%q", result.Status, result.Message, result.Details)
 	}
 }
 
-func TestCodexHooksDriftCheckFixUpgradesManagedHooks(t *testing.T) {
-	dir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, dir, `{
+func TestCodexHooksDriftCheckFixRemovesOnlyManagedEntries(t *testing.T) {
+	mixed := t.TempDir()
+	writeCodexHooksForDoctorTest(t, mixed, managedCodexHooksForDoctorTest)
+	managedOnly := filepath.Join(t.TempDir(), ".gc", "agents", "reviewer")
+	writeCodexHooksForDoctorTest(t, managedOnly, `{
   "hooks": {
     "SessionStart": [{
       "hooks": [{
@@ -97,25 +94,34 @@ func TestCodexHooksDriftCheckFixUpgradesManagedHooks(t *testing.T) {
   }
 }`)
 
-	check := newCodexHooksDriftCheck(dir, []string{dir})
+	check := newCodexHooksDriftCheck([]string{mixed, managedOnly})
 	if err := check.Fix(&doctor.CheckContext{}); err != nil {
 		t.Fatalf("Fix: %v", err)
 	}
-	result := check.Run(&doctor.CheckContext{})
-	if result.Status != doctor.StatusOK {
-		t.Fatalf("status after fix = %v, want ok; message=%s", result.Status, result.Message)
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("status after fix = %v, want ok; message=%s details=%q", result.Status, result.Message, result.Details)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
+
+	data, err := os.ReadFile(filepath.Join(mixed, ".codex", "hooks.json"))
 	if err != nil {
 		t.Fatalf("read hooks: %v", err)
 	}
-	if !strings.Contains(string(data), "PreCompact") {
-		t.Fatalf("fixed hooks missing PreCompact:\n%s", string(data))
+	got := string(data)
+	if !strings.Contains(got, "/opt/operator-guard.sh") {
+		t.Fatalf("fix dropped the operator's own hook:\n%s", got)
+	}
+	for _, managed := range []string{"prime --hook", "handoff --auto"} {
+		if strings.Contains(got, managed) {
+			t.Fatalf("fix kept the managed %q hook:\n%s", managed, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(managedOnly, ".codex", "hooks.json")); !os.IsNotExist(err) {
+		t.Fatalf("a hooks file holding only managed hooks survived the fix: stat err = %v", err)
 	}
 }
 
 func TestNewCodexHooksDriftCheckCleansDedupesAndSortsDirs(t *testing.T) {
-	check := newCodexHooksDriftCheck("/city", []string{" /z/../z ", "", "/a", "/a/."})
+	check := newCodexHooksDriftCheck([]string{" /z/../z ", "", "/a", "/a/."})
 
 	if got, want := strings.Join(check.dirs, ","), "/a,/z"; got != want {
 		t.Fatalf("dirs = %q, want %q", got, want)
@@ -125,104 +131,6 @@ func TestNewCodexHooksDriftCheckCleansDedupesAndSortsDirs(t *testing.T) {
 	}
 	if !check.CanFix() {
 		t.Fatal("CanFix = false, want true")
-	}
-}
-
-func TestCodexHooksDriftCheckFixBindsAgentWorkDirToCityRoot(t *testing.T) {
-	cityDir := t.TempDir()
-	agentDir := filepath.Join(cityDir, ".gc", "agents", "reviewer")
-	writeCodexHooksForDoctorTest(t, agentDir, `{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	check := newCodexHooksDriftCheck(cityDir, []string{agentDir})
-	if err := check.Fix(&doctor.CheckContext{}); err != nil {
-		t.Fatalf("Fix: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(agentDir, ".codex", "hooks.json"))
-	if err != nil {
-		t.Fatalf("read hooks: %v", err)
-	}
-	got := string(data)
-	if !strings.Contains(got, `\"${GC_BIN:-gc}\" --city `) {
-		t.Fatalf("fixed hooks missing explicit --city binding:\n%s", got)
-	}
-	if !strings.Contains(got, shellquote.Quote(cityDir)) {
-		t.Fatalf("fixed hooks missing city root %q:\n%s", cityDir, got)
-	}
-	if strings.Contains(got, shellquote.Quote(agentDir)) {
-		t.Fatalf("fixed hooks rebound to agent workdir %q:\n%s", agentDir, got)
-	}
-}
-
-func TestCodexHooksDriftCheckReportsManagedWrongCityBinding(t *testing.T) {
-	cityDir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, cityDir, `{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city /old/city prime --hook --hook-format codex"
-      }]
-    }],
-    "PreCompact": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city /old/city handoff --auto --hook-format codex \"context cycle\""
-      }]
-    }]
-  }
-}`)
-
-	check := newCodexHooksDriftCheck(cityDir, []string{cityDir})
-	result := check.Run(&doctor.CheckContext{})
-	if result.Status != doctor.StatusWarning {
-		t.Fatalf("status = %v, want warning; message=%s", result.Status, result.Message)
-	}
-}
-
-func TestCodexHooksDriftCheckFixRebindsManagedWrongCityBinding(t *testing.T) {
-	cityDir := t.TempDir()
-	writeCodexHooksForDoctorTest(t, cityDir, `{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city /old/city prime --hook --hook-format codex"
-      }]
-    }],
-    "PreCompact": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && \"${GC_BIN:-gc}\" --city /old/city handoff --auto --hook-format codex \"context cycle\""
-      }]
-    }]
-  }
-}`)
-
-	check := newCodexHooksDriftCheck(cityDir, []string{cityDir})
-	if err := check.Fix(&doctor.CheckContext{}); err != nil {
-		t.Fatalf("Fix: %v", err)
-	}
-
-	data, err := os.ReadFile(filepath.Join(cityDir, ".codex", "hooks.json"))
-	if err != nil {
-		t.Fatalf("read hooks: %v", err)
-	}
-	got := string(data)
-	if !strings.Contains(got, shellquote.Quote(cityDir)) {
-		t.Fatalf("fixed hooks missing city root %q:\n%s", cityDir, got)
-	}
-	if strings.Contains(got, "/old/city") {
-		t.Fatalf("stale city binding survived:\n%s", got)
 	}
 }
 
@@ -296,58 +204,31 @@ func TestCodexHookWorkDirsIncludesBoundedPoolInstanceWorkDirs(t *testing.T) {
 	assertDoctorPathPresent(t, got, filepath.Join(cityDir, ".gc", "worktrees", "active", "worker-2"))
 }
 
-func TestCodexHooksMissingPreCompactRejectsUnreadableAndMalformedFiles(t *testing.T) {
+func TestCodexHooksHaveManagedEntriesRejectsUnreadableMalformedAndCustomFiles(t *testing.T) {
 	dir := t.TempDir()
-	missingPath := filepath.Join(dir, ".codex", "hooks.json")
-	if codexHooksMissingPreCompact(missingPath) {
-		t.Fatal("missing file reported as stale")
+	path := filepath.Join(dir, ".codex", "hooks.json")
+	if codexHooksHaveManagedEntries(path) {
+		t.Fatal("missing file reported a managed entry")
 	}
 
 	writeCodexHooksForDoctorTest(t, dir, `{not-json`)
-	if codexHooksMissingPreCompact(missingPath) {
-		t.Fatal("malformed JSON reported as stale")
+	if codexHooksHaveManagedEntries(path) {
+		t.Fatal("malformed JSON reported a managed entry")
 	}
 
 	writeCodexHooksForDoctorTest(t, dir, `{"notHooks": {}}`)
-	if codexHooksMissingPreCompact(missingPath) {
-		t.Fatal("file without hooks map reported as stale")
-	}
-}
-
-func TestCodexHooksMissingPreCompactRequiresManagedCommand(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, ".codex", "hooks.json")
-	writeCodexHooksForDoctorTest(t, dir, `{
-  "hooks": {
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "printf custom"
-      }]
-    }]
-  }
-}`)
-
-	if codexHooksMissingPreCompact(path) {
-		t.Fatal("custom-only hooks reported as missing managed PreCompact")
-	}
-}
-
-func TestCodexHooksNeedUpgradeRejectsUnreadableMalformedAndCustomFiles(t *testing.T) {
-	dir := t.TempDir()
-	missingPath := filepath.Join(dir, ".codex", "hooks.json")
-	if codexHooksNeedUpgrade(missingPath, "/city") {
-		t.Fatal("missing file reported stale")
-	}
-
-	writeCodexHooksForDoctorTest(t, dir, `{not-json`)
-	if codexHooksNeedUpgrade(missingPath, "/city") {
-		t.Fatal("malformed JSON reported stale")
+	if codexHooksHaveManagedEntries(path) {
+		t.Fatal("file without a hooks map reported a managed entry")
 	}
 
 	writeCodexHooksForDoctorTest(t, dir, `{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"FOO=1 gc mail check --inject --hook-format codex"}]}]}}`)
-	if codexHooksNeedUpgrade(missingPath, "/city") {
-		t.Fatal("env-prefixed custom hooks reported stale")
+	if codexHooksHaveManagedEntries(path) {
+		t.Fatal("env-prefixed custom hooks reported a managed entry")
+	}
+
+	writeCodexHooksForDoctorTest(t, dir, managedCodexHooksForDoctorTest)
+	if !codexHooksHaveManagedEntries(path) {
+		t.Fatal("managed hooks were not reported")
 	}
 }
 

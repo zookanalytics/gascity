@@ -46,7 +46,6 @@ go_library(
         "orders/spawn-storm-detect.toml",
         "orders/wisp-compact.toml",
         "overlay/per-provider/antigravity/.agents/hooks.json",
-        "overlay/per-provider/codex/.codex/hooks.json",
         "overlay/per-provider/copilot/.github/copilot-instructions.md",
         "overlay/per-provider/copilot/.github/hooks/gascity.json",
         "overlay/per-provider/cursor/.cursor/hooks.json",

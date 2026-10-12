@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -1144,10 +1145,15 @@ func TestBuildResumeCommandAppliesTemplateOverrides(t *testing.T) {
 		SessionKey: "abc-123",
 	}
 
-	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+	cityDir := t.TempDir()
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", map[string]string{
 		"template_overrides": `{"permission_mode":"plan"}`,
 	}, io.Discard)
-	want := "codex --resume abc-123 --ask-for-approval never"
+	hookArgs, err := config.ProviderHookLaunchArgs(cityDir, "codex")
+	if err != nil {
+		t.Fatalf("ProviderHookLaunchArgs: %v", err)
+	}
+	want := "codex --resume abc-123 --ask-for-approval never " + shellquote.Join(hookArgs)
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}
@@ -1223,10 +1229,17 @@ func TestBuildResumeCommandFallsBackToDefaultArgsWhenOverridesInvalid(t *testing
 		SessionKey: "abc-123",
 	}
 
-	cmd, _ := buildResumeCommand(t.TempDir(), cfg, info, "", map[string]string{
+	cityDir := t.TempDir()
+	cmd, _ := buildResumeCommand(cityDir, cfg, info, "", map[string]string{
 		"template_overrides": `{"permission_mode":"invalid"}`,
 	}, io.Discard)
-	want := "codex --resume abc-123 --ask-for-approval on-request"
+	// The fallback that skips BuildProviderLaunchCommand still registers the
+	// Codex hooks, since the provider runs the codex binary.
+	hookArgs, err := config.ProviderHookLaunchArgs(cityDir, "codex")
+	if err != nil {
+		t.Fatalf("ProviderHookLaunchArgs: %v", err)
+	}
+	want := "codex --resume abc-123 --ask-for-approval on-request " + shellquote.Join(hookArgs)
 	if cmd != want {
 		t.Fatalf("resume command = %q, want %q", cmd, want)
 	}

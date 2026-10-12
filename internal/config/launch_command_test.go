@@ -5,8 +5,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func TestBuildProviderLaunchCommandAddsDefaultsAndSettings(t *testing.T) {
@@ -255,5 +259,76 @@ func TestBuildProviderLaunchCommandWithoutOptionsIgnoresDeprecatedKindForSetting
 	}
 	if got.SettingsPath != "" || got.SettingsRel != "" {
 		t.Fatalf("unexpected settings source from deprecated Kind fallback: %#v", got)
+	}
+}
+
+// codexHookArgsIn returns the value of each -c hooks= argument in command.
+func codexHookArgsIn(command string) []string {
+	var values []string
+	tokens := shellquote.Split(command)
+	for i := 0; i+1 < len(tokens); i++ {
+		if tokens[i] == "-c" && strings.HasPrefix(tokens[i+1], "hooks=") {
+			values = append(values, tokens[i+1])
+		}
+	}
+	return values
+}
+
+func TestBuildProviderLaunchCommandRegistersCodexHooks(t *testing.T) {
+	const city = "/city with space"
+	wantArgs, err := hooks.CodexLaunchArgs(city)
+	if err != nil {
+		t.Fatalf("CodexLaunchArgs: %v", err)
+	}
+	spec := BuiltinProviders()["codex"]
+	rp := specToResolved("codex", &spec)
+
+	got, err := BuildProviderLaunchCommand(city, rp, nil, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if !strings.HasPrefix(got.Command, "codex --dangerously-bypass-approvals-and-sandbox ") {
+		t.Fatalf("Command = %q, want the codex defaults first", got.Command)
+	}
+	if values := codexHookArgsIn(got.Command); !reflect.DeepEqual(values, wantArgs[1:]) {
+		t.Fatalf("hooks overrides in %q = %q, want exactly %q", got.Command, values, wantArgs[1:])
+	}
+	if got.SettingsPath != "" || got.SettingsRel != "" {
+		t.Fatalf("codex launch reported a settings file: %#v", got)
+	}
+
+	// Option overrides applied to the stored command later keep the
+	// registration intact.
+	reapplied := ReplaceSchemaFlags(got.Command, rp.OptionsSchema, []string{"-c", "model_reasoning_effort=high"})
+	if values := codexHookArgsIn(reapplied); !reflect.DeepEqual(values, wantArgs[1:]) {
+		t.Fatalf("hooks overrides after re-applying options to %q = %q, want exactly %q", reapplied, values, wantArgs[1:])
+	}
+
+	wrapped := &ResolvedProvider{Name: "codex-mini", BuiltinAncestor: "codex", Command: "codex"}
+	base, err := BuildProviderLaunchCommandWithoutOptions(city, wrapped, "")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommandWithoutOptions: %v", err)
+	}
+	if want := "codex " + shellquote.Join(wantArgs); base.Command != want {
+		t.Fatalf("wrapped codex Command = %q, want %q", base.Command, want)
+	}
+}
+
+func TestProviderHookLaunchArgsRegisterOnlyCodex(t *testing.T) {
+	for _, family := range []string{"claude", "gemini", "opencode", "custom", ""} {
+		args, err := ProviderHookLaunchArgs("/city", family)
+		if err != nil {
+			t.Fatalf("ProviderHookLaunchArgs(%q): %v", family, err)
+		}
+		if len(args) != 0 {
+			t.Errorf("ProviderHookLaunchArgs(%q) = %q, want none", family, args)
+		}
+	}
+	args, err := ProviderHookLaunchArgs("/city", "codex")
+	if err != nil {
+		t.Fatalf("ProviderHookLaunchArgs(codex): %v", err)
+	}
+	if len(args) != 2 || args[0] != "-c" || !strings.HasPrefix(args[1], "hooks=") {
+		t.Fatalf("ProviderHookLaunchArgs(codex) = %q, want [-c hooks=<table>]", args)
 	}
 }

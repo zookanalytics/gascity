@@ -1,7 +1,12 @@
 // Package hooks installs provider-specific agent hook files into working
-// directories. Each provider (Claude, Codex, Gemini, Antigravity, OpenCode, Copilot, etc.)
+// directories. Each provider (Claude, Gemini, Antigravity, OpenCode, Copilot, etc.)
 // has its own file format and install location. Hook files are embedded at build time
 // and written idempotently — existing files are never overwritten.
+//
+// Codex takes Gas City's managed hooks on its launch command instead
+// (CodexLaunchArgs), because in a linked git worktree it reads no hooks file
+// from the session's directory. Installing for Codex removes managed copies
+// from the working directory (StripManagedCodexHooks).
 package hooks
 
 import (
@@ -140,6 +145,8 @@ func ValidateWithResolver(providers []string, resolve FamilyResolver) error {
 // Install writes hook files for the given providers. cityDir is the city root
 // (used for city-wide files like Claude settings). workDir is the agent's
 // working directory (used for per-project files like Gemini, OpenCode, Copilot).
+// For Codex it removes Gas City's managed entries from workDir's hooks file,
+// since a Codex session gets them from its launch command.
 // Idempotent — existing files are not overwritten.
 func Install(fs fsys.FS, cityDir, workDir string, providers []string) error {
 	return InstallWithResolver(fs, cityDir, workDir, providers, nil)
@@ -157,10 +164,12 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
-			err = installOverlayManaged(fs, cityDir, workDir, family)
+		case "codex":
+			err = StripManagedCodexHooks(fs, workDir)
+		case "gemini", "antigravity", "kiro", "opencode", "mimocode", "copilot", "cursor", "pi", "omp", "kimi":
+			err = installOverlayManaged(fs, workDir, family)
 		case "groq", "cerebras":
-			err = installOverlayManaged(fs, cityDir, workDir, "opencode")
+			err = installOverlayManaged(fs, workDir, "opencode")
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}
@@ -171,7 +180,7 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 	return nil
 }
 
-func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error {
+func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 	if strings.TrimSpace(workDir) == "" {
 		return nil
 	}
@@ -194,9 +203,6 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
-		}
-		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
-			return writeCodexHooksManaged(fs, cityDir, dst, data)
 		}
 		if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
 			if normalized, normErr := overlay.CanonicalJSON(data); normErr == nil {
@@ -676,22 +682,6 @@ func readClaudeSettingsCandidate(fs fsys.FS, path string) (claudeCandidateState,
 	return candidateUnreadable, nil, err
 }
 
-func writeCodexHooksManaged(fs fsys.FS, cityDir, dst string, data []byte) error {
-	if normalized, _, err := normalizeCodexHookCommands(data, cityDir); err == nil {
-		data = normalized
-	}
-	if existing, err := fs.ReadFile(dst); err == nil {
-		upgraded, changed, upgradeErr := upgradeCodexHooks(existing, data, cityDir)
-		if upgradeErr != nil || !changed {
-			return nil
-		}
-		return writeManagedData(fs, dst, upgraded)
-	} else if _, statErr := fs.Stat(dst); statErr == nil {
-		return nil
-	}
-	return writeManagedData(fs, dst, data)
-}
-
 func writeManagedData(fs fsys.FS, dst string, data []byte) error {
 	dir := filepath.Dir(dst)
 	if err := fs.MkdirAll(dir, 0o755); err != nil {
@@ -701,30 +691,6 @@ func writeManagedData(fs fsys.FS, dst string, data []byte) error {
 		return fmt.Errorf("writing %s: %w", dst, err)
 	}
 	return nil
-}
-
-func upgradeCodexHooks(existing, desired []byte, cityDir string) ([]byte, bool, error) {
-	var root any
-	if err := json.Unmarshal(existing, &root); err != nil {
-		return nil, false, err
-	}
-	hasManagedCommand := codexHookValueHasManagedCommand(root, "")
-	needsPreCompact := codexHookDocCanAddPreCompact(root)
-	changed := upgradeCodexHookValue(root, "", cityDir)
-	if desiredCodexPreCompactHook(desired) != nil && normalizeCodexManagedHookEntries(root) {
-		changed = true
-	}
-	if addCodexPreCompactHook(root, desired, cityDir) {
-		changed = true
-	}
-	data, err := overlay.MarshalCanonicalJSON(root)
-	if err != nil {
-		return nil, false, err
-	}
-	if hasManagedCommand && !needsPreCompact && !bytes.Equal(data, existing) {
-		changed = true
-	}
-	return data, changed, nil
 }
 
 func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, error) {
@@ -745,64 +711,6 @@ func normalizeCodexHookCommands(existing []byte, cityDir string) ([]byte, bool, 
 		changed = true
 	}
 	return data, changed, nil
-}
-
-// NormalizeManagedCodexHooks rewrites an already-staged Codex hooks file in
-// workDir into current managed form for cityDir: managed commands bound to
-// cityDir with an explicit --city flag, prompt hooks wrapped in `gc hook run`,
-// and duplicate managed SessionStart entries collapsed.
-//
-// Overlay staging copies a pack's per-provider/codex/.codex/hooks.json into an
-// agent's working directory verbatim, bypassing the normalization Install
-// applies. Callers that stage provider overlays run this afterwards so the
-// staged file matches the managed form the codex-hooks-drift doctor check
-// audits.
-//
-// It never creates a hooks file: when nothing is staged at workDir the call is
-// a no-op, because whether an agent has a Codex hook surface at all is the
-// overlay's decision. User-owned hook documents are left untouched.
-func NormalizeManagedCodexHooks(fs fsys.FS, cityDir, workDir string) error {
-	if strings.TrimSpace(workDir) == "" {
-		return nil
-	}
-	dst := filepath.Join(workDir, ".codex", "hooks.json")
-	if _, err := fs.Stat(dst); err != nil {
-		return nil
-	}
-	desired, err := iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
-	if err != nil {
-		return fmt.Errorf("reading managed Codex hooks asset: %w", err)
-	}
-	return writeCodexHooksManaged(fs, cityDir, dst, desired)
-}
-
-// CodexHooksMissingManagedPreCompact reports whether data is a Gas City
-// managed Codex hooks document that can be upgraded with a PreCompact hook.
-func CodexHooksMissingManagedPreCompact(data []byte) bool {
-	var root any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return false
-	}
-	return codexHookDocCanAddPreCompact(root)
-}
-
-// CodexHooksNeedManagedUpgrade reports whether data is a recognizable Gas City
-// managed Codex hooks document that would be upgraded to current managed form
-// for cityDir, including explicit --city rebinding and missing PreCompact.
-func CodexHooksNeedManagedUpgrade(data []byte, cityDir string) bool {
-	var root any
-	if err := json.Unmarshal(data, &root); err != nil {
-		return false
-	}
-	return applyCodexManagedHookUpgrade(root, nil, cityDir)
-}
-
-func applyCodexManagedHookUpgrade(root any, desired []byte, cityDir string) bool {
-	changed := upgradeCodexHookValue(root, "", cityDir)
-	if addCodexPreCompactHook(root, desired, cityDir) {
-		changed = true
-	}
-	return changed
 }
 
 func codexHookValueHasManagedCommand(v any, event string) bool {
@@ -1264,167 +1172,6 @@ func codexManagedPromptTargetArgs(args []string, hookFormat string) (string, boo
 	default:
 		return "", false
 	}
-}
-
-func addCodexPreCompactHook(root any, desired []byte, cityDir string) bool {
-	if !codexHookDocCanAddPreCompact(root) {
-		return false
-	}
-	doc := root.(map[string]any)
-	hooksMap := doc["hooks"].(map[string]any)
-	preCompact := desiredCodexPreCompactHook(desired)
-	if preCompact == nil {
-		return false
-	}
-	if prefix, gcToken, ok := findCodexManagedCommandShape(root); ok {
-		rewriteCodexCommands(preCompact, prefix+preCompactCurrentFormBody(cityDir, gcToken))
-	}
-	hooksMap["PreCompact"] = preCompact
-	return true
-}
-
-// findCodexManagedCommandShape scans an existing managed Codex hooks doc for
-// any recognized managed command and reports the shape (PATH-prefix and gc
-// invocation token) it uses, so a newly-added hook (PreCompact) can be
-// reconstructed in the same shape instead of always emitting the embedded
-// overlay's shape verbatim. The prefix is re-derived from the original
-// command text via direct HasPrefix checks against the two known constants,
-// not from parseManagedGCCommand's combined prefix return, so that any extra
-// env tokens a user added to an existing managed command never leak into the
-// freshly-added command.
-func findCodexManagedCommandShape(v any) (string, string, bool) {
-	var prefix, gcToken string
-	var found bool
-	var walk func(any, string)
-	walk = func(node any, event string) {
-		if found {
-			return
-		}
-		switch n := node.(type) {
-		case map[string]any:
-			for key, val := range n {
-				if found {
-					return
-				}
-				if key == "hooks" {
-					if hooksMap, ok := val.(map[string]any); ok {
-						for eventName, eventVal := range hooksMap {
-							walk(eventVal, eventName)
-						}
-						continue
-					}
-				}
-				if key == "command" {
-					if command, ok := val.(string); ok && codexHookCommandLooksManaged(event, command) {
-						switch {
-						case strings.HasPrefix(command, canonicalGCPathPrefixAppend):
-							prefix = canonicalGCPathPrefixAppend
-						case strings.HasPrefix(command, canonicalGCPathPrefix):
-							prefix = canonicalGCPathPrefix
-						default:
-							prefix = ""
-						}
-						if _, token, _, _, ok := parseManagedGCCommand(command); ok {
-							gcToken = token
-							found = true
-						}
-					}
-					continue
-				}
-				walk(val, event)
-			}
-		case []any:
-			for _, elem := range n {
-				walk(elem, event)
-			}
-		}
-	}
-	walk(v, "")
-	return prefix, gcToken, found
-}
-
-// rewriteCodexCommands overwrites every "command" leaf found in v in place
-// with command, walking arbitrary managed-hook JSON structure (a single hook
-// entry, an event's entry list, or a full hooks map).
-func rewriteCodexCommands(v any, command string) {
-	switch n := v.(type) {
-	case map[string]any:
-		for key, val := range n {
-			if key == "command" {
-				if _, ok := val.(string); ok {
-					n[key] = command
-				}
-				continue
-			}
-			rewriteCodexCommands(val, command)
-		}
-	case []any:
-		for _, elem := range n {
-			rewriteCodexCommands(elem, command)
-		}
-	}
-}
-
-func codexHookDocCanAddPreCompact(root any) bool {
-	doc, ok := root.(map[string]any)
-	if !ok || !codexHookDocLooksManaged(doc) {
-		return false
-	}
-	hooksMap, ok := doc["hooks"].(map[string]any)
-	if !ok {
-		return false
-	}
-	if _, exists := hooksMap["PreCompact"]; exists {
-		return false
-	}
-	return true
-}
-
-func codexHookDocLooksManaged(doc map[string]any) bool {
-	var found bool
-	var walk func(any)
-	walk = func(v any) {
-		if found {
-			return
-		}
-		switch node := v.(type) {
-		case map[string]any:
-			if hooksMap, ok := node["hooks"].(map[string]any); ok {
-				for eventName, val := range hooksMap {
-					if codexHookValueHasManagedCommand(val, eventName) {
-						found = true
-						return
-					}
-				}
-			}
-			for _, val := range node {
-				walk(val)
-			}
-		case []any:
-			for _, val := range node {
-				walk(val)
-			}
-		}
-	}
-	walk(doc)
-	return found
-}
-
-func desiredCodexPreCompactHook(desired []byte) any {
-	if len(desired) == 0 {
-		var err error
-		desired, err = iofs.ReadFile(core.PackFS, path.Join("overlay", "per-provider", "codex", ".codex", "hooks.json"))
-		if err != nil {
-			return nil
-		}
-	}
-	var doc struct {
-		Hooks map[string]any `json:"hooks"`
-	}
-	if err := json.Unmarshal(desired, &doc); err != nil {
-		return nil
-	}
-	return doc.Hooks["PreCompact"]
 }
 
 func writeManagedFile(fs fsys.FS, dst string, data []byte, policy writeManagedFilePolicy) error {

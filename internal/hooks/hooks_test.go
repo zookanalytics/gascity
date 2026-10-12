@@ -10,9 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/bootstrap/packs/core"
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 func claudeHookCommand(t *testing.T, data []byte, event string) string {
@@ -40,15 +38,6 @@ func claudeHookEntries(t *testing.T, data []byte, event string) []claudeHookEntr
 		t.Fatalf("unmarshal claude hooks: %v", err)
 	}
 	return cfg.Hooks[event]
-}
-
-func codexHookCommand(t *testing.T, data []byte, event string) string {
-	t.Helper()
-	entries := claudeHookEntries(t, data, event)
-	if len(entries) == 0 || len(entries[0].Hooks) == 0 {
-		t.Fatalf("missing codex hook for %s", event)
-	}
-	return entries[0].Hooks[0].Command
 }
 
 func TestSupportedProviders(t *testing.T) {
@@ -315,398 +304,6 @@ func TestInstallClaudeUpgradesGeneratedFileSessionStartMatcher(t *testing.T) {
 	}
 }
 
-func TestInstallCodexUpgradesGeneratedFileMissingHookFormat(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, "--hook-format codex") {
-		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
-	}
-	if !strings.Contains(got, "GC_MANAGED_SESSION_HOOK=1") {
-		t.Errorf("upgraded codex hooks missing managed SessionStart marker:\n%s", got)
-	}
-	if !strings.Contains(got, "GC_HOOK_EVENT_NAME=SessionStart") {
-		t.Errorf("upgraded codex hooks missing SessionStart event marker:\n%s", got)
-	}
-	if !strings.Contains(got, `"PreCompact"`) {
-		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
-		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
-	}
-}
-
-func TestInstallCodexUpgradesSessionStartMissingManagedMarker(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
-	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
-		t.Fatalf("upgraded codex SessionStart missing managed marker: %s", sessionStartCommand)
-	}
-	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
-		t.Fatalf("upgraded codex SessionStart missing event marker: %s", sessionStartCommand)
-	}
-	if !strings.Contains(sessionStartCommand, "gc --city '/city' prime --hook --hook-format codex") {
-		t.Fatalf("upgraded codex SessionStart missing hook format: %s", sessionStartCommand)
-	}
-}
-
-func TestInstallCodexDedupesManagedSessionStartDrift(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "matcher": "startup",
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
-      }]
-    }, {
-      "matcher": "startup",
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
-      }]
-    }, {
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- prime --hook --hook-format codex"
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex"
-      }, {
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	entries := claudeHookEntries(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
-	if len(entries) != 1 {
-		t.Fatalf("SessionStart entries = %d, want 1:\n%s", len(entries), string(fs.Files["/work/.codex/hooks.json"]))
-	}
-	if entries[0].Matcher != "startup" {
-		t.Fatalf("SessionStart matcher = %q, want startup", entries[0].Matcher)
-	}
-	sessionStartCommand := codexHookCommand(t, fs.Files["/work/.codex/hooks.json"], "SessionStart")
-	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
-		t.Fatalf("SessionStart missing managed marker: %s", sessionStartCommand)
-	}
-	if strings.Contains(string(fs.Files["/work/.codex/hooks.json"]), "gc hook run --timeout 15s --timeout-exit-code 0 -- prime --hook") {
-		t.Fatalf("legacy hook-run prime SessionStart survived:\n%s", string(fs.Files["/work/.codex/hooks.json"]))
-	}
-}
-
-func TestInstallCodexUpgradesManagedFileMissingPreCompact(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook --hook-format codex"
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `"PreCompact"`) {
-		t.Errorf("upgraded codex hooks missing PreCompact:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
-		t.Errorf("upgraded codex PreCompact missing auto handoff command:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`) {
-		t.Errorf("upgraded codex UserPromptSubmit missing bounded mail check command:\n%s", got)
-	}
-}
-
-func TestInstallCodexWritesCanonicalHookBytes(t *testing.T) {
-	fs := fsys.NewFake()
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := fs.Files["/work/.codex/hooks.json"]
-	normalized, changed, err := normalizeCodexHookCommands(got, "/city")
-	if err != nil {
-		t.Fatalf("normalizeCodexHookCommands: %v", err)
-	}
-	if changed || !bytes.Equal(normalized, got) {
-		t.Fatalf("codex hook install should write canonical bytes")
-	}
-}
-
-func TestInstallCodexBindsExplicitCity(t *testing.T) {
-	fs := fsys.NewFake()
-	cityDir := "/city with spaces"
-	if err := Install(fs, cityDir, "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	wantCity := `--city ` + shellquote.Quote(cityDir)
-	if !strings.Contains(got, wantCity) {
-		t.Fatalf("codex hooks missing explicit city binding %q:\n%s", wantCity, got)
-	}
-}
-
-func TestInstallCodexIsByteStableAcrossRepeatedInstalls(t *testing.T) {
-	fs := fsys.NewFake()
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("first Install: %v", err)
-	}
-	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("second Install: %v", err)
-	}
-	after := fs.Files["/work/.codex/hooks.json"]
-	if !bytes.Equal(before, after) {
-		t.Fatalf("second Install rewrote codex hooks:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-func TestNormalizeManagedCodexHooksUpgradesStagedOverlay(t *testing.T) {
-	fs := fsys.NewFake()
-	// Raw pack-overlay form: managed commands not bound to the city and prompt
-	// hooks not wrapped in `gc hook run`. This is what overlay staging writes.
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"gc handoff --auto \"context cycle\""}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"gc nudge drain --inject --hook-format codex"}]}]}}`)
-
-	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
-		t.Fatalf("NormalizeManagedCodexHooks: %v", err)
-	}
-
-	got := fs.Files["/work/.codex/hooks.json"]
-	if CodexHooksNeedManagedUpgrade(got, "/city") {
-		t.Fatalf("staged overlay still needs a managed upgrade after normalization:\n%s", got)
-	}
-	if !strings.Contains(string(got), `--city `+shellquote.Quote("/city")) {
-		t.Fatalf("normalized hooks missing explicit city binding:\n%s", got)
-	}
-}
-
-// TestNormalizeManagedCodexHooksAcrossObservedGenerations pins the three hook
-// generations observed live on a long-running city (gc-beez). Each stale
-// generation must be reported as needing an upgrade, must normalize to current
-// managed form, and must then be reported clean — so the codex-hooks-drift
-// doctor check goes green after materialization while still flagging genuinely
-// outdated files.
-//
-// The two released stale generations carry the prepend PATH prologue and a
-// bare gc. The upgrade is shape-preserving (managedGCBinToken): it binds,
-// wraps and collapses entries but never flips the PATH order or the gc token,
-// so those generations converge on the managed form in their own shape rather
-// than on the byte-identical output of a fresh Install.
-func TestNormalizeManagedCodexHooksAcrossObservedGenerations(t *testing.T) {
-	const city = "/home/city"
-	// Every generation shipped on disk carries this PATH prefix; normalization
-	// rewrites the gc invocation after it and preserves the prefix verbatim.
-	const p = `export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && `
-	generations := []struct {
-		name        string
-		stale       bool
-		legacyShape bool
-		doc         string
-	}{
-		{
-			// Older core asset: PreCompact already carries --hook-format, but
-			// commands are unbound and prompt hooks are unwrapped.
-			name:        "unbound-core-asset",
-			stale:       true,
-			legacyShape: true,
-			doc: `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"` + p + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],` +
-				`"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"` + p + `gc handoff --auto --hook-format codex \"context cycle\""}]}],` +
-				`"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"` + p + `gc nudge drain --inject --hook-format codex"},{"type":"command","command":"` + p + `gc mail check --inject --hook-format codex"}]}]}}`,
-		},
-		{
-			// Pack overlay merged over the core asset: duplicate managed
-			// SessionStart entries (matcher "startup" and ""), PreCompact
-			// missing --hook-format, prompt hooks unwrapped.
-			name:        "pack-overlay-merged",
-			stale:       true,
-			legacyShape: true,
-			doc: `{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"` + p + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]},` +
-				`{"matcher":"","hooks":[{"type":"command","command":"` + p + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],` +
-				`"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"` + p + `gc handoff --auto \"context cycle\""}]}],` +
-				`"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"` + p + `gc nudge drain --inject --hook-format codex"},{"type":"command","command":"` + p + `gc mail check --inject --hook-format codex"}]}]}}`,
-		},
-		{
-			// Current managed form, as Install writes it.
-			name:  "current-managed",
-			stale: false,
-		},
-	}
-
-	// The current generation is whatever Install produces for this city.
-	currentFS := fsys.NewFake()
-	if err := Install(currentFS, city, "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	current := currentFS.Files["/work/.codex/hooks.json"]
-	generations[len(generations)-1].doc = string(current)
-
-	for _, gen := range generations {
-		t.Run(gen.name, func(t *testing.T) {
-			if got := CodexHooksNeedManagedUpgrade([]byte(gen.doc), city); got != gen.stale {
-				t.Fatalf("CodexHooksNeedManagedUpgrade = %v, want %v for %s:\n%s", got, gen.stale, gen.name, gen.doc)
-			}
-
-			fs := fsys.NewFake()
-			fs.Files["/work/.codex/hooks.json"] = []byte(gen.doc)
-			if err := NormalizeManagedCodexHooks(fs, city, "/work"); err != nil {
-				t.Fatalf("NormalizeManagedCodexHooks: %v", err)
-			}
-			got := fs.Files["/work/.codex/hooks.json"]
-			if CodexHooksNeedManagedUpgrade(got, city) {
-				t.Fatalf("%s still needs an upgrade after normalization:\n%s", gen.name, got)
-			}
-			want := current
-			if gen.legacyShape {
-				want = legacyShapeOf(current)
-			}
-			if !bytes.Equal(got, want) {
-				t.Fatalf("%s did not converge on current managed form:\nwant:\n%s\ngot:\n%s", gen.name, want, got)
-			}
-		})
-	}
-}
-
-// legacyShapeOf rewrites Install's current-form Codex hooks document into the
-// shape a released prepend-PATH, bare-gc document keeps through the
-// shape-preserving upgrade: same bound, wrapped and collapsed entries, but the
-// prepend prologue and bare gc token are retained (the inverse of what
-// cursorHookLegacyVariants derives for the cursor overlay).
-func legacyShapeOf(current []byte) []byte {
-	out := bytes.ReplaceAll(current,
-		[]byte(`export PATH=\"$PATH:$HOME/go/bin:$HOME/.local/bin\" && `),
-		[]byte(`export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && `))
-	return bytes.ReplaceAll(out, []byte(`\"${GC_BIN:-gc}\"`), []byte(`gc`))
-}
-
-func TestNormalizeManagedCodexHooksIsIdempotent(t *testing.T) {
-	fs := fsys.NewFake()
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-	before := append([]byte(nil), fs.Files["/work/.codex/hooks.json"]...)
-
-	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
-		t.Fatalf("NormalizeManagedCodexHooks: %v", err)
-	}
-	if after := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(before, after) {
-		t.Fatalf("normalization rewrote already-current hooks:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-func TestNormalizeManagedCodexHooksSkipsMissingAndCustomFiles(t *testing.T) {
-	fs := fsys.NewFake()
-	// Absent file: nothing to normalize, and nothing may be created — the
-	// overlay decides whether an agent has a Codex hook surface at all.
-	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
-		t.Fatalf("NormalizeManagedCodexHooks(missing): %v", err)
-	}
-	if _, ok := fs.Files["/work/.codex/hooks.json"]; ok {
-		t.Fatal("normalization created a Codex hooks file where none was staged")
-	}
-
-	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
-	fs.Files["/work/.codex/hooks.json"] = append([]byte(nil), custom...)
-	if err := NormalizeManagedCodexHooks(fs, "/city", "/work"); err != nil {
-		t.Fatalf("NormalizeManagedCodexHooks(custom): %v", err)
-	}
-	if got := fs.Files["/work/.codex/hooks.json"]; !bytes.Equal(got, custom) {
-		t.Fatalf("user-owned Codex hooks were rewritten:\nwant: %s\ngot:  %s", custom, got)
-	}
-}
-
-func TestCodexHooksMissingManagedPreCompact(t *testing.T) {
-	staleManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}]}}`)
-	if !CodexHooksMissingManagedPreCompact(staleManaged) {
-		t.Fatal("managed Codex hooks without PreCompact were not reported stale")
-	}
-
-	currentManaged := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"gc prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto --hook-format codex"}]}]}}`)
-	if CodexHooksMissingManagedPreCompact(currentManaged) {
-		t.Fatal("managed Codex hooks with PreCompact were reported stale")
-	}
-
-	customOnly := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"printf custom"}]}]}}`)
-	if CodexHooksMissingManagedPreCompact(customOnly) {
-		t.Fatal("custom-only Codex hooks were reported stale")
-	}
-
-	if CodexHooksMissingManagedPreCompact([]byte(`{not-json`)) {
-		t.Fatal("malformed Codex hooks were reported stale")
-	}
-}
-
-func TestCodexHooksNeedManagedUpgrade(t *testing.T) {
-	wrongCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /old/city prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city /old/city handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
-	if !CodexHooksNeedManagedUpgrade(wrongCity, "/new city") {
-		t.Fatal("managed Codex hooks with stale city binding were not reported stale")
-	}
-
-	currentCity := []byte(`{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/old/city' prime --hook --hook-format codex"}]}],"PreCompact":[{"hooks":[{"type":"command","command":"export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city '/old/city' handoff --auto --hook-format codex \"context cycle\""}]}]}}`)
-	if CodexHooksNeedManagedUpgrade(currentCity, "/old/city") {
-		t.Fatal("managed Codex hooks already bound to requested city were reported stale")
-	}
-
-	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"FOO=1 gc mail check --inject --hook-format codex"}]}]}}`)
-	if CodexHooksNeedManagedUpgrade(custom, "/city") {
-		t.Fatal("env-prefixed custom Codex hooks were reported stale")
-	}
-}
-
 func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	fs := fsys.NewFake()
 	custom := []byte(`{"hooks":{"UserPromptSubmit":[{"hooks":[{"command":"printf custom-codex-hook","type":"command"}]}]}}`)
@@ -718,111 +315,6 @@ func TestInstallCodexPreservesCustomOnlyHooksByteForByte(t *testing.T) {
 	got := fs.Files["/work/.codex/hooks.json"]
 	if !bytes.Equal(custom, got) {
 		t.Fatalf("custom-only codex hooks were rewritten:\nbefore:\n%s\nafter:\n%s", custom, got)
-	}
-}
-
-func TestInstallCodexUpgradePreservesCustomHooks(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc prime --hook"
-      }]
-    }],
-    "UserPromptSubmit": [{
-      "hooks": [{
-        "type": "command",
-        "command": "printf custom-codex-hook"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, "--hook-format codex") {
-		t.Errorf("upgraded codex hooks missing Codex hook output format:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/city' prime --hook --hook-format codex`) {
-		t.Errorf("upgraded codex hooks missing explicit city binding:\n%s", got)
-	}
-	if !strings.Contains(got, "printf custom-codex-hook") {
-		t.Errorf("custom codex hook was not preserved:\n%s", got)
-	}
-	if !strings.Contains(got, `"PreCompact"`) {
-		t.Errorf("managed codex upgrade should add PreCompact while preserving custom hooks:\n%s", got)
-	}
-}
-
-func TestInstallCodexRebindsManagedHooksAndAddsPreCompact(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /old/city prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/new city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `gc --city '/new city' prime --hook --hook-format codex`) {
-		t.Fatalf("SessionStart not rebound to current city:\n%s", got)
-	}
-	if !strings.Contains(got, `"PreCompact"`) {
-		t.Fatalf("managed codex upgrade missing PreCompact:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
-		t.Fatalf("PreCompact not added for current city:\n%s", got)
-	}
-	if strings.Contains(got, "/old/city") {
-		t.Fatalf("stale city binding survived:\n%s", got)
-	}
-}
-
-func TestInstallCodexRebindsManagedHooksToCurrentCity(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city /old/city prime --hook --hook-format codex"
-      }]
-    }],
-    "PreCompact": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc --city /old/city handoff --auto --hook-format codex \"context cycle\""
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/new city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `gc --city '/new city' prime --hook --hook-format codex`) {
-		t.Fatalf("SessionStart not rebound to current city:\n%s", got)
-	}
-	if !strings.Contains(got, `gc --city '/new city' handoff --auto --hook-format codex \"context cycle\"`) {
-		t.Fatalf("PreCompact not rebound to current city:\n%s", got)
-	}
-	if strings.Contains(got, "/old/city") {
-		t.Fatalf("stale city binding survived:\n%s", got)
 	}
 }
 
@@ -869,150 +361,6 @@ func TestInstallCodexPreservesEnvPrefixedManagedLookingCustomHooks(t *testing.T)
 
 	if got := string(fs.Files["/work/.codex/hooks.json"]); got != string(custom) {
 		t.Fatalf("env-prefixed custom codex hooks were rewritten:\n%s", got)
-	}
-}
-
-func TestInstallCodexPreservesExtraEnvOnManagedHooks(t *testing.T) {
-	fs := fsys.NewFake()
-	fs.Files["/work/.codex/hooks.json"] = []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	got := string(fs.Files["/work/.codex/hooks.json"])
-	if !strings.Contains(got, `FOO=1 GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc --city '/city' prime --hook --hook-format codex`) {
-		t.Fatalf("managed codex hook lost extra env prefix:\n%s", got)
-	}
-	if !strings.Contains(got, `"PreCompact"`) {
-		t.Fatalf("managed codex hook with extra env missing PreCompact:\n%s", got)
-	}
-}
-
-func TestUpgradeCodexHooksSkipsWhenDesiredPreCompactUnavailable(t *testing.T) {
-	existing := []byte(`{
-  "hooks": {
-    "SessionStart": [{
-      "hooks": [{
-        "type": "command",
-        "command": "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"
-      }]
-    }]
-  }
-}`)
-	for name, desired := range map[string][]byte{
-		"malformed": []byte(`{not-json`),
-		"missing":   []byte(`{"hooks":{}}`),
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, changed, err := upgradeCodexHooks(existing, desired, ""); err != nil || changed {
-				t.Fatalf("changed = %v, err = %v, want unchanged without error", changed, err)
-			}
-		})
-	}
-}
-
-func TestUpgradeCodexHooksPreservesLegacyShapeWhenAddingPreCompact(t *testing.T) {
-	desired, err := core.PackFS.ReadFile("overlay/per-provider/codex/.codex/hooks.json")
-	if err != nil {
-		t.Fatalf("read embedded codex overlay: %v", err)
-	}
-	for _, tc := range []struct {
-		name            string
-		sessionStart    string
-		wantPrefix      string
-		wantGCToken     string
-		forbidSubstring string
-	}{
-		{
-			name:            "legacy prepend and bare gc",
-			sessionStart:    canonicalGCPathPrefix + `gc prime --hook --hook-format codex`,
-			wantPrefix:      canonicalGCPathPrefix,
-			wantGCToken:     "gc",
-			forbidSubstring: "${GC_BIN",
-		},
-		{
-			name:            "current append and GC_BIN",
-			sessionStart:    canonicalGCPathPrefixAppend + managedGCBinInvocation + ` prime --hook --hook-format codex`,
-			wantPrefix:      canonicalGCPathPrefixAppend,
-			wantGCToken:     managedGCBinInvocation,
-			forbidSubstring: canonicalGCPathPrefix,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			existing, err := json.Marshal(map[string]any{
-				"hooks": map[string]any{
-					"SessionStart": []any{map[string]any{
-						"hooks": []any{map[string]any{"type": "command", "command": tc.sessionStart}},
-					}},
-				},
-			})
-			if err != nil {
-				t.Fatalf("marshal fixture: %v", err)
-			}
-			got, changed, err := upgradeCodexHooks(existing, desired, "/city")
-			if err != nil {
-				t.Fatalf("upgradeCodexHooks: %v", err)
-			}
-			if !changed {
-				t.Fatal("upgradeCodexHooks changed = false, want true")
-			}
-			if want := tc.wantPrefix + preCompactCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "PreCompact") != want {
-				t.Fatalf("PreCompact command = %q, want %q", codexHookCommand(t, got, "PreCompact"), want)
-			}
-			if want := tc.wantPrefix + sessionStartCurrentFormBody("/city", tc.wantGCToken); codexHookCommand(t, got, "SessionStart") != want {
-				t.Fatalf("SessionStart command = %q, want %q", codexHookCommand(t, got, "SessionStart"), want)
-			}
-			if strings.Contains(string(got), tc.forbidSubstring) {
-				t.Fatalf("upgraded hooks switched shape, found %q:\n%s", tc.forbidSubstring, got)
-			}
-		})
-	}
-}
-
-func TestAddCodexPreCompactHookRejectsInvalidRoots(t *testing.T) {
-	desired := []byte(`{"hooks":{"PreCompact":[{"hooks":[{"type":"command","command":"gc handoff --auto"}]}]}}`)
-	for name, root := range map[string]any{
-		"non-map-root": []any{},
-		"custom-only": map[string]any{
-			"hooks": map[string]any{
-				"UserPromptSubmit": []any{map[string]any{
-					"hooks": []any{map[string]any{"command": "printf custom"}},
-				}},
-			},
-		},
-		"missing-hooks-map": map[string]any{
-			"other": []any{map[string]any{"command": "gc prime --hook"}},
-		},
-		"already-has-precompact": map[string]any{
-			"hooks": map[string]any{
-				"SessionStart": []any{map[string]any{
-					"hooks": []any{map[string]any{"command": "gc prime --hook"}},
-				}},
-				"PreCompact": []any{},
-			},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if addCodexPreCompactHook(root, desired, "") {
-				t.Fatalf("addCodexPreCompactHook(%s) = true, want false", name)
-			}
-		})
-	}
-}
-
-func TestDesiredCodexPreCompactHookFallsBackToEmbeddedOverlay(t *testing.T) {
-	if got := desiredCodexPreCompactHook(nil); got == nil {
-		t.Fatal("desiredCodexPreCompactHook(nil) = nil, want embedded PreCompact hook")
 	}
 }
 
@@ -1931,12 +1279,11 @@ func TestInstallClaudeSurfacesNonObjectOverride(t *testing.T) {
 // are materialized from the embedded core pack overlay into the workdir.
 func TestInstallOverlayManagedProviders(t *testing.T) {
 	fs := fsys.NewFake()
-	providers := []string{"codex", "gemini", "opencode", "mimocode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
+	providers := []string{"gemini", "opencode", "mimocode", "copilot", "cursor", "kiro", "pi", "omp", "antigravity", "kimi"}
 	if err := Install(fs, "/city", "/work", providers); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
 	for _, rel := range []string{
-		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.opencode/plugins/gascity.js",
 		"/work/.mimocode/plugin/gascity.js",
@@ -1953,32 +1300,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	} {
 		if _, ok := fs.Files[rel]; !ok {
 			t.Errorf("expected overlay-managed provider file %s to be written", rel)
-		}
-	}
-	codexHooks := fs.Files["/work/.codex/hooks.json"]
-	codexHooksText := string(codexHooks)
-	sessionStartCommand := codexHookCommand(t, codexHooks, "SessionStart")
-	if !strings.Contains(sessionStartCommand, `"${GC_BIN:-gc}" --city '/city' prime --hook --hook-format codex`) {
-		t.Fatalf("codex SessionStart hook command = %q, want city-bound gc prime --hook --hook-format codex", sessionStartCommand)
-	}
-	if !strings.Contains(sessionStartCommand, "GC_HOOK_EVENT_NAME=SessionStart") {
-		t.Fatalf("codex SessionStart hook command = %q, want GC_HOOK_EVENT_NAME=SessionStart", sessionStartCommand)
-	}
-	if !strings.Contains(sessionStartCommand, "GC_MANAGED_SESSION_HOOK=1") {
-		t.Fatalf("codex SessionStart hook command = %q, want GC_MANAGED_SESSION_HOOK=1", sessionStartCommand)
-	}
-	if !strings.Contains(codexHooksText, `"PreCompact"`) {
-		t.Error("codex hooks should include PreCompact")
-	}
-	if !strings.Contains(codexHooksText, `\"${GC_BIN:-gc}\" --city '/city' handoff --auto --hook-format codex \"context cycle\"`) {
-		t.Error("codex PreCompact should use auto handoff with Codex hook output format")
-	}
-	for _, want := range []string{
-		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`,
-		`\"${GC_BIN:-gc}\" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject --hook-format codex`,
-	} {
-		if !strings.Contains(codexHooksText, want) {
-			t.Errorf("codex prompt hooks missing bounded command %q:\n%s", want, codexHooksText)
 		}
 	}
 	geminiHooks := string(fs.Files["/work/.gemini/settings.json"])
@@ -2108,7 +1429,6 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 		t.Errorf("MiMo Code plugin must not read the OpenCode transcript env var:\n%s", mimocodeHooks)
 	}
 	for _, rel := range []string{
-		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.opencode/plugins/gascity.js",
 		"/work/.github/hooks/gascity.json",
@@ -2747,7 +2067,8 @@ func TestInstallPiHookPreservesUserAuthoredFile(t *testing.T) {
 func TestInstallMultipleProviders(t *testing.T) {
 	fs := fsys.NewFake()
 	// Claude writes city-level files; overlay-managed names write their
-	// provider hook files into workDir.
+	// provider hook files into workDir. Codex writes nothing: its managed
+	// hooks ride the session's launch command.
 	err := Install(fs, "/city", "/work", []string{"claude", "codex", "gemini", "copilot"})
 	if err != nil {
 		t.Fatalf("Install: %v", err)
@@ -2759,7 +2080,6 @@ func TestInstallMultipleProviders(t *testing.T) {
 		t.Error("missing claude runtime settings")
 	}
 	for _, rel := range []string{
-		"/work/.codex/hooks.json",
 		"/work/.gemini/settings.json",
 		"/work/.github/hooks/gascity.json",
 	} {
@@ -2767,24 +2087,8 @@ func TestInstallMultipleProviders(t *testing.T) {
 			t.Errorf("expected overlay-managed provider file %s via Install", rel)
 		}
 	}
-}
-
-func TestInstallCodexWritesCanonicalJSON(t *testing.T) {
-	fs := fsys.NewFake()
-
-	if err := Install(fs, "/city", "/work", []string{"codex"}); err != nil {
-		t.Fatalf("Install: %v", err)
-	}
-
-	data := fs.Files["/work/.codex/hooks.json"]
-	if bytes.Contains(data, []byte(`\u0026`)) {
-		t.Fatalf("codex hook escaped command operator:\n%s", data)
-	}
-	if !bytes.Contains(data, []byte(` && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart \"${GC_BIN:-gc}\" --city '/city' prime`)) {
-		t.Fatalf("codex hook missing literal command operator:\n%s", data)
-	}
-	if !bytes.HasSuffix(data, []byte("\n")) {
-		t.Fatalf("codex hook missing trailing newline:\n%s", data)
+	if _, ok := fs.Files["/work/.codex/hooks.json"]; ok {
+		t.Error("Install wrote a Codex hooks file; Codex takes its managed hooks from its launch command")
 	}
 }
 
@@ -2833,32 +2137,6 @@ func TestInstallUnknownProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported") {
 		t.Errorf("error should mention unsupported: %v", err)
-	}
-}
-
-// TestSupportsHooksSyncWithProviderSpec verifies that the hooks supported list
-// stays in sync with ProviderSpec.SupportsHooks across all builtin providers.
-func TestSupportsHooksSyncWithProviderSpec(t *testing.T) {
-	sup := make(map[string]bool, len(SupportedProviders()))
-	for _, p := range SupportedProviders() {
-		sup[p] = true
-	}
-
-	providers := config.BuiltinProviders()
-	for name, spec := range providers {
-		supports := spec.SupportsHooks != nil && *spec.SupportsHooks
-		if supports && !sup[name] {
-			t.Errorf("provider %q has SupportsHooks=true but is not in hooks.SupportedProviders()", name)
-		}
-		if !supports && sup[name] {
-			t.Errorf("provider %q is in hooks.SupportedProviders() but has SupportsHooks=false", name)
-		}
-	}
-	// Reverse check: every supported provider must be a known builtin.
-	for _, p := range SupportedProviders() {
-		if _, ok := providers[p]; !ok {
-			t.Errorf("hooks.SupportedProviders() contains %q which is not a builtin provider", p)
-		}
 	}
 }
 

@@ -92,7 +92,7 @@ func TestPreserveManagedFileKeepsUserAuthoredPlugin(t *testing.T) {
 // deliberately, not by oversight.
 func TestManagedOverlayHookPathsCoverEveryVersionedFile(t *testing.T) {
 	providers := []string{
-		"codex", "gemini", "antigravity", "kiro", "opencode",
+		"gemini", "antigravity", "kiro", "opencode",
 		"mimocode", "copilot", "cursor", "pi", "omp", "kimi",
 	}
 	checked := 0
