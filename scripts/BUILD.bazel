@@ -99,6 +99,7 @@ go_test(
         "check_embedded_pins_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
+        "ci_fork_runners_test.go",
         "ci_merge_queue_test.go",
         "ci_required_coverage_test.go",
         "codeql_go_cache_test.go",
