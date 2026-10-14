@@ -79,6 +79,7 @@ go_library(
 go_test(
     name = "core_test",
     srcs = [
+        "cascade_nudge_partial_unblock_test.go",
         "cascade_nudge_script_test.go",
         "escalate_script_test.go",
         "pack_assets_test.go",
