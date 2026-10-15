@@ -183,7 +183,7 @@ func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, cre
 		if ok && strings.TrimSpace(value) != "" {
 			err = os.Setenv(key, value)
 		} else {
-			err = os.Unsetenv(key)
+			err = unsetOpenEnv(key)
 		}
 		if err != nil {
 			restoreNativeDoltOpenEnv(previous, keys)
@@ -201,18 +201,60 @@ func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 			_ = os.Setenv(key, *value)
 			continue
 		}
-		_ = os.Unsetenv(key)
+		_ = unsetOpenEnv(key)
 	}
+}
+
+// unsetOpenEnv makes key read as unset, for an open window or its restore.
+//
+// Go's environment table never reuses a removed key's slot: Unsetenv blanks
+// it, and the next Setenv of the key appends a new one. os.Environ walks the
+// whole table, blanks included, and sizes its copy by it, and every child gc
+// starts without an explicit Env takes such a copy. A window runs on every
+// open, so removing a key the next open sets again would grow the table, and
+// every such copy, by a slot per open.
+//
+// So a key in the BEADS_ or BD_ namespace (emptyReadsAsUnset) keeps its slot
+// and takes the empty value, and keeps it after the window: a bd child then
+// finds the key set to empty, which keeps a .beads/.env value for it from
+// loading, as gc's explicit empty values for bd already do. An absent key stays
+// absent. Any other key is removed, because an empty value is a value there:
+// git refuses to commit under an empty GIT_AUTHOR_NAME. The proxied window's
+// author pair is such a key, so a proxied open in a process that lacks the pair
+// still adds two slots; only a way to hand the linked library its open
+// configuration outside the process environment removes that.
+func unsetOpenEnv(key string) error {
+	if _, present := os.LookupEnv(key); !present {
+		return nil
+	}
+	if emptyReadsAsUnset(key) {
+		return os.Setenv(key, "")
+	}
+	return os.Unsetenv(key)
+}
+
+// emptyReadsAsUnset reports whether key is in BEADS_, the namespace the linked
+// library configures an open from, or in BD_, bd's own. Those are the
+// namespaces the windows set and withhold keys in, and an empty value there
+// configures nothing. Inside an open the library reads both through os.Getenv
+// or viper, neither of which tells an empty value from an absent one, or, for
+// BD_EVENTS_JOURNAL and BD_EVENTS_JOURNAL_AUTO_PRUNE, parses the value and
+// falls through on an empty one. Its readers that check presence instead, bd's
+// config-source reporting and BD_AUDIT_ENABLED, serve bd's commands and not an
+// open. gc's readers take an empty value as unset too, and cmd/gc's
+// setProjectedDoltEnvEmpty hands bd an empty value to mean unset.
+func emptyReadsAsUnset(key string) bool {
+	return strings.HasPrefix(key, beadsEnvPrefix) || strings.HasPrefix(key, bdEnvPrefix)
 }
 
 // beadsEnvPrefix is the namespace the upstream library configures itself from.
 const beadsEnvPrefix = "BEADS_"
 
-// withWithheldBeadsEnv unsets every ambient BEADS_-prefixed variable and
-// returns the restore.
+// withWithheldBeadsEnv makes every ambient BEADS_-prefixed variable read as
+// unset (unsetOpenEnv) and returns the restore.
 //
 // It is prefix-based rather than a key list on purpose. The scoped projection
-// above names the thirteen variables gc itself sets; the library reads many
+// above names the variables gc itself sets; the library reads many
 // more — a credential command, database and directory overrides, a central
 // config path — and the list grows with the library. A caller that must be
 // sure a workspace is served by its own configuration alone cannot maintain a
@@ -242,9 +284,10 @@ func withWithheldBeadsEnvLocked() (func(), error) {
 	return withWithheldPrefixesLocked(beadsEnvPrefix)
 }
 
-// withWithheldPrefixesLocked unsets every ambient variable under any of the
-// given prefixes and returns the restore, with nativeDoltOpenEnvMu already
-// held.
+// withWithheldPrefixesLocked makes every ambient variable under any of the
+// given prefixes read as unset (unsetOpenEnv) and returns the restore, with
+// nativeDoltOpenEnvMu already held. A variable that is already empty already
+// reads as unset, so it is left as it is.
 //
 // It is prefix-parameterised rather than fixed at BEADS_ because the
 // proxied-native window has a second namespace to answer for: bd's own BD_
@@ -271,11 +314,11 @@ func withWithheldPrefixesLocked(prefixes ...string) (func(), error) {
 	}
 	for _, entry := range os.Environ() {
 		key, value, ok := strings.Cut(entry, "=")
-		if !ok || !hasPrefix(key) {
+		if !ok || value == "" || !hasPrefix(key) {
 			continue
 		}
 		previous = append(previous, withheld{key: key, value: value})
-		if err := os.Unsetenv(key); err != nil {
+		if err := unsetOpenEnv(key); err != nil {
 			restore()
 			return nil, fmt.Errorf("withholding ambient %s: %w", key, err)
 		}

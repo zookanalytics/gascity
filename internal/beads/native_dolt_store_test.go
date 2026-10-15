@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -3264,6 +3265,174 @@ func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	if got != "/poison/credential-command" {
 		t.Fatalf("BEADS_DOLT_CREDENTIAL_COMMAND during a scoped projection = %q; if the projection now honors unlisted keys, the hermetic open's reason to exist has changed", got)
 	}
+}
+
+// TestNativeOpenWindowsDoNotGrowTheProcessEnvironment pins that a process can
+// run native opens without bound and keep its environment table one size.
+//
+// Go's environment table never reuses the slot of a removed key: Unsetenv
+// blanks the slot, and the next Setenv of that key appends a new one.
+// os.Environ, which every child process started without an explicit Env also
+// runs, walks the whole table, blank slots included, and returns a slice sized
+// by it, so the copy's capacity is the table's size. A window that removed a
+// key the next window sets again would add a slot per such key per open.
+//
+// Every lane opens the way a supervisor meets it: the keys the windows set
+// start absent, and BEADS_ACTOR is ambient, so the hosted and proxied windows
+// withhold it. The author pair starts ambient because it is the one projected
+// pair outside the BEADS_ and BD_ namespaces, which a window removes again
+// when the ambient environment lacked it
+// (TestProxiedOpenRemovesAnAuthorPairTheAmbientLacked).
+func TestNativeOpenWindowsDoNotGrowTheProcessEnvironment(t *testing.T) {
+	endpoint := map[string]string{
+		"BEADS_DOLT_AUTO_START":      "0",
+		"BEADS_DOLT_MAX_CONNS":       "1",
+		"BEADS_DOLT_SERVER_DATABASE": "hq",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     "4407",
+		"BEADS_DOLT_SERVER_USER":     "root",
+	}
+	for key := range endpoint {
+		unsetForTest(t, key)
+	}
+	unsetForTest(t, BDAllowRemoteMigrateEnvKey)
+	unsetForTest(t, "BEADS_DOLT_CREDENTIAL_COMMAND")
+	t.Setenv("BEADS_ACTOR", "controller")
+	t.Setenv("GIT_AUTHOR_NAME", "op")
+	t.Setenv("GIT_AUTHOR_EMAIL", "op@laptop")
+
+	direct := maps.Clone(endpoint)
+	direct[BDAllowRemoteMigrateEnvKey] = "1"
+	proxied := maps.Clone(endpoint)
+	proxied["GIT_AUTHOR_NAME"] = "gc"
+	proxied["GIT_AUTHOR_EMAIL"] = "gc@demo-city"
+
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	ctx := context.Background()
+	scopeRoot := filepath.Join(t.TempDir(), "scope")
+	const credentialCommand = "/selected/gc internal beads-credential"
+	closeStore := func(store *NativeDoltStore, err error) error {
+		if err != nil {
+			return err
+		}
+		return store.CloseStore()
+	}
+	closeStorage := func(storage NativeStorage, err error) error {
+		if err != nil {
+			return err
+		}
+		return storage.Close()
+	}
+	lanes := []struct {
+		name string
+		open func() error
+	}{
+		{"direct open", func() error { return closeStore(OpenNativeDoltStoreAt(ctx, scopeRoot, direct)) }},
+		{"direct reopen", func() error { return closeStorage(OpenNativeStorage(ctx, scopeRoot, direct)) }},
+		{"hosted open", func() error {
+			return closeStore(OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand))
+		}},
+		{"hosted reopen", func() error {
+			return closeStorage(OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand))
+		}},
+		{"proxied open", func() error { return closeStore(OpenNativeDoltStoreAtProxied(ctx, scopeRoot, proxied)) }},
+		{"proxied reopen", func() error { return closeStorage(OpenNativeStorageAtProxied(ctx, scopeRoot, proxied)) }},
+	}
+	openEveryLane := func() {
+		t.Helper()
+		for _, lane := range lanes {
+			if err := lane.open(); err != nil {
+				t.Fatalf("%s: %v", lane.name, err)
+			}
+		}
+	}
+
+	// The first round may give each key the windows set a slot of its own.
+	openEveryLane()
+	slots, entries := cap(os.Environ()), len(os.Environ())
+	const rounds = 50
+	for range rounds {
+		openEveryLane()
+	}
+	if got := cap(os.Environ()); got != slots {
+		t.Errorf("process environment table = %d slots after %d more rounds of native opens, want %d: every window must reuse the slot of each key it sets", got, rounds, slots)
+	}
+	if got := len(os.Environ()); got != entries {
+		t.Errorf("process environment = %d entries after %d more rounds of native opens, want %d", got, rounds, entries)
+	}
+	for key := range direct {
+		if got := os.Getenv(key); got != "" {
+			t.Errorf("%s = %q after the opens, want it read as unset, as it did before them", key, got)
+		}
+	}
+	if got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); got != "" {
+		t.Errorf("BEADS_DOLT_CREDENTIAL_COMMAND = %q after the opens, want it read as unset, as it did before them", got)
+	}
+	for key, want := range map[string]string{"BEADS_ACTOR": "controller", "GIT_AUTHOR_NAME": "op", "GIT_AUTHOR_EMAIL": "op@laptop"} {
+		if got := os.Getenv(key); got != want {
+			t.Errorf("%s = %q after the opens, want the ambient %q restored", key, got, want)
+		}
+	}
+}
+
+// TestProxiedOpenRemovesAnAuthorPairTheAmbientLacked pins the one projected
+// pair a window removes rather than empties. Outside the BEADS_ and BD_
+// namespaces an empty value does not read as unset: git refuses to commit under
+// an empty GIT_AUTHOR_NAME, so an author pair left empty after the open would
+// fail every commit a git child of the process makes.
+func TestProxiedOpenRemovesAnAuthorPairTheAmbientLacked(t *testing.T) {
+	unsetForTest(t, "GIT_AUTHOR_NAME")
+	unsetForTest(t, "GIT_AUTHOR_EMAIL")
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	var seen string
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		seen = os.Getenv("GIT_AUTHOR_NAME")
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+
+	store, err := OpenNativeDoltStoreAtProxied(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
+		"GIT_AUTHOR_NAME":  "gc",
+		"GIT_AUTHOR_EMAIL": "gc@demo-city",
+	})
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtProxied: %v", err)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+	if seen != "gc" {
+		t.Fatalf("GIT_AUTHOR_NAME during the proxied open = %q, want gc", seen)
+	}
+	for _, key := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"} {
+		if value, present := os.LookupEnv(key); present {
+			t.Errorf("%s = %q after the proxied open, want it absent as it was before the open: git refuses an empty author identity", key, value)
+		}
+	}
+}
+
+// unsetForTest removes key from the process environment for the test and
+// restores what was there on cleanup. t.Setenv can only give a key a value.
+func unsetForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, previous)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
 }
 
 // nativeReadyGateBlocker builds one GetDependenciesWithMetadata row: the
