@@ -195,34 +195,43 @@ func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, cre
 	}, nil
 }
 
+// restoreNativeDoltOpenEnv puts back what a projection found: the value of each
+// key the process had, and the absence of each key it lacked.
+//
+// A key the process lacked is removed again, though Go's environment table
+// never reuses a removed key's slot, so every open that sets such a key adds a
+// slot to the table. Leaving the key empty instead would keep the slot, but
+// the process environment is what every child inherits: through
+// ProcessEnvSnapshotExcludingNativeDoltOpen, through any other copy of
+// os.Environ, and directly when a child starts without an explicit Env. bd
+// loads a workspace's .beads/.env with gotenv, which skips any key the
+// environment already has, even an empty one, so an empty leftover would hide
+// that key's workspace value from every later bd child. That slot per open is
+// gone only when the linked library takes its open configuration from
+// somewhere other than the process environment.
 func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 	for _, key := range keys {
 		if value := previous[key]; value != nil {
 			_ = os.Setenv(key, *value)
 			continue
 		}
-		_ = unsetOpenEnv(key)
+		_ = os.Unsetenv(key)
 	}
 }
 
-// unsetOpenEnv makes key read as unset, for an open window or its restore.
+// unsetOpenEnv makes a key the process has read as unset for the rest of an
+// open window. A key the process lacks already reads as unset.
 //
 // Go's environment table never reuses a removed key's slot: Unsetenv blanks
 // it, and the next Setenv of the key appends a new one. os.Environ walks the
-// whole table, blanks included, and sizes its copy by it, and every child gc
-// starts without an explicit Env takes such a copy. A window runs on every
-// open, so removing a key the next open sets again would grow the table, and
-// every such copy, by a slot per open.
+// whole table and sizes its copy by it, and every child gc starts without an
+// explicit Env takes such a copy. So a window that removed a key and then set
+// it back would grow the table, and every such copy, by a slot per open.
 //
-// So a key in the BEADS_ or BD_ namespace (emptyReadsAsUnset) keeps its slot
-// and takes the empty value, and keeps it after the window: a bd child then
-// finds the key set to empty, which keeps a .beads/.env value for it from
-// loading, as gc's explicit empty values for bd already do. An absent key stays
-// absent. Any other key is removed, because an empty value is a value there:
-// git refuses to commit under an empty GIT_AUTHOR_NAME. The proxied window's
-// author pair is such a key, so a proxied open in a process that lacks the pair
-// still adds two slots; only a way to hand the linked library its open
-// configuration outside the process environment removes that.
+// A key in the BEADS_ or BD_ namespace (emptyReadsAsUnset) therefore keeps its
+// slot and takes the empty value until the window's restore sets its value
+// back. Any other key is removed, because an empty value is a value there: git
+// refuses to commit under an empty GIT_AUTHOR_NAME.
 func unsetOpenEnv(key string) error {
 	if _, present := os.LookupEnv(key); !present {
 		return nil
@@ -235,14 +244,11 @@ func unsetOpenEnv(key string) error {
 
 // emptyReadsAsUnset reports whether key is in BEADS_, the namespace the linked
 // library configures an open from, or in BD_, bd's own. Those are the
-// namespaces the windows set and withhold keys in, and an empty value there
-// configures nothing. Inside an open the library reads both through os.Getenv
-// or viper, neither of which tells an empty value from an absent one, or, for
+// namespaces the windows set and withhold keys in, and inside an open an empty
+// value there configures nothing: the library reads both through os.Getenv or
+// viper, neither of which tells an empty value from an absent one, or, for
 // BD_EVENTS_JOURNAL and BD_EVENTS_JOURNAL_AUTO_PRUNE, parses the value and
-// falls through on an empty one. Its readers that check presence instead, bd's
-// config-source reporting and BD_AUDIT_ENABLED, serve bd's commands and not an
-// open. gc's readers take an empty value as unset too, and cmd/gc's
-// setProjectedDoltEnvEmpty hands bd an empty value to mean unset.
+// falls through on an empty one.
 func emptyReadsAsUnset(key string) bool {
 	return strings.HasPrefix(key, beadsEnvPrefix) || strings.HasPrefix(key, bdEnvPrefix)
 }
