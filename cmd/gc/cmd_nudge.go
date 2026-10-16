@@ -325,6 +325,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 	}
 	cmd.AddCommand(
 		newNudgeStatusCmd(stdout, stderr),
+		newNudgeShowCmd(stdout, stderr),
 		newNudgeDrainCmd(stdout, stderr),
 		newNudgePollCmd(stdout, stderr),
 		newNudgeDropCmd(stdout, stderr),
@@ -1429,6 +1430,10 @@ type sessionNudgeResult struct {
 	// note, when set, is the downgrade wording for a queued nudge in place of
 	// the one undelivered names (a question dialog is not a permission prompt).
 	note string
+	// nudgeID is the queue item's id when this process enqueued it, so the
+	// caller can resolve delivered-vs-dropped later with `gc nudge show`;
+	// empty when the session queued the nudge itself.
+	nudgeID string
 }
 
 // deliverSessionNudgeKeyed records the nudge as a message{role: notice} op
@@ -1605,6 +1610,8 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 		// The session could not take it now and queued the nudge itself
 		// (CONTRACT v5.9 D8); a held wait-idle nudge (NudgeUndeliveredHeld) is
 		// queued below.
+		// The session queued it itself, so there is no queue item id to
+		// report; `gc nudge show` cannot address this nudge.
 		return sessionNudgeResult{queued: true, undelivered: result.Undelivered}, nil
 	}
 	if !result.Delivered {
@@ -1628,7 +1635,7 @@ func writeSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOut
 		if note == "" {
 			note = queuedNudgeDowngradeNote(target, res.undelivered)
 		}
-		return writeQueuedSessionNudgeNote(target, mode, jsonOutput, note, op, stdout, stderr)
+		return writeQueuedSessionNudgeNote(target, mode, res.nudgeID, jsonOutput, note, op, stdout, stderr)
 	}
 	if jsonOutput {
 		result := sessionNudgeJSON{
@@ -1802,7 +1809,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return sessionNudgeResult{queued: true, undelivered: undelivered}, nil
+	return sessionNudgeResult{queued: true, undelivered: undelivered, nudgeID: item.ID}, nil
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {
@@ -2025,7 +2032,8 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 // queueSessionNudgeWithNote is queueSessionNudgeWithWorker with note, the
 // downgrade wording that replaces the one undelivered names ("" keeps it).
 func queueSessionNudgeWithNote(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, undelivered worker.NudgeUndeliveredReason, note string) (sessionNudgeResult, error) {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		return sessionNudgeResult{}, err
 	}
 	// The observe is a session-class read; route through the session store
@@ -2033,21 +2041,23 @@ func queueSessionNudgeWithNote(target nudgeTarget, store beads.Store, sp runtime
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
-	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note}, nil
+	return sessionNudgeResult{queued: true, undelivered: undelivered, note: note, nudgeID: item.ID}, nil
 }
 
 // writeQueuedSessionNudgeResult reports a queued nudge truthfully: WHERE it was
 // queued (the flock'd state.json that is the queue's authority — the shadow bead
-// is a projection of it, so an operator looking for the item needs this path)
-// and, when the live leg was skipped rather than tried, WHY. op (nil when none)
-// is the op that backs the run, which --json names.
-func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, op *cliOp, stdout, stderr io.Writer) int {
-	return writeQueuedSessionNudgeNote(target, mode, jsonOutput, queuedNudgeDowngradeNote(target, undelivered), op, stdout, stderr)
+// is a projection of it, so an operator looking for the item needs this path),
+// WHICH nudge it is (nudgeID is echoed back so the caller can resolve
+// delivered-vs-dropped later with `gc nudge show`; empty when the session
+// queued it itself), and, when the live leg was skipped rather than tried,
+// WHY. op (nil when none) is the op that backs the run, which --json names.
+func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, nudgeID string, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, op *cliOp, stdout, stderr io.Writer) int {
+	return writeQueuedSessionNudgeNote(target, mode, nudgeID, jsonOutput, queuedNudgeDowngradeNote(target, undelivered), op, stdout, stderr)
 }
 
 // writeQueuedSessionNudgeNote is writeQueuedSessionNudgeResult with the
 // rendered downgrade note.
-func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, note string, op *cliOp, stdout, stderr io.Writer) int {
+func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, nudgeID string, jsonOutput bool, note string, op *cliOp, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		result := sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -2058,13 +2068,18 @@ func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, jso
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
+			NudgeID:       nudgeID,
 		}
 		result.OpID, result.Key, result.Replayed = op.jsonFields()
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", result)
 	}
+	idNote := ""
+	if nudgeID != "" {
+		idNote = " (nudge " + nudgeID + ")"
+	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
-		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, note)
+		"Queued nudge for %s in %s%s%s\n",
+		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, idNote, note)
 	return 0
 }
 
