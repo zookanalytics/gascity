@@ -222,7 +222,8 @@
               "storage-repair-sequence",
               "runtime-workdir-export",
               "agent-is-foreign",
-              "nudge-show"
+              "nudge-show",
+              "session-release-name"
             ]
           },
           "event_id": {
