@@ -68,6 +68,7 @@ func TestSessionMutationActionSchemasDeclared(t *testing.T) {
 		{"session", "kill", "--json-schema=result"},
 		{"session", "rename", "--json-schema=result"},
 		{"session", "prune", "--json-schema=result"},
+		{"session", "release-name", "--json-schema=result"},
 		{"session", "reset", "--json-schema=result"},
 		{"session", "pin", "--json-schema=result"},
 		{"session", "unpin", "--json-schema=result"},
