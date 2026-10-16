@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The Makefile's pinned golangci-lint, which make installs into
+# $(go env GOPATH)/bin when it is missing or stale; that directory need not be
+# on PATH. GOLANGCI_LINT names another binary, as it does for make.
+golangci_lint="${GOLANGCI_LINT:-}"
+if [ -z "$golangci_lint" ]; then
+  make -s golangci-lint-pinned </dev/null >&2
+  golangci_lint="$(go env GOPATH)/bin/golangci-lint"
+fi
+
 status=0
 
 while IFS= read -r file; do
@@ -9,7 +18,7 @@ while IFS= read -r file; do
   fi
 
   tmp=$(mktemp "${TMPDIR:-/tmp}/gc-precommit-fmt.XXXXXX")
-  if ! golangci-lint fmt --stdin <"$file" >"$tmp"; then
+  if ! "$golangci_lint" fmt --stdin <"$file" >"$tmp"; then
     rm -f "$tmp"
     status=1
     continue

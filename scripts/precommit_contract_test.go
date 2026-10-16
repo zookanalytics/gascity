@@ -11,11 +11,9 @@ import (
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
-func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
-	repoRoot := repoRoot(t)
-	binDir := t.TempDir()
-	fakeLint := filepath.Join(binDir, "golangci-lint")
-	writeExecutable(t, fakeLint, `#!/usr/bin/env bash
+// fakeFormatter is a golangci-lint that accepts only `fmt --stdin` and
+// "formats" by appending a newline.
+const fakeFormatter = `#!/usr/bin/env bash
 set -euo pipefail
 if [ "$#" -ne 2 ] || [ "$1" != "fmt" ] || [ "$2" != "--stdin" ]; then
   echo "unexpected golangci-lint args: $*" >&2
@@ -23,7 +21,12 @@ if [ "$#" -ne 2 ] || [ "$1" != "fmt" ] || [ "$2" != "--stdin" ]; then
 fi
 cat
 printf '\n'
-`)
+`
+
+func TestPreCommitFormatterPreservesFileMode(t *testing.T) {
+	repoRoot := repoRoot(t)
+	fakeLint := filepath.Join(t.TempDir(), "golangci-lint")
+	writeExecutable(t, fakeLint, fakeFormatter)
 
 	source := filepath.Join(t.TempDir(), "needs_format.go")
 	if err := os.WriteFile(source, []byte("package main"), 0o644); err != nil {
@@ -33,7 +36,8 @@ printf '\n'
 	cmd := exec.Command(filepath.Join(repoRoot, "scripts", "precommit-format-staged-go"))
 	cmd.Dir = repoRoot
 	cmd.Env = []string{
-		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"PATH=" + os.Getenv("PATH"),
+		"GOLANGCI_LINT=" + fakeLint,
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + t.TempDir(),
 	}
@@ -56,6 +60,59 @@ printf '\n'
 	}
 	if string(content) != "package main\n" {
 		t.Fatalf("formatted content = %q, want package main with newline", content)
+	}
+}
+
+// TestPreCommitFormatterUsesThePinnedLinter: with no GOLANGCI_LINT, the
+// formatter has make install the pin when it is missing or stale, then runs
+// the golangci-lint in $(go env GOPATH)/bin, where make puts it, rather than
+// whatever golangci-lint PATH offers first.
+func TestPreCommitFormatterUsesThePinnedLinter(t *testing.T) {
+	repoRoot := repoRoot(t)
+	gopath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(gopath, "bin"), 0o755); err != nil {
+		t.Fatalf("create GOPATH bin: %v", err)
+	}
+	writeExecutable(t, filepath.Join(gopath, "bin", "golangci-lint"), fakeFormatter)
+
+	binDir := t.TempDir()
+	makeLog := filepath.Join(t.TempDir(), "make.log")
+	writeExecutable(t, filepath.Join(binDir, "make"), "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '"+makeLog+"'\n")
+	writeExecutable(t, filepath.Join(binDir, "go"), `#!/usr/bin/env bash
+if [ "$*" = "env GOPATH" ]; then echo '`+gopath+`'; exit 0; fi
+echo "unexpected go args: $*" >&2
+exit 2
+`)
+	writeExecutable(t, filepath.Join(binDir, "golangci-lint"), "#!/usr/bin/env bash\necho 'formatted with the golangci-lint on PATH' >&2\nexit 3\n")
+
+	source := filepath.Join(t.TempDir(), "needs_format.go")
+	writeTestFile(t, source, "package main")
+
+	cmd := testCommand(filepath.Join(repoRoot, "scripts", "precommit-format-staged-go"))
+	cmd.Dir = repoRoot
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"TMPDIR=" + t.TempDir(),
+	}
+	cmd.Stdin = strings.NewReader(source + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("precommit formatter failed: %v\n%s", err, out)
+	}
+	makeCalls, err := os.ReadFile(makeLog)
+	if err != nil {
+		t.Fatalf("formatter never ran make: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(makeCalls)); got != "-s golangci-lint-pinned" {
+		t.Errorf("make ran %q, want %q", got, "-s golangci-lint-pinned")
+	}
+	content, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read formatted source: %v", err)
+	}
+	if string(content) != "package main\n" {
+		t.Errorf("formatted content = %q, want the pinned linter's output %q", content, "package main\n")
 	}
 }
 

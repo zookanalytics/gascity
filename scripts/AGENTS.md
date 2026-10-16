@@ -88,6 +88,11 @@ Both engines, including the go suite `auto` picks after that probe, run
 through `run_suite`, never `exec`: a 141 (SIGPIPE) fails the push with a
 named error, because it says a writer hit a closed pipe, not whether the
 tests passed (`TestPrePushSuiteFailsClosedOnSIGPIPE`).
+The lint step of `.githooks/pre-commit` chooses between `make lint-changed`
+and `make lint-changed-go` (`GC_PRECOMMIT_LINT=auto|bazel|go`) by whether the
+command `NOGO_BAZEL` names (default `bazel`) is on PATH, without the loader
+probe, since nogo never loads ICU.
+`scripts/githooks_pre_commit_bazel_fallback_test.go` pins that choice.
 
 ## The tmux test inventory is derived, never counted
 
