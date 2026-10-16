@@ -314,6 +314,7 @@ was asleep or was not at a safe interactive boundary yet.`,
 	}
 	cmd.AddCommand(
 		newNudgeStatusCmd(stdout, stderr),
+		newNudgeShowCmd(stdout, stderr),
 		newNudgeDrainCmd(stdout, stderr),
 		newNudgePollCmd(stdout, stderr),
 		newNudgeDropCmd(stdout, stderr),
@@ -1265,7 +1266,9 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		// The session could not take it now and queued the nudge itself
 		// (CONTRACT v5.9 D8); a held wait-idle nudge (NudgeUndeliveredHeld) is
 		// queued below.
-		return writeQueuedSessionNudgeResult(target, mode, jsonOutput, result.Undelivered, stdout, stderr)
+		// The session queued it itself, so there is no queue item id to
+		// report; `gc nudge show` cannot address this nudge.
+		return writeQueuedSessionNudgeResult(target, mode, "", jsonOutput, result.Undelivered, stdout, stderr)
 	}
 	if !result.Delivered {
 		// Not delivered and not queued: a wait-idle nudge that found no
@@ -1393,7 +1396,7 @@ func queueManagedSessionNudgeWake(target nudgeTarget, store beads.Store, message
 	} else if err := nudgePokeController(target.cityPath, reconcilekey.Session(target.sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: warning: poke failed: %v\n", err) //nolint:errcheck
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, item.ID, jsonOutput, undelivered, stdout, stderr)
 }
 
 func enqueueManagedNudgeThenWake(target nudgeTarget, store beads.Store, item queuedNudge) (session.WakeRequestOutcome, error) {
@@ -1573,7 +1576,8 @@ func deliverSessionNudgeWithProvider(target nudgeTarget, sp runtime.Provider, mo
 // line can say it; it is empty for a caller that queued by request rather than
 // by downgrade.
 func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
-	if err := enqueueQueuedNudge(target.cityPath, newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))); err != nil {
+	item := newQueuedNudgeWithOptions(target.agentKey(), message, "session", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudge(target.cityPath, item); err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -1582,14 +1586,16 @@ func queueSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runti
 	if obs, err := workerObserveNudgeTarget(target, cliSessionStore(store, target.cfg, target.cityPath), sp); err == nil && obs.Running {
 		maybeStartNudgePoller(target)
 	}
-	return writeQueuedSessionNudgeResult(target, mode, jsonOutput, undelivered, stdout, stderr)
+	return writeQueuedSessionNudgeResult(target, mode, item.ID, jsonOutput, undelivered, stdout, stderr)
 }
 
 // writeQueuedSessionNudgeResult reports a queued nudge truthfully: WHERE it was
 // queued (the flock'd state.json that is the queue's authority — the shadow bead
-// is a projection of it, so an operator looking for the item needs this path)
-// and, when the live leg was skipped rather than tried, WHY.
-func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
+// is a projection of it, so an operator looking for the item needs this path),
+// WHICH nudge it is (nudgeID is echoed back so the caller can resolve
+// delivered-vs-dropped later with `gc nudge show`), and, when the live leg was
+// skipped rather than tried, WHY.
+func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, nudgeID string, jsonOutput bool, undelivered worker.NudgeUndeliveredReason, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
@@ -1600,11 +1606,16 @@ func writeQueuedSessionNudgeResult(target nudgeTarget, mode nudgeDeliveryMode, j
 			Delivery:      string(mode),
 			Queued:        true,
 			Outcome:       "queued",
+			NudgeID:       nudgeID,
 		})
 	}
+	idNote := ""
+	if nudgeID != "" {
+		idNote = " (nudge " + nudgeID + ")"
+	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
-		"Queued nudge for %s in %s%s\n",
-		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, queuedNudgeDowngradeNote(target, undelivered))
+		"Queued nudge for %s in %s%s%s\n",
+		target.agentKey(), openNudgeQueue(target.cityPath, beads.NudgesStore{}).Location, idNote, queuedNudgeDowngradeNote(target, undelivered))
 	return 0
 }
 
