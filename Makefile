@@ -107,7 +107,7 @@ endif
 endif
 
 .PHONY: golangci-lint-pinned
-.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
+.PHONY: build check check-all check-bd check-docker check-docs check-dolt check-hooks check-eventexport-isolation check-gomod-replace check-core-boundary check-native-dependency-surface check-routed-test-rows check-split-topology-rows check-version-tag lint lint-changed lint-changed-go lint-affected lint-full lint-golangci vet-go fmt-check fmt-check-changed fmt vet test test-ci-policy test-mac test-fast-parallel test-fsys-darwin-compile test-herdr-live test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-productmetrics-testhook test-worker-core test-worker-core-phase2 test-worker-core-phase2-all test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-beads-topology-matrix test-bd-cli-contract test-bd-cli-contract-home-isolation test-bd-conditional-release-contract test-acceptance-b test-acceptance-split-storage test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mail-wisp-insert test-mcp-mail test-openclaw-bridge test-docker test-k8s test-cover test-cover-mac test-cover-noncmdgc test-cover-cmdgc-shard cover check-self-contained install install-tools install-buildx install-oasdiff openapi-breaking-check setup clean generate check-schema complexity complexity-diff complexity-check complexity-update docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-build dashboard-build-npm dashboard-generate-client dashboard-lock dashboard-dev dashboard-check dashboard-check-npm dashboard-ci dashboard-smoke dashboard-e2e-go dashboard-e2e-play dashboard-e2e
 .PHONY: check-release-dist-ignore
 .PHONY: bazel-tmpdir test-go check-go check-all-go check-docs-go test-acceptance-go test-integration-go
 
@@ -340,7 +340,13 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
-LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
+# golangci-lint type-checks the standard library from source and cannot load a
+# GOROOT newer than the Go that built it ("file requires newer Go version"), so
+# it runs under go.mod's Go, as the macOS quality job does (setup-go reads
+# go.mod), whatever go or GOTOOLCHAIN the host carries. LINT_GOTOOLCHAIN
+# overrides the pin.
+LINT_GOTOOLCHAIN ?= go$(shell awk '$$1 == "go" { print $$2; exit }' go.mod)
+LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOTOOLCHAIN=$(LINT_GOTOOLCHAIN)
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 
@@ -355,11 +361,10 @@ NOGO_BUILD_FLAGS ?= --keep_going --output_groups=nogo_fix
 lint:
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) //...
 
-## lint-changed: run nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|tracked|worktree)
-# testdata paths are dropped with sed, not a case statement: macOS /bin/sh
-# (bash 3.2) cannot parse a case pattern's ')' inside $(...).
-lint-changed:
-	@case "$(LINT_CHANGED_SCOPE)" in \
+# Recipe fragment shared by lint-changed and lint-changed-go: sets the shell
+# variable files to the changed Go files LINT_CHANGED_SCOPE selects, one per
+# line.
+LINT_CHANGED_FILES = case "$(LINT_CHANGED_SCOPE)" in \
 		staged) \
 			files="$$(git diff --cached --name-only --diff-filter=ACMRT -- '*.go')"; \
 			;; \
@@ -377,7 +382,13 @@ lint-changed:
 			echo "unknown LINT_CHANGED_SCOPE=$(LINT_CHANGED_SCOPE); expected staged, tracked, or worktree" >&2; \
 			exit 2; \
 			;; \
-	esac; \
+	esac
+
+## lint-changed: run nogo over the Bazel packages of changed Go files (LINT_CHANGED_SCOPE=staged|tracked|worktree)
+# testdata paths are dropped with sed, not a case statement: macOS /bin/sh
+# (bash 3.2) cannot parse a case pattern's ')' inside $(...).
+lint-changed:
+	@$(LINT_CHANGED_FILES); \
 	if [ -z "$$files" ]; then \
 		echo "lint-changed: no changed Go files"; \
 		exit 0; \
@@ -400,6 +411,25 @@ lint-changed:
 	fi; \
 	echo "lint-changed: $$(printf '%s\n' "$$targets" | tr '\n' ' ')"; \
 	$(NOGO_BAZEL) build $(NOGO_BUILD_FLAGS) $$targets
+
+## lint-changed-go: golangci-lint and go vet over the packages of changed Go files, without Bazel (pre-commit's lint where bazel is not installed)
+# Both run even when the first fails, so one commit attempt reports every
+# finding, as nogo's --keep_going does.
+lint-changed-go: golangci-lint-pinned
+	@$(LINT_CHANGED_FILES); \
+	pkgs="$$(printf '%s\n' "$$files" | sed -e '/^$$/d' -e '/^testdata\//d' -e '/\/testdata\//d' | while IFS= read -r file; do \
+		dir="$$(dirname "$$file")"; \
+		if [ "$$dir" = "." ]; then echo "."; else echo "./$$dir"; fi; \
+	done | sort -u)"; \
+	if [ -z "$$pkgs" ]; then \
+		echo "lint-changed-go: no changed Go packages"; \
+		exit 0; \
+	fi; \
+	echo "lint-changed-go: $$(printf '%s\n' "$$pkgs" | tr '\n' ' ')"; \
+	status=0; \
+	$(LINT_ENV) $(GOLANGCI_LINT) run $(LINT_FLAGS) $$pkgs || status=$$?; \
+	GOFLAGS="$(QUALITY_GATE_GOFLAGS)" go vet $$pkgs || status=$$?; \
+	exit $$status
 
 ## vet: go vet's analyzers run inside nogo; same as lint
 vet: lint

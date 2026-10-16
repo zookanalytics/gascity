@@ -23,23 +23,64 @@ if [ -n "$staged_go_files" ]; then
 
   # Lint and vet: nogo (//tools/nogo) over the staged files' Bazel packages,
   # the same analyzers bazel.yml gates on. Findings fail the commit; nogo
-  # prints a `patch -p1` command for the ones with suggested fixes.
-  make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
+  # prints a `patch -p1` command for the ones with suggested fixes. Where
+  # nogo's Bazel command (NOGO_BAZEL, default bazel) is not on PATH, auto runs
+  # the go twin (golangci-lint and go vet over the same packages) behind a
+  # banner instead. nogo analyzes at build time and never loads ICU, so unlike
+  # the docs gate below this does not consult lib/local-runtime.sh.
+  # GC_PRECOMMIT_LINT=auto|bazel|go picks the engine; the explicit values are
+  # never replaced.
+  lint_mode="${GC_PRECOMMIT_LINT:-auto}"
+  lint_bazel="${NOGO_BAZEL:-bazel}"
+  lint_why="GC_PRECOMMIT_LINT=go"
+  lint_fix="unset GC_PRECOMMIT_LINT, or set GC_PRECOMMIT_LINT=bazel, to run nogo"
+  case "$lint_mode" in
+  auto)
+    if command -v "${lint_bazel%% *}" >/dev/null 2>&1; then
+      lint_mode=bazel
+    else
+      lint_why="${lint_bazel%% *} is not on PATH"
+      lint_fix="install bazelisk (engdocs/bazel-quickstart.md); GC_PRECOMMIT_LINT=bazel then runs make lint-changed"
+      lint_mode=go
+    fi
+    ;;
+  bazel | go) ;;
+  *)
+    echo "pre-commit: GC_PRECOMMIT_LINT=$lint_mode is not one of auto, bazel, go" >&2
+    exit 2
+    ;;
+  esac
+  if [ "$lint_mode" = go ]; then
+    {
+      echo "pre-commit: running make lint-changed-go (golangci-lint and go vet): NOT the nogo lint and vet CI enforces."
+      echo "pre-commit: why: $lint_why"
+      echo "pre-commit: CI runs bazel test //... (.github/workflows/bazel.yml), whose nogo analyzers can still fail a commit that passes here."
+      echo "pre-commit: fix: $lint_fix"
+    } >&2
+    make lint-changed-go LINT_CHANGED_SCOPE=staged || exit 1
+  else
+    make lint-changed LINT_CHANGED_SCOPE=staged || exit 1
+  fi
+
+  # The three generators below build with cgo off. None needs cgo, and
+  # with it on their imports reach Dolt's ICU regex binding, which does
+  # not compile where the ICU headers are off the default include path,
+  # as Homebrew's keg-only icu4c is on macOS.
 
   # Regenerate the OpenAPI spec from the live Huma API and stage both
   # canonical copies. Keeps the committed spec and the published
   # Mintlify schema in lockstep with whatever the server actually
   # serves.
-  go run ./cmd/genspec
+  CGO_ENABLED=0 go run ./cmd/genspec
   git add internal/api/openapi.json docs/reference/schema/openapi.json docs/reference/schema/openapi.txt
 
-  go generate ./internal/api/genclient
+  CGO_ENABLED=0 go generate ./internal/api/genclient
   git add internal/api/genclient/client_gen.go
 
   # Regenerate the config/schema docs derived from Go structs and
   # stage every generated artifact so commits do not leave the
   # worktree dirty.
-  go run ./cmd/genschema
+  CGO_ENABLED=0 go run ./cmd/genschema
   git add docs/reference/schema/city-schema.json docs/reference/schema/city-schema.txt docs/reference/config.md docs/reference/cli.md
 
   # Heavy `go test` fan-out runs in .githooks/pre-push, not here (#3628).

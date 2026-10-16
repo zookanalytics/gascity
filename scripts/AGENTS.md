@@ -84,3 +84,8 @@ hooks; it derives the soname list from a single ICU-major constant, and
 `TestBazelLocalRuntimePinMatchesProbe` fails when that constant, the
 `MODULE.bazel` pin and `engdocs/bazel-quickstart.md` disagree. Only `auto`
 probes: an explicit mode is never replaced.
+The lint step of `.githooks/pre-commit` chooses between `make lint-changed`
+and `make lint-changed-go` (`GC_PRECOMMIT_LINT=auto|bazel|go`) by whether the
+command `NOGO_BAZEL` names (default `bazel`) is on PATH, without the loader
+probe, since nogo never loads ICU.
+`scripts/githooks_pre_commit_bazel_fallback_test.go` pins that choice.
