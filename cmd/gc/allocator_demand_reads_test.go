@@ -1157,7 +1157,7 @@ func TestControlDispatcherTicksAndDesiredStateBuildsReadClosedSessionHistoryOnce
 		logPrefix:         "gc test",
 		stdout:            io.Discard,
 		stderr:            io.Discard,
-		managedDoltHealth: func(string) error { return nil },
+		managedDoltHealth: func(context.Context, string) error { return nil },
 	}
 	cr.setControllerState(&controllerState{
 		cfg:           cfg,
