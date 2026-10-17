@@ -412,54 +412,8 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	root.Include = origInclude
 
-	for _, inc := range includes {
-		var fragPath string
-		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
-			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, opts.RepoCacheNonBlocking)
-			if err != nil {
-				return nil, nil, fmt.Errorf("resolving include %q: %w", inc, err)
-			}
-			fragPath = resolved
-		} else {
-			fragPath = resolveConfigPath(inc, cityRoot, cityRoot)
-		}
-
-		fragData, err := fs.ReadFile(fragPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading fragment %q: %w", inc, err)
-		}
-
-		frag, fragMeta, fragWarnings, err := parseWithMeta(fragData, fragPath)
-		if err != nil {
-			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
-		}
-		prov.Warnings = append(prov.Warnings, fragWarnings...)
-		if legacyV1SurfaceWarningsEnabled {
-			if err := LegacyV1SurfaceError(frag, fragPath, fragData); err != nil {
-				return nil, nil, &fragmentLegacyV1SurfaceError{include: inc, err: err}
-			}
-			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(frag, fragPath)...)
-			prov.Warnings = append(prov.Warnings, legacyRigPathSurfaceWarnings(frag, fragPath)...)
-		}
-
-		// Fragments cannot include other fragments.
-		if len(frag.Include) > 0 {
-			return nil, nil, fmt.Errorf(
-				"fragment %q: includes are not allowed in fragments (no recursive includes)", inc)
-		}
-
-		// Adjust fragment agent paths to be city-root-relative.
-		fragDir := filepath.Dir(fragPath)
-		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
-		adjustPatchPaths(&frag.Patches, fragDir, cityRoot)
-		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
-
-		// Merge fragment into root.
-		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
-			return nil, nil, fmt.Errorf("fragment %q: %w", inc, err)
-		}
-		prov.Sources = append(prov.Sources, fragPath)
-		prov.recordSource(fragPath, fragData)
+	if err := mergeIncludeFragments(fs, root, includes, cityRoot, legacyV1SurfaceWarningsEnabled, opts.RepoCacheNonBlocking, prov); err != nil {
+		return nil, nil, err
 	}
 	if err := ValidateStorageConfig(root); err != nil {
 		return nil, nil, err
@@ -896,6 +850,123 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		prov.captureRevisionSnapshot(fs, root, cityRoot, conventionInputs)
 	}
 
+	return root, prov, nil
+}
+
+// mergeIncludeFragments merges each include fragment into root, in order. A
+// remote include resolves to its cached checkout and a local one to a path
+// relative to the city root. Fragments cannot include other fragments.
+// legacyV1 applies the authoring-surface checks a schema-2 city pack asks
+// for.
+func mergeIncludeFragments(fs fsys.FS, root *City, includes []string, cityRoot string, legacyV1, nonBlocking bool, prov *Provenance) error {
+	for _, inc := range includes {
+		var fragPath string
+		if isRemoteInclude(inc) || isGitHubTreeURL(inc) {
+			resolved, err := resolvePackRef(inc, cityRoot, cityRoot, nonBlocking)
+			if err != nil {
+				return fmt.Errorf("resolving include %q: %w", inc, err)
+			}
+			fragPath = resolved
+		} else {
+			fragPath = resolveConfigPath(inc, cityRoot, cityRoot)
+		}
+
+		fragData, err := fs.ReadFile(fragPath)
+		if err != nil {
+			return fmt.Errorf("loading fragment %q: %w", inc, err)
+		}
+
+		frag, fragMeta, fragWarnings, err := parseWithMeta(fragData, fragPath)
+		if err != nil {
+			return fmt.Errorf("fragment %q: %w", inc, err)
+		}
+		prov.Warnings = append(prov.Warnings, fragWarnings...)
+		if legacyV1 {
+			if err := LegacyV1SurfaceError(frag, fragPath, fragData); err != nil {
+				return &fragmentLegacyV1SurfaceError{include: inc, err: err}
+			}
+			prov.Warnings = append(prov.Warnings, legacyWorkspaceIdentitySurfaceWarnings(frag, fragPath)...)
+			prov.Warnings = append(prov.Warnings, legacyRigPathSurfaceWarnings(frag, fragPath)...)
+		}
+
+		if len(frag.Include) > 0 {
+			return fmt.Errorf(
+				"fragment %q: includes are not allowed in fragments (no recursive includes)", inc)
+		}
+
+		// Adjust fragment agent paths to be city-root-relative.
+		fragDir := filepath.Dir(fragPath)
+		adjustAgentPaths(frag.Agents, fragDir, cityRoot)
+		adjustPatchPaths(&frag.Patches, fragDir, cityRoot)
+		adjustRigOverridePaths(frag.Rigs, fragDir, cityRoot)
+
+		if err := mergeFragment(root, frag, fragMeta, fragPath, prov); err != nil {
+			return fmt.Errorf("fragment %q: %w", inc, err)
+		}
+		prov.Sources = append(prov.Sources, fragPath)
+		prov.recordSource(fragPath, fragData)
+	}
+	return nil
+}
+
+// LoadDeployment composes a city's deployment layer: city.toml, its include
+// fragments, the rig patches they declare and the .gc/site.toml binding. It
+// reads no pack, neither the city's own pack.toml nor any import: a pack
+// declares no workspace, rigs, [beads], [storage], [dolt] or [daemon], and
+// composing it never writes a rig's fields. So for a city whose full
+// composition succeeds, the rigs, workspace, [beads], [storage], [dolt] and
+// [daemon] this returns are the ones LoadWithIncludesOptions returns. What
+// packs contribute (agents, formulas, orders, providers, named sessions) is
+// absent, and so are the agent, provider and named-session patches that
+// target it.
+//
+// It validates [storage], the [beads] modes and the [dolt] limits, and nothing
+// that needs a pack, so a city whose packs fail to compose still loads here.
+// It is for callers that read only deployment facts and would otherwise pay
+// for walking every pack and order directory on each call.
+func LoadDeployment(fs fsys.FS, path string) (*City, *Provenance, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
+	}
+	root, rootMeta, rootWarnings, err := parseWithMeta(data, path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
+	}
+	cityRoot := filepath.Dir(path)
+	prov := newProvenance(path)
+	prov.recordSource(path, data)
+	prov.Warnings = append(prov.Warnings, rootWarnings...)
+	trackRigs(prov, root.Rigs, path)
+	trackWorkspace(prov, rootMeta, path)
+
+	includes := append([]string{}, root.Include...)
+	if err := mergeIncludeFragments(fs, root, includes, cityRoot, false, false, prov); err != nil {
+		return nil, nil, err
+	}
+	if err := ValidateStorageConfig(root); err != nil {
+		return nil, nil, err
+	}
+	adjustPatchPaths(&root.Patches, cityRoot, cityRoot)
+	adjustRigOverridePaths(root.Rigs, cityRoot, cityRoot)
+	if err := ApplyPatches(root, Patches{Rigs: root.Patches.Rigs}); err != nil {
+		return nil, nil, fmt.Errorf("applying patches: %w", err)
+	}
+	root.Patches = Patches{}
+	ApplyBeadPolicyDefaults(root)
+	NormalizeSessionSleepFields(root)
+
+	siteBindingWarnings, err := ApplySiteBindings(fs, cityRoot, root)
+	if err != nil {
+		return nil, nil, err
+	}
+	prov.Warnings = append(prov.Warnings, siteBindingWarnings...)
+	if err := ValidateDoltConfig(root, path); err != nil {
+		return nil, nil, err
+	}
+	if err := validateBeadsModes(root.Beads); err != nil {
+		return nil, nil, err
+	}
 	return root, prov, nil
 }
 
