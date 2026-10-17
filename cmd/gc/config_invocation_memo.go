@@ -9,16 +9,20 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// invocationConfigMemo shares one composed city config load across the
-// helpers a single short-lived command runs.
+// invocationConfigMemo shares a city's config loads across the helpers a
+// single short-lived command runs.
 //
 // `gc bd` is the case it exists for. Before it execs bd, the passthrough's
-// guards and env builders each loaded the composed config of the same city on
-// their own: doBd itself, the by-id twin census, the pinned-bd resolver
-// (twice, once through the storage-binding env) and the hosted-credential
-// probe. Each load walks every pack, include and order directory; on a
-// production-sized city that is 50-70 ms a time, and the repeats were most of
-// gc's own share of an operator `gc bd show`. A load that calls
+// guards and env builders each need the config of the same city. A read verb
+// routes on deployment facts alone, and so do the env builders every verb runs
+// (the pinned-bd resolver and the hosted-credential probe): they share one
+// deployment-layer load (loadCityDeploymentConfig), which reads city.toml, its
+// fragments and the site binding and no pack. A composed load walks every pack,
+// include and order directory, 50-70 ms a time on a production-sized city, so
+// the scope answers each composed load of the shape below from the first one:
+// doBd's own for a write, and for a read whichever helper asks first (the by-id
+// twin census on a split city, or the init-path classifiers of a rig scope
+// with no metadata yet). A load that calls
 // config.LoadWithIncludesOptions itself is not shared, and the one-shot storage
 // funnel's routing read (resolveCLIStorageRoutes) stays one by choice: a by-id
 // `gc bd` that enters the funnel composes there once more, at most once per
@@ -49,6 +53,11 @@ import (
 // the helpers' loads, which the uncached path never guaranteed either (each
 // load already reads its sources one by one).
 //
+// The scope answers a deployment-layer load the same way: the first one of a
+// city.toml in the scope loads it, every later one gets a copy of that answer
+// under the same copy and no-write-through rules, and an error is never
+// remembered.
+//
 // The scope also carries the builtin readiness deferral: the cities whose
 // readiness pass the gc bd passthrough loader skipped
 // (deferBuiltinReadinessForInvocation). It lives here so it dies with the
@@ -61,6 +70,9 @@ import (
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
+	// deployments holds the deployment-layer loads (loadCityDeploymentConfig)
+	// by normalized city.toml path.
+	deployments map[string]invocationConfigMemoEntry
 	// readinessDeferred holds normalized city paths whose builtin readiness
 	// pass the passthrough loader deferred in this invocation.
 	readinessDeferred map[string]struct{}
@@ -109,14 +121,19 @@ type invocationConfigMemoEntry struct {
 // config cost.
 var composedCityConfigLoads atomic.Int64
 
+// deploymentCityConfigLoads counts the deployment-layer loads
+// loadCityDeploymentConfig actually performed (memo hits excluded), for tests
+// that pin a command's config cost.
+var deploymentCityConfigLoads atomic.Int64
+
 var (
 	invocationConfigMemoMu     sync.Mutex
 	activeInvocationConfigMemo *invocationConfigMemo
 )
 
 // invocationMemoLoadOptions is the only option set the memo answers: the
-// one-shot load (skipRevisionSnapshot, cliStorageRoutesLoad and
-// hostedCredentialProbeLoad are all exactly this).
+// one-shot load (skipRevisionSnapshot and cliStorageRoutesLoad are both
+// exactly this).
 var invocationMemoLoadOptions = config.LoadOptions{SkipRevisionSnapshot: true}
 
 // beginInvocationConfigMemo opens a memo scope for the rest of a one-shot
@@ -188,6 +205,36 @@ func loadComposedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions
 		return cfg, prov, err
 	}
 	memo.entries[key] = invocationConfigMemoEntry{cfg: callerCopyOfCityConfig(cfg), prov: prov}
+	return cfg, prov, nil
+}
+
+// loadCityDeploymentConfig is config.LoadDeployment for cityPath's city.toml,
+// answered from the open invocation memo when there is one. It is the load
+// for a caller that reads only deployment facts (rigs and their prefixes, the
+// workspace and its env, [beads], [storage], [dolt], [daemon]), which it
+// returns as a composed load would, without walking a pack.
+func loadCityDeploymentConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		deploymentCityConfigLoads.Add(1)
+		return config.LoadDeployment(fsys.OSFS{}, tomlPath)
+	}
+	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if entry, ok := memo.deployments[key]; ok {
+		return callerCopyOfCityConfig(entry.cfg), entry.prov, nil
+	}
+	deploymentCityConfigLoads.Add(1)
+	cfg, prov, err := config.LoadDeployment(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		return cfg, prov, err
+	}
+	if memo.deployments == nil {
+		memo.deployments = map[string]invocationConfigMemoEntry{}
+	}
+	memo.deployments[key] = invocationConfigMemoEntry{cfg: callerCopyOfCityConfig(cfg), prov: prov}
 	return cfg, prov, nil
 }
 

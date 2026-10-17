@@ -97,10 +97,11 @@ func makeBundledCacheUnhealable(t *testing.T, cacheDir string) {
 
 // TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal pins the
 // fallback's failure path: when the cache composition rejects cannot be
-// healed, gc bd reports the readiness pass's own error, as the full load does,
-// not the composition error the pass was run to repair.
+// healed, a gc bd write reports the readiness pass's own error, as the full
+// load does, not the composition error the pass was run to repair. A read
+// reads no pack cache, so the same city still answers it.
 func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
-	run := func(legacy bool) (int, string, bdTrimCounters) {
+	run := func(legacy bool, args ...string) (int, string, bdTrimCounters) {
 		cityDir := newBdTrimsTestCity(t)
 		makeBundledCacheUnhealable(t, corruptBundledBdCacheMarker(t, cityDir))
 		if legacy {
@@ -108,13 +109,14 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 		}
 		before := snapBdTrimCounters()
 		var stdout, stderr bytes.Buffer
-		code := doBd([]string{"show", "demo-abc"}, &stdout, &stderr)
+		code := doBd(args, &stdout, &stderr)
 		got := snapBdTrimCounters().since(before)
 		out := strings.ReplaceAll(stderr.String(), os.Getenv("GC_HOME"), "$GC_HOME")
 		return code, strings.ReplaceAll(out, cityDir, "$CITY"), got
 	}
-	legacyCode, legacyStderr, _ := run(true)
-	code, stderr, got := run(false)
+	write := []string{"update", "demo-abc", "--status", "in_progress"}
+	legacyCode, legacyStderr, _ := run(true, write...)
+	code, stderr, got := run(false, write...)
 
 	const want = "gc bd: loading config: preparing builtin pack caches: "
 	if code != 1 || !strings.HasPrefix(stderr, want) {
@@ -128,6 +130,14 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 	}
 	if got.fallbacks != 1 || got.passes != 1 {
 		t.Fatalf("fallbacks = %d, passes = %d; want 1 and 1", got.fallbacks, got.passes)
+	}
+
+	readCode, readStderr, read := run(false, "show", "demo-abc")
+	if readCode != 0 {
+		t.Fatalf("a read over an unhealable cache exited %d, want 0 (it reads no pack cache); stderr=%q", readCode, readStderr)
+	}
+	if read.fallbacks != 0 || read.passes != 0 {
+		t.Fatalf("a read ran fallbacks = %d, passes = %d; want 0 and 0", read.fallbacks, read.passes)
 	}
 }
 
@@ -276,7 +286,7 @@ func TestGcBdPassthroughTrimsKeepRoutingMore(t *testing.T) {
 		}},
 		{"fallback cannot heal", plain, func(t *testing.T, c bdParityCity) []string {
 			makeBundledCacheUnhealable(t, corruptBundledBdCacheMarker(t, c.city))
-			return []string{"show", "demo-abc"}
+			return []string{"update", "demo-abc", "--status", "in_progress"}
 		}},
 		{"rig worktree redirect cwd", plain, redirectCwd(
 			func(bdParityCity) string { return filepath.Join("frontend", "polecat") }, rigBeads, false,

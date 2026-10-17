@@ -128,6 +128,19 @@ rig-local policy wins when both set the same field. Pack-level agent
 patches are applied inside recursive pack loading and do not expose
 city-only patch targets such as rigs or providers.
 
+`LoadDeployment` composes the deployment layer alone: it parses
+city.toml (step 1), loads and merges its fragments (step 4), applies the
+rig patches of step 7, and applies the `.gc/site.toml` binding. It reads
+no pack. A pack declares no workspace, rigs, `[beads]`, `[storage]`,
+`[dolt]` or `[daemon]`, and expanding one writes no rig field, so for a
+city that composes, those fields equal what `LoadWithIncludes` returns.
+The exception is the pack includes of the rigs and the workspace, which
+stay as written: `LoadWithIncludes` resolves a named pack to its cache
+path and adds the root pack's includes to the workspace's.
+What packs contribute (agents, formulas, orders, providers, named
+sessions) is absent. It is for callers that read only deployment facts,
+such as the `gc bd` read path and the bd environment it builds.
+
 Provider resolution happens later, at agent startup time, via
 `ResolveProvider`:
 
@@ -255,6 +268,7 @@ Provider resolution happens later, at agent startup time, via
 | Depended on by | How |
 |---|---|
 | `cmd/gc/controller.go` | Loads config via `LoadWithIncludes`, watches for changes via `WatchDirs`, detects reloads via `Revision` |
+| `cmd/gc/config_invocation_memo.go` | Loads the deployment layer via `LoadDeployment` (`loadCityDeploymentConfig`) for `gc bd` reads, the by-id split check, the pinned-bd resolver and the hosted Beads credential probe |
 | `cmd/gc/pool.go` | Reads `Agent.Pool` for scaling; deep-copies agent fields when spawning pool instances |
 | `cmd/gc/reconciler.go` | Reads resolved agent list and rig list to start/stop agents |
 | `internal/city/` | Uses `Load` for basic config operations (init, add rig) |

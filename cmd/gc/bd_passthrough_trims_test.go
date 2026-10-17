@@ -28,6 +28,7 @@ type bdTrimCounters struct {
 	passes      int64 // EnsureBuiltinRuntimeAssets calls, warm or cold
 	importScans int64 // missingRequiredBuiltinImports walks
 	composes    int64 // real compositions (memo hits excluded)
+	deployments int64 // real deployment-layer loads (memo hits excluded)
 	fallbacks   int64 // passthrough loads that fell back to the readiness pass
 }
 
@@ -37,6 +38,7 @@ func snapBdTrimCounters() bdTrimCounters {
 		passes:      builtinReadinessPasses.Load(),
 		importScans: requiredBuiltinImportScans.Load(),
 		composes:    composedCityConfigLoads.Load(),
+		deployments: deploymentCityConfigLoads.Load(),
 		fallbacks:   bdPassthroughReadinessFallbacks.Load(),
 	}
 }
@@ -47,6 +49,7 @@ func (c bdTrimCounters) since(before bdTrimCounters) bdTrimCounters {
 		passes:      c.passes - before.passes,
 		importScans: c.importScans - before.importScans,
 		composes:    c.composes - before.composes,
+		deployments: c.deployments - before.deployments,
 		fallbacks:   c.fallbacks - before.fallbacks,
 	}
 }
@@ -100,30 +103,32 @@ func writeBdTrimsCityConfig(t *testing.T, cityDir string) {
 }
 
 // TestGcBdPassthroughRunsNoFullConfigLoad pins what the passthrough pays before
-// it execs bd: one composition and nothing else. No full loader call (the
-// discarded rig-name load and doBd's own), no builtin readiness pass (cold or
-// warm, at the load or at the write guard's store open), no required-import
-// scan, and no fallback, for every way gc bd finds its city and for reads and
-// writes alike.
+// it execs bd: one deployment-layer load, a composition only where a write's
+// guards (or the step that decides the city) need one, and nothing else. No
+// full loader call (the discarded rig-name load and doBd's own), no builtin
+// readiness pass (cold or warm, at the load or at the write guard's store
+// open), no required-import scan, and no fallback, for every way gc bd finds
+// its city and for reads and writes alike.
 func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 	// helpersLoad marks the argvs whose guards open a store past the scope
-	// decision: the exact-id write guard (bdStoreForCityWithConfig) and the
-	// rig-prefix probe, whose rig env builders (scopeUsesProxiedDoltMode,
-	// scopePrefixForInit, desiredScopeDoltConfigStateForInit) call the full
-	// loader. Inside the scope those calls are memo hits that run no readiness
-	// pass and no import scan, which the other columns pin for every case.
+	// decision: the exact-id write guard (bdStoreForCityWithConfig) calls the
+	// full loader. Inside the scope those calls run no readiness pass and no
+	// import scan, which the other columns pin for every case. read marks the
+	// argvs loaded from the deployment layer alone, which compose nothing of
+	// their own.
 	argvs := []struct {
 		args        []string
 		helpersLoad bool
+		read        bool
 	}{
-		{[]string{"show", "demo-abc"}, false},
-		{[]string{"show", "demo-abc", "--json"}, false},
-		{[]string{"list", "--json"}, false},
-		{[]string{"show", "fe-abc"}, true},
-		{[]string{"update", "demo-abc", "--status", "in_progress"}, true},
-		{[]string{"close", "demo-abc"}, true},
-		{[]string{"heartbeat", "demo-abc"}, true},
-		{[]string{"create", "--title", "x"}, false},
+		{[]string{"show", "demo-abc"}, false, true},
+		{[]string{"show", "demo-abc", "--json"}, false, true},
+		{[]string{"list", "--json"}, false, true},
+		{[]string{"show", "fe-abc"}, false, true},
+		{[]string{"update", "demo-abc", "--status", "in_progress"}, true, false},
+		{[]string{"close", "demo-abc"}, true, false},
+		{[]string{"heartbeat", "demo-abc"}, true, false},
+		{[]string{"create", "--title", "x"}, false, false},
 	}
 	// noFullLoads marks the shapes that used to pay the discarded rig-name
 	// load (walk-up is the same decoration as GC_DIR; see
@@ -174,14 +179,23 @@ func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 		for _, argv := range argvs {
 			t.Run(shape.name+"/"+strings.Join(argv.args, " "), func(t *testing.T) {
 				cityDir := newBdTrimsTestCity(t)
+				// A reachable managed Dolt, as on a running city: without one the
+				// env builders take the recovery path, which loads the city to
+				// enumerate the scopes a health check visits.
+				writeReachableManagedDoltState(t, cityDir)
 				args := append(shape.setup(t, cityDir), argv.args...)
 				before := snapBdTrimCounters()
 				var stdout, stderr bytes.Buffer
 				code := doBd(args, &stdout, &stderr)
 				got := snapBdTrimCounters().since(before)
-				want := bdTrimCounters{fullLoads: got.fullLoads, passes: shape.passes, composes: 1}
+				want := bdTrimCounters{fullLoads: got.fullLoads, passes: shape.passes, composes: 1, deployments: 1}
 				if shape.noFullLoads && !argv.helpersLoad {
 					want.fullLoads = 0
+				}
+				// A read composes only where the step that decides the city
+				// loads it (the shapes that run a pass).
+				if argv.read && shape.passes == 0 {
+					want.composes = 0
 				}
 				if got != want {
 					t.Fatalf("doBd(%q) exit %d cost %+v, want %+v; stderr=%q", args, code, got, want, stderr.String())
@@ -197,7 +211,8 @@ func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 // TestBdPassthroughConfigFallsBackToTheFullLoadOnACacheCompositionRejects pins
 // the passthrough loader's one self-heal: a bundled cache whose marker
 // composition rejects. The loader runs the readiness pass, the pass rewrites
-// the cache, and the second composition gives the config a full load gives.
+// the cache, and the second composition gives the config a full load gives. A
+// write is what composes; a read reads no pack cache and never reaches it.
 func TestBdPassthroughConfigFallsBackToTheFullLoadOnACacheCompositionRejects(t *testing.T) {
 	cityDir := newBdTrimsTestCity(t)
 	source, ok := builtinpacks.Source("bd")
@@ -223,8 +238,8 @@ func TestBdPassthroughConfigFallsBackToTheFullLoadOnACacheCompositionRejects(t *
 
 	before := snapBdTrimCounters()
 	var stdout, stderr bytes.Buffer
-	if code := doBd([]string{"show", "demo-abc"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("doBd(show) = %d with a cache the readiness pass heals; stderr=%q", code, stderr.String())
+	if code := doBd([]string{"update", "demo-abc", "--status", "in_progress"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doBd(update) = %d with a cache the readiness pass heals; stderr=%q", code, stderr.String())
 	}
 	got := snapBdTrimCounters().since(before)
 	if got.fallbacks != 1 || got.passes != 1 {
@@ -431,10 +446,12 @@ func TestGcBdStillPrintsConfigLoadWarnings(t *testing.T) {
 }
 
 // TestGcBdValidationErrorsMatchTheFullLoad pins that a config which composes
-// but fails validation is not mistaken for a cache problem: no fallback pass,
-// and the same exit code and text the full load gives.
+// but fails validation is not mistaken for a cache problem: a write gets no
+// fallback pass, and the same exit code and text the full load gives. A read
+// loads only the deployment layer, which the failing pack is not part of, so
+// the same city still answers it.
 func TestGcBdValidationErrorsMatchTheFullLoad(t *testing.T) {
-	run := func(legacy bool) (int, string, bdTrimCounters) {
+	run := func(legacy bool, args ...string) (int, string, bdTrimCounters) {
 		clearGCEnv(t)
 		newSingleExecTestCity(t)
 		cityDir := writeRuntimeCityFixture(t, "subprocess")
@@ -445,15 +462,16 @@ func TestGcBdValidationErrorsMatchTheFullLoad(t *testing.T) {
 		}
 		before := snapBdTrimCounters()
 		var stdout, stderr bytes.Buffer
-		code := doBd([]string{"show", "demo-abc"}, &stdout, &stderr)
+		code := doBd(args, &stdout, &stderr)
 		return code, strings.ReplaceAll(stderr.String(), cityDir, "$CITY"), snapBdTrimCounters().since(before)
 	}
+	write := []string{"update", "demo-abc", "--status", "in_progress"}
 
-	oldCode, oldStderr, _ := run(true)
+	oldCode, oldStderr, _ := run(true, write...)
 	// The one intended difference: the legacy full load also printed the
 	// missing-builtin-import hint.
 	oldStderr = dropMissingBuiltinImportHint(oldStderr)
-	newCode, newStderr, got := run(false)
+	newCode, newStderr, got := run(false, write...)
 	if oldCode != newCode || oldStderr != newStderr {
 		t.Fatalf("validation failure differs:\n old: %d %q\n new: %d %q", oldCode, oldStderr, newCode, newStderr)
 	}
@@ -463,18 +481,25 @@ func TestGcBdValidationErrorsMatchTheFullLoad(t *testing.T) {
 	if got.fallbacks != 0 || got.passes != 0 {
 		t.Fatalf("a validation error ran fallbacks = %d, passes = %d; want 0 and 0", got.fallbacks, got.passes)
 	}
+
+	if code, stderr, _ := run(false, "show", "demo-abc"); code != 0 {
+		t.Fatalf("a read on a city whose pack fails validation exited %d, want 0 (it loads no pack); stderr=%q", code, stderr)
+	}
 }
 
 // useLegacyBdPassthroughSeams puts doBd back on the loaders it used before the
-// trims: the general resolver (with its rig decoration) and the full load. It
-// returns the restore, which the caller runs as soon as its legacy run ends.
+// trims: the general resolver (with its rig decoration) and the full load, for
+// reads and writes alike. It returns the restore, which the caller runs as soon
+// as its legacy run ends.
 func useLegacyBdPassthroughSeams() (restore func()) {
-	origResolve, origLoad := resolveBdCityPath, loadBdPassthroughConfig
+	origResolve, origLoad, origRead := resolveBdCityPath, loadBdPassthroughConfig, loadBdReadConfig
 	resolveBdCityPath = resolveCity
-	loadBdPassthroughConfig = func(cityPath string, w io.Writer) (*config.City, error) {
+	fullLoad := func(cityPath string, w io.Writer) (*config.City, error) {
 		return loadCityConfig(cityPath, w)
 	}
-	return func() { resolveBdCityPath, loadBdPassthroughConfig = origResolve, origLoad }
+	loadBdPassthroughConfig = fullLoad
+	loadBdReadConfig = fullLoad
+	return func() { resolveBdCityPath, loadBdPassthroughConfig, loadBdReadConfig = origResolve, origLoad, origRead }
 }
 
 // TestResolveCityPathOnlyNamesTheSameCity pins resolveCityPathOnly against
