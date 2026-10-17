@@ -64,3 +64,28 @@ func loadCityConfigForBdPassthrough(cityPath string, warnings io.Writer) (*confi
 	applyFeatureFlags(cfg)
 	return cfg, nil
 }
+
+// loadCityConfigForBdRead is the gc bd passthrough's config load for a read
+// verb (bdReadVerbs): the city's deployment layer, with no pack read.
+//
+// A read routes on rigs and their prefixes, the workspace prefix, [beads] and
+// [storage], and the env builders before its exec read rigs, workspace.env and
+// the storage binding. LoadDeployment composes each of those as the full
+// composition does. A write keeps loadCityConfigForBdPassthrough, because its
+// guards open stores from the composed config.
+//
+// A read does not validate what it does not compose: a pack that fails to
+// compose or to validate fails every full load, a gc bd write's among them,
+// but not a bd read. Like the passthrough loader, it defers the builtin
+// readiness pass for the rest of the invocation; nothing a read routes on comes
+// from builtin pack content.
+func loadCityConfigForBdRead(cityPath string, warnings io.Writer) (*config.City, error) {
+	cfg, prov, err := loadCityDeploymentConfig(cityPath)
+	if err != nil {
+		return nil, err
+	}
+	deferBuiltinReadinessForInvocation(cityPath)
+	emitLoadCityConfigWarnings(warnings, prov)
+	applyFeatureFlags(cfg)
+	return cfg, nil
+}
