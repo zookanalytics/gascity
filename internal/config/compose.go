@@ -913,9 +913,12 @@ func mergeIncludeFragments(fs fsys.FS, root *City, includes []string, cityRoot s
 // fragments, the rig patches they declare and the .gc/site.toml binding. It
 // reads no pack, neither the city's own pack.toml nor any import: a pack
 // declares no workspace, rigs, [beads], [storage], [dolt] or [daemon], and
-// composing it never writes a rig's fields. So for a city whose full
-// composition succeeds, the rigs, workspace, [beads], [storage], [dolt] and
-// [daemon] this returns are the ones LoadWithIncludesOptions returns. What
+// expanding one writes no rig field. So for a city whose full composition
+// succeeds, the rigs, workspace, [beads], [storage], [dolt] and [daemon] this
+// returns are the ones LoadWithIncludesOptions returns, except for the pack
+// includes of the rigs and the workspace. Those stay as city.toml and its
+// fragments wrote them, while the full composition resolves a named pack to
+// its cache path and adds the city pack's includes to the workspace's. What
 // packs contribute (agents, formulas, orders, providers, named sessions) is
 // absent, and so are the agent, provider and named-session patches that
 // target it.

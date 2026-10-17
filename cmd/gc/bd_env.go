@@ -864,7 +864,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	// old one; skip caching so the next call reloads. A memo answer inside an
 	// invocation scope can predate both stats, which this cannot see; only
 	// the same one-shot command reads such an entry again, and it already
-	// shares that composition.
+	// shares that load.
 	if after, ok := statHostedCredentialProbeSource(cityConfigPath); !ok || after != before {
 		cacheable = false
 	}

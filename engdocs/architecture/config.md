@@ -134,6 +134,9 @@ rig patches of step 7, and applies the `.gc/site.toml` binding. It reads
 no pack. A pack declares no workspace, rigs, `[beads]`, `[storage]`,
 `[dolt]` or `[daemon]`, and expanding one writes no rig field, so for a
 city that composes, those fields equal what `LoadWithIncludes` returns.
+The exception is the pack includes of the rigs and the workspace, which
+stay as written: `LoadWithIncludes` resolves a named pack to its cache
+path and adds the root pack's includes to the workspace's.
 What packs contribute (agents, formulas, orders, providers, named
 sessions) is absent. It is for callers that read only deployment facts,
 such as the `gc bd` read path and the bd environment it builds.
