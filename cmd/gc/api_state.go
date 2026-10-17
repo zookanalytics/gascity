@@ -73,14 +73,21 @@ type controllerState struct {
 	// and has no running sessions: every cache this state owns then skips its
 	// periodic reconcile, so nothing touches a store whose pair was retired.
 	beadsQuiescent *atomic.Bool
+	// storeWork counts the controller's store work in flight off the tick:
+	// a committed close's completion fact and autoclose, the confirming read
+	// of every other bead.closed, and autoclose sweep passes. A quiescent city
+	// retires its bd pairs only once it is zero (enterBeadsQuiescenceIfDue):
+	// work that passed its quiescence check before the city went quiescent is
+	// still reading, and its next read would restart a pair retired under it.
+	storeWork atomic.Int64
 	// suspendedRigs is the set of rigs the city runtime last saw suspended,
 	// published every tick. A suspended rig's cache skips its periodic
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
-	// onDeathGate is the city runtime's on_death start interlock, set when
-	// its inventory lane starts; nil holds nothing.
-	onDeathGate atomic.Pointer[onDeathGate]
+	// pendingPoke pokes the city runtime's pending-interaction lane; nil
+	// when the lane is not running (pending_interaction_lane.go).
+	pendingPoke atomic.Pointer[func(sessionID string)]
 	cfg         *config.City
 	// rawCfg is the raw (pre-expansion, site-bound) config snapshot captured
 	// at the same generation as cfg. It is the basis the mutation gate uses
@@ -123,8 +130,18 @@ type controllerState struct {
 	adapterReg             *extmsg.AdapterRegistry
 	maintenanceLoop        *supervisor.StoreMaintenanceLoop // nil when [maintenance.dolt] enabled=false
 	updateMu               sync.Mutex                       // serializes rebuild+swap so stale reloads cannot overtake newer mutations
-	beadEventStartSeq      uint64
-	beadEventStartSeqOK    bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
+	// publishMu is the publication transaction. A runtime reload holds it
+	// across its staleness check and swap; an API config mutation holds it
+	// from snapshotting the config files through its write, validating
+	// refresh, pending-revision mark and any rollback (mutateAndPoke). So a
+	// reload can neither swap an older config over a mutation that refreshed
+	// in between nor publish or cache a rejected write before its rollback,
+	// and concurrent mutations cannot roll back over each other. Lock order:
+	// configTransactionMu, then publishMu, then the configedit.Editor lock,
+	// then updateMu, then mu.
+	publishMu           sync.Mutex
+	beadEventStartSeq   uint64
+	beadEventStartSeqOK bool // false when LatestSeq errored at construction; 0+true = genuinely empty log
 
 	// completionsDeltaIndex is the controller's warm completion-fact
 	// idempotency record, shared by the tick delta pass and the close path
@@ -155,9 +172,15 @@ type controllerState struct {
 	// configTransactionMu fences multi-file config writes (API pack import
 	// add/remove and rig provisioning) from their first file write through
 	// controller publication. The runtime reload only TryLocks it around its
-	// candidate load, so it never reads a half-written generation and never
-	// stalls the reconciler behind a slow import. Lock order: this mutex, then
-	// the configedit.Editor lock.
+	// candidate load, so it never reads a half-written generation and its read
+	// never waits behind a slow import. A transaction also holds publishMu for
+	// its whole body, pack fetch or rig provisioning included, so a reload whose
+	// candidate was read before the transaction began, and every other API
+	// config edit, waits at publication until the transaction ends. That stall
+	// is accepted: it is bounded by the transaction, and publication then
+	// rejects a candidate the transaction's generation superseded. Lock order:
+	// configTransactionMu, then publishMu, then the configedit.Editor lock,
+	// then updateMu, then mu.
 	configTransactionMu sync.Mutex
 
 	// rolloutFlags is the boot-latched rollout-gate snapshot: written once in
@@ -515,6 +538,36 @@ func (cs *controllerState) setSuspendedRigs(rigs map[string]bool) {
 		return
 	}
 	cs.suspendedRigs.Store(&rigs)
+}
+
+// beginStoreWork counts one piece of store work as in flight (see storeWork)
+// and returns the func that ends it.
+func (cs *controllerState) beginStoreWork() (end func()) {
+	cs.storeWork.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { cs.storeWork.Add(-1) }) }
+}
+
+// trackStoreWork wraps fn as store work counted from now, when it is
+// dispatched, until it returns: a run queued just before the city goes
+// quiescent holds the retire as much as one already reading.
+func (cs *controllerState) trackStoreWork(fn func()) func() {
+	end := cs.beginStoreWork()
+	return func() {
+		defer end()
+		fn()
+	}
+}
+
+// storeWorkInFlight reports whether any store work is in flight.
+func (cs *controllerState) storeWorkInFlight() bool {
+	return cs != nil && cs.storeWork.Load() > 0
+}
+
+// storesQuiescent reports whether the city is quiescent (see beadsQuiescent):
+// its stores take no read until it resumes.
+func (cs *controllerState) storesQuiescent() bool {
+	return cs != nil && cs.beadsQuiescent != nil && cs.beadsQuiescent.Load()
 }
 
 // setBeadsQuiescent records whether the city is quiescent (suspended, with no
@@ -962,25 +1015,53 @@ func (cs *controllerState) applyBeadEventToStores(evt events.Event) {
 	}
 	wake.OnBeadEvent(evt, snapshot)
 	if evt.Type == events.BeadClosed && evt.Subject != "" && len(stores) > 0 {
-		if evt.Actor == cacheReconcileActor {
-			beadCloseAutocloseDispatch(func() { cs.applyInferredClose(evt, stores, storeRef) })
+		if evt.Actor == cacheLocalActor {
+			cs.applyCommittedClose(evt, stores[0], storeRef)
 			return
 		}
-		// A local close, or a writer's own bead.closed, is a committed close.
-		if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
-			cs.emitCompletedFact(step, evt.Actor)
-		}
-		cs.runBeadCloseAutoclose(evt.Subject, stores[0], storeRef)
+		beadCloseAutocloseDispatch(cs.trackStoreWork(func() { cs.applyInferredClose(evt, stores, storeRef) }))
 	}
 }
 
-// applyInferredClose runs a cache-inferred bead.closed's durable effects only
-// if a live read returns the row closed: the scan can evict an open row and
-// synthesize its close (mc-zndi7.43, .56). The fact derives from that read,
-// not from the inferred payload. A row that is open or gone gets nothing. An
-// unreadable row gets nothing yet: the autoclose sweep re-reads it, and the
-// completions sweep backstops its fact.
+// applyCommittedClose runs a committed bead.closed's durable effects: the
+// completion fact, then autoclose. Only the controller's own cache write
+// (actor cacheLocalActor) is a committed close: the backing accepted it, so
+// its payload is trusted. The actor string itself is not authenticated: a
+// writer that can append to the event log under that actor is trusted too,
+// so this is hygiene against honest mistakes, not a trust boundary. Every
+// other bead.closed takes applyInferredClose. Both effects read (the fact
+// reads the run's root from the graph store), so a quiescent city runs
+// neither yet: the sweep confirms the close after resume and records the
+// fact then. That fact carries the actor of the pass that records it
+// (autoclose-sweep, or execution-reconcile when the completions lane reaches
+// the row first), not the writer's. A row that no longer reads closed by then, reopened or
+// deleted, gets none: both passes record facts only for rows that read closed.
+// The fact's read is store work (storeWork) from before the quiescence check,
+// so a city that goes quiescent while it reads keeps its pairs until it ends.
+func (cs *controllerState) applyCommittedClose(evt events.Event, store beads.Store, storeRef string) {
+	defer cs.beginStoreWork()()
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
+	if step, ok := beads.DecodeBeadEventPayload(evt.Payload); ok {
+		cs.emitCompletedFact(step, evt.Actor)
+	}
+	cs.runBeadCloseAutoclose(evt.Subject, store, storeRef)
+}
+
+// applyInferredClose runs a bead.closed's durable effects only if a live read
+// returns the row closed. It serves every actor but cacheLocalActor: a
+// cache-reconcile close is inferred from a read that can be stale (the scan
+// can evict an open row and synthesize its close, mc-zndi7.43, .56), and any
+// other actor's close (a one-shot CLI emitter, a bd hook's `gc event emit`)
+// is a claim anyone who can append to the event log could make. The
+// fact derives from the live read, never from the payload. A row that is open
+// or gone gets nothing. An unreadable row gets nothing yet: the autoclose
+// sweep re-reads it, and the completions sweep backstops its fact.
 func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.Store, storeRef string) {
+	if cs.deferIfQuiescent(evt.Subject) {
+		return
+	}
 	store, live, err := liveReadOwner(stores, evt.Subject)
 	switch confirmInferredClose(live, err) {
 	case closeConfirmed:
@@ -988,8 +1069,19 @@ func (cs *controllerState) applyInferredClose(evt events.Event, stores []beads.S
 		finished := cs.beadCloseAutoclose(evt.Subject, store, storeRef)()
 		cs.autocloseSweepOf().settle(evt.Subject, finished, time.Now())
 	case closeUnconfirmed:
-		cs.autocloseSweepOf().deferID(evt.Subject, time.Now())
+		cs.autocloseSweepOf().settle(evt.Subject, false, time.Now())
 	}
+}
+
+// deferIfQuiescent owes id's close to the sweep, reading nothing, when the city
+// is quiescent, and reports whether it did. The close is settled unfinished, so
+// a handled mark left by an earlier close of id cannot make the sweep skip it.
+func (cs *controllerState) deferIfQuiescent(id string) bool {
+	if !cs.storesQuiescent() {
+		return false
+	}
+	cs.autocloseSweepOf().settle(id, false, time.Now())
+	return true
 }
 
 // liveReadOwner reads id live from the store that holds it. stores is
@@ -1052,9 +1144,23 @@ func (cs *controllerState) autocloseStoreRefLocked(beadID string) string {
 // bead via the controller's store. Replaces the shell on_close hook chain that
 // spawned gc subprocesses per bead write (gastownhall/gascity#3248). The bead
 // is marked handled only once the run has finished its reads (settle).
+//
+// A run the dispatcher starts once the city is quiescent reads nothing: a
+// close that lands as the city drains (a stopped session's wisp) is owed to
+// the sweep, which confirms it after resume. Read now, it would restart the
+// bd pair the quiescent city just retired. The check is not atomic with the
+// reads it guards: a suspend that lands after it still completes the run, as
+// it does the row a sweep pass has in flight. So the run is store work
+// (storeWork) from dispatch until it returns, and the quiescent city retires
+// its pairs only once no such run is in flight.
 func (cs *controllerState) runBeadCloseAutoclose(beadID string, store beads.Store, storeRef string) {
 	run := cs.beadCloseAutoclose(beadID, store, storeRef)
-	beadCloseAutocloseDispatch(func() { cs.autocloseSweepOf().settle(beadID, run(), time.Now()) })
+	beadCloseAutocloseDispatch(cs.trackStoreWork(func() {
+		if cs.deferIfQuiescent(beadID) {
+			return
+		}
+		cs.autocloseSweepOf().settle(beadID, run(), time.Now())
+	}))
 }
 
 // autocloseRefusalAttempts bounds the runs one trigger makes while a fenced
@@ -1251,7 +1357,11 @@ func closeBeadStoreHandle(store beads.Store) error {
 	if store == nil {
 		return nil
 	}
-	if base, _, ok := unwrapBeadPolicyStore(store); ok {
+	if base, policy, ok := unwrapBeadPolicyStore(store); ok {
+		if policy.borrowed {
+			// The invocation memo owns the store and closes it at exit.
+			return nil
+		}
 		return closeBeadStoreHandle(base)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
@@ -1303,6 +1413,8 @@ func storePointerKey(store beads.Store) (uintptr, bool) {
 // or on-disk config won while the reload was preparing it) and leaves the
 // controller state untouched; the caller must then keep its own generation too.
 func (cs *controllerState) updateFromRuntime(cfg *config.City, sp runtime.Provider, revision string) bool {
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	if cs.configMutationPending.Load() {
 		matchesPending, stale := cs.runtimeUpdateStatusForPendingMutation(revision)
 		if stale {
@@ -1820,14 +1932,6 @@ func (cs *controllerState) IsQuarantined(sessionName string) bool {
 	return ct.isQuarantined(sessionName, time.Now())
 }
 
-// OnDeathHookPending reports whether sessionName's on_death hook is queued
-// or running, so an API start must leave it to the reconciler.
-func (cs *controllerState) OnDeathHookPending(sessionName string) bool {
-	return cs.onDeathGate.Load().Pending(sessionName)
-}
-
-var _ api.OnDeathHookGate = (*controllerState)(nil)
-
 // ClearCrashHistory removes in-memory crash tracking for a session.
 func (cs *controllerState) ClearCrashHistory(sessionName string) {
 	cs.mu.RLock()
@@ -1869,7 +1973,9 @@ func (cs *controllerState) loadRawSnapshot() *config.City {
 // as cs.cfg, so reads are O(1) (no per-request TOML parse) and agree with the
 // mutation gate. If a swap-time load failed, the prior snapshot is retained,
 // and on the very first reads before any swap-time capture it falls back to a
-// one-time load so provenance is never decided on a nil-raw heuristic.
+// one-time load so provenance is never decided on a nil-raw heuristic. That
+// load holds publishMu like a swap-time capture, so it never caches an API
+// mutation's write before the mutation is validated.
 func (cs *controllerState) RawConfig() *config.City {
 	cs.mu.RLock()
 	cached := cs.rawCfg
@@ -1879,6 +1985,14 @@ func (cs *controllerState) RawConfig() *config.City {
 	}
 	// First-read fallback: no snapshot captured yet. Load once and memoize so
 	// the read path still uses the gate's basis rather than nil.
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
+	cs.mu.RLock()
+	cached = cs.rawCfg
+	cs.mu.RUnlock()
+	if cached != nil {
+		return cached
+	}
 	raw := cs.loadRawSnapshot()
 	if raw == nil {
 		return nil
@@ -1924,6 +2038,12 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	cs.mu.RLock()
 	defer cs.mu.RUnlock()
 	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+}
+
+// NudgeQueue returns the city's nudge queue over its nudges-class store, for the
+// API's deferred submits and wait-nudge withdrawals.
+func (cs *controllerState) NudgeQueue() api.NudgeQueue {
+	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
 }
 
 // SessionsBeadStore returns the store backing session-class beads. At the default
@@ -2059,8 +2179,10 @@ func (cs *controllerState) DisableOrder(name, rig string) error {
 // packs.lock, and sometimes city.toml) as one config transaction:
 //
 //   - it holds the config transaction fence, so the runtime reload cannot read
-//     the generation while it is half-written, and the configedit.Editor lock,
-//     so it serializes with every other API config mutation;
+//     the generation while it is half-written, the publication lock, so no
+//     reload or other API mutation publishes until it ends, and the
+//     configedit.Editor lock, so it serializes with every other API config
+//     mutation;
 //   - if fn fails after writing some of the files, the pack files are restored,
 //     so a half-written pack set never stays on disk for a later reload;
 //   - on success the generation is published to the controller state (refresh,
@@ -2076,7 +2198,7 @@ func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
 				return fmt.Errorf("snapshotting pack config files: %w", err)
 			}
 		}
-		return cs.mutateAndPoke(func() error {
+		return cs.mutateAndPokeLocked(func() error {
 			err := fn()
 			if err != nil && packFiles != nil {
 				if restoreErr := packFiles.restore(); restoreErr != nil {
@@ -2088,12 +2210,18 @@ func (cs *controllerState) SerializeConfigWrite(fn func() error) error {
 	})
 }
 
-// withConfigTransaction runs fn holding the config transaction fence and the
-// configedit.Editor lock. fn must not call Editor methods that take the
-// Editor lock themselves.
+// withConfigTransaction runs fn holding the config transaction fence, the
+// publication lock and the configedit.Editor lock, taken in that order: a plain
+// API edit holds the publication lock when its mutation takes the Editor lock,
+// so taking the Editor lock first would deadlock against it. None of the three
+// locks is reentrant, so fn must not call mutateAndPoke, enter another config
+// transaction, or call Editor methods that take the Editor lock themselves; it
+// publishes only through mutateAndPokeLocked.
 func (cs *controllerState) withConfigTransaction(fn func() error) error {
 	cs.configTransactionMu.Lock()
 	defer cs.configTransactionMu.Unlock()
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
 	return cs.editor.Do(fn)
 }
 
@@ -2189,8 +2317,8 @@ func (cs *controllerState) FormulaSource(name string) ([]byte, bool, error) {
 // never silent. If a prior source exists but cannot be read, the mutation aborts
 // before any write, since rollback would have no basis to restore it.
 func (cs *controllerState) UpsertFormula(name string, content []byte) error {
-	// The read-prior -> write -> refresh -> rollback sequence is not atomic across
-	// concurrent editor ops (the pre-existing mutateAndPoke rollback race class):
+	// The formula source backup and rollback sit outside mutateAndPoke's
+	// city-config publication transaction. Across concurrent formula edits,
 	// a same-name racing upsert could see this rollback's delete-on-no-prior erase
 	// its committed file. Very low risk on a single-operator control plane; a
 	// coarse per-city mutation lock is deferred as out of scope for this change.
@@ -2360,16 +2488,17 @@ func realPathForContainment(target string) (string, error) {
 }
 
 // CreateRig provisions a rig through internal/rig.Provision (Decision 7) and
-// commits it to controller state through the standard mutateAndPoke handshake.
+// commits it to controller state through the mutateAndPokeLocked handshake.
 //
-// Provision runs AS the mutateAndPoke mutate closure: a mid-provision failure
-// rolls back through Provision's own topology snapshot (mutateAndPoke returns
-// the mutate error without touching its config snapshot), while a post-write
-// refresh failure rolls back through mutateAndPoke's config snapshot. The two
-// restore layers never overlap. The whole handshake runs under the config
-// transaction (withConfigTransaction) so a concurrent config edit cannot
-// interleave with Provision's read-modify-append of city.toml, and the runtime
-// reload cannot read the rig's half-written files.
+// Provision runs AS the mutateAndPokeLocked mutate closure: a mid-provision
+// failure rolls back through Provision's own topology snapshot
+// (mutateAndPokeLocked returns the mutate error without touching its config
+// snapshot), while a post-write refresh failure rolls back through
+// mutateAndPokeLocked's config snapshot. The two restore layers never overlap.
+// The whole handshake runs under the config transaction (withConfigTransaction)
+// so a concurrent config edit cannot interleave with Provision's
+// read-modify-append of city.toml, and the runtime reload cannot read the rig's
+// half-written files.
 func (cs *controllerState) CreateRig(r config.Rig) error {
 	rigPath := strings.TrimSpace(r.Path)
 	if rigPath == "" {
@@ -2672,7 +2801,7 @@ func (cs *controllerState) TeardownPartialRig(ctx context.Context, m api.RigProv
 		}
 	}
 	// Routes repair (best-effort, non-gating): after a refresh-failure rollback
-	// mutateAndPoke restores city.toml/site.toml but not routes.jsonl, so
+	// mutateAndPokeLocked restores city.toml/site.toml but not routes.jsonl, so
 	// regenerate routes from the now-restored on-disk config. A load/write
 	// failure here is logged, never joined into the teardown error.
 	if err := cs.regenerateRoutesBestEffort(); err != nil {
@@ -2735,8 +2864,8 @@ func (cs *controllerState) sweepOrphanRigProvisions(ctx context.Context) error {
 }
 
 // provisionRigLocked runs the config-write half of a rig add under the per-city
-// guard (withConfigTransaction → mutateAndPoke). r.Path must already be resolved
-// absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
+// guard (withConfigTransaction → mutateAndPokeLocked). r.Path must already be
+// resolved absolute. onStep, when non-nil, wires rig.Deps.OnStep so the caller can
 // project provisioning progress onto events; nil onStep produces the exact
 // git-blind behavior CreateRig has always had. It returns the provisioned rig.
 func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, detail string, warn bool)) (config.Rig, error) {
@@ -2755,7 +2884,7 @@ func (cs *controllerState) provisionRigLocked(r config.Rig, onStep func(step, de
 
 	var provisionedRig config.Rig
 	if err := cs.withConfigTransaction(func() error {
-		return cs.mutateAndPoke(func() error {
+		return cs.mutateAndPokeLocked(func() error {
 			var err error
 			provisionedRig, err = cs.provisionRigWrite(r, depOnStep)
 			return err
@@ -2794,13 +2923,14 @@ func rigConfigHasRigNamed(cfg *config.City, name string) bool {
 }
 
 // provisionRigWrite performs the config-mutating half of a git_url rig add. It
-// MUST run inside cs.withConfigTransaction → cs.mutateAndPoke (the per-city write
-// lock plus refresh/poke): it loads the raw for-edit config, re-asserts the
-// duplicate-name guard authoritatively under the lock, registers the city dolt
-// config for the beads-init path, and runs rig.Provision. A best-effort
-// PostProvision failure is logged, not returned, so mutateAndPoke still commits
-// the rig that was written to disk — returning it would make mutateAndPoke treat
-// the committed rig as "nothing committed" and split-brain disk vs controller.
+// MUST run inside cs.withConfigTransaction → cs.mutateAndPokeLocked (the
+// per-city write lock plus refresh/poke): it loads the raw for-edit config,
+// re-asserts the duplicate-name guard authoritatively under the lock, registers
+// the city dolt config for the beads-init path, and runs rig.Provision. A
+// best-effort PostProvision failure is logged, not returned, so
+// mutateAndPokeLocked still commits the rig that was written to disk —
+// returning it would make mutateAndPokeLocked treat the committed rig as
+// "nothing committed" and split-brain disk vs controller.
 func (cs *controllerState) provisionRigWrite(r config.Rig, depOnStep func(rig.ProvisionStep)) (config.Rig, error) {
 	// Load the raw for-edit config (NOT cs.cfg, which is composed/expanded):
 	// writing city.toml from the composed snapshot would bake expansions into the
@@ -2879,9 +3009,9 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 // .beads/.env root marker. Every step is best-effort — a failure is logged, never
 // returned, because the rig is already committed to disk. It deliberately DROPS the
 // CLI's controller-reload + store-accessible wait: G17 forbids the controller
-// dialing its own socket mid-request, and mutateAndPoke's refresh already makes the
-// controller see the rig. Split out of the Deps literal to keep provisionRigWrite's
-// nesting shallow; the behavior is unchanged.
+// dialing its own socket mid-request, and mutateAndPokeLocked's refresh already
+// makes the controller see the rig. Split out of the Deps literal to keep
+// provisionRigWrite's nesting shallow; the behavior is unchanged.
 func (cs *controllerState) rigPostProvisionLocal(rigName string, pc rig.ProvisionContext) {
 	if err := ensureGitignoreEntries(fsys.OSFS{}, pc.RigPath, rigGitignoreEntries); err != nil {
 		log.Printf("api: rig create: writing .gitignore: %v", err)
@@ -3228,6 +3358,19 @@ func (s *configMutationSnapshot) restore() error {
 }
 
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
+	// Keep unvalidated writes and rollback inside the publication transaction.
+	// A reload must not cache a rejected raw patch while publishing an older
+	// accepted composed config. This also serializes config snapshots across
+	// concurrent API edits, so rollback cannot overwrite another edit.
+	cs.publishMu.Lock()
+	defer cs.publishMu.Unlock()
+	return cs.mutateAndPokeLocked(mutate)
+}
+
+// mutateAndPokeLocked is mutateAndPoke for a config transaction, which
+// already holds publishMu (withConfigTransaction takes it before the
+// configedit.Editor lock).
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
 		var err error
@@ -3240,6 +3383,9 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		return err
 	}
 	revision, err := cs.refreshConfigSnapshot()
+	if err == nil {
+		cs.markConfigMutationPending(revision)
+	}
 	if err != nil {
 		if snapshot != nil {
 			if restoreErr := snapshot.restore(); restoreErr != nil {
@@ -3249,7 +3395,6 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	cs.markConfigMutationPending(revision)
 	if cs.configDirty != nil {
 		cs.configDirty.Store(true)
 	}

@@ -531,6 +531,7 @@ case "$1" in
     ;;
 esac
 `)
+	writeOfflineBrew(t, binDir)
 
 	return integrationShardFixture{
 		binDir:      binDir,

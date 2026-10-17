@@ -1847,6 +1847,7 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:  "recent run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:test-order"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1889,6 +1890,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:     "recent run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(-30 * time.Minute),
 	}); err != nil {
@@ -1915,6 +1917,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	store.reset()
 	if _, err := store.Create(beads.Bead{
 		Title:     "manual run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(20 * time.Minute),
 	}); err != nil {
@@ -2689,6 +2692,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	// Seed a recent exec run.
 	_, err := store.Create(beads.Bead{
 		Title:  "order:wasteland-poll",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:wasteland-poll"},
 	})
 	if err != nil {
@@ -3982,6 +3986,28 @@ func TestSweepOrphanedOrderTracking_OnlyClosedBeads(t *testing.T) {
 	}
 	if closed != 0 {
 		t.Fatalf("closed = %d, want 0", closed)
+	}
+}
+
+func TestSweepStaleOrderTrackingAcrossStoresIgnoresRecordedRunTimeout(t *testing.T) {
+	// gc order sweep-tracking applies --stale-after alone: it closes a
+	// tracking bead older than --stale-after even while the timeout its run
+	// records has not passed. Only the controller's watchdog waits that out.
+	store := beads.NewMemStore()
+	run, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("long-pass", orders.RunOpts{Timeout: time.Hour})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+
+	result, err := sweepStaleOrderTrackingAcrossStores([]beads.Store{store}, nil, run.CreatedAt.Add(defaultOrderTrackingSweepStaleAfter+time.Second), defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("sweepStaleOrderTrackingAcrossStores: %v", err)
+	}
+	if result.trackingClosed != 1 {
+		t.Fatalf("closed = %d, want 1", result.trackingClosed)
+	}
+	if got := orderTrackingStatus(t, store, run.ID); got != "closed" {
+		t.Fatalf("tracking status past --stale-after inside the run's recorded timeout = %s, want closed", got)
 	}
 }
 
@@ -6857,6 +6883,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	// Seed a recent run for rig-A's order (scoped name).
 	_, err := store.Create(beads.Bead{
 		Title:  "order run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:db-health:rig:rig-a"},
 	})
 	if err != nil {
@@ -7305,6 +7332,7 @@ pool = "worker"
 	}
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:rig-digest:rig:frontend"},
 	}); err != nil {
 		t.Fatalf("Create(legacy city run): %v", err)
@@ -7391,7 +7419,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:release-watch:rig:frontend",
+		failLabel: "order-run:release-watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -7613,6 +7641,7 @@ pool = "worker"
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "existing work",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:file-order"},
 	}); err != nil {
 		t.Fatalf("Create(existing work): %v", err)
@@ -8082,6 +8111,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	// Seed an open wisp (non-tracking bead) for this order.
 	_, err := store.Create(beads.Bead{
 		Title:  "mol-do-work", // not "order:my-auto" → counts as real work
+		Type:   "molecule",    // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:my-auto"},
 	})
 	if err != nil {
@@ -8521,6 +8551,75 @@ func TestStoreHasOpenDescendantsMembershipSkipsTransientNotification(t *testing.
 	}
 	if has {
 		t.Fatal("open stamped transient-notification bead must not count as in-flight on the membership fast path when skip=isTransientNotificationBead")
+	}
+}
+
+// rootIDQueryRecordingStore records every List query that filters on
+// gc.root_bead_id. A Dolt-backed store reads every row's metadata for a
+// membership query that includes closed beads, and only the non-closed rows
+// for one that excludes them, so tests use it to pin the status scope a
+// membership lookup asks for.
+type rootIDQueryRecordingStore struct {
+	beads.Store
+	rootIDQueries []beads.ListQuery
+}
+
+func (s *rootIDQueryRecordingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata[beadmeta.RootBeadIDMetadataKey] != "" {
+		s.rootIDQueries = append(s.rootIDQueries, q)
+	}
+	return s.Store.List(q)
+}
+
+// TestStoreOpenDescendantIDsListsOnlyOpenMembers pins the membership fast path
+// to open beads. The caller discards closed members, so a lookup that includes
+// them only buys a scan of every closed row's metadata.
+func TestStoreOpenDescendantIDsListsOnlyOpenMembers(t *testing.T) {
+	store := &rootIDQueryRecordingStore{Store: beads.NewMemStore()}
+
+	root, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Type:   "molecule",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(done.ID); err != nil {
+		t.Fatalf("close member: %v", err)
+	}
+	open, err := store.Create(beads.Bead{
+		Title:    "generate-digest",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := storeOpenDescendantIDs(store, root.ID, nil)
+	if err != nil {
+		t.Fatalf("storeOpenDescendantIDs: %v", err)
+	}
+	if !slices.Equal(got, []string{open.ID}) {
+		t.Fatalf("storeOpenDescendantIDs = %v, want [%s]", got, open.ID)
+	}
+	if len(store.rootIDQueries) == 0 {
+		t.Fatal("storeOpenDescendantIDs issued no gc.root_bead_id membership query")
+	}
+	for _, q := range store.rootIDQueries {
+		if q.IncludeClosed {
+			t.Errorf("membership query %+v includes closed beads; the caller discards them, so it must ask for open beads only", q)
+		}
+		if q.TierMode != beads.TierBoth {
+			t.Errorf("membership query TierMode = %v, want TierBoth so wisp-tier members still count", q.TierMode)
+		}
 	}
 }
 
@@ -10488,8 +10587,10 @@ func TestLastRunFuncGatesFallbackOnIndexMiss(t *testing.T) {
 	indexed := time.Now().Add(-time.Hour)
 	// Pre-seed the history index so lastRunForStore reads it without listing
 	// the store. The "\x00history" suffix matches historyEntriesForStore's key.
-	idx.entries[storeKey+"\x00history"] = map[string]orderTrackingSummary{
-		"order-hit": {lastRun: indexed},
+	if _, err := idx.sharedRead(storeKey+"\x00history", func() (map[string]orderTrackingSummary, error) {
+		return map[string]orderTrackingSummary{"order-hit": {lastRun: indexed}}, nil
+	}); err != nil {
+		t.Fatalf("seeding the history index: %v", err)
 	}
 
 	fallbackCalls := 0
@@ -10948,4 +11049,33 @@ title = "Do work"
 		titles = append(titles, b.Title)
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
+}
+
+// TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel (architecture B v2,
+// mc-v8g4p): a plain task carrying an order's order-run label, even with an
+// open child, is no run of the order (orders.IsRunRecord) and holds no
+// single-flight, through the per-tick index and its live fallback alike; the
+// real molecule root of the same shape still does
+// (TestHasOpenWorkStrictBlocksOnWispWithOpenChildren).
+func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	forged, err := store.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "step", ParentID: forged.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ad := &memoryOrderDispatcher{}
+	if has, err := ad.hasOpenWorkStrict(store, "digest"); err != nil || has {
+		t.Fatalf("hasOpenWorkStrict = %t (%v), want no open work from a plain task", has, err)
+	}
+	idx := newOrderDispatchTrackingIndex(io.Discard)
+	entries, err := idx.entriesForStore(store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := entries["digest"]; summary.openWorkTracking || len(summary.openRoots) != 0 {
+		t.Fatalf("index summary %+v, want no run of digest", summary)
+	}
 }

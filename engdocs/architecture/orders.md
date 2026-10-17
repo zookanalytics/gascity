@@ -175,7 +175,10 @@ the tick never waits on order gates.
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
   staged dispatcher (a reload's, or the rescan's), runs the
-  tracking/nudge-mail watchdogs, and calls `dispatch()`. A panic
+  tracking/nudge-mail watchdogs, and calls `dispatch()`. The preflight
+  waits at most 30 seconds for a Dolt recover, counted from when the
+  recover started; past that the pass carries on and the recover keeps
+  running, so a slow recover never holds up dispatch. A panic
   is recovered per pass (`safeTick`). Each pass is its own trace cycle
   with trigger `orders`.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
@@ -283,6 +286,20 @@ Violations indicate bugs.
   in the main dispatch loop. This prevents the cooldown trigger from
   re-firing on the next lane pass while the dispatch goroutine is
   still running.
+
+- **The tracking watchdog never closes a run inside its timeout**: The
+  open tracking bead is the order's single-flight gate. Each lane pass
+  runs a watchdog, at most every 30s, that closes stale open tracking
+  beads for every order, so a bead no dispatch closed cannot jam its
+  order. A launched run's tracking bead records the timeout the run was
+  launched with (`order_run_timeout` metadata): `effectiveTimeout()`
+  under the `max_timeout` of the dispatcher or `gc order run` process
+  that launched it. A run still in flight, with no outcome label yet,
+  keeps its bead until the bead is 2m older than that recorded timeout.
+  By then the run has been killed, even if a reload has since shortened
+  the order's timeout or `max_timeout`. Any other open tracking bead is
+  closed at 2m. `gc order sweep-tracking` applies its `--stale-after`
+  alone.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
