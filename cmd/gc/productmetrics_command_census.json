@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 213,
+  "next_id": 214,
   "permanent_ids": [
     {
       "name": "help",
@@ -79,6 +79,21 @@
       "classification": "agent-add",
       "owner": "immediate",
       "id": 5
+    },
+    {
+      "path": "gc agent is-foreign",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "agent-is-foreign",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc agent list",
@@ -2656,7 +2671,7 @@
       "notice_policy": "eligible",
       "classification": "nudge-show",
       "owner": "immediate",
-      "id": 211
+      "id": 212
     },
     {
       "path": "gc nudge status",
@@ -3793,7 +3808,7 @@
       "notice_policy": "eligible",
       "classification": "session-release-name",
       "owner": "immediate",
-      "id": 212
+      "id": 213
     },
     {
       "path": "gc session rename",

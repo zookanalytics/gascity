@@ -122,7 +122,15 @@ func liveGraphWorkflowDrivesBead(store, graphStore beads.Store, b beads.Bead) (b
 			return true, nil
 		}
 	}
-	roots, err := sourceworkflow.ListLiveInputConvoyRootsForItem(store, rootStore, b.ID, "")
+	// The walk crosses a store boundary: membership edges live with the work
+	// bead (store) while workflow roots live in the graph store (rootStore). A
+	// read error is returned rather than swallowed: an empty list would read as
+	// "no live workflow".
+	convoys, err := convoycore.TrackingConvoysForItem(store, b.ID)
+	if err != nil {
+		return false, fmt.Errorf("listing tracking convoys for %s: %w", b.ID, err)
+	}
+	roots, err := sourceworkflow.ListLiveInputConvoyRootsForConvoys(rootStore, convoys, "")
 	if err != nil {
 		return false, err
 	}

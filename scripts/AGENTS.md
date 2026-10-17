@@ -75,9 +75,17 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
-
-`.githooks/pre-commit` does the same per step. Where the command
-`NOGO_BAZEL` or `BAZEL` names (default `bazel`) is not on PATH, it runs
-`make lint-changed-go` in place of `make lint-changed` and `make check-docs-go`
-in place of `make check-docs`, each under the same kind of banner.
-`scripts/githooks_pre_commit_bazel_fallback_test.go` pins the choice.
+`auto` also falls back when a loader probe says the host cannot resolve the
+ICU runtime `MODULE.bazel`'s sysroot pins, or cannot say. The docs side of
+`.githooks/pre-commit` makes the same choice between `make check-docs` and
+`make check-docs-go` (`GC_PRECOMMIT_DOCS=auto|bazel|go`), again behind a
+banner. One shared decision, `.githooks/lib/local-runtime.sh`, serves both
+hooks; it derives the soname list from a single ICU-major constant, and
+`TestBazelLocalRuntimePinMatchesProbe` fails when that constant, the
+`MODULE.bazel` pin and `engdocs/bazel-quickstart.md` disagree. Only `auto`
+probes: an explicit mode is never replaced.
+The lint step of `.githooks/pre-commit` chooses between `make lint-changed`
+and `make lint-changed-go` (`GC_PRECOMMIT_LINT=auto|bazel|go`) by whether the
+command `NOGO_BAZEL` names (default `bazel`) is on PATH, without the loader
+probe, since nogo never loads ICU.
+`scripts/githooks_pre_commit_bazel_fallback_test.go` pins that choice.

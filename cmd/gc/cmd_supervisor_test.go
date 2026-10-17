@@ -5289,22 +5289,56 @@ func TestStopManagedCityDoesNotUseStartupOrDriftTimeouts(t *testing.T) {
 	assertSingleStopWithBenignNoise(t, ops)
 }
 
+// stampedWriter is a Writer that records when each line was written.
+type stampedWriter struct {
+	mu     sync.Mutex
+	buf    bytes.Buffer
+	lines  []stampedLine
+	onLine func(string) // called with each line as it is written
+}
+
+type stampedLine struct {
+	at   time.Time
+	text string
+}
+
+func (w *stampedWriter) Write(p []byte) (int, error) {
+	if w.onLine != nil {
+		w.onLine(string(p))
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.lines = append(w.lines, stampedLine{at: time.Now(), text: string(p)})
+	return w.buf.Write(p)
+}
+
+// at is when the first write containing sub landed; zero when none did.
+func (w *stampedWriter) at(sub string) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, l := range w.lines {
+		if strings.Contains(l.text, sub) {
+			return l.at
+		}
+	}
+	return time.Time{}
+}
+
+func (w *stampedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // hangingListProvider wraps a runtime.Provider but makes ListRunning block
 // forever. This simulates a session/beads dependency call inside
 // CityRuntime.shutdown that never returns (#5256) — ListRunning has no
 // context argument, so nothing can bound or cancel it from outside.
 type hangingListProvider struct {
 	runtime.Provider
-	entered chan<- struct{} // when set, signaled without blocking as ListRunning starts to hang
 }
 
-func (p hangingListProvider) ListRunning(string) ([]string, error) {
-	if p.entered != nil {
-		select {
-		case p.entered <- struct{}{}:
-		default:
-		}
-	}
+func (hangingListProvider) ListRunning(string) ([]string, error) {
 	select {}
 }
 
@@ -5315,24 +5349,20 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
-	const shutdownTimeout = 100 * time.Millisecond
-	forceTimeout := shutdownTimeout * 5
-	shutdownEntered := make(chan struct{}, 1)
-	done := make(chan struct{})
 	closer := &closerSpy{}
 	forceStop := &atomic.Bool{}
 	mc := &managedCity{
 		name:   "bright-lights",
 		cancel: func() {},
-		done:   done,
+		done:   make(chan struct{}), // never closes: city never exits on its own
 		closer: closer,
 		cr: &CityRuntime{
 			cfg: &config.City{
 				Daemon: config.DaemonConfig{
-					ShutdownTimeout: shutdownTimeout.String(),
+					ShutdownTimeout: "20ms",
 				},
 			},
-			sp:                hangingListProvider{Provider: runtime.NewFake(), entered: shutdownEntered},
+			sp:                hangingListProvider{Provider: runtime.NewFake()},
 			rec:               events.Discard,
 			stdout:            io.Discard,
 			stderr:            io.Discard,
@@ -5340,45 +5370,45 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		},
 	}
 
-	var stderr bytes.Buffer
+	// A sibling 100ms timer, armed as the forced phase begins (the grace's
+	// warning), fires as late as the forced wait's own timer on a loaded
+	// host: the forced phase is judged against it, not the wall clock.
+	var sibling atomic.Int64
+	stderr := &stampedWriter{onLine: func(line string) {
+		if strings.Contains(line, "after cancel") {
+			time.AfterFunc(100*time.Millisecond, func() { sibling.Store(time.Now().UnixNano()) })
+		}
+	}}
 	result := make(chan error, 1)
 	go func() {
-		result <- stopManagedCity(mc, cityPath, &stderr)
+		result <- stopManagedCity(mc, cityPath, stderr)
 	}()
 
-	// The close below is timed from the moment the forced shutdown starts
-	// hanging, so reaching that hang is asserted rather than assumed: a
-	// shutdown that no longer calls ListRunning fails here instead of
-	// leaving the double-wait check unarmed.
-	select {
-	case <-shutdownEntered:
-	case err := <-result:
-		t.Fatalf("stopManagedCity returned %v before CityRuntime.shutdown reached the hanging ListRunning", err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("CityRuntime.shutdown did not reach the hanging ListRunning within 10s")
-	}
-	// Close mc.done halfway through a second forced-stop budget. A
-	// regression that waits forceTimeout twice observes this close and
-	// incorrectly reports success. The shared-deadline implementation
-	// expires before the close and reports the forced-shutdown timeout.
-	// The margin between the shared deadline and this close is about
-	// forceTimeout/2 (250ms), well above the timer wake-up delay of a
-	// loaded host; if this ever flakes, raise shutdownTimeout. Elapsed
-	// wall time is not asserted: stopManagedCity tears the bead provider
-	// down after its waits, and that cost belongs to the host, not to the
-	// shutdown bound.
-	time.AfterFunc(forceTimeout+forceTimeout/2, func() { close(done) })
-
 	select {
 	case err := <-result:
+		// ShutdownTimeout is 20ms, so the forced-stop timeout (5x) is
+		// 100ms, and with CityRuntime.shutdown hung the forced phase is
+		// one 100ms wait. A second full wait on the forced timeout, the
+		// regression this test guards against, ends it a further 100ms
+		// after the sibling timer. Timing the phase against that sibling
+		// leaves out timer lateness on a loaded host, and the bead
+		// provider's shutdown (an exec subprocess) after the phase.
+		forcedAt := stderr.at("after forced shutdown")
+		if stderr.at("after cancel").IsZero() || forcedAt.IsZero() {
+			t.Fatalf("stderr = %q, want the grace and forced-shutdown warnings", stderr.String())
+		}
+		siblingAt := time.Unix(0, sibling.Load())
+		if sibling.Load() == 0 {
+			siblingAt = time.Now() // not fired yet: the forced phase ended before it
+		}
+		if after := forcedAt.Sub(siblingAt); after >= 50*time.Millisecond {
+			t.Fatalf("the forced phase ended %s after one forced wait would have, want one forced wait (~100ms), not two (~200ms), even when CityRuntime.shutdown hangs", after)
+		}
 		if err == nil {
-			t.Fatal("stopManagedCity err = nil, want forced-shutdown timeout instead of a second full wait")
+			t.Fatal("stopManagedCity err = nil, want non-nil because city never exited and shutdown hung")
 		}
 		if !strings.Contains(err.Error(), "did not exit") {
 			t.Fatalf("stopManagedCity err = %q, want 'did not exit' detail", err.Error())
-		}
-		if !strings.Contains(stderr.String(), "after forced shutdown") {
-			t.Fatalf("stderr = %q, want forced-shutdown timeout", stderr.String())
 		}
 		if !forceStop.Load() {
 			t.Fatal("expected forced cleanup to request force-stop shutdown")
@@ -5386,8 +5416,8 @@ func TestStopManagedCityBoundsForcedShutdownWhenRuntimeHangs(t *testing.T) {
 		if !closer.closed {
 			t.Fatal("expected closer to be closed even though CityRuntime.shutdown never returned")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("stopManagedCity did not return within 10s: forced shutdown is not bounded when CityRuntime.shutdown hangs (issue #5256)")
+	case <-time.After(2 * time.Second):
+		t.Fatal("stopManagedCity did not return within 2s: forced shutdown is not bounded when CityRuntime.shutdown hangs (issue #5256)")
 	}
 }
 

@@ -29,6 +29,7 @@ go_test(
     embed = [":sourceworkflow"],
     deps = [
         "//internal/beads",
+        "//internal/convoy",
         "//internal/session",
         "//internal/testenv",
         "//internal/testutil",
