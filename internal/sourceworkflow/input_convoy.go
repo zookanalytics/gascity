@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
 
 // ListLiveInputConvoyRoots returns the live graph.v2 workflow roots already
@@ -39,38 +38,23 @@ func ListLiveInputConvoyRoots(store beads.Store, inputConvoyID, allowedRootKey s
 	return filterLiveGraphV2Roots(matches, allowedRootKey), nil
 }
 
-// ListLiveInputConvoyRootsForItem returns the live graph.v2 workflow roots
-// poured over any convoy that tracks itemID, sorted by ID.
+// ListLiveInputConvoyRootsForConvoys returns the live graph.v2 workflow roots
+// poured over any of convoys, deduplicated and sorted by ID.
 //
-// This reverse walk (root -> gc.input_convoy_id -> tracks -> item) is the only
-// durable link from a work bead back to a convoy-first workflow driving it:
-// such a root carries no gc.source_bead_id, and the bead carries no
-// gc.molecule_id. Keying on the convoy ID alone is not enough, because a pour
-// over a bare bead mints a FRESH synthetic input convoy every time
-// (graphv2.CreateSingleItemInputConvoy) — so a second pour's own convoy is
-// always new and never collides with its predecessor's.
+// It is the root half of the reverse walk (root -> gc.input_convoy_id ->
+// tracks -> item), the only durable link from a work bead back to a
+// convoy-first workflow driving it: such a root carries no
+// gc.source_bead_id, and the bead carries no gc.molecule_id. Keying on one
+// convoy ID is not enough, because a pour over a bare bead mints a FRESH
+// synthetic input convoy every time (graphv2.CreateSingleItemInputConvoy), so
+// the caller passes every convoy that tracks the item
+// (convoy.TrackingConvoysForItem, read from the item's store). This package
+// takes the convoys rather than walking them itself: internal/convoy reaches
+// internal/orders through internal/config, and internal/orders' tests import
+// this package, so importing internal/convoy here closes an import cycle.
 //
-// The walk crosses a store boundary: membership edges live with the work bead
-// (itemStore) while workflow roots live in the graph store (rootStore). Pass
-// the same handle twice on a city that does not relocate graph; a nil rootStore
-// falls back to itemStore.
-//
-// allowedRootKey behaves as in ListLiveInputConvoyRoots. A read error on the
-// item's tracking convoys is returned rather than swallowed: callers gate
-// dispatch on this result, and a silent empty list would read as "no live
-// workflow" and let a duplicate through.
-func ListLiveInputConvoyRootsForItem(itemStore, rootStore beads.Store, itemID, allowedRootKey string) ([]beads.Bead, error) {
-	itemID = strings.TrimSpace(itemID)
-	if itemStore == nil || itemID == "" {
-		return nil, nil
-	}
-	if rootStore == nil {
-		rootStore = itemStore
-	}
-	convoys, err := convoycore.TrackingConvoysForItem(itemStore, itemID)
-	if err != nil {
-		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
-	}
+// allowedRootKey behaves as in ListLiveInputConvoyRoots.
+func ListLiveInputConvoyRootsForConvoys(rootStore beads.Store, convoys []beads.Bead, allowedRootKey string) ([]beads.Bead, error) {
 	var roots []beads.Bead
 	seen := make(map[string]bool, len(convoys))
 	for _, convoy := range convoys {
@@ -103,7 +87,7 @@ func filterLiveGraphV2Roots(beadsList []beads.Bead, allowedRootKey string) []bea
 	allowedRootKey = strings.TrimSpace(allowedRootKey)
 	roots := make([]beads.Bead, 0, len(beadsList))
 	for _, root := range beadsList {
-		if convoycore.IsTerminalStatus(root.Status) || !IsWorkflowRoot(root) {
+		if root.Status == "closed" || root.Status == "tombstone" || !IsWorkflowRoot(root) {
 			continue
 		}
 		if strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != beadmeta.FormulaContractGraphV2 {

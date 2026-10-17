@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -613,19 +614,25 @@ const defaultConfigDebounce = 200 * time.Millisecond
 // Returns a cleanup function. If the watcher cannot be created, returns a
 // no-op cleanup (degraded to tick-only, no file watching).
 type configWatchRegistrar struct {
-	watcher        *fsnotify.Watcher
-	stderr         io.Writer
-	mu             sync.Mutex
-	recursiveRoots map[string]struct{}
+	watcher *fsnotify.Watcher
+	stderr  io.Writer
+	mu      sync.Mutex
+	// recursiveRoots maps each recursively watched root, normalized, to the
+	// spellings an event path under it can start with (watchPathSpellings).
+	recursiveRoots map[string][]string
 	discoveryRoots map[string]struct{}
+	// shallowTargets holds the spellings of the non-recursive targets: config
+	// source directories and directly watched files.
+	shallowTargets map[string]struct{}
 }
 
 func newConfigWatchRegistrar(watcher *fsnotify.Watcher, stderr io.Writer) *configWatchRegistrar {
 	return &configWatchRegistrar{
 		watcher:        watcher,
 		stderr:         stderr,
-		recursiveRoots: make(map[string]struct{}),
+		recursiveRoots: make(map[string][]string),
 		discoveryRoots: make(map[string]struct{}),
+		shallowTargets: make(map[string]struct{}),
 	}
 }
 
@@ -674,7 +681,7 @@ func (r *configWatchRegistrar) addPath(root string, recursive bool, done <-chan 
 		if samePath(path, root) {
 			return nil
 		}
-		if path != root && shouldIgnoreConfigWatchEvent(path) {
+		if path != root && (shouldIgnoreConfigWatchEvent(path) || r.revisionSkips(path)) {
 			return filepath.SkipDir
 		}
 		r.addOne(path, done)
@@ -703,10 +710,38 @@ func (r *configWatchRegistrar) addOne(path string, done <-chan struct{}) bool {
 	return true
 }
 
-func (r *configWatchRegistrar) markRecursiveRoot(root string) {
+// markTarget records how target takes part in watching before addPath
+// registers it. A discovery root admits convention subtrees created later, a
+// recursive root carries its revision hash's skip rule (revisionSkips), and a
+// shallow target delivers every event for itself and its direct entries.
+func (r *configWatchRegistrar) markTarget(target config.WatchTarget) {
+	if target.DiscoverConventions {
+		r.markDiscoveryRoot(target.Path)
+	}
+	if target.Recursive {
+		r.markRecursiveRoot(target.Path)
+		return
+	}
+	spellings := watchPathSpellings(target.Path)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.recursiveRoots[normalizePathForCompare(root)] = struct{}{}
+	for _, spelling := range spellings {
+		r.shallowTargets[spelling] = struct{}{}
+	}
+}
+
+func (r *configWatchRegistrar) markRecursiveRoot(root string) {
+	key := normalizePathForCompare(root)
+	spellings := watchPathSpellings(root)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known := r.recursiveRoots[key]
+	for _, spelling := range spellings {
+		if !slices.Contains(known, spelling) {
+			known = append(known, spelling)
+		}
+	}
+	r.recursiveRoots[key] = known
 }
 
 func (r *configWatchRegistrar) unmarkRecursiveRoot(root string) {
@@ -732,6 +767,52 @@ func (r *configWatchRegistrar) watchesRecursively(path string) bool {
 	return false
 }
 
+// revisionSkips reports whether path lies under a recursive root and every
+// recursive root it lies under leaves it out of that root's content hash
+// (config.IsIgnoredPackRuntimePath, relative to the root). The recursive
+// roots are the directories the config revision hashes, so a write there
+// cannot change the revision: the walk does not watch it and the event loop
+// drops it. A path under no recursive root, or spelled so that no root
+// matches it, is not skipped.
+func (r *configWatchRegistrar) revisionSkips(path string) bool {
+	clean := filepath.Clean(path)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	skipped := false
+	for _, spellings := range r.recursiveRoots {
+		for _, root := range spellings {
+			rel, err := filepath.Rel(root, clean)
+			if err != nil || pathutil.IsOutsideDir(rel) {
+				continue
+			}
+			if !config.IsIgnoredPackRuntimePath(rel) {
+				return false
+			}
+			skipped = true
+		}
+	}
+	return skipped
+}
+
+// ignoresEvent reports whether an event at path is dropped instead of
+// marking config dirty: runtime state under .gc or .beads, or a path the
+// revision skips. A shallow target and its direct entries are always
+// delivered, because a config source file can sit in a directory that a
+// recursive root skips.
+func (r *configWatchRegistrar) ignoresEvent(path string) bool {
+	if shouldIgnoreConfigWatchEvent(path) {
+		return true
+	}
+	clean := filepath.Clean(path)
+	r.mu.Lock()
+	_, shallow := r.shallowTargets[clean]
+	if !shallow {
+		_, shallow = r.shallowTargets[filepath.Dir(clean)]
+	}
+	r.mu.Unlock()
+	return !shallow && r.revisionSkips(clean)
+}
+
 func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 	parent := filepath.Dir(path)
 	base := filepath.Base(filepath.Clean(path))
@@ -750,6 +831,18 @@ func (r *configWatchRegistrar) isConventionRootCreate(path string) bool {
 
 func pathIsWithin(root, path string) bool {
 	return pathutil.PathWithin(root, path)
+}
+
+// watchPathSpellings returns the spellings an event path at or under path can
+// start with: path as registered, under which fsnotify names its direct
+// entries, and its symlink-resolved form, under which the recursive walk
+// registers nested directories.
+func watchPathSpellings(path string) []string {
+	spellings := []string{filepath.Clean(path)}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != spellings[0] {
+		spellings = append(spellings, resolved)
+	}
+	return spellings
 }
 
 func isConventionDiscoveryDirName(base string) bool {
@@ -805,14 +898,11 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 	// fsnotify is non-recursive. Watch config source directories shallowly,
 	// but recurse through pack and convention roots where config-bearing
 	// files live below pre-existing subdirectories. Regression guard:
-	// gastownhall/gascity#780.
+	// gastownhall/gascity#780. A recursive root watches only what the
+	// revision hashes, so a pack root that is a git checkout leaves its .git
+	// unwatched (revisionSkips).
 	for _, target := range targets {
-		if target.DiscoverConventions {
-			registrar.markDiscoveryRoot(target.Path)
-		}
-		if target.Recursive {
-			registrar.markRecursiveRoot(target.Path)
-		}
+		registrar.markTarget(target)
 		if ok := registrar.addPath(target.Path, target.Recursive, done); !ok && target.Recursive {
 			registrar.unmarkRecursiveRoot(target.Path)
 		}
@@ -831,7 +921,7 @@ func watchConfigTargets(targets []config.WatchTarget, debounceDelay time.Duratio
 				if !ok {
 					return
 				}
-				if shouldIgnoreConfigWatchEvent(event.Name) {
+				if registrar.ignoresEvent(event.Name) {
 					continue
 				}
 				if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
@@ -1009,6 +1099,9 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 //  1. Send Interrupt (Ctrl-C) to all sessions
 //  2. Wait shutdown_timeout
 //  3. Stop (force-kill) any survivors
+//
+// It is the compatibility wrapper direct tests call; the stop paths call
+// gracefulStopAllWithForceSignal.
 func gracefulStopAll(
 	names []string,
 	sp runtime.Provider,
@@ -1018,11 +1111,18 @@ func gracefulStopAll(
 	store beads.SessionStore,
 	stdout, stderr io.Writer,
 ) {
-	gracefulStopAllWithForceSignal(names, sp, timeout, rec, cfg, store, stdout, stderr, nil)
+	gracefulStopAllWithForceSignal(names, nil, sp, timeout, rec, cfg, store, stdout, stderr, nil)
 }
 
+// gracefulStopAllWithForceSignal is gracefulStopAll that a force stop can cut
+// short. knownUnlisted holds names the caller's own per-name probe already found
+// running (or could not rule out) that the runtime inventory did not list.
+// They are read per name without probing them again before the interrupt; on
+// a remote runtime every probe is a round trip. Nil when the caller probed
+// nothing.
 func gracefulStopAllWithForceSignal(
 	names []string,
+	knownUnlisted map[string]bool,
 	sp runtime.Provider,
 	timeout time.Duration,
 	rec events.Recorder,
@@ -1041,6 +1141,12 @@ func gracefulStopAllWithForceSignal(
 	for _, target := range targets {
 		targetByName[target.name] = target
 	}
+	// A name the runtime inventory does not list but a per-name probe does not
+	// rule out is one the list cannot see (an exec pack whose list-running is
+	// unsupported answers an empty inventory). Read its liveness per name below:
+	// trusting the list would read it as exited at once, cut the grace window
+	// short and stop it outside the worker boundary as "exited gracefully".
+	unlisted := unlistedSessionSet(sp, names, knownUnlisted)
 
 	// Pass 1: interrupt all in a single bounded broadcast wave.
 	// This is intentionally flat: interrupts are a best-effort graceful hint,
@@ -1062,19 +1168,13 @@ func gracefulStopAllWithForceSignal(
 		if stopForceRequested(forceStopRequested) {
 			break
 		}
-		allExited := true
+		var allExited bool
 		if runningSet, ok := runningSessionSet(sp, names); ok {
-			allExited = len(runningSet) == 0
+			allExited = len(runningSet) == 0 && namesObservedExited(sp, setKeys(unlisted), deadline)
 		} else {
-			for _, name := range names {
-				// An unknown state is not an exit: keep waiting out the grace
-				// window rather than cutting it short on a failed observation.
-				running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
-				if err != nil || running {
-					allExited = false
-					break
-				}
-			}
+			// An unknown state is not an exit: keep waiting out the grace
+			// window rather than cutting it short on a failed observation.
+			allExited = namesObservedExited(sp, names, deadline)
 		}
 		if allExited {
 			break
@@ -1093,13 +1193,22 @@ func gracefulStopAllWithForceSignal(
 	// Pass 2: kill survivors.
 	var survivors []string
 	runningSet, listed := runningSessionSet(sp, names)
+	// Names the list cannot vouch for (all of them when it failed) are read
+	// per name, in one bounded parallel wave.
+	var toProbe []string
+	for _, name := range names {
+		if !listed || unlisted[name] {
+			toProbe = append(toProbe, name)
+		}
+	}
+	probed := probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts)
 	for _, name := range names {
 		running := false
 		var observeErr error
-		if listed {
-			running = runningSet[name]
+		if p, ok := probed[name]; ok {
+			running, observeErr = p.running, p.err
 		} else {
-			running, observeErr = workerSessionTargetRunningWithConfig("", nil, sp, nil, name)
+			running = runningSet[name]
 		}
 		if observeErr != nil {
 			// The state is unknown, not exited: still stop it, but neither
@@ -1153,6 +1262,140 @@ func gracefulStopAllWithForceSignal(
 
 func stopForceRequested(forceStopRequested func() bool) bool {
 	return forceStopRequested != nil && forceStopRequested()
+}
+
+// stopProbeRunning is the per-name liveness read for a name the runtime
+// inventory did not list. It is the bare provider liveness observation, one
+// provider op on a remote runtime (the worker observation also reads
+// metadata, attachment and activity, several round trips each), and it
+// reports a failed probe as an error wherever the provider can tell one
+// (runtime.LivenessObserverWithError); elsewhere it is the bool IsRunning.
+func stopProbeRunning(sp runtime.Provider, name string) (bool, error) {
+	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	return obs.Running, err
+}
+
+// unlistedSessionSet returns the names that a complete runtime inventory does
+// not list but that a per-name probe reports running or cannot rule out,
+// together with known, the names the caller's own probe already found so
+// (they are not probed again). When the inventory is incomplete it returns
+// every name, unprobed: that listing vouches for none of them, and a later
+// one that answers blind would read them all as exited, so each later read
+// of them is per name. Nil when the inventory lists every name, or when the
+// provider attests its listing complete (runtime.ListRunningAttested): a
+// name an attested list does not show is gone, and probing it would only
+// add a round trip per name, or a timeout per name on a wedged server.
+func unlistedSessionSet(sp runtime.Provider, names []string, known map[string]bool) map[string]bool {
+	if runtime.ListRunningAttested(sp) {
+		return nil
+	}
+	runningSet, ok := runningSessionSet(sp, names)
+	if !ok {
+		return setOf(names)
+	}
+	var unlisted map[string]bool
+	add := func(name string) {
+		if unlisted == nil {
+			unlisted = make(map[string]bool)
+		}
+		unlisted[name] = true
+	}
+	var toProbe []string
+	for _, name := range names {
+		switch {
+		case known[name]:
+			add(name)
+		case !runningSet[name]:
+			toProbe = append(toProbe, name)
+		}
+	}
+	for name, p := range probeNamesRunning(sp, toProbe, defaultMaxParallelInterrupts) {
+		if p.err != nil || p.running {
+			add(name)
+		}
+	}
+	return unlisted
+}
+
+// namesObservedExited reports whether a per-name probe sees every name
+// exited. An unknown state is not an exit. It probes one name at a time and
+// stops at the first that is not exited: the grace-window poll asks this
+// every 500 ms, and while agents are still up one probe answers it. It
+// begins no probe once deadline (the end of the grace window) has passed,
+// and a walk cut short there is not an exit, so a backend that answers
+// slowly overruns the window by at most the one probe in flight.
+func namesObservedExited(sp runtime.Provider, names []string, deadline time.Time) bool {
+	for _, name := range names {
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		if running, err := stopProbeRunning(sp, name); err != nil || running {
+			return false
+		}
+	}
+	return true
+}
+
+// stopProbe is one stopProbeRunning answer.
+type stopProbe struct {
+	running bool
+	err     error
+}
+
+// probeNamesRunning reads stopProbeRunning for each name, at most parallel
+// at a time: on a remote runtime every probe is a round trip, and a stop that
+// probed one name at a time would outlast the caller's wait on a city of any
+// size. Every name is probed; a forced stop does not cut this short, because
+// a name left unprobed is a session left running past a stop that reports
+// success. The callers bound the cost with the width instead.
+func probeNamesRunning(sp runtime.Provider, names []string, parallel int) map[string]stopProbe {
+	if len(names) == 0 {
+		return nil
+	}
+	if parallel < 1 {
+		parallel = 1
+	}
+	results := make([]stopProbe, len(names))
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for i, name := range names {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			running, err := stopProbeRunning(sp, name)
+			results[i] = stopProbe{running: running, err: err}
+		}()
+	}
+	wg.Wait()
+	out := make(map[string]stopProbe, len(names))
+	for i, name := range names {
+		out[name] = results[i]
+	}
+	return out
+}
+
+// storeSweepMaxParallelProbes is how many of the city's recorded sessions a
+// stop probes at once (storeRecordedRunningOutside, and the standalone stop's
+// check of rows left creating). It is wider than the interrupt wave
+// (defaultMaxParallelInterrupts): these probes only read, and on a runtime
+// whose backend hangs each one waits out the provider's whole op timeout (30 s
+// on an exec pack), so a narrow wave would add one op timeout per wave to
+// every stop, forced or not. At this width a city of up to this many recorded
+// rows pays about one op timeout.
+const storeSweepMaxParallelProbes = 64
+
+// setKeys returns the members of set.
+func setKeys(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	return keys
 }
 
 func runningSessionSet(sp runtime.Provider, names []string) (map[string]bool, bool) {
@@ -1290,6 +1533,10 @@ func configReloadSummary(oldAgents, oldRigs, newAgents, newRigs int) string {
 // --foreground does, before it starts the bead-store provider); the caller
 // keeps ownership and releases it after this returns. When heldLock is nil,
 // runController acquires the lock itself and releases it last.
+//
+// closedNamed is the closed named-session index cache the caller handed
+// buildFnWithSessionBeads; the runtime's other readers share it. Nil gives the
+// runtime a cache of its own.
 func runController(
 	cityPath string,
 	heldLock *os.File,
@@ -1298,6 +1545,7 @@ func runController(
 	configRev string,
 	buildFn func(*config.City, runtime.Provider, beads.Store) DesiredStateResult,
 	buildFnWithSessionBeads func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult,
+	closedNamed *closedNamedIndexCache,
 	sp runtime.Provider,
 	dops drainOps,
 	poolSessions map[string]time.Duration,
@@ -1381,6 +1629,7 @@ func runController(
 		Publication:             supervisor.PublicationConfig{},
 		BuildFn:                 buildFn,
 		BuildFnWithSessionBeads: buildFnWithSessionBeads,
+		ClosedNamedIndex:        closedNamed,
 		Dops:                    dops,
 		Rec:                     rec,
 		PoolSessions:            poolSessions,
