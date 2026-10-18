@@ -435,7 +435,7 @@ func (m *MemStore) List(query ListQuery) ([]Bead, error) {
 	if query.Limit > 0 && len(result) > query.Limit {
 		result = result[:query.Limit]
 	}
-	return result, nil
+	return query.Fields.project(result), nil
 }
 
 // ListOpen returns non-closed beads in creation order by default.
@@ -537,7 +537,7 @@ func (m *MemStore) readyLocked(ctx context.Context, q ReadyQuery) ([]Bead, error
 			}
 		}
 	}
-	return result, nil
+	return q.Fields.project(result), nil
 }
 
 // Get retrieves a bead by ID. Returns a wrapped ErrNotFound if the ID does

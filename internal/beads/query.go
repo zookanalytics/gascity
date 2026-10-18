@@ -179,6 +179,10 @@ type ListQuery struct {
 	// first silently drops page rows — so seeked reads fetch a superset and cut
 	// the page in Go.
 	SeekAfter *SeekBoundary
+	// Fields names the fields each returned row must populate. The zero
+	// value, FieldsFull, reads whole rows; FieldsCore leaves the free-form
+	// text out (see FieldSet). It never changes which rows match.
+	Fields FieldSet
 }
 
 // SeekBoundary identifies the last row a pagination client has seen, in the
@@ -229,6 +233,10 @@ type ReadyQuery struct {
 	// equality semantics on every backend (a value that is a JSON literal, a
 	// key outside bd's key grammar) must not push it.
 	MetadataEquals map[string]string
+	// Fields names the fields each returned row must populate, as
+	// ListQuery.Fields does. It selects no rows, so a query whose only
+	// non-zero member is Fields still asks for every ready bead.
+	Fields FieldSet
 }
 
 // IsZero reports whether q selects nothing beyond Ready's historical default:
@@ -385,7 +393,9 @@ func beadHasLabel(b Bead, want string) bool {
 	return false
 }
 
-// ApplyListQuery filters, sorts, and limits an in-memory bead slice.
+// ApplyListQuery filters, sorts, and limits an in-memory bead slice, and
+// clears from the rows it returns the fields q.Fields omits. It returns a new
+// slice and leaves items untouched.
 func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 	filtered := make([]Bead, 0, len(items))
 	for _, b := range items {
@@ -397,7 +407,7 @@ func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 	if q.Limit > 0 && len(filtered) > q.Limit {
 		filtered = filtered[:q.Limit]
 	}
-	return filtered
+	return q.Fields.project(filtered)
 }
 
 func applyListQuery(items []Bead, q ListQuery) []Bead {

@@ -444,7 +444,7 @@ func (s *Store) Ready(query ...beads.ReadyQuery) ([]beads.Bead, error) {
 			result = append(result, b)
 		}
 	}
-	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit, TierMode: q.TierMode}), nil
+	return beads.ApplyListQuery(result, beads.ListQuery{Assignee: q.Assignee, Limit: q.Limit, TierMode: q.TierMode, Fields: q.Fields}), nil
 }
 
 // Children returns non-closed beads whose ParentID matches by default:

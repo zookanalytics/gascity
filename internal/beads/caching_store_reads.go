@@ -15,9 +15,19 @@ import (
 // backing-store history when possible, preserving partial backing rows when bd
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
+//
+// A query whose field set omits the text is served from cache with the text
+// cleared from the rows it returns, and passes its field set to every backing
+// read. A Live or ParentID list refreshes the cache from the rows its backing
+// read returns, but not a projected one: a projected row carries no text, so
+// installing it would erase the cached text of its bead. The cache learns rows
+// only from whole reads.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
+	}
+	if (query.Live || query.ParentID != "") && query.Fields.omitsText() {
+		return c.backing.List(query)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -59,7 +69,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 			if query.Limit > 0 && len(items) > query.Limit {
 				items = items[:query.Limit]
 			}
-			return items, err
+			return query.Fields.project(items), err
 		}
 
 		if !query.IncludesClosed() {
@@ -312,7 +322,7 @@ func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
-	return cached
+	return query.Fields.project(cached)
 }
 
 // cacheServableForListQueryLocked refuses to treat PrimeActive's open and
@@ -1028,12 +1038,16 @@ func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, inst
 	return "bead.updated", true
 }
 
-// Ready returns open beads whose blocking deps are all closed.
+// Ready returns open beads whose blocking deps are all closed. A query with a
+// selector (tier, assignee or limit) reads the backing. A query without one is
+// served from cache when the cache can vouch for it; its field set selects no
+// rows, so it does not count as a selector.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if !readyQueryFromArgs(query).IsZero() {
+	q := readyQueryFromArgs(query)
+	if !q.IsZero() {
 		return c.backing.Ready(query...)
 	}
-	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+	if rows, ok := c.readyFromCache(q); ok {
 		return rows, nil
 	}
 	return c.backing.Ready(query...)
@@ -1126,7 +1140,7 @@ func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	if query.Limit > 0 && len(result) > query.Limit {
 		result = result[:query.Limit]
 	}
-	return result, true
+	return query.Fields.project(result), true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It
