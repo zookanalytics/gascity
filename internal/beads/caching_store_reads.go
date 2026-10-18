@@ -365,7 +365,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
-	now := time.Now()
+	now := c.clockNow()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
@@ -452,7 +452,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 		}
 		c.evictListedGoneLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return refreshed
 }
@@ -609,8 +609,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if depsFromBacking {
 				opts.depsMode, opts.deps = depsExplicit, freshDeps
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), opts)
-			c.markFreshLocked(time.Now())
+			c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return fresh, nil
@@ -624,6 +624,69 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 	}
 	c.mu.RUnlock()
 	return c.backing.Get(id)
+}
+
+var _ ExactBatchGetter = (*CachingStore)(nil)
+
+// GetExactBatch answers ids the way Get answers each one, sharing the backing
+// reads. An id Get serves from the cache is answered from the cache. The ids Get
+// reads straight from the backing store go to the backing store's exact batch
+// read in one call. The rest are left unresolved for the caller's Get: an id Get
+// reports deleted, a dirty id Get refreshes before answering, and an id the
+// backing batch read did not answer or, when the backing store offers no such
+// read, could not ask.
+func (c *CachingStore) GetExactBatch(ids []string) (map[string]Bead, []string, error) {
+	found := make(map[string]Bead, len(ids))
+	seen := make(map[string]bool, len(ids))
+	var fromBacking []string
+	c.mu.RLock()
+	servable := c.state == cacheLive || c.state == cachePartial
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if _, deleted := c.deletedSeq[id]; deleted {
+			continue
+		}
+		_, dirty := c.dirty[id]
+		if _, mutated := c.beadSeq[id]; mutated && !dirty {
+			if b, ok := c.beads[id]; ok {
+				found[id] = cloneBead(b)
+				continue
+			}
+		}
+		if servable {
+			if dirty {
+				continue
+			}
+			if b, ok := c.beads[id]; ok {
+				found[id] = cloneBead(b)
+				continue
+			}
+		}
+		fromBacking = append(fromBacking, id)
+	}
+	c.mu.RUnlock()
+
+	if getter, ok := c.backing.(ExactBatchGetter); ok && len(fromBacking) > 0 {
+		got, _, err := getter.GetExactBatch(fromBacking)
+		if err != nil && !errors.Is(err, ErrExactBatchGetUnsupported) {
+			return nil, nil, fmt.Errorf("getting %d beads from the backing store: %w", len(fromBacking), err)
+		}
+		for _, id := range fromBacking {
+			if b, ok := got[id]; ok {
+				found[id] = b
+			}
+		}
+	}
+	var unresolved []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			unresolved = append(unresolved, id)
+		}
+	}
+	return found, unresolved, nil
 }
 
 // refetchFencedLocked reports whether a mutation or deletion newer than
@@ -769,13 +832,16 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if depsFromBacking {
 			opts.depsMode, opts.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, time.Now(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if eventType == "bead.closed" {
+		c.noteCloseAnnouncedLocked(id)
+	}
 	if changed || evicted {
 		// The eviction dropped the row's beadSeq, a dirty uncached row's
 		// included, so it is stamped anew.
@@ -783,7 +849,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
 			c.clearDependentReadyProjectionsLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 	}
 	c.mu.Unlock()
@@ -834,6 +900,33 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if readyQueryFromArgs(query) != (ReadyQuery{}) {
 		return c.backing.Ready(query...)
 	}
+	if rows, ok := c.readyFromCache(ReadyQuery{}); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query...)
+}
+
+// ReadyPreferCache answers any ready query (tier, assignee, limit) from the
+// cache when the cache can vouch for it, under exactly the rules the
+// zero-query Ready applies: a fully live, dependency-complete cache whose
+// ready projection is not degraded, with dirty rows refreshed through the
+// bounded overlay first. When the cache is cold, partial, invalidated past the
+// overlay, or cannot vouch for one candidate's verdict, it reads the backing
+// with the caller's query, as Live.Ready does.
+//
+// It is a separate entry rather than a widening of Ready because Ready with
+// arguments has always meant "authoritative" to its existing callers; the
+// native Ready endpoint opts in explicitly.
+func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	if rows, ok := c.readyFromCache(query); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query)
+}
+
+// readyFromCache computes query's ready set from the cache, reporting false
+// when the cache cannot answer and the caller must read the backing.
+func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
@@ -861,13 +954,17 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				}
 				statusByID[b.ID] = b.Status
 				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
-				if IsReadyCandidate(b, now) {
-					if c.readyProjectionUnknownLocked(b.ID) {
-						unanswerable = true
-						return
-					}
-					openBeads = append(openBeads, cloneBead(b))
+				if !IsReadyCandidateForTier(b, now, query.TierMode) {
+					continue
 				}
+				if query.Assignee != "" && b.Assignee != query.Assignee {
+					continue
+				}
+				if c.readyProjectionUnknownLocked(b.ID) {
+					unanswerable = true
+					return
+				}
+				openBeads = append(openBeads, cloneBead(b))
 			}
 			depsByID = make(map[string][]Dep, len(openBeads))
 			for _, b := range openBeads {
@@ -875,12 +972,12 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 	if unanswerable {
 		// One candidate whose verdict the cache cannot vouch for costs this
 		// read the cache, not correctness: the live scan is slower and right.
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 
 	var result []Bead
@@ -893,7 +990,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// call; impose the canonical ready order so cache-served results
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
-	return result, nil
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return result, true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It
@@ -1051,6 +1151,18 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		Sort:          SortCreatedAsc,
 		TierMode:      TierModeFromOpts(opts),
 	})
+}
+
+var _ ChildrenBatchLister = (*CachingStore)(nil)
+
+// ChildrenOfAny reads every parent's children from the backing store in one
+// batched read (or one exact Children per parent on a backing without the
+// batch). A ParentID listing never reads the cache: Children forwards every one
+// to the backing, so this answers with the same consistency Children does and
+// saves the per-parent round trip the controller's graph and cleanup walks
+// would otherwise pay.
+func (c *CachingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	return ChildrenOfAny(c.backing, parentIDs, opts...)
 }
 
 // ListByLabel returns beads matching the given label. By default, serves from

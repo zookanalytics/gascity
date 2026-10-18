@@ -791,7 +791,7 @@ func TestOrderLastRunFn(t *testing.T) {
 	store := beads.NewBdStore(t.TempDir(), func(_, _ string, args ...string) ([]byte, error) {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "--label=order-run:digest") {
-			return []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"task","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`), nil
+			return []byte(`[{"id":"bd-aaa","title":"digest wisp","status":"open","issue_type":"molecule","created_at":"2026-02-27T10:00:00Z","labels":["order-run:digest"]}]`), nil
 		}
 		return []byte(`[]`), nil
 	})
@@ -884,6 +884,7 @@ func TestOrderCheckWithStoresResolverUsesBoundedEventTail(t *testing.T) {
 	now := time.Now().Add(time.Second)
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "recent digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest"},
 	}); err != nil {
 		t.Fatal(err)
@@ -964,6 +965,7 @@ func TestOrderCheckWithStoresResolverUsesRigStore(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	if _, err := rigStore.Create(beads.Bead{
 		Title:  "recent rig run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest:rig:frontend"},
 	}); err != nil {
 		t.Fatal(err)
@@ -998,6 +1000,7 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:digest:rig:frontend"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1062,7 +1065,7 @@ func TestOrderCheckWithStoresResolverFailsWhenLegacyEventCursorReadFails(t *test
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:watch:rig:frontend",
+		failLabel: "order-run:watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -3318,6 +3321,64 @@ prefix = "fe"
 	}
 }
 
+func TestOrderRunExecTrackedRecordsRunTimeout(t *testing.T) {
+	// The tracking bead a manual exec run holds open is the order's
+	// single-flight gate for the controller too, and the controller's watchdog
+	// keeps it only as long as the timeout the bead records. That must be the
+	// timeout the run is killed at: the order's, capped by max_timeout.
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+
+[orders]
+max_timeout = "30s"
+
+[[rigs]]
+name = "frontend"
+path = "frontend"
+prefix = "fe"
+`)
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	a := orders.Order{
+		Name:     "long-pass",
+		Rig:      "frontend",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Timeout:  "300s",
+		Exec:     "true",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doOrderRunExecTracked(a, cityDir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	all := trackingBeads(t, store, orders.RunLabel(a.ScopedName()))
+	if len(all) != 1 {
+		t.Fatalf("tracking bead count = %d, want 1", len(all))
+	}
+	run, ok := orders.RunFromTrackingBead(all[0])
+	if !ok {
+		t.Fatalf("tracking bead %+v does not decode as an order run", all[0])
+	}
+	if run.Timeout != 30*time.Second {
+		t.Fatalf("recorded run timeout = %s, want 30s (the order's 300s capped by max_timeout)", run.Timeout)
+	}
+}
+
 func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	// The refusal quotes the offending backend name, so naming it as the
@@ -3691,7 +3752,7 @@ func TestBdCursorUsesRowsFromPartialTierError(t *testing.T) {
 		Store: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "cursor-1",
-			Labels: []string{"order:digest", "seq:42"},
+			Labels: []string{"order-run:digest", "order:digest", "seq:42", "order-tracking"}, // a run record (the #7766 review)
 		}},
 		err: fmt.Errorf("wisps tier unavailable"),
 	}

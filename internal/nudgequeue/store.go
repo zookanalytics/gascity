@@ -476,45 +476,62 @@ func IsShadowBead(b beads.Bead) bool {
 // the cmd/gc adapter test that guards the >=20 char validator floor.
 func CanonicalCloseReason(stateCode string) string { return canonicalCloseReason(stateCode) }
 
-func isTerminalNudgeState(state string) bool {
-	switch state {
-	case "accepted_for_injection", "injected", "expired", "failed", "superseded":
-		return true
+// TerminalOutcome is what a nudge lifecycle state code means for the work the
+// nudge carried. ClassifyTerminalState is the single list of terminal codes;
+// IsTerminalState is derived from it.
+type TerminalOutcome int
+
+const (
+	// OutcomeNotTerminal is a live nudge (queued, in flight), a closed shadow
+	// that carries no delivery outcome (an enqueue closed by RollbackEnqueue,
+	// or one closed gc-swept by SweepStale), or an unknown code. Wait dispatch
+	// re-queues a wait reminder whose shadows are all in this class.
+	OutcomeNotTerminal TerminalOutcome = iota
+	// OutcomeDelivered means delivery to the provider is proven; the nudge must
+	// not be retried.
+	OutcomeDelivered
+	// OutcomeFailed means the nudge will never be delivered.
+	OutcomeFailed
+	// OutcomeSuperseded means a newer queued entry replaced the nudge and
+	// carries its delivery outcome.
+	OutcomeSuperseded
+)
+
+// String returns the outcome name for diagnostics.
+func (o TerminalOutcome) String() string {
+	switch o {
+	case OutcomeNotTerminal:
+		return "not-terminal"
+	case OutcomeDelivered:
+		return "delivered"
+	case OutcomeFailed:
+		return "failed"
+	case OutcomeSuperseded:
+		return "superseded"
 	default:
-		return false
+		return "TerminalOutcome(" + strconv.Itoa(int(o)) + ")"
 	}
 }
 
-// Delivery outcomes a terminal nudge state resolves to. They answer the one
-// question a caller who nudged an agent and heard nothing back has to settle
-// before reading anything into the silence: did the message actually arrive?
-const (
-	// OutcomeDelivered: the nudge reached the target's runtime.
-	OutcomeDelivered = "delivered"
-	// OutcomeDropped: the nudge was terminalized without ever being delivered.
-	OutcomeDropped = "dropped"
-	// OutcomeUnknown: the state names no outcome this build understands.
-	// Reported as-is rather than guessed at — a wrong guess here is exactly
-	// the false certainty the outcome exists to remove.
-	OutcomeUnknown = "unknown"
-)
-
-// OutcomeForState classifies a nudge lifecycle state as a delivery outcome. It
-// lives beside isTerminalNudgeState because both read the same state codes;
-// keeping the classification here is what stops a new state from silently
-// reading as delivered (or as dropped) at a call site that never learned about
-// it. A non-terminal state ("queued") has no outcome yet and resolves to
-// OutcomeUnknown — the queue, not the shadow bead, is the authority while an
-// item is still live.
-func OutcomeForState(state string) string {
+// ClassifyTerminalState maps a nudge lifecycle state code to its terminal
+// outcome. It is the package-canonical list of terminal codes: a new terminal
+// state is added here, and every consumer that switches on the outcome picks it
+// up.
+func ClassifyTerminalState(state string) TerminalOutcome {
 	switch state {
-	case "accepted_for_injection", "injected":
+	case "accepted_for_injection", "injected", "injected_unobserved":
 		return OutcomeDelivered
-	case "expired", "failed", "superseded":
-		return OutcomeDropped
+	case "expired", "failed":
+		return OutcomeFailed
+	case "superseded":
+		return OutcomeSuperseded
 	default:
-		return OutcomeUnknown
+		return OutcomeNotTerminal
 	}
+}
+
+func isTerminalNudgeState(state string) bool {
+	return ClassifyTerminalState(state) != OutcomeNotTerminal
 }
 
 // canonicalCloseReason maps a nudge terminalization state code to a

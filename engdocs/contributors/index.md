@@ -39,6 +39,14 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Upstream sync 2026-10-07](upstream-sync-2026-10-07.md) — the carried-commit
   ledger for the fork: every commit kept, dropped, reworked or regenerated when
   rebasing onto upstream, with the upstream evidence behind each drop
+- [Upstream sync 2026-10-13](upstream-sync-2026-10-13.md) — the next ledger:
+  the 398-commit upstream catch-up (Actor verbs, SeatWork, issueops read
+  roles, ChildrenOfAny), the five drops with their verification, and the
+  reworks that followed upstream's direction
+- [Upstream sync 2026-10-15](upstream-sync-2026-10-15.md) — the 65-commit
+  catch-up: one drop (a supervisor test flake upstream fixed), the
+  `gc nudge show` and pre-commit lint reworks onto upstream's typed nudge
+  outcomes and hook fallback, and the census v3 regeneration
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

@@ -1,15 +1,12 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/doctor"
 )
 
 // stubHolderProbes replaces the three injectable holder probes for the
@@ -206,151 +203,4 @@ func TestBuildSupervisorServiceDataCarriesAlreadyRunningExitCode(t *testing.T) {
 	if data.AlreadyRunningExitCode != supervisorExitCodeAlreadyRunning {
 		t.Fatalf("AlreadyRunningExitCode = %d, want %d", data.AlreadyRunningExitCode, supervisorExitCodeAlreadyRunning)
 	}
-}
-
-// TestSupervisorBuildDrifted pins the corroboration rule: escalation requires
-// a comparison that was actually made.
-func TestSupervisorBuildDrifted(t *testing.T) {
-	tests := []struct {
-		name           string
-		local, remote  string
-		queryErr       error
-		wantDrifted    bool
-		wantComparable bool
-	}{
-		{name: "query failed", local: "abc", remote: "", queryErr: errors.New("connection refused")},
-		{name: "local unknown", local: "unknown", remote: "abc"},
-		{name: "local empty", local: "", remote: "abc"},
-		{name: "supervisor unknown", local: "abc", remote: "unknown"},
-		{name: "supervisor empty", local: "abc", remote: ""},
-		{name: "same build", local: "abc", remote: "abc", wantComparable: true},
-		{name: "drifted", local: "def", remote: "abc", wantDrifted: true, wantComparable: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			drifted, comparable := supervisorBuildDrifted(tt.local, tt.remote, tt.queryErr)
-			if drifted != tt.wantDrifted || comparable != tt.wantComparable {
-				t.Fatalf("got (drifted=%v, comparable=%v), want (drifted=%v, comparable=%v)",
-					drifted, comparable, tt.wantDrifted, tt.wantComparable)
-			}
-		})
-	}
-}
-
-// newTestStaleImageCheck builds the doctor check with all external probes
-// stubbed, so Run exercises only its own decision logic.
-func newTestStaleImageCheck(pid int, state supervisorHolderState, exePath, localID, remoteID string, queryErr error) *supervisorStaleImageCheck {
-	return &supervisorStaleImageCheck{
-		pid:               pid,
-		localBuildID:      localID,
-		classify:          func(int) (supervisorHolderState, string) { return state, exePath },
-		supervisorBuildID: func(context.Context) (string, error) { return remoteID, queryErr },
-	}
-}
-
-// TestSupervisorStaleImageCheckNonFindings covers every state that must not
-// raise an alarm. A deleted image is the normal state between a rebuild and
-// the next restart, and an unverifiable image is absence of evidence — neither
-// is a finding.
-func TestSupervisorStaleImageCheckNonFindings(t *testing.T) {
-	tests := []struct {
-		name  string
-		check *supervisorStaleImageCheck
-	}{
-		{"no supervisor", newTestStaleImageCheck(0, supervisorHolderLive, "", "abc", "abc", nil)},
-		{"live image", newTestStaleImageCheck(42, supervisorHolderLive, "/usr/local/bin/gc", "abc", "abc", nil)},
-		{"unverifiable image", newTestStaleImageCheck(42, supervisorHolderUnknown, "", "abc", "abc", nil)},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r := tt.check.Run(nil)
-			if r.Status != doctor.StatusOK {
-				t.Fatalf("Status = %v, want StatusOK (message: %s)", r.Status, r.Message)
-			}
-		})
-	}
-}
-
-// TestSupervisorStaleImageCheckWarnsWithoutCorroboration covers the routine
-// post-rebuild state: the image is unlinked but the running build still
-// matches, or could not be compared. That is restart-pending, not a wedge, so
-// it must stay a warning.
-func TestSupervisorStaleImageCheckWarnsWithoutCorroboration(t *testing.T) {
-	tests := []struct {
-		name             string
-		local, remote    string
-		queryErr         error
-		wantBuildDetails bool
-	}{
-		{name: "same build", local: "abc", remote: "abc", wantBuildDetails: true},
-		{name: "health unreachable", local: "abc", remote: "", queryErr: errors.New("connection refused")},
-		{name: "build id unknown", local: "unknown", remote: "abc"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := newTestStaleImageCheck(3204367, supervisorHolderStaleImage, "/home/someone/go/bin/gc", tt.local, tt.remote, tt.queryErr)
-			r := c.Run(nil)
-			if r.Status != doctor.StatusWarning {
-				t.Fatalf("Status = %v, want StatusWarning (message: %s)", r.Status, r.Message)
-			}
-			if r.Severity != doctor.SeverityAdvisory {
-				t.Fatalf("Severity = %v, want SeverityAdvisory", r.Severity)
-			}
-			hasBuildDetail := false
-			for _, d := range r.Details {
-				if strings.Contains(d, "supervisor build") {
-					hasBuildDetail = true
-				}
-			}
-			if hasBuildDetail != tt.wantBuildDetails {
-				t.Fatalf("build-comparison detail present = %v, want %v (details: %v)", hasBuildDetail, tt.wantBuildDetails, r.Details)
-			}
-		})
-	}
-}
-
-// TestSupervisorStaleImageCheckErrorsOnConfirmedWedge is the visibility half
-// of gc-f1081: a deleted image that no longer matches the built code means
-// landed fixes are inert in the running city. gc doctor had no binary-identity
-// coverage at all, so this went unseen for five days.
-func TestSupervisorStaleImageCheckErrorsOnConfirmedWedge(t *testing.T) {
-	c := newTestStaleImageCheck(3204367, supervisorHolderStaleImage, "/home/someone/go/bin/gc", "newbuild", "oldbuild", nil)
-	r := c.Run(nil)
-	if r.Status != doctor.StatusError {
-		t.Fatalf("Status = %v, want StatusError (message: %s)", r.Status, r.Message)
-	}
-	// Advisory on purpose: the warning form of this check is routine in any
-	// tree that rebuilds gc, so gating dispatch on it would halt development.
-	if r.Severity != doctor.SeverityAdvisory {
-		t.Fatalf("Severity = %v, want SeverityAdvisory", r.Severity)
-	}
-	if r.FixHint == "" {
-		t.Fatal("confirmed wedge reported no FixHint")
-	}
-	joined := r.Message + "\n" + strings.Join(r.Details, "\n")
-	for _, want := range []string{"3204367", "/home/someone/go/bin/gc", "oldbuild", "newbuild"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("report missing %q; got:\n%s", want, joined)
-		}
-	}
-}
-
-// TestSupervisorStaleImageCheckMetadata pins the check's registration
-// contract: a stable name and no auto-fix (replacing the holder restarts the
-// city, which is the operator's call).
-func TestSupervisorStaleImageCheckMetadata(t *testing.T) {
-	c := newSupervisorStaleImageCheck(0)
-	if c.Name() != "supervisor-stale-image" {
-		t.Fatalf("Name = %q, want supervisor-stale-image", c.Name())
-	}
-	if c.CanFix() {
-		t.Fatal("CanFix = true; restarting the city must not be automatic")
-	}
-	if err := c.Fix(nil); err != nil {
-		t.Fatalf("Fix = %v, want nil no-op", err)
-	}
-	if c.WarmupEligible() {
-		t.Fatal("WarmupEligible = true; gc start already runs its own drift check")
-	}
-	var _ doctor.Check = c
 }

@@ -1129,6 +1129,47 @@ func TestRecyclableDeadConfiguredNamePhantom_NilConfigNeverRecyclable(t *testing
 	}
 }
 
+// Kills: a ClosedNamedSessionBeadIndexed that drifts from the index it names.
+// A bead the index would find but the predicate rejects hides a closed
+// phantom from an index cache that rebuilds on the predicate; a bead the
+// predicate accepts but the index skips rebuilds it for nothing.
+func TestClosedNamedSessionBeadIndexedMatchesTheIndex(t *testing.T) {
+	bead := func(status string, metadata map[string]string) beads.Bead {
+		return beads.Bead{ID: "gc-1", Type: BeadType, Labels: []string{LabelSession}, Status: status, Metadata: metadata}
+	}
+	named := func(extra map[string]string) map[string]string {
+		m := map[string]string{NamedSessionMetadataKey: "true", NamedSessionIdentityMetadata: "witness", "session_name": "rt-witness"}
+		for k, v := range extra {
+			m[k] = v
+		}
+		return m
+	}
+	for _, tc := range []struct {
+		name string
+		b    beads.Bead
+		want bool
+	}{
+		{"closed named session", bead("closed", named(nil)), true},
+		{"closed named session without a session_name", bead("closed", named(map[string]string{"session_name": ""})), true},
+		{"open named session", bead("open", named(nil)), false},
+		{"closed session with no named identity", bead("closed", map[string]string{"session_name": "worker-1"}), false},
+		{"closed as failed-create", bead("closed", named(map[string]string{"state": string(StateFailedCreate), "close_reason": CanonicalCloseReason(string(StateFailedCreate))})), false},
+		{"closed with state duplicate", bead("closed", named(map[string]string{"state": "duplicate"})), false},
+		{"closed with close_reason gc_swept", bead("closed", named(map[string]string{"close_reason": "gc_swept"})), false},
+		{"closed and not continuity eligible", bead("closed", named(map[string]string{"continuity_eligible": "false"})), false},
+	} {
+		idx, err := BuildClosedNamedSessionBeadIndex(beads.NewMemStoreFrom(0, []beads.Bead{tc.b}, nil))
+		if err != nil {
+			t.Fatalf("%s: building the index: %v", tc.name, err)
+		}
+		_, found := idx.Find("witness")
+		got := ClosedNamedSessionBeadIndexed(tc.b)
+		if got != tc.want || found != tc.want {
+			t.Errorf("%s: ClosedNamedSessionBeadIndexed = %t, index finds it = %t, want both %t", tc.name, got, found, tc.want)
+		}
+	}
+}
+
 // TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup is the equivalence
 // oracle for ga-0t7qjl: it proves BuildClosedNamedSessionBeadIndex(store).Find
 // agrees with FindClosedNamedSessionBeadForSessionName(store, identity, "")
