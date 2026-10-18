@@ -269,6 +269,32 @@ func TestBuildDoltDSNUsesResolvedUserAndPassword(t *testing.T) {
 	}
 }
 
+// On Dolt, one WHERE that ORs the id lookup with the gc.root_bead_id lookup
+// reads every row of the table; as separate UNION arms each lookup reads an
+// index.
+func TestWorkflowSQLLookupsKeepIDAndRootIDArmsApart(t *testing.T) {
+	tableSets := []workflowSQLTableSet{workflowSQLIssueTables, workflowSQLWispTables}
+	beadsQuery := workflowSQLWorkflowBeadsQuery("issues")
+	idsQuery := workflowSQLWorkflowIDsSubquery(tableSets)
+	for name, query := range map[string]string{"workflow beads": beadsQuery, "workflow ids": idsQuery} {
+		if strings.Contains(strings.ToUpper(query), " OR ") {
+			t.Errorf("%s query ORs its lookups:\n%s", name, query)
+		}
+		if !strings.Contains(query, workflowSQLRootIDPredicate()) {
+			t.Errorf("%s query lacks the gc.root_bead_id predicate %q:\n%s", name, workflowSQLRootIDPredicate(), query)
+		}
+	}
+	if !strings.Contains(beadsQuery, "UNION ALL") {
+		t.Errorf("workflow beads query is not a UNION ALL:\n%s", beadsQuery)
+	}
+	if got := strings.Count(beadsQuery, "?"); got != 2 {
+		t.Errorf("workflow beads query has %d placeholders, want 2 (root id twice)", got)
+	}
+	if got, want := strings.Count(idsQuery, "?"), len(workflowSQLWorkflowIDsSubqueryArgs(tableSets, "gc-root")); got != want {
+		t.Errorf("workflow ids query has %d placeholders, want %d to match its args", got, want)
+	}
+}
+
 func clearDoltAuthEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{"GC_DOLT_USER", "GC_DOLT_PASSWORD", "BEADS_DOLT_PASSWORD", "BEADS_CREDENTIALS_FILE"} {
