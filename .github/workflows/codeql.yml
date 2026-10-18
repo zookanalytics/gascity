@@ -23,12 +23,11 @@ on:
 permissions:
   actions: read
   contents: read
-  security-events: write
 
 jobs:
   runner-policy:
     name: Runner policy
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     outputs:
       use_blacksmith: ${{ steps.policy.outputs.use_blacksmith }}
       reason: ${{ steps.policy.outputs.reason }}
@@ -52,6 +51,10 @@ jobs:
     needs: runner-policy
     runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:

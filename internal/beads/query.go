@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 )
@@ -102,9 +103,10 @@ type ListQuery struct {
 	Assignees []string
 	ParentID  string
 	// ParentIDs matches beads whose parent_id is any of the listed ids — a
-	// batched form of ParentID for graph/subtree walks. Backends that do not
-	// recognize it should ignore it (returning a superset); callers that need
-	// exact results must filter the returned beads by parent in memory.
+	// batched form of ParentID for graph/subtree walks. An empty entry names no
+	// parent. A store that cannot push the list into its backend returns a
+	// superset, which ApplyListQuery/Matches then cut exactly, so the result is
+	// exact. It counts as a filter, so a ParentIDs query needs no AllowScan.
 	ParentIDs []string
 	// IDs matches beads whose id is any of the listed ids — the IN-list form of
 	// a batch of Gets. It exists so a lane that already knows WHICH beads it
@@ -203,6 +205,12 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+	// Brief says the caller reads none of a row's free-form text: its
+	// description, design, acceptance criteria and notes. On a ledger whose
+	// beads carry long notes that text is most of what a ready read sends, so a
+	// store that sends rows across a process boundary may leave it empty. A
+	// store that holds rows in process ignores it.
+	Brief bool
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
@@ -220,6 +228,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.ParentIDs) > 0 ||
 		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
@@ -280,6 +289,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		}
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
+		return false
+	}
+	if len(q.ParentIDs) > 0 && (b.ParentID == "" || !slices.Contains(q.ParentIDs, b.ParentID)) {
 		return false
 	}
 	if len(q.IDs) > 0 {
@@ -365,6 +377,22 @@ func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 
 func applyListQuery(items []Bead, q ListQuery) []Bead {
 	return ApplyListQuery(items, q)
+}
+
+// distinctNonEmpty returns the distinct non-empty entries of ids in the order
+// they first appear. An empty entry names no bead, and an id is compared
+// exactly, never trimmed.
+func distinctNonEmpty(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // SortBeads sorts items into the canonical (created_at, id) total order for

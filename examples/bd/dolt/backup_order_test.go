@@ -23,9 +23,23 @@ import (
 //	FAKE_UNREACHABLE_SCOPES  scopes whose bd calls fail
 //	FAKE_UNSUPPORTED_SCOPES  scopes where backup is refused (proxied, bd v1.3.0)
 //	FAKE_CONFIGURED_DBS      databases that already have a backup destination
+//	FAKE_STATUS_FAIL_DBS     databases whose backup status fails
+//	FAKE_BACKUP_URLS         "db=url ..." destinations status reports as configured
 //	FAKE_INIT_FAIL_DBS       databases whose backup init fails
+//	FAKE_FAILURE_DETAIL      text appended to the unreachable, status, and init errors
 //	FAKE_SYNC_FAIL_UNTIL     fail each database's first N syncs (default 0)
+//	FAKE_SYNC_STDERR         stderr line a failing sync prints (default: a closed connection)
+//	FAKE_SYNC_FIRST_STDERR   overrides FAKE_SYNC_STDERR on a database's first sync
+//	FAKE_SYNC_TORN_UNTIL     each database's first N syncs exit 0 without
+//	                         committing: a file:// destination gets the chunk
+//	                         file but no manifest (default 0)
+//	FAKE_SYNC_TIE            a committing sync gives its chunk file the
+//	                         manifest's exact mtime
 //	FAKE_SYNC_STARTED/FAKE_SYNC_RELEASE  block sync until the release file exists
+//
+// A sync to a file:// destination (from init or FAKE_BACKUP_URLS) writes the
+// way Dolt does: the attempt's chunk file first, then the manifest that
+// commits it.
 type backupFakeGC struct {
 	logPath string
 }
@@ -59,11 +73,16 @@ case " ${FAKE_NOT_BD_SCOPES:-} " in
   *" $scope "*) printf 'gc bd: only supported for bd-backed beads providers (resolved "file" for %%s)\n' "$scope" >&2; exit 1 ;;
 esac
 case " ${FAKE_UNREACHABLE_SCOPES:-} " in
-  *" $scope "*) printf 'fake gc: %%s unreachable\n' "$scope" >&2; exit 1 ;;
+  *" $scope "*) printf 'fake gc: %%s unreachable%%s\n' "$scope" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
 esac
 db=prod
 for pair in ${FAKE_SCOPE_DBS:-}; do
   case "$pair" in "$scope="*) db="${pair#*=}" ;; esac
+done
+url=""
+[ -s "$state/$db.configured" ] && url=$(cat "$state/$db.configured")
+for pair in ${FAKE_BACKUP_URLS:-}; do
+  case "$pair" in "$db="*) url="${pair#*=}" ;; esac
 done
 case "${1:-} ${2:-}" in
   "sql --csv")
@@ -78,14 +97,21 @@ case "${1:-} ${2:-}" in
     esac
     case "$2" in
       status)
+        case " ${FAKE_STATUS_FAIL_DBS:-} " in
+          *" $db "*) printf 'Error: backup status failed for %%s%%s\n' "$db" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
+        esac
         configured=false
         case " ${FAKE_CONFIGURED_DBS:-} " in *" $db "*) configured=true ;; esac
         [ -f "$state/$db.configured" ] && configured=true
-        printf '{"backup":{},"dolt":{"configured":%%s}}\n' "$configured"
+        if [ -n "$url" ]; then
+          printf '{"backup":{},"dolt":{"configured":true,"backup_url":"%%s"}}\n' "$url"
+        else
+          printf '{"backup":{},"dolt":{"configured":%%s}}\n' "$configured"
+        fi
         ;;
       init)
         case " ${FAKE_INIT_FAIL_DBS:-} " in
-          *" $db "*) printf 'Error: failed to add backup destination for %%s\n' "$db" >&2; exit 1 ;;
+          *" $db "*) printf 'Error: failed to add backup destination for %%s%%s\n' "$db" "${FAKE_FAILURE_DETAIL:+ $FAKE_FAILURE_DETAIL}" >&2; exit 1 ;;
         esac
         printf '%%s\n' "$3" > "$state/$db.configured"
         printf '{"backup_name":"default","backup_url":"%%s","initialized":true}\n' "$3"
@@ -98,9 +124,25 @@ case "${1:-} ${2:-}" in
         fi
         attempts=$(wc -c < "$state/$db.syncs" | tr -d ' ')
         if [ "$attempts" -le "${FAKE_SYNC_FAIL_UNTIL:-0}" ]; then
-          printf 'Error: backup sync failed: Error 1105 (HY000): connection was closed\n' >&2
+          sync_err='Error: backup sync failed: Error 1105 (HY000): connection was closed'
+          if [ -n "${FAKE_SYNC_STDERR:-}" ]; then sync_err=$FAKE_SYNC_STDERR; fi
+          if [ "$attempts" -eq 1 ] && [ -n "${FAKE_SYNC_FIRST_STDERR:-}" ]; then sync_err=$FAKE_SYNC_FIRST_STDERR; fi
+          printf '%%s\n' "$sync_err" >&2
           exit 1
         fi
+        case "$url" in
+          file://*)
+            dest="${url#file://}"
+            mkdir -p "$dest"
+            printf 'chunk %%s\n' "$attempts" > "$dest/sync-$attempts.darc"
+            if [ "$attempts" -gt "${FAKE_SYNC_TORN_UNTIL:-0}" ]; then
+              printf 'manifest %%s\n' "$attempts" > "$dest/manifest"
+              if [ -n "${FAKE_SYNC_TIE:-}" ]; then
+                touch -r "$dest/manifest" "$dest/sync-$attempts.darc"
+              fi
+            fi
+            ;;
+        esac
         printf '{"synced":true,"duration":"1ms"}\n'
         ;;
     esac
@@ -322,6 +364,182 @@ func TestBackupOrderEscalatesFailedSyncWithDiagnostic(t *testing.T) {
 	}
 }
 
+func TestBackupOrderEscalatesFirstSyncFailureWithCredentialsRedacted(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		"FAKE_CONFIGURED_DBS=prod",
+		"FAKE_SYNC_FAIL_UNTIL=99",
+		"GC_DOLT_BACKUP_SYNC_ATTEMPTS=2",
+		`FAKE_SYNC_FIRST_STDERR=sync failed Password=first-secret postgres://user:first-url-secret@example.test/repo {"token":"json-secret"} --password cli-secret Authorization: Bearer bearer-secret`,
+		"FAKE_SYNC_STDERR=later failure TOKEN=second-secret",
+	)
+	if got := syncAttempts(t, binDir, "prod"); got != 2 {
+		t.Fatalf("backup sync attempted %d times, want GC_DOLT_BACKUP_SYNC_ATTEMPTS=2", got)
+	}
+	log := gc.log(t)
+	if !strings.Contains(log, "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]") {
+		t.Fatalf("sync failure did not escalate:\n%s", log)
+	}
+	for _, secret := range []string{"first-secret", "first-url-secret", "json-secret", "cli-secret", "bearer-secret", "second-secret"} {
+		if strings.Contains(log, secret) || strings.Contains(out, secret) {
+			t.Fatalf("sync stderr credential %q leaked into the order output or escalation:\nlog:\n%s\noutput:\n%s", secret, log, out)
+		}
+	}
+	for _, want := range []string{
+		"sync failed Password=[redacted]",
+		"postgres://[redacted]@example.test/repo",
+		`"token":"[redacted]"`,
+		"--password [redacted]",
+		"Authorization: [redacted]",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("escalation missing the first attempt's redacted diagnostic %q:\n%s", want, log)
+		}
+	}
+	if strings.Contains(log, "later failure") {
+		t.Fatalf("escalation must report the first failed attempt, not a later one:\n%s", log)
+	}
+}
+
+func TestBackupOrderRaisesUnchangedSyncFailureAsOneIncident(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	failing := []string{"FAKE_CONFIGURED_DBS=prod", "FAKE_SYNC_FAIL_UNTIL=99", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1"}
+	const notified = "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]"
+
+	mustRunBackupOrder(t, binDir, cityPath, failing...)
+	mustRunBackupOrder(t, binDir, cityPath, failing...)
+	if got := strings.Count(gc.log(t), notified); got != 1 {
+		t.Fatalf("an unchanged sync failure notified %d times over two runs, want 1:\n%s", got, gc.log(t))
+	}
+	states, err := filepath.Glob(filepath.Join(cityPath, ".gc", "incidents", "*.state"))
+	if err != nil {
+		t.Fatalf("glob incident state: %v", err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("incident state files = %v, want one incident for the sync failure", states)
+	}
+
+	mustRunBackupOrder(t, binDir, cityPath, append(failing, "FAKE_SYNC_STDERR=Error: backup sync failed: remote rejected the push")...)
+	if got := strings.Count(gc.log(t), notified); got != 2 {
+		t.Fatalf("a changed sync failure notified %d times in total, want a second notification:\n%s", got, gc.log(t))
+	}
+}
+
+// TestBackupOrderAlertsWhenASyncFailureReturnsAfterRecovery pins the recovery
+// half of the incident. A clean run resolves it, so the same failure coming
+// back inside the reminder interval notifies again rather than being
+// suppressed as unchanged.
+func TestBackupOrderAlertsWhenASyncFailureReturnsAfterRecovery(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+	const notified = "mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]"
+	// The fake counts sync attempts across runs, so FAKE_SYNC_FAIL_UNTIL=99
+	// fails every later run and 0 lets the next one succeed.
+	run := func(failUntil string) {
+		t.Helper()
+		mustRunBackupOrder(t, binDir, cityPath,
+			"FAKE_CONFIGURED_DBS=prod", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1", "FAKE_SYNC_FAIL_UNTIL="+failUntil)
+	}
+
+	run("99")
+	run("0")
+	if got := strings.Count(gc.log(t), notified); got != 1 {
+		t.Fatalf("fail then recover notified %d times, want 1:\n%s", got, gc.log(t))
+	}
+	run("99")
+	if got := strings.Count(gc.log(t), notified); got != 2 {
+		t.Fatalf("a failure that returned after a clean run notified %d times in total, want 2:\n%s", got, gc.log(t))
+	}
+}
+
+// TestBackupOrderRedactsEveryCredentialShape pins the redactor against each
+// credential shape a sync error can carry. Each shape runs in its own city so
+// a match in one row cannot mask a miss in another, and both the escalation
+// and the order log must keep the key and lose the value.
+func TestBackupOrderRedactsEveryCredentialShape(t *testing.T) {
+	cases := []struct {
+		name     string
+		stderr   string
+		secret   string
+		redacted string
+	}{
+		{"authorization with any scheme", "Authorization: Basic basic-cred-sentinel", "basic-cred-sentinel", "Authorization: [redacted]"},
+		{"quoted multi-word value", `password: "two-word secret-sentinel-dq"`, "secret-sentinel-dq", "password: [redacted]"},
+		{"spaces around the separator", "token = space-sentinel", "space-sentinel", "token = [redacted]"},
+		{"prefixed JSON token key", `{"access_token":"json-prefix-sentinel"}`, "json-prefix-sentinel", `"access_token":"[redacted]"`},
+		{"prefixed JSON secret key", `{"client_secret": "json-secret-sentinel"}`, "json-secret-sentinel", `"client_secret": "[redacted]"`},
+		{"secret access key", "aws_secret_access_key=aws-sentinel", "aws-sentinel", "aws_secret_access_key=[redacted]"},
+		{"prefixed flag", "--db-password cli-prefix-sentinel", "cli-prefix-sentinel", "--db-password [redacted]"},
+		{"JSON authorization", `"Authorization": "Bearer json-auth-sentinel"`, "json-auth-sentinel", `"Authorization": "[redacted]"`},
+		{"URL userinfo with @ in the password", "https://user:p@ss-sentinel@example.test/repo", "ss-sentinel", "https://[redacted]@example.test/repo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := resolvedTempDir(t)
+			binDir := t.TempDir()
+			gc := writeBackupFakeGC(t, binDir)
+
+			out := mustRunBackupOrder(t, binDir, cityPath,
+				"FAKE_CONFIGURED_DBS=prod",
+				"FAKE_SYNC_FAIL_UNTIL=99",
+				"GC_DOLT_BACKUP_SYNC_ATTEMPTS=1",
+				"FAKE_SYNC_STDERR=Error: backup sync failed: "+tc.stderr,
+			)
+			log := gc.log(t)
+			if strings.Contains(log, tc.secret) || strings.Contains(out, tc.secret) {
+				t.Fatalf("credential %q leaked:\nlog:\n%s\noutput:\n%s", tc.secret, log, out)
+			}
+			if !strings.Contains(log, tc.redacted) || !strings.Contains(out, tc.redacted) {
+				t.Fatalf("want %q in both the escalation and the order log:\nlog:\n%s\noutput:\n%s", tc.redacted, log, out)
+			}
+		})
+	}
+}
+
+// TestBackupOrderRedactsEveryFailureDiagnostic pins that redaction covers
+// every diagnostic the escalation carries, not only sync stderr. A failed
+// backup status, an unreachable scope, and a failed destination registration
+// each reach the mail through the same filter.
+func TestBackupOrderRedactsEveryFailureDiagnostic(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		`FAKE_RIG_LIST_JSON={"rigs":[{"name":"api","hq":false},{"name":"archive","hq":false}]}`,
+		"FAKE_SCOPE_DBS=city=prod rig:api=apidb rig:archive=archive",
+		"FAKE_STATUS_FAIL_DBS=prod",
+		"FAKE_UNREACHABLE_SCOPES=rig:api",
+		"FAKE_INIT_FAIL_DBS=archive",
+		"FAKE_FAILURE_DETAIL=token=diag-token-sentinel Authorization: Basic diag-basic-sentinel",
+	)
+	if !strings.Contains(out, "synced: 0/3") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	log := gc.log(t)
+	for _, secret := range []string{"diag-token-sentinel", "diag-basic-sentinel"} {
+		if strings.Contains(log, secret) || strings.Contains(out, secret) {
+			t.Fatalf("diagnostic credential %q leaked:\nlog:\n%s\noutput:\n%s", secret, log, out)
+		}
+	}
+	for _, want := range []string{
+		"backup status failed for prod token=[redacted] Authorization: [redacted]",
+		"rig:api unreachable token=[redacted] Authorization: [redacted]",
+		"failed to add backup destination for archive token=[redacted] Authorization: [redacted]",
+		"common credential shapes redacted",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("escalation missing %q:\n%s", want, log)
+		}
+	}
+}
+
 func TestBackupOrderRetriesMarginalSyncFailure(t *testing.T) {
 	cityPath := resolvedTempDir(t)
 	binDir := t.TempDir()
@@ -336,6 +554,164 @@ func TestBackupOrderRetriesMarginalSyncFailure(t *testing.T) {
 	}
 	if strings.Contains(gc.log(t), "databases failed to sync") {
 		t.Fatalf("a scope that succeeded on retry must not escalate:\n%s", gc.log(t))
+	}
+}
+
+// committedBackupDestination returns a city whose prod scope backs up to a
+// file:// directory holding a manifest committed an hour ago, the state a
+// destination is in between two syncs, plus the fake gc setting that reports
+// that directory as prod's configured destination.
+func committedBackupDestination(t *testing.T) (cityPath, destDir, urlEnv string) {
+	t.Helper()
+	cityPath = resolvedTempDir(t)
+	destDir = filepath.Join(cityPath, ".dolt-backup", "prod")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("mkdir backup destination: %v", err)
+	}
+	manifest := filepath.Join(destDir, "manifest")
+	if err := os.WriteFile(manifest, []byte("manifest 0\n"), 0o600); err != nil {
+		t.Fatalf("write previous manifest: %v", err)
+	}
+	committed := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(manifest, committed, committed); err != nil {
+		t.Fatalf("age previous manifest: %v", err)
+	}
+	return cityPath, destDir, "FAKE_BACKUP_URLS=prod=file://" + destDir
+}
+
+func TestBackupOrderRetriesTornBackupThenSucceeds(t *testing.T) {
+	cityPath, destDir, urlEnv := committedBackupDestination(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, urlEnv, "FAKE_SYNC_TORN_UNTIL=1")
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("a sync whose retry commits its manifest must count as synced:\n%s", out)
+	}
+	if got := syncAttempts(t, binDir, "prod"); got != 2 {
+		t.Fatalf("backup sync attempted %d times, want 2 (one uncommitted upload, then a committed one)", got)
+	}
+	if !strings.Contains(out, "attempt 1/3 failed") || !strings.Contains(out, "sync-1.darc in "+destDir+" is newer than the manifest") {
+		t.Fatalf("the attempt that exited 0 without committing must be logged as failed:\n%s", out)
+	}
+	if strings.Contains(gc.log(t), "databases failed to sync") {
+		t.Fatalf("a scope that committed on retry must not escalate:\n%s", gc.log(t))
+	}
+}
+
+func TestBackupOrderEscalatesPersistentlyTornBackup(t *testing.T) {
+	cityPath, destDir, urlEnv := committedBackupDestination(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, urlEnv,
+		"FAKE_SYNC_TORN_UNTIL=99",
+		"GC_DOLT_BACKUP_SYNC_ATTEMPTS=2",
+	)
+	if !strings.Contains(out, "synced: 0/1") {
+		t.Fatalf("a sync that exits 0 without committing its manifest must not count as synced:\n%s", out)
+	}
+	if got := syncAttempts(t, binDir, "prod"); got != 2 {
+		t.Fatalf("backup sync attempted %d times, want GC_DOLT_BACKUP_SYNC_ATTEMPTS=2", got)
+	}
+	log := gc.log(t)
+	for _, want := range []string{
+		"mail send human -s Dolt backup: 1/1 databases failed to sync [MEDIUM]",
+		"prod(sync failed)",
+		"did not commit what it uploaded",
+		// The escalation carries the FIRST attempt's diagnostic (one torn
+		// chunk file), so an incident that does not change between runs
+		// deduplicates (upstream #6363); later attempts only add files.
+		"sync-1.darc in " + destDir + " is newer than the manifest",
+		"restores only to the previous sync",
+	} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("failure escalation missing %q:\n%s", want, log)
+		}
+	}
+}
+
+func TestBackupOrderFailsSyncThatLeavesNoManifest(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	// No destination is configured, so the order registers one under the
+	// artifact dir and the first sync into it never commits.
+	out := mustRunBackupOrder(t, binDir, cityPath, "FAKE_SYNC_TORN_UNTIL=99", "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1")
+	if !strings.Contains(out, "synced: 0/1") {
+		t.Fatalf("a sync that leaves its destination without a manifest must not count as synced:\n%s", out)
+	}
+	destDir := filepath.Join(cityPath, ".dolt-backup", "prod")
+	if log := gc.log(t); !strings.Contains(log, destDir+" has no manifest") {
+		t.Fatalf("failure escalation should say the destination has no manifest:\n%s", log)
+	}
+}
+
+func TestBackupOrderFailsSyncWhoseDestinationCannotBeRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory, so the destination scan cannot be made to fail")
+	}
+	cityPath, destDir, urlEnv := committedBackupDestination(t)
+	locked := filepath.Join(destDir, "oldgen")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatalf("mkdir unreadable subdirectory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath, urlEnv, "GC_DOLT_BACKUP_SYNC_ATTEMPTS=1")
+	if !strings.Contains(out, "synced: 0/1") {
+		t.Fatalf("a destination the order cannot read is unverified, not synced:\n%s", out)
+	}
+	if log := gc.log(t); !strings.Contains(log, destDir+" could not be read") {
+		t.Fatalf("failure escalation should say the destination could not be read:\n%s", log)
+	}
+}
+
+func TestBackupOrderAcceptsSyncThatCommittedItsManifest(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "manifest written last"},
+		{name: "chunk shares the manifest's mtime", env: []string{"FAKE_SYNC_TIE=1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, destDir, urlEnv := committedBackupDestination(t)
+			binDir := t.TempDir()
+			gc := writeBackupFakeGC(t, binDir)
+
+			out := mustRunBackupOrder(t, binDir, cityPath, append([]string{urlEnv}, tc.env...)...)
+			if !strings.Contains(out, "synced: 1/1") {
+				t.Fatalf("a sync that committed its manifest must count as synced:\n%s", out)
+			}
+			if got := syncAttempts(t, binDir, "prod"); got != 1 {
+				t.Fatalf("backup sync attempted %d times, want 1", got)
+			}
+			if _, err := os.Stat(filepath.Join(destDir, "sync-1.darc")); err != nil {
+				t.Fatalf("the sync should have written into the verified destination: %v", err)
+			}
+			if strings.Contains(gc.log(t), "mail send") {
+				t.Fatalf("a committed backup must not escalate:\n%s", gc.log(t))
+			}
+		})
+	}
+}
+
+func TestBackupOrderAcceptsNonFileDestinationOnExitStatus(t *testing.T) {
+	cityPath := resolvedTempDir(t)
+	binDir := t.TempDir()
+	gc := writeBackupFakeGC(t, binDir)
+
+	out := mustRunBackupOrder(t, binDir, cityPath,
+		"FAKE_BACKUP_URLS=prod=https://doltremoteapi.dolthub.com/acme/prod-backup")
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("a destination with no local directory to inspect is accepted on bd's exit status:\n%s", out)
+	}
+	if strings.Contains(gc.log(t), "mail send") {
+		t.Fatalf("an unverifiable destination must not escalate:\n%s", gc.log(t))
 	}
 }
 
@@ -550,15 +926,24 @@ exit %d
 	return logPath
 }
 
+// writeRecordingTimeout installs a fake bounded-execution helper in binDir
+// and returns the path of its log. Each call logs the name it was invoked
+// by and its arguments, then runs the wrapped command unbounded. The fake
+// is installed as both gtimeout and timeout because _bounded.sh prefers
+// gtimeout: on a host where Homebrew coreutils puts a real gtimeout on
+// PATH, run_bounded would otherwise bypass the fake.
 func writeRecordingTimeout(t *testing.T, binDir string) string {
 	t.Helper()
 	logPath := filepath.Join(binDir, "timeout.log")
-	writeExecutable(t, filepath.Join(binDir, "timeout"), fmt.Sprintf(`#!/bin/sh
-printf 'timeout %%s\n' "$*" >> %s
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s %%s\n' "${0##*/}" "$*" >> %s
 [ "$1" = "--kill-after=2" ] && shift
 shift
 exec "$@"
-`, shellQuote(logPath)))
+`, shellQuote(logPath))
+	for _, name := range []string{"gtimeout", "timeout"} {
+		writeExecutable(t, filepath.Join(binDir, name), script)
+	}
 	return logPath
 }
 

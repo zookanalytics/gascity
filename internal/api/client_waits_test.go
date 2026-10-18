@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -172,5 +173,73 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 	sort.SliceStable(got, func(i, j int) bool { return got[i].CreatedAt.Before(got[j].CreatedAt) })
 	if got[0].ID != "w-early" || got[1].ID != "w-late" {
 		t.Fatalf("post-sort order = [%s %s], want [w-early w-late]", got[0].ID, got[1].ID)
+	}
+}
+
+// inProcessCityClient returns a city-scoped Client whose requests h serves
+// in-process, so a test drives the real read routes without opening a loopback
+// listener. It sends no X-GC-Request header, so mutating routes refuse it.
+// example.com is the host wrapTestSupervisorMiddleware allows.
+func inProcessCityClient(t *testing.T, h http.Handler, cityName string) *Client {
+	t.Helper()
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Result(), nil
+	})
+	const baseURL = "http://example.com"
+	cw, err := genclient.NewClientWithResponses(baseURL, genclient.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatalf("genclient.NewClientWithResponses: %v", err)
+	}
+	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
+}
+
+// TestListWaitsViaBeadsReportsCapAtBound drives the legacy leg through the real
+// /beads handler on both sides of session.SessionWaitLookupLimit. Exactly the
+// limit is a complete read. One wait more is a capped read that keeps the newest
+// SessionWaitLookupLimit waits, the same bound the /waits handler reports.
+func TestListWaitsViaBeadsReportsCapAtBound(t *testing.T) {
+	limit := session.SessionWaitLookupLimit
+	base := time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		seeded     int
+		wantCapped bool
+	}{
+		{name: "exactly-the-limit", seeded: limit, wantCapped: false},
+		{name: "one-past-the-limit", seeded: limit + 1, wantCapped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Wait i is created i seconds after base, so w-0000 is the oldest.
+			seed := make([]beads.Bead, 0, tc.seeded)
+			for i := 0; i < tc.seeded; i++ {
+				seed = append(seed, subSecondWaitBead(fmt.Sprintf("w-%04d", i), base.Add(time.Duration(i)*time.Second)))
+			}
+			state := newFakeState(t)
+			state.stores["myrig"] = beads.NewMemStoreFrom(tc.seeded, seed, nil)
+			c := inProcessCityClient(t, newTestCityHandler(t, state), state.CityName())
+
+			cr, err := c.ListWaitsViaBeads()
+			if err != nil {
+				t.Fatalf("ListWaitsViaBeads: %v", err)
+			}
+			if cr.Body.Capped != tc.wantCapped {
+				t.Errorf("Capped = %v, want %v", cr.Body.Capped, tc.wantCapped)
+			}
+			if got := len(cr.Body.Waits); got != limit {
+				t.Fatalf("wait count = %d, want %d", got, limit)
+			}
+			kept := make(map[string]bool, len(cr.Body.Waits))
+			for _, w := range cr.Body.Waits {
+				kept[w.ID] = true
+			}
+			if newest := fmt.Sprintf("w-%04d", tc.seeded-1); !kept[newest] {
+				t.Errorf("newest wait %s missing from the read", newest)
+			}
+			if kept["w-0000"] == tc.wantCapped {
+				t.Errorf("oldest wait w-0000 kept = %v, want %v (a capped read drops it)", kept["w-0000"], !tc.wantCapped)
+			}
+		})
 	}
 }
