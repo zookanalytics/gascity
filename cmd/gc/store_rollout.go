@@ -101,16 +101,22 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 // nativeControlStores keeps the first native store each scope opens, and a
 // scope the factory answered with the bd store skips the preflight until
 // controlStoreNativeRecheck has passed. Both answers hold only for the binding
-// the scope had when the factory gave them. An open that finds the scope's
-// .beads/metadata.json changed, such as a move to another database, to
-// proxied-server or to another backend, retires the kept store and asks the
-// factory again, as a controller reload rebuilds the controller's stores when
-// that file has changed (storeMetadataSignature). The proxied lane is not
-// wired here, so a proxied-server scope keeps the bd store.
+// the scope had when the factory gave them (controlStoreBinding). Every open
+// resolves the env a native open of the scope projects, as the bd store
+// resolves its env for every bd call, and an open that finds the binding
+// changed retires the kept store and asks the factory again. A change to the
+// scope's .beads/metadata.json changes the binding, such as a move to another
+// database, to proxied-server or to another backend. So does a change to the
+// server, the credentials or the open options the env projects, such as gc rig
+// set-endpoint pointing the scope at another server while the old one still
+// answers. The proxied lane is not wired here, so a proxied-server scope keeps
+// the bd store.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
-	// The binding is read before the factory opens anything, so a store is
-	// never recorded under a binding newer than the one it opened under.
-	binding := scopeMetadataDigest(scopeRoot)
+	// The binding is read before the factory opens anything, and a native open
+	// uses the env the binding names, so a store is never recorded under a
+	// binding newer than the one it opened under.
+	env, envErr := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
+	binding := controlStoreBinding(scopeRoot, env, envErr)
 	transport := controlStoreNativeTransport(scopeRoot, cfg)
 	if transport == beads.NativeTransportOff {
 		closeUnheldControlStore(scopeRoot, nativeControlStores.retireRebound(scopeRoot, binding))
@@ -140,7 +146,7 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 			cityPath, conditionalWritesStoreID(scopeRoot, cityPath), flags, resolved),
 		OpenBdStore: openBd,
 		OpenNativeStore: func() (beads.Store, error) {
-			return openNativeControlStore(scopeRoot, cityPath, cfg)
+			return openNativeControlStore(scopeRoot, cityPath, env, envErr)
 		},
 	})
 	if err != nil {
@@ -152,6 +158,24 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 	store, unheld := nativeControlStores.retain(scopeRoot, binding, result.Store)
 	closeUnheldControlStore(scopeRoot, unheld)
 	return store, nil
+}
+
+// controlStoreBinding names what a control-plane open of scopeRoot binds a
+// native store to. It joins the digest of the scope's .beads/metadata.json,
+// which names the backend, the database and the Dolt mode, with the digest of
+// what a native open projects from env, the scope's native open env: the
+// server, the credentials and the open options. The env carries them whichever
+// input supplied them, such as the scope's canonical .beads/config.yaml, a
+// rig's Dolt host and port in city.toml, or the managed Dolt port. envErr is
+// the error resolving env. An env that could not be resolved is named as
+// unresolved, without the error's text, so a failure that stands keeps one
+// binding and its refusal stays held for controlStoreNativeRecheck.
+func controlStoreBinding(scopeRoot string, env map[string]string, envErr error) string {
+	endpoint := "unresolved"
+	if envErr == nil {
+		endpoint = beads.NativeDoltOpenEnvDigest(env)
+	}
+	return "metadata:" + scopeMetadataDigest(scopeRoot) + " env:" + endpoint
 }
 
 // controlStoreNativeTransport is the native transport a control-plane open
@@ -174,18 +198,21 @@ func controlStoreNativeTransport(scopeRoot string, cfg *config.City) beads.Nativ
 }
 
 // openNativeControlStore opens the native store a control-plane scope keeps
-// while its binding holds, with the scoped Dolt env and the library's
-// long-lived connection pool, as controllerState.openRigStore opens the
-// controller's rig stores. Its reopen hook re-resolves the current env on
-// every reconnect, because a dispatcher can outlive a managed-Dolt restart or
-// rebind by days and the env it opened with pins the port as of the open. The
-// hook passes no config, so a reconnect also re-reads city.toml for a rig's
-// explicit Dolt endpoint and the city's beads.allow_schema_behind_migrate
-// decision. The controller's hook reuses the config it opened with.
-func openNativeControlStore(scopeRoot, cityPath string, cfg *config.City) (beads.Store, error) {
-	env, err := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
-	if err != nil {
-		return nil, fmt.Errorf("project native control store env %s: %w", scopeRoot, err)
+// while its binding holds, with the scoped Dolt env the binding names and the
+// library's long-lived connection pool, as controllerState.openRigStore opens
+// the controller's rig stores. env is the scope's native open env, and envErr,
+// the error resolving it, fails the open. Its reopen hook re-resolves the
+// current env on every reconnect, because a dispatcher can outlive a
+// managed-Dolt restart or rebind by days and the env it opened with pins the
+// port as of the open. A reconnect that reaches another endpoint leaves the
+// store recorded under the binding it opened with, so the next control open
+// retires it and asks the factory again. The hook passes no config, so a
+// reconnect also re-reads city.toml for a rig's explicit Dolt endpoint and the
+// city's beads.allow_schema_behind_migrate decision. The controller's hook
+// reuses the config it opened with.
+func openNativeControlStore(scopeRoot, cityPath string, env map[string]string, envErr error) (beads.Store, error) {
+	if envErr != nil {
+		return nil, fmt.Errorf("project native control store env %s: %w", scopeRoot, envErr)
 	}
 	reopen := func(ctx context.Context) (beads.NativeStorage, error) {
 		freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cityPath, nil, scopeRoot)
@@ -213,7 +240,7 @@ var nativeControlStores = newControlStoreRegistry(time.Now)
 
 // controlStoreRegistry holds the native store each control-plane scope opened
 // and the time the factory last answered a scope with the bd store, each with
-// the scope's binding (scopeMetadataDigest) when the factory answered. An open
+// the scope's binding (controlStoreBinding) when the factory answered. An open
 // that finds the scope under another binding retires the kept store and does
 // not honor the refusal.
 //

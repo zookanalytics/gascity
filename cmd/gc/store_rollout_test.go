@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -953,6 +955,143 @@ func TestOpenControlStoreReopensAScopeWhoseBindingChanged(t *testing.T) {
 				t.Fatalf("open under the unchanged new binding = %T with %d factory opens, want the store kept for that binding", again, len(*opens))
 			}
 		})
+	}
+}
+
+// endpointAwareControlStoreFactory answers each control open the way the
+// factory answers a native-eligible scope: under a transport that allows
+// native, the native store of the host and port the scope's native open env
+// names at the time of the open, made on the first open of that endpoint, and
+// the bd store otherwise. The env comes from the real resolver with no config
+// passed, so it reads the scope's .beads/config.yaml and city.toml as they are
+// at the open. It returns each endpoint's native store and the storage behind
+// it, and the options of each open, in order.
+func endpointAwareControlStoreFactory(t *testing.T, bd beads.Store) (map[string]*beads.NativeDoltStore, map[string]*closeCountingStorage, *[]beads.StoreOpenOptions) {
+	t.Helper()
+	natives := map[string]*beads.NativeDoltStore{}
+	storages := map[string]*closeCountingStorage{}
+	opens := stubControlStoreFactory(t, func(opts beads.StoreOpenOptions) beads.Store {
+		if opts.NativeTransport == beads.NativeTransportOff {
+			return bd
+		}
+		env, err := nativeDoltOpenEnvForScope(opts.CityPath, nil, opts.ScopeRoot)
+		if err != nil {
+			t.Fatalf("resolve the native open env of %s: %v", opts.ScopeRoot, err)
+		}
+		endpoint := env["BEADS_DOLT_SERVER_HOST"] + ":" + env["BEADS_DOLT_SERVER_PORT"]
+		if _, ok := natives[endpoint]; !ok {
+			storages[endpoint] = &closeCountingStorage{}
+			natives[endpoint] = beads.NewNativeDoltStoreOverStorageForTest(storages[endpoint])
+		}
+		return natives[endpoint]
+	})
+	return natives, storages, opens
+}
+
+// TestOpenControlStoreReopensAScopeWhoseEndpointMoved pins that a kept native
+// store serves only the endpoint its scope's native open env named when the
+// store opened. gc rig set-endpoint moves a rig to another Dolt server by
+// rewriting the rig's .beads/config.yaml and its endpoint in city.toml, and a
+// rig can also carry its endpoint in city.toml alone. Neither move changes an
+// already-canonical .beads/metadata.json, and a store on the old server that
+// still answers never reconnects. So the next control open has to find the
+// move in the env it resolves: it stops handing out the kept store and asks
+// the factory for the new endpoint's store. A caller that opened the old store
+// before the move may still be using it, so that store stays open until the
+// caller closes its handle, and is closed then.
+func TestOpenControlStoreReopensAScopeWhoseEndpointMoved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// point moves the frontend rig to the Dolt server at host:port.
+		point func(t *testing.T, cityDir, host, port string)
+	}{
+		{name: "gc rig set-endpoint", point: setFrontendRigEndpointForTest},
+		{name: "a legacy rig endpoint in city.toml", point: writeLegacyFrontendRigEndpointForTest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "skip")
+			useControlStoreRegistryForTest(t)
+			cityDir := t.TempDir()
+			rigDir := filepath.Join(t.TempDir(), "frontend")
+			writeRigEndpointCityConfig(t, cityDir, rigDir)
+			writeRigEndpointMetadata(t, rigDir, "fe")
+			tc.point(t, cityDir, "db-one.example.com", "3307")
+			bd := beads.NewMemStore()
+			natives, storages, opens := endpointAwareControlStoreFactory(t, bd)
+			// open reads city.toml for every open, as the control dispatcher
+			// does for every readiness scan and every control bead.
+			open := func() beads.Store {
+				t.Helper()
+				cfg, err := loadCityConfig(cityDir, io.Discard)
+				if err != nil {
+					t.Fatalf("loadCityConfig: %v", err)
+				}
+				resolveRigPaths(cityDir, cfg.Rigs)
+				store, err := openControlBdStoreThroughFactory(rigDir, cityDir, "bd", cfg,
+					func() (beads.Store, error) { return bd, nil })
+				if err != nil {
+					t.Fatalf("openControlBdStoreThroughFactory: %v", err)
+				}
+				return store
+			}
+			const one, two = "db-one.example.com:3307", "db-two.example.com:3308"
+
+			inFlight := open()
+			if inFlight != beads.Store(natives[one]) {
+				t.Fatalf("first open = %T, want the native store of %s", inFlight, one)
+			}
+			metadata := scopeMetadataDigest(rigDir)
+			tc.point(t, cityDir, "db-two.example.com", "3308")
+			if got := scopeMetadataDigest(rigDir); got != metadata {
+				t.Fatalf("the move rewrote .beads/metadata.json (%s, was %s); this case needs a move that leaves it as it was", got, metadata)
+			}
+			next := open()
+			if next != beads.Store(natives[two]) || len(*opens) != 2 {
+				t.Fatalf("open after the move = %T with %d factory opens, want the native store of %s from a second factory open (the kept store reads and writes the old server)", next, len(*opens), two)
+			}
+			if storages[one].closed != 0 {
+				t.Fatal("the retired store was closed while a caller that opened it before the move still held it")
+			}
+			if err := closeControlStoreHandle(next); err != nil {
+				t.Fatalf("closeControlStoreHandle(new store): %v", err)
+			}
+			if err := closeControlStoreHandle(inFlight); err != nil {
+				t.Fatalf("closeControlStoreHandle(retired store): %v", err)
+			}
+			if storages[one].closed != 1 {
+				t.Fatalf("the retired store was closed %d times once its last handle came back, want 1", storages[one].closed)
+			}
+			if again := open(); again != next || len(*opens) != 2 || storages[two].closed != 0 {
+				t.Fatalf("open under the unchanged new endpoint = %T with %d factory opens, want the store kept for that endpoint", again, len(*opens))
+			}
+		})
+	}
+}
+
+// setFrontendRigEndpointForTest points the frontend rig of a
+// writeRigEndpointCityConfig city at the external Dolt server at host:port, as
+// gc rig set-endpoint --external does, with the endpoint check passing.
+func setFrontendRigEndpointForTest(t *testing.T, cityDir, host, port string) {
+	t.Helper()
+	origVerify := verifyRigExternalEndpoint
+	verifyRigExternalEndpoint = func(contract.ConfigState, string, string) error { return nil }
+	defer func() { verifyRigExternalEndpoint = origVerify }()
+	var stdout, stderr bytes.Buffer
+	if code := doRigSetEndpoint(fsys.OSFS{}, cityDir, "frontend", rigEndpointOptions{External: true, Host: host, Port: port}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigSetEndpoint(%s:%s) = %d, stderr = %s", host, port, code, stderr.String())
+	}
+}
+
+// writeLegacyFrontendRigEndpointForTest points the frontend rig of a
+// writeRigEndpointCityConfig city at the Dolt server at host:port through the
+// rig's dolt_host and dolt_port in city.toml, leaving the rig with no
+// .beads/config.yaml.
+func writeLegacyFrontendRigEndpointForTest(t *testing.T, cityDir, host, port string) {
+	t.Helper()
+	content := fmt.Sprintf("[workspace]\n\n[[rigs]]\nname = \"frontend\"\nprefix = \"fe\"\ndolt_host = %q\ndolt_port = %q\n", host, port)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
