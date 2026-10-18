@@ -511,6 +511,34 @@ func TestLaunchUsesAssignedTaskWorkDir(t *testing.T) {
 	}
 }
 
+// Kills a v2 launch into a task work_dir that its row does not record, where a
+// later start cannot see the session: the launch records the task work_dir it
+// starts in, and a launch in the session's own work dir clears a recorded one.
+func TestLaunchRecordsTheTaskWorkDirItStartsIn(t *testing.T) {
+	for _, intoTask := range []bool{true, false} {
+		k, leaf := launchKit(t, "asleep", "session_key", "k-1", session.LaunchTaskWorkDirMetadataKey, "/wt/earlier")
+		k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+		taskDir, ownDir := t.TempDir(), t.TempDir()
+		row := k.p.World.Census.Rows[k.it.Key]
+		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker", WorkDir: ownDir}}}}
+		want, wantRecord := ownDir, ""
+		if intoTask {
+			k.p.World.Demand = demandView{AssignedWork: []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"work_dir": taskDir}}}}
+			want, wantRecord = taskDir, taskDir
+		}
+		old := staleResumeKeyProbe
+		staleResumeKeyProbe = func(_ []string, _, _, _ string) (bool, bool) { return true, true }
+		s := k.runKind()
+		staleResumeKeyProbe = old
+		if s.Outcome != settledLanded || len(leaf.cfgs) != 1 || leaf.cfgs[0].WorkDir != want {
+			t.Fatalf("into a task work_dir %v: settlement %+v, launched in %v; want landed in %q", intoTask, s, leaf.cfgs, want)
+		}
+		if got := k.meta(session.LaunchTaskWorkDirMetadataKey); got != wantRecord {
+			t.Fatalf("into a task work_dir %v: launch_task_work_dir = %q, want %q", intoTask, got, wantRecord)
+		}
+	}
+}
+
 // Kills a launch under an empty session name (START-012): it refuses at
 // PreWake, writing nothing and starting nothing.
 func TestLaunchRefusesEmptySessionName(t *testing.T) {

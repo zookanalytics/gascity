@@ -85,12 +85,17 @@ func prepareAdoption(_ context.Context, r effectReads, v txView) (*preparedStart
 // dir its launch runs in (S-1), read-only: unknown with no key, no work dir
 // or no probe.
 func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) sessTranscriptState {
-	sk := strings.TrimSpace(row.SessionKey)
-	if sk == "" {
+	if strings.TrimSpace(row.SessionKey) == "" {
 		return sessTranscriptUnknown
 	}
-	dir := launchWorkDir(r, w, row, tp)
-	if dir == "" {
+	return transcriptIn(w, row, tp, launchWorkDir(r, w, row, tp))
+}
+
+// transcriptIn is the state of row's session key's transcript in dir,
+// read-only: unknown with no key, no dir or no probe.
+func transcriptIn(w *World, row session.Info, tp TemplateParams, dir string) sessTranscriptState {
+	sk := strings.TrimSpace(row.SessionKey)
+	if sk == "" || dir == "" {
 		return sessTranscriptUnknown
 	}
 	switch present, probeable := staleResumeKeyProbe(launchTranscriptRoots(w.Env.Cfg, tp), sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
@@ -102,13 +107,17 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	return sessTranscriptAbsent
 }
 
-// launchWorkDir is the work dir prepare launches row in
+// launchWorkDirChoiceOf is the work dir prepare launches row in
 // (preparedLaunchWorkDir): the task's unless it is refused, the row's, the
 // template's. The prepare that launches the row logs a refusal; this read
 // does not.
+func launchWorkDirChoiceOf(r effectReads, w *World, row session.Info, tp TemplateParams) launchWorkDirChoice {
+	return preparedLaunchWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), tp.WorkDir)
+}
+
+// launchWorkDir is the directory of launchWorkDirChoiceOf.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	dir, _ := preparedLaunchWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), tp.WorkDir)
-	return dir
+	return launchWorkDirChoiceOf(r, w, row, tp).dir
 }
 
 // errTemplateUnresolved: the pass's memo holds no template for the row.

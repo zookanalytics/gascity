@@ -552,6 +552,17 @@ func TestLaunchWorkDirIsPreparesLaunchDir(t *testing.T) {
 			})
 			return f.store, []beads.Bead{step}
 		}},
+		{"a worktree another session was started in", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			if err := f.store.Close(f.otherSession.ID); err != nil {
+				t.Fatal(err)
+			}
+			merger := f.createBuilderSession(t, "custom-merger-1", filepath.Join(f.cityPath, ".gc", "worktrees", "frontend", "merger", "merger-1"))
+			if err := f.store.SetMetadata(merger.ID, session.LaunchTaskWorkDirMetadataKey, f.otherWorktree); err != nil {
+				t.Fatal(err)
+			}
+			f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+			return f.store, nil
+		}},
 		{"an unreadable session list", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
 			ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
 			if err := os.MkdirAll(ownWorktree, 0o755); err != nil {

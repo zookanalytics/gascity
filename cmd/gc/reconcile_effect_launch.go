@@ -100,6 +100,10 @@ type preWakeFold struct {
 	repair     session.MetadataPatch
 	reset      session.MetadataPatch
 	transcript sessTranscriptState
+	// launch records the task work_dir the launch runs in
+	// (LaunchTaskWorkDirPatch), so a start prepared while this one is coming
+	// up already sees the session there.
+	launch session.MetadataPatch
 }
 
 // verifyWorktree is worktree.Verify; a test injects its own.
@@ -142,9 +146,12 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
+	// One launch dir choice for the transcript probe and the record.
+	launch := launchWorkDirChoiceOf(r, v.World, next, tp)
+	f.launch = session.LaunchTaskWorkDirPatch(next, launch.task)
 	// Only a key whose transcript is gone and that staleResumeKeyClears is
 	// reset; an allocated key no start committed yet is kept.
-	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent && staleResumeKeyClears(next, tp.ResolvedProvider) {
+	if f.transcript = transcriptIn(v.World, next, tp, launch.dir); f.transcript == sessTranscriptAbsent && staleResumeKeyClears(next, tp.ResolvedProvider) {
 		f.reset = clearStaleResumeKeyMetadata("", nil) // its patch only
 	}
 	return f, nil
@@ -197,7 +204,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		patch = session.MetadataPatch{}
 	}
 	_, _, wake, wakeClass := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset} {
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset, f.launch} {
 		maps.Copy(patch, more)
 	}
 	// The heal's cells and then the PreWake cell, minted at the write.

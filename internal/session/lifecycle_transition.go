@@ -389,6 +389,9 @@ type CommitStartedPatchInput struct {
 	// the session in, read after the start (RuntimeBindingPatch); empty
 	// writes no binding keys.
 	RuntimeBinding MetadataPatch
+	// LaunchTaskWorkDir is the patch recording the task work_dir the start
+	// launched the session in (LaunchTaskWorkDirPatch); empty writes nothing.
+	LaunchTaskWorkDir MetadataPatch
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -441,6 +444,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 		patch[PromptHashMetadataKey] = input.PromptHash
 	}
 	maps.Copy(patch, input.RuntimeBinding)
+	maps.Copy(patch, input.LaunchTaskWorkDir)
 	return patch
 }
 

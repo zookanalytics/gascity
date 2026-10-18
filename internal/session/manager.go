@@ -240,6 +240,11 @@ type Info struct {
 	// canonical→legacy precedence. Additive, internal-only (absent from the HTTP
 	// wire).
 	WorkerDir string // worker_dir (raw)
+	// LaunchTaskWorkDir is the RAW launch_task_work_dir metadata
+	// (LaunchTaskWorkDirMetadataKey): the task work_dir the session's current
+	// incarnation was launched in, empty when it was launched in its own work
+	// dir. Additive, internal-only (absent from the HTTP wire).
+	LaunchTaskWorkDir string // launch_task_work_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//
