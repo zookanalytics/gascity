@@ -356,13 +356,21 @@ func controlReadyScopeShellReady(dir string, env map[string]string, includeEphem
 }
 
 // controlReadyShellRead takes one `bd ready` read in dir, returning at most
-// limit rows. A limit of 0 is bd's unbounded read.
+// limit rows. A limit of 0 is bd's unbounded read. It asks bd for brief rows,
+// because evaluateControlReady reads no text, and reads whole rows from a bd
+// that refuses --brief (beads.ReadWithBdBrief).
 func controlReadyShellRead(dir string, env map[string]string, includeEphemeral bool, limit int) ([]beads.Bead, error) {
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, limit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
-	output, err := shellWorkQueryWithEnv(query, dir, mergeRuntimeEnv(os.Environ(), env))
+	runEnv := mergeRuntimeEnv(os.Environ(), env)
+	output, err := beads.ReadWithBdBrief(dir, func(brief bool) (string, error) {
+		if brief {
+			return shellWorkQueryWithEnv(query+" --brief", dir, runEnv)
+		}
+		return shellWorkQueryWithEnv(query, dir, runEnv)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -387,14 +395,19 @@ func controlReadyShellRead(dir string, env map[string]string, includeEphemeral b
 // a leg cut short could hide them. It reproduces the shell arm's filters:
 // --include-ephemeral is the TierBoth/TierIssues split BdStore.Ready itself
 // applies, and --exclude-type is applied in Go because ReadyQuery carries no
-// type selector. The read is Brief, because the scan reads no row text, which
-// is most of the bytes a bd leg would otherwise send.
+// type selector.
+//
+// The read asks for core rows (beads.FieldsCore). Nothing tryControlReadyScan
+// hands its rows to reads their text: evaluateControlReady decides on ids,
+// types, assignees, labels, metadata and ready order, and the queue it returns
+// carries ids and metadata. A drain therefore moves no description, design or
+// notes, whatever their size.
 func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool) ([]beads.Bead, error) {
 	tier := beads.TierIssues
 	if includeEphemeral {
 		tier = beads.TierBoth
 	}
-	ready, err := binding.Ready(beads.ReadyQuery{TierMode: tier, Brief: true})
+	ready, err := binding.Ready(beads.ReadyQuery{TierMode: tier, Fields: beads.FieldsCore})
 	if err != nil {
 		return nil, fmt.Errorf("control-ready fallback: reading the graph binding for %s: %w", dir, err)
 	}

@@ -298,7 +298,8 @@ func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
-	return s.queryIssues(query, "", nil, query.Limit)
+	rows, err := s.queryIssues(query, "", nil, query.Limit)
+	return query.Fields.project(rows), err
 }
 
 // ListOpen returns the open beads, filtered to status[0] when given.
@@ -363,7 +364,7 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if hash != "" && hash == s.readyHash && s.readyCache != nil {
 		if cached, ok := s.readyCache[cacheKey]; ok {
 			s.readyMu.Unlock()
-			return cloneBeads(cached), nil
+			return rq.Fields.project(cloneBeads(cached)), nil
 		}
 	}
 	s.readyMu.Unlock()
@@ -404,7 +405,8 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		s.readyCache[cacheKey] = cloneBeads(out)
 	}
 	s.readyMu.Unlock()
-	return out, nil
+	// The cache keeps whole rows, so every field set is served from one entry.
+	return rq.Fields.project(out), nil
 }
 
 // LastOrderRun returns when the order named name last ran, or the zero time.
