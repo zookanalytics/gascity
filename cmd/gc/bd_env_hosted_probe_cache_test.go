@@ -31,7 +31,7 @@ func writeHostedProbeCity(t *testing.T, cityPath string, hosted bool, stamp time
 	}
 }
 
-func TestHostedCredentialProbeReusesTheComposedLoad(t *testing.T) {
+func TestHostedCredentialProbeReusesItsLoad(t *testing.T) {
 	resetHostedCredentialProbeCache()
 	t.Cleanup(resetHostedCredentialProbeCache)
 	cityPath := t.TempDir()
@@ -68,16 +68,15 @@ func TestHostedCredentialProbeReusesTheComposedLoad(t *testing.T) {
 }
 
 // TestHostedCredentialProbeReadsThroughTheInvocationMemo pins that the probe
-// composes through loadComposedCityConfig, so inside a `gc bd` scope it is
-// answered from the composition the rest of the command already holds instead
-// of composing the city again.
+// reads the deployment layer through loadCityDeploymentConfig, so inside a
+// `gc bd` scope it is answered from the load the rest of the command already
+// holds instead of reading the city again, and composes nothing.
 //
-// The scope's composition is seeded, then storage.toml is rewritten to drop the
-// hosted binding: a probe that read through the memo still reports the seeded
-// answer, while one that called config.LoadWithIncludesOptions itself reads the
-// rewrite. That stale read is the only way to tell the two apart: a direct
-// composition moves cmd/gc's load counters exactly as a memo answer does, so
-// TestGcBdPassthroughLoadsCityConfigOnce cannot see one.
+// The scope's deployment entry is seeded, then storage.toml is rewritten to
+// drop the hosted binding: a probe that read through the memo still reports
+// the seeded answer, while one that called config.LoadDeployment itself reads
+// the rewrite. That stale read is the only way to tell the two apart: a direct
+// load moves the probe's load counter exactly as a memo answer does.
 func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 	resetHostedCredentialProbeCache()
 	t.Cleanup(resetHostedCredentialProbeCache)
@@ -88,14 +87,14 @@ func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 
 	end := beginInvocationConfigMemo()
 	t.Cleanup(end)
-	if _, _, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, invocationMemoLoadOptions); err != nil {
+	if _, _, err := loadCityDeploymentConfig(cityPath); err != nil {
 		t.Fatal(err)
 	}
 	writeHostedProbeCity(t, cityPath, false, stamp.Add(time.Second))
 
-	// Control: a fresh composition reads the rewrite, so the probe's answer
-	// below tells a memo read from a fresh one.
-	fresh, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, hostedCredentialProbeLoad)
+	// Control: a fresh load reads the rewrite, so the probe's answer below
+	// tells a memo read from a fresh one.
+	fresh, _, err := config.LoadDeployment(fsys.OSFS{}, tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,15 +103,19 @@ func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 	}
 
 	composedBefore := composedCityConfigLoads.Load()
+	deploymentBefore := deploymentCityConfigLoads.Load()
 	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !selected {
-		t.Fatal("probe inside the scope composed the city again instead of reading the scope's composition")
+		t.Fatal("probe inside the scope read the city again instead of the scope's deployment load")
+	}
+	if got := deploymentCityConfigLoads.Load() - deploymentBefore; got != 0 {
+		t.Fatalf("probe inside the scope loaded the deployment layer %d times, want 0 (a memo answer)", got)
 	}
 	if got := composedCityConfigLoads.Load() - composedBefore; got != 0 {
-		t.Fatalf("probe inside the scope composed the city config %d times, want 0 (a memo answer)", got)
+		t.Fatalf("probe inside the scope composed the city config %d times, want 0", got)
 	}
 }
 

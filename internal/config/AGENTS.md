@@ -50,6 +50,19 @@ beside each `ValidateRigs` call. Unlike `ValidateRigs`, a layout failure on
 reload is a refusal (`tryReloadConfig`), not a warning: a running city must
 not adopt a config that start would refuse.
 
+## Checks on deployment fields
+
+`LoadDeployment` composes the deployment layer (city.toml, its fragments, the
+rig and GitHub PR monitor patches, the site binding) for callers that must
+not walk packs, and the full load composes everything. A check that reads only
+deployment fields goes in `validateDeploymentLayer`, which both loaders call,
+so neither accepts a deployment config the other refuses. A check placed
+directly in `LoadWithIncludesOptions` leaves the deployment layer accepting
+what every full load refuses. `TestLoadDeploymentChecksWhatTheFullLoadChecks`
+runs an invalid config for each check through both loaders; add a case with
+a new check. `ValidateRigFederation` is one of these checks: the federation
+settings decide which rows of a rig's store a `gc bd` read may act on.
+
 ## Adding `.gc/site.toml` fields
 
 `.gc/site.toml` holds machine-local bindings and may carry tables this binary

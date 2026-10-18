@@ -486,14 +486,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Use the full composed load (includes pack expansion + site
-	// binding overlay) so migrated rigs (path only in .gc/site.toml)
-	// resolve to their bound path. A raw config.Load here would make
-	// every already-migrated rig look unbound and fail the new guard
-	// in resolveBdScopeTarget / bdRigScopeTarget. The passthrough loader
-	// is that same composition without the builtin readiness pass; see
-	// loadCityConfigForBdPassthrough.
-	cfg, err := loadBdPassthroughConfig(cityPath, stderr)
+	// Both loads apply the .gc/site.toml binding, so migrated rigs (path only
+	// in the site binding) resolve to their bound path; a raw config.Load here
+	// would make every already-migrated rig look unbound and fail the guard in
+	// resolveBdScopeTarget / bdRigScopeTarget. A read verb loads the city's
+	// deployment layer alone (loadCityConfigForBdRead). Every other verb loads
+	// the full composition without the builtin readiness pass
+	// (loadCityConfigForBdPassthrough), for the guards that open stores from it.
+	cfg, err := loadBdConfig(cityPath, bdArgs, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -669,7 +669,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// stdout (human or --json) is untouched, and it never changes the exit
 	// code, matching the disclosure style #5162/#5167 established for the
 	// sibling relocated-class invariant.
-	if verb, _, ok := bdRelocatedClassVerb(bdArgs); ok && bdScopeDisclosureVerbs[verb] {
+	if bdArgsReadOnly(bdArgs) {
 		fmt.Fprintf(stderr, "gc bd: answering from the %s store\n", scopeLabel(target)) //nolint:errcheck // best-effort stderr
 	}
 
@@ -1079,14 +1079,36 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	return 0
 }
 
-// resolveBdCityPath and loadBdPassthroughConfig are the passthrough's city
-// resolution and its one config load. They are variables only so the routing
-// parity tests can run doBd with the full loaders (resolveCity, loadCityConfig)
-// and compare; production never reassigns them.
+// resolveBdCityPath, loadBdPassthroughConfig and loadBdReadConfig are the
+// passthrough's city resolution and its config loads, one per verb class. They
+// are variables only so the routing parity tests can run doBd with the full
+// loaders (resolveCity, loadCityConfig) and compare; production never
+// reassigns them.
 var (
 	resolveBdCityPath       = resolveCityPathOnly
 	loadBdPassthroughConfig = loadCityConfigForBdPassthrough
+	loadBdReadConfig        = loadCityConfigForBdRead
 )
+
+// loadBdConfig loads the config a gc bd invocation routes on: the deployment
+// layer for a read verb, the full composition for every other verb.
+//
+// A read verb on a split city takes the full composition too. There the
+// class-flip guard (bdClassFlipGuard) runs for every verb, resolves the bd
+// inventory and can open stores from the config, and the deployment layer
+// composes no agents, packs or orders for those to read. The deployment layer
+// composes [storage], so it is enough to tell a split city from a single-store
+// one, where the guard passes every verb through.
+func loadBdConfig(cityPath string, bdArgs []string, stderr io.Writer) (*config.City, error) {
+	if !bdArgsReadOnly(bdArgs) {
+		return loadBdPassthroughConfig(cityPath, stderr)
+	}
+	cfg, err := loadBdReadConfig(cityPath, stderr)
+	if err != nil || workStoreClassHolds(cfg) == nil {
+		return cfg, err
+	}
+	return loadBdPassthroughConfig(cityPath, stderr)
+}
 
 // resolveBdCity names the city a gc bd invocation runs against. It resolves
 // the city only: every rig decision the passthrough makes is
@@ -1330,17 +1352,26 @@ func bdScopeFallbackTarget(cfg *config.City, cityPath string, cityTarget execSto
 	return target, gcRigDiscarded, nil
 }
 
-// bdScopeDisclosureVerbs are the bd read-only passthrough verbs whose
-// resolved store gets announced on stderr (gastownhall/gascity#5170). Scoped
-// to reads: a write verb's effect is directly observable (the record it
-// touched can be re-read), while a read verb's silence is exactly what makes
-// an empty answer indistinguishable from "no matches in the store that was
-// asked."
-var bdScopeDisclosureVerbs = map[string]bool{
+// bdReadVerbs are the bd passthrough verbs that only read. gc bd routes them
+// on the city's deployment layer (loadCityConfigForBdRead) and announces the
+// store that answers them on stderr (gastownhall/gascity#5170). The
+// announcement is scoped to reads: a write verb's effect is directly
+// observable (the record it touched can be re-read), while a read verb's
+// silence is exactly what makes an empty answer indistinguishable from "no
+// matches in the store that was asked."
+var bdReadVerbs = map[string]bool{
 	"list":   true,
 	"ready":  true,
 	"search": true,
 	"show":   true,
+}
+
+// bdArgsReadOnly reports whether a passthrough argv runs one of bdReadVerbs.
+// An argv whose verb cannot be found (an unrecognized flag before it) is not a
+// read.
+func bdArgsReadOnly(bdArgs []string) bool {
+	verb, _, ok := bdRelocatedClassVerb(bdArgs)
+	return ok && bdReadVerbs[verb]
 }
 
 // scopeLabel renders a store target for operator-facing diagnostics, e.g.
