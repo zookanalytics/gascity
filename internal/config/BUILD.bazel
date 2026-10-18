@@ -104,6 +104,7 @@ go_test(
         "chain_test.go",
         "command_discovery_test.go",
         "compose_beads_test.go",
+        "compose_deployment_test.go",
         "compose_storage_test.go",
         "compose_test.go",
         "config_test.go",

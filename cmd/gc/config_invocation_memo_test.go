@@ -136,3 +136,75 @@ func TestInvocationConfigMemoHandsEachCallerItsOwnRigs(t *testing.T) {
 		t.Fatalf("second caller saw workspace %q, want demo", second.Workspace.Name)
 	}
 }
+
+// TestInvocationConfigMemoSharesOneDeploymentLoadInAScope pins the scope's
+// deployment-layer entries under the composed entries' rules: off outside a
+// scope, one load per city inside one, each caller its own rigs, errors never
+// remembered, and no composition on the way.
+func TestInvocationConfigMemoSharesOneDeploymentLoadInAScope(t *testing.T) {
+	cityDir := t.TempDir()
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	write := func(name string) {
+		t.Helper()
+		body := "[workspace]\nname = \"" + name + "\"\nprefix = \"demo\"\n\n[[rigs]]\nname = \"r\"\npath = \"rigs/r\"\nprefix = \"rr\"\n"
+		if err := os.WriteFile(tomlPath, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("demo")
+	composedBefore := composedCityConfigLoads.Load()
+
+	// Outside a scope every load reads the file.
+	before := deploymentCityConfigLoads.Load()
+	if _, _, err := loadCityDeploymentConfig(cityDir); err != nil {
+		t.Fatal(err)
+	}
+	write("renamed")
+	cfg, _, err := loadCityDeploymentConfig(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := deploymentCityConfigLoads.Load() - before; got != 2 || cfg.Workspace.Name != "renamed" {
+		t.Fatalf("outside a scope: %d loads reading %q, want 2 reading the edit", got, cfg.Workspace.Name)
+	}
+
+	end := beginInvocationConfigMemo()
+	t.Cleanup(end)
+	before = deploymentCityConfigLoads.Load()
+	first, _, err := loadCityDeploymentConfig(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolveRigPaths(cityDir, first.Rigs)
+	first.Workspace.Name = "mutated"
+	write("edited-in-scope")
+	second, _, err := loadCityDeploymentConfig(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := deploymentCityConfigLoads.Load() - before; got != 1 {
+		t.Fatalf("loads in a scope = %d, want 1", got)
+	}
+	if second.Workspace.Name != "renamed" {
+		t.Fatalf("second caller saw workspace %q, want the scope's first answer %q", second.Workspace.Name, "renamed")
+	}
+	if second.Rigs[0].Path != "rigs/r" {
+		t.Fatalf("second caller saw rig path %q, want rigs/r (another caller's in-place resolve leaked)", second.Rigs[0].Path)
+	}
+
+	// A failed load is not remembered.
+	missing := t.TempDir()
+	before = deploymentCityConfigLoads.Load()
+	for i := 0; i < 2; i++ {
+		if _, _, err := loadCityDeploymentConfig(missing); err == nil {
+			t.Fatal("loading a missing city.toml succeeded")
+		}
+	}
+	if got := deploymentCityConfigLoads.Load() - before; got != 2 {
+		t.Fatalf("failed loads in a scope = %d, want 2 (errors are not memoized)", got)
+	}
+	end()
+	if got := composedCityConfigLoads.Load() - composedBefore; got != 0 {
+		t.Fatalf("deployment loads composed the city config %d times, want 0", got)
+	}
+}

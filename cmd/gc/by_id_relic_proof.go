@@ -417,10 +417,13 @@ func byIDTwinProofsFor(cityPath string, ids []string) map[string]byIDTwinProof {
 // the funnel prints none of the funnel's boot output; that trade is the last
 // paragraph of "The skip waits for the served-binding note" above.
 //
-// The config is loaded without the revision snapshot, for the funnel's reason
-// (cliStorageRoutesLoad): nothing here reads config.Revision(), and the
-// snapshot content-hashes every pack file, which on maintainer-city was most of
-// this function's CPU.
+// The split shape is read from the city's deployment layer, which composes
+// [storage] as the full composition does without walking a pack, so a by-id
+// read on a city that splits nothing composes no pack here. Only a split goes
+// on to the composed config, loaded without the revision snapshot for the
+// funnel's reason (cliStorageRoutesLoad): nothing here reads
+// config.Revision(), and the snapshot content-hashes every pack file, which on
+// maintainer-city was most of this function's CPU.
 func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinProof {
 	out := make(map[string]byIDTwinProof, len(ids))
 	all := func(verdict byIDTwinVerdict) map[string]byIDTwinProof {
@@ -429,13 +432,13 @@ func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinPr
 		}
 		return out
 	}
-	cfg, _, err := loadComposedCityConfig(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
-	if err != nil || cfg == nil {
+	deployment, _, err := loadCityDeploymentConfig(cityPath)
+	if err != nil || deployment == nil {
 		return all(twinUndecided)
 	}
 	shape, binding := storageSplitNone, ""
-	if cfg.Storage != nil {
-		shape, binding = storageSplitShapeOf(cfg.EffectiveStorage())
+	if deployment.Storage != nil {
+		shape, binding = storageSplitShapeOf(deployment.EffectiveStorage())
 	}
 	switch shape {
 	case storageSplitWhole:
@@ -455,6 +458,10 @@ func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinPr
 		// An arrangement this build cannot serve — a partial move, a fan-out —
 		// may be a served split edited out from under its binding, so it
 		// decides nothing either. The funnel refuses it before any listing.
+		return all(twinUndecided)
+	}
+	cfg, _, err := loadComposedCityConfig(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
+	if err != nil || cfg == nil {
 		return all(twinUndecided)
 	}
 	storage := cfg.EffectiveStorage()
