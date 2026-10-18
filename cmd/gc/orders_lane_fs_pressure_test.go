@@ -5,9 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -49,6 +51,38 @@ func TestOrdersLanePassSkipsDispatchUnderFSPressure(t *testing.T) {
 	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
 	if !od.called.Load() {
 		t.Fatal("order dispatch did not run on the forced pass after max consecutive pressure skips")
+	}
+}
+
+// The orders a pressure-skipped pass holds back wait through it just as they
+// wait through a slow pass, so the budget keeps accruing over the skips: the
+// pass the lane forces after maxConsecutiveFSPressureSkips dispatches the
+// patrol intervals since the last pass that dispatched, not the configured cap.
+func TestOrdersLanePressureSkippedPassesKeepTheBudgetAccruing(t *testing.T) {
+	store := beads.NewMemStore()
+	names := make([]string, 50)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	// The last pass that dispatched, three minutes ago.
+	m.budgetPassStart = time.Now().Add(-3 * time.Minute)
+	cr := ordersLaneTestRuntime(t, m, "1h", nil)
+	withFakePressureFile(t, []byte(samplePressureHigh), nil)
+	t.Setenv(fsPressureThresholdEnv, "")
+	cr.managedDoltOwned = func(string) (bool, error) { return false, nil }
+
+	for i := 0; i < maxConsecutiveFSPressureSkips; i++ {
+		cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	}
+	if got := countOrderTrackingRuns(t, store); got != 0 {
+		t.Fatalf("tracking runs from %d pressure-skipped passes = %d, want 0", maxConsecutiveFSPressureSkips, got)
+	}
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	drainOrderDispatch(t, m)
+
+	if got := countOrderTrackingRuns(t, store); got != 12 {
+		t.Fatalf("tracking runs from the forced pass = %d, want 12: the six intervals since the last dispatching pass accrue 2 each", got)
 	}
 }
 

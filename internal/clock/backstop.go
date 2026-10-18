@@ -30,6 +30,8 @@ import (
 // several patrols is divided with it):
 //   - the patrol tick and the startup retry
 //   - the orders lane's pace
+//   - the order dispatch budget's accrual, so the orders lane may dispatch N
+//     times as many clock-driven orders per real second
 //   - the runtime-inventory lane's pace, observation max age and read-budget
 //     window
 //   - the drain restart timeout, above its 5 minute floor only
