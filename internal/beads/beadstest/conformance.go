@@ -749,6 +749,46 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ChildrenOfAny answers the union of Children(id, IncludeClosed, opts...)
+	// over its parents (beads.ChildrenBatchLister), through the store's batched
+	// read when it has one. molecule.ListSubtree asks without IncludeClosed and
+	// relies on the closed rows to reach an open descendant behind a closed
+	// intermediate, so a batched read that drops them leaves a workflow's
+	// teardown sweep short of members.
+	t.Run("ChildrenOfAnyIncludesClosedChildren", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{Title: "parent", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		open, err := s.Create(beads.Bead{Title: "open child", ParentID: parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed, err := s.Create(beads.Bead{Title: "closed child", ParentID: parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(closed.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		children, err := beads.ChildrenOfAny(s, []string{parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(children))
+		for _, child := range children {
+			got = append(got, child.ID)
+		}
+		sort.Strings(got)
+		want := []string{open.ID, closed.ID}
+		sort.Strings(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("ChildrenOfAny(%s) = %v, want both children %v, the closed one included", parent.ID, got, want)
+		}
+	})
+
 	// ParentID is a WEAK, CITY-SCOPED reference (see beads.Bead.ParentID), and
 	// on a split city the parent routinely lives in another store: a graph-class
 	// molecule in the binding hangs its steps off a work-class bead in a rig

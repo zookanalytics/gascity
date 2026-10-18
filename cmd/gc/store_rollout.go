@@ -160,12 +160,14 @@ func controlStoreNativeTransport(scopeRoot string, cfg *config.City) beads.Nativ
 }
 
 // openNativeControlStore opens the native store a control-plane scope keeps
-// for the life of the process, the way the controller opens its rig stores
-// (controllerState.openRigStore): the scoped Dolt env with the library's
-// long-lived connection pool, and a reopen hook that re-resolves the current
-// env on every reconnect. The hook reloads the city config, because a
-// dispatcher can outlive a managed-Dolt restart or rebind by days and the env
-// it opened with pins the port as of the open.
+// for the life of the process, with the scoped Dolt env and the library's
+// long-lived connection pool, as controllerState.openRigStore opens the
+// controller's rig stores. Its reopen hook re-resolves the current env on
+// every reconnect, because a dispatcher can outlive a managed-Dolt restart or
+// rebind by days and the env it opened with pins the port as of the open. The
+// hook passes no config, so a reconnect also re-reads city.toml for a rig's
+// explicit Dolt endpoint and the city's beads.allow_schema_behind_migrate
+// decision. The controller's hook reuses the config it opened with.
 func openNativeControlStore(scopeRoot, cityPath string, cfg *config.City) (beads.Store, error) {
 	env, err := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
 	if err != nil {

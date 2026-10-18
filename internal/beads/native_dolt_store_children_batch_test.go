@@ -94,8 +94,8 @@ func TestNativeDoltStoreChildrenOfAnyReadsEveryParentsChildrenByExactID(t *testi
 	if err != nil {
 		t.Fatalf("ChildrenOfAny: %v", err)
 	}
-	if want := []string{fx["a1"].ID, fx["b1"].ID}; !slices.Equal(batchIDsOf(got), want) {
-		t.Fatalf("ChildrenOfAny = %v, want the open children %v in created order", batchIDsOf(got), want)
+	if want := []string{fx["a1"].ID, fx["a2"].ID, fx["b1"].ID}; !slices.Equal(batchIDsOf(got), want) {
+		t.Fatalf("ChildrenOfAny = %v, want every child %v, closed included, in created order", batchIDsOf(got), want)
 	}
 	for _, child := range got {
 		if child.ParentID == "" {
@@ -108,7 +108,7 @@ func TestNativeDoltStoreChildrenOfAnyReadsEveryParentsChildrenByExactID(t *testi
 	assertEveryListIsExact(t, storage, 1)
 }
 
-func TestNativeDoltStoreChildrenOfAnyIncludesClosedOnRequestAndMatchesChildren(t *testing.T) {
+func TestNativeDoltStoreChildrenOfAnyMatchesChildrenWithClosedIncluded(t *testing.T) {
 	store, _, fx := seedChildrenBatchFixture(t)
 
 	got, err := store.ChildrenOfAny([]string{fx["a"].ID, fx["b"].ID}, IncludeClosed)
@@ -118,7 +118,7 @@ func TestNativeDoltStoreChildrenOfAnyIncludesClosedOnRequestAndMatchesChildren(t
 	if want := []string{fx["a1"].ID, fx["a2"].ID, fx["b1"].ID}; !slices.Equal(batchIDsOf(got), want) {
 		t.Fatalf("ChildrenOfAny(IncludeClosed) = %v, want %v", batchIDsOf(got), want)
 	}
-	// Per parent, the batch answers what Children answers.
+	// Per parent, the batch answers what Children(id, IncludeClosed) answers.
 	for _, parent := range []string{fx["a"].ID, fx["b"].ID} {
 		single, err := store.Children(parent, IncludeClosed)
 		if err != nil {
