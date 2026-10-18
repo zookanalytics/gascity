@@ -5,6 +5,12 @@ description: Records why a control dispatcher on a bd store now answers each rea
 
 # gc-due3fr: what a control-dispatcher scan reads
 
+This is the record of the branch's first version. The branch was brought
+current with main on 2026-10-17, after upstream shipped its own
+one-read-per-scan change, and
+[specs/gc-xmah9h/control-ready-scan-on-main.md](../gc-xmah9h/control-ready-scan-on-main.md)
+records what it carries now and the measurements on main.
+
 ## What changed
 
 - Every readiness scan reads the ledger as it is when the scan runs. Nothing is
