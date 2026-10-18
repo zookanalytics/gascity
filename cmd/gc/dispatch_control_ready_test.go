@@ -421,6 +421,132 @@ esac
 	}
 }
 
+// controlReadyBriefBd writes a fake bd that logs every invocation and answers
+// bd ready with one row carrying text. When refuseBrief is set it answers any
+// invocation carrying --brief the way bd 1.0.4 does: a usage error, exit 1.
+func controlReadyBriefBd(t *testing.T, assignee string, refuseBrief bool) (logPath string) {
+	t.Helper()
+	tmp := t.TempDir()
+	logPath = filepath.Join(tmp, "bd.log")
+	refuse := ""
+	if refuseBrief {
+		refuse = `case " $* " in
+  *" --brief "*) echo "Error: unknown flag: --brief" >&2; exit 1 ;;
+esac
+`
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> "%s"
+%scase " $* " in
+  *" ready "*)
+    printf '[{"id":"ga-ready","status":"open","issue_type":"task","assignee":"%s","description":"text no drain reads"}]'
+    ;;
+  *)
+    printf '[]'
+    ;;
+esac
+`, logPath, refuse, assignee)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_BEADS", "bd")
+	return logPath
+}
+
+// TestTryControlReadyScanAsksBdForBriefRows pins what a drain moves on a bd
+// leg: the scan's one bd ready asks for brief rows, because nothing the scan
+// hands its rows to reads their text.
+func TestTryControlReadyScanAsksBdForBriefRows(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	target := "gascity/control-dispatcher"
+	logPath := controlReadyBriefBd(t, target, false)
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
+	if err != nil || !handled {
+		t.Fatalf("tryControlReadyScan: handled=%v err=%v", handled, err)
+	}
+	if len(queue) != 1 || queue[0].ID != "ga-ready" {
+		t.Fatalf("queue = %#v, want single ga-ready bead", queue)
+	}
+	calls := readBDCalls(t, logPath)
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "ready ") || !strings.Contains(calls[0], "--brief") {
+		t.Fatalf("bd calls = %q, want one `bd ready ... --brief` call per scan", calls)
+	}
+}
+
+// TestTryControlReadyScanReadsWholeRowsFromABdThatRefusesBrief pins the scan on
+// a bd older than 1.2.0: the refused --brief costs one subprocess, once per
+// scope, and every scan still answers.
+func TestTryControlReadyScanReadsWholeRowsFromABdThatRefusesBrief(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	target := "gascity/control-dispatcher"
+	logPath := controlReadyBriefBd(t, target, true)
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+
+	for scan := 1; scan <= 2; scan++ {
+		queue, handled, err := tryControlReadyScan(query, cityDir, nil)
+		if err != nil || !handled {
+			t.Fatalf("scan %d: handled=%v err=%v", scan, handled, err)
+		}
+		if len(queue) != 1 || queue[0].ID != "ga-ready" {
+			t.Fatalf("scan %d: queue = %#v, want single ga-ready bead", scan, queue)
+		}
+	}
+	calls := readBDCalls(t, logPath)
+	if len(calls) != 3 {
+		t.Fatalf("bd calls = %q, want three: one refused --brief, then one whole-row read per scan", calls)
+	}
+	if !strings.Contains(calls[0], "--brief") || strings.Contains(calls[1], "--brief") || strings.Contains(calls[2], "--brief") {
+		t.Fatalf("bd calls = %q, want only the first to carry --brief", calls)
+	}
+}
+
+// TestControlReadyScopeShellReadyAsksForBriefRows pins the shell arm of the
+// fallback: it asks bd for brief rows, and reads whole rows, once refused, from
+// a bd that does not know the flag.
+func TestControlReadyScopeShellReadyAsksForBriefRows(t *testing.T) {
+	for _, refuse := range []bool{false, true} {
+		t.Run(fmt.Sprintf("refuseBrief=%v", refuse), func(t *testing.T) {
+			configureIsolatedRuntimeEnv(t)
+			logPath := controlReadyBriefBd(t, "", refuse)
+			dir := t.TempDir()
+			for read := 1; read <= 2; read++ {
+				result, err := controlReadyFallbackReady(dir, dir, nil, false)
+				if err != nil {
+					t.Fatalf("read %d: controlReadyFallbackReady: %v", read, err)
+				}
+				if len(result) != 1 || result[0].ID != "ga-ready" {
+					t.Fatalf("read %d: result = %#v, want ga-ready", read, result)
+				}
+			}
+			calls := readBDCalls(t, logPath)
+			want := []bool{true, true}
+			if refuse {
+				want = []bool{true, false, false}
+			}
+			if len(calls) != len(want) {
+				t.Fatalf("bd calls = %q, want %d", calls, len(want))
+			}
+			for i, brief := range want {
+				if strings.Contains(calls[i], "--brief") != brief {
+					t.Errorf("bd call %d = %q, want --brief=%v", i, calls[i], brief)
+				}
+			}
+		})
+	}
+}
+
 // readyPagePayload renders one full page of open task rows routed elsewhere
 // (controlReadyFallbackLimit of them), then one row per extra id assigned to
 // assignee, as the array bd ready prints.
