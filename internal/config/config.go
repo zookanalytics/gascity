@@ -386,6 +386,10 @@ type City struct {
 	// PackDoctors holds convention-discovered pack doctor checks composed
 	// during city and rig expansion. Runtime-only.
 	PackDoctors []DiscoveredDoctor `toml:"-" json:"-"`
+	// PackMetadataIndexes holds the bead metadata keys packs declare in
+	// [beads].metadata_indexes, composed city-wide from city and rig
+	// expansion in declaration order. Runtime-only.
+	PackMetadataIndexes []DiscoveredMetadataIndex `toml:"-" json:"-"`
 	// Runtimes maps pack-declared runtime selection names ([runtimes.<name>]
 	// in pack.toml) to their resolved declarations, composed during city and
 	// rig expansion. Selection is city-wide, so rig-imported runtime packs
@@ -4980,9 +4984,9 @@ func Parse(data []byte) (*City, error) {
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
 // (conditional_writes, guarded_release, native_transport). Parse runs it on
-// its single layer and LoadWithIncludesOptions runs it again on the composed
+// its single layer and validateDeploymentLayer runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
-// keeps the two load paths from drifting when a field is added.
+// keeps the load paths from drifting when a field is added.
 func validateBeadsModes(b BeadsConfig) error {
 	if err := validateConditionalWrites(b.ConditionalWrites); err != nil {
 		return err

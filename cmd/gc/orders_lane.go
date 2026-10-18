@@ -299,10 +299,6 @@ func (cr *CityRuntime) dispatchOrdersLocked(ctx context.Context, cityRoot string
 		return report
 	}
 	now := time.Now()
-	if !cr.wispIndexMigrationApplied {
-		cr.wispIndexMigrationApplied = true
-		cr.applyWispQueryIndexes(ctx)
-	}
 	timeArm := func(took *time.Duration, arm func()) {
 		start := time.Now()
 		arm()
