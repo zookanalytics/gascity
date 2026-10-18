@@ -55,7 +55,7 @@ const dirtyScopeTablesCommitAuthor = "gascity-builder <builder@gascity.local>"
 
 // dirtyScopeTablesCommitCall commits the selected database's working set. The
 // explicit --author matches every other DOLT_COMMIT call site in the tree
-// (dolt_wisp_query_index.go): Dolt aborts a commit with an empty committer
+// (internal/beads/queryindex): Dolt aborts a commit with an empty committer
 // identity, and gc does not guarantee a global one on a fresh host.
 const dirtyScopeTablesCommitCall = "CALL DOLT_COMMIT('-A', '-m', '" + dirtyScopeTablesCommitMessage + "', " +
 	"'--author', '" + dirtyScopeTablesCommitAuthor + "')"
