@@ -1,5 +1,49 @@
 // Package beads provides the bead store abstraction — the universal persistence
 // substrate for Gas City work units (tasks, messages, molecules, etc.).
+//
+// # Selective reads
+//
+// ListQuery.Fields and ReadyQuery.Fields name the fields a read needs. A read
+// that asks for FieldsCore returns every row with an empty Description and
+// every other field intact, on every backing, so a caller that evaluates ids,
+// status, assignee, labels, metadata and edges does not pay to move text it
+// never reads. Each backing honors it at the cheapest level it has:
+//
+//   - BdStore passes --brief to bd list and bd ready, which drops the text
+//     columns from bd's SELECT and from its JSON. A bd older than 1.2.0
+//     refuses the flag as unknown. The store then re-reads without it and
+//     records the refusal for the scope, so later reads of that scope in the
+//     process read whole rows without trying the flag again. The wisp leg of a
+//     TierWisps or TierBoth list runs bd query, which has no such flag, so its
+//     rows arrive whole and the store clears their text.
+//   - NativeDoltStore sets Brief on its reader-role list and ready requests,
+//     which select the library's lite column set.
+//   - CachingStore serves a FieldsCore read from its cache by clearing the
+//     text on the rows it returns, and passes the field set to every read it
+//     sends to its backing. It never installs a projected row, so the cache
+//     learns a row only from a whole read.
+//   - MemStore, FileStore, SQLiteStore, DoltliteReadStore and the exec
+//     provider read the row whole and clear the text before returning it.
+//     They save nothing; clearing keeps their answer identical to the
+//     backings that do, so a caller that reads Description from a projected
+//     row reads an empty string in tests as it would in production.
+//
+// The projection is a declaration on each read rather than a second row type,
+// a store-wide mode, or a change to how often readers read. A store-side view
+// of the core columns would be state each backing has to keep in step with
+// every write, where bd and the native reader already select the lite columns
+// on request. An event-fed in-memory ready set would let the control
+// dispatcher drain without a store read at all, but it is correct only while
+// every writer's events reach it, and out-of-process bd writes announce
+// nothing; the dispatcher reads on every drain because a reused answer is
+// stale. A longer idle backoff between drains trades workflow latency for
+// read count and leaves every read as large as before.
+//
+// A declaration is only as good as the caller's claim. A FieldsCore caller
+// that reads Description reads an empty string on every backing. cmd/gc's
+// projected-read flow check (TestProjectedReadFlowsReadNoOmittedField) fails
+// when a function a registered projected read's rows reach selects a
+// Description field.
 package beads
 
 import (
