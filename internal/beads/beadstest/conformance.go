@@ -1168,22 +1168,6 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
-	// ListStorageTierContract pins query.go's TierMode row filter (#3045,
-	// #3444): TierIssues keeps history and no-history rows and drops only
-	// ephemeral ones; TierWisps keeps no-history and ephemeral rows; TierBoth
-	// unions all three. Backends must agree on these cardinalities or API list
-	// totals silently shift with backend selection.
-	//
-	// This shared subtest seeds through Store.Create, so it runs only for the
-	// Create-seedable backends wired through RunStoreTests: MemStore,
-	// FileStore, ExecStore, the br exec bridge, and NativeDoltStore. Two
-	// full-Store backends seed differently and pin the same tier contract
-	// through their own tests instead: BdStore via
-	// TestBdStoreListStorageTierConformance, and the DoltLite read store via
-	// TestDoltliteReadStoreTierModesIncludeWisps (its Create routes to the
-	// external bd runner, so it cannot use this Create-based harness and seeds
-	// the snapshot tables directly). Keep those backend-specific tier tests in
-	// sync with this contract.
 	t.Run("CoreFieldSetOmitsOnlyTheText", func(t *testing.T) {
 		s := newStore()
 		worked, err := s.Create(beads.Bead{
@@ -1299,6 +1283,22 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ListStorageTierContract pins query.go's TierMode row filter (#3045,
+	// #3444): TierIssues keeps history and no-history rows and drops only
+	// ephemeral ones; TierWisps keeps no-history and ephemeral rows; TierBoth
+	// unions all three. Backends must agree on these cardinalities or API list
+	// totals silently shift with backend selection.
+	//
+	// This shared subtest seeds through Store.Create, so it runs only for the
+	// Create-seedable backends wired through RunStoreTests: MemStore,
+	// FileStore, ExecStore, the br exec bridge, and NativeDoltStore. Two
+	// full-Store backends seed differently and pin the same tier contract
+	// through their own tests instead: BdStore via
+	// TestBdStoreListStorageTierConformance, and the DoltLite read store via
+	// TestDoltliteReadStoreTierModesIncludeWisps (its Create routes to the
+	// external bd runner, so it cannot use this Create-based harness and seeds
+	// the snapshot tables directly). Keep those backend-specific tier tests in
+	// sync with this contract.
 	t.Run("ListStorageTierContract", func(t *testing.T) {
 		s := newStore()
 		if _, err := s.Create(beads.Bead{Title: "tier-history", Labels: []string{"tier-contract"}}); err != nil {
