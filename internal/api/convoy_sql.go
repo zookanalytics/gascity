@@ -117,10 +117,10 @@ func workflowSQLSnapshot(user, password, host string, port int, database, rootID
 	return workflowBeads, beadIndex, depMap, nil
 }
 
-// workflowSQLQueryWorkflowBeads is beads.MembershipDirectRootID expressed as a
-// WHERE clause: the root row, plus every row whose gc.root_bead_id metadata
-// equals the root id. It runs over every available table set, issues and wisps
-// alike, which is what makes it tier-complete like beads.DirectMembers.
+// workflowSQLQueryWorkflowBeads is beads.MembershipDirectRootID in SQL: the
+// root row, plus every row whose gc.root_bead_id metadata equals the root id.
+// It runs over every available table set, issues and wisps alike, which is
+// what makes it tier-complete like beads.DirectMembers.
 //
 // It must stay equivalent to beads.DirectMembers — this is the fast path for
 // the same question snapshotFromStore's fallback answers, and a divergence
@@ -132,16 +132,7 @@ func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, 
 	beadIndex := make(map[string]beads.Bead)
 	for _, tables := range tableSets {
 		ctx, cancel := context.WithTimeout(context.Background(), workflowSQLQueryTimeout)
-		rows, err := db.QueryContext(ctx, `
-			SELECT
-				i.id, i.title, i.status, i.issue_type, i.assignee,
-				i.description, i.created_at, i.updated_at,
-				i.metadata
-			FROM `+tables.beads+` i
-			WHERE i.id = ?
-			   OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.RootBeadIDMetadataKey)+`')) = ?
-			ORDER BY i.created_at
-		`, rootID, rootID)
+		rows, err := db.QueryContext(ctx, workflowSQLWorkflowBeadsQuery(tables.beads), rootID, rootID)
 		if err != nil {
 			cancel()
 			return nil, nil, fmt.Errorf("beads query %s: %w", tables.beads, err)
@@ -177,6 +168,35 @@ func workflowSQLQueryWorkflowBeads(db *sql.DB, tableSets []workflowSQLTableSet, 
 		return workflowBeads[i].CreatedAt.Before(workflowBeads[j].CreatedAt)
 	})
 	return workflowBeads, beadIndex, nil
+}
+
+// workflowSQLRootIDPredicate compares a row's gc.root_bead_id metadata to a
+// bound value, in the text of the functional index the controller keeps on
+// every managed bead store (internal/beads/queryindex).
+func workflowSQLRootIDPredicate() string {
+	return "JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '" + beadmeta.JSONPath(beadmeta.RootBeadIDMetadataKey) + "')) = ?"
+}
+
+// workflowSQLWorkflowBeadsQuery selects table's workflow rows, the root row by
+// id and its members by gc.root_bead_id, as two arms of a UNION ALL so each
+// arm reads an index: the primary key and the functional gc.root_bead_id
+// index. Joined by OR in one WHERE, the same lookups read every row of the
+// table. A row matching both arms comes back twice, and the caller keeps the
+// first.
+func workflowSQLWorkflowBeadsQuery(table string) string {
+	const columns = `i.id, i.title, i.status, i.issue_type, i.assignee,
+				i.description, i.created_at, i.updated_at,
+				i.metadata`
+	return `
+			SELECT ` + columns + `
+			FROM ` + table + ` i
+			WHERE i.id = ?
+			UNION ALL
+			SELECT ` + columns + `
+			FROM ` + table + ` i
+			WHERE ` + workflowSQLRootIDPredicate() + `
+			ORDER BY created_at
+		`
 }
 
 func workflowSQLQueryWorkflowDeps(db *sql.DB, tableSets []workflowSQLTableSet, rootID string) (map[string][]beads.Dep, error) {
@@ -387,12 +407,16 @@ func workflowSQLDependsOnExprFromColumns(alias string, columns map[string]bool) 
 	return "COALESCE(" + strings.Join(parts, ", ") + ", '')", nil
 }
 
+// workflowSQLWorkflowIDsSubquery selects the ids of the workflow's rows in
+// every table set. Like workflowSQLWorkflowBeadsQuery, the id lookup and the
+// gc.root_bead_id lookup are separate UNION arms so each reads an index.
 func workflowSQLWorkflowIDsSubquery(tableSets []workflowSQLTableSet) string {
 	parts := make([]string, 0, len(tableSets))
 	for _, tables := range tableSets {
 		parts = append(parts, `
-			SELECT i.id FROM `+tables.beads+` i
-			WHERE i.id = ? OR JSON_UNQUOTE(JSON_EXTRACT(i.metadata, '`+beadmeta.JSONPath(beadmeta.RootBeadIDMetadataKey)+`')) = ?
+			SELECT i.id FROM `+tables.beads+` i WHERE i.id = ?
+			UNION
+			SELECT i.id FROM `+tables.beads+` i WHERE `+workflowSQLRootIDPredicate()+`
 		`)
 	}
 	return strings.Join(parts, " UNION ")

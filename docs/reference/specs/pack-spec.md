@@ -86,6 +86,7 @@ A pack may contain the following abstract content:
 | Services | `[[service]]` in `pack.toml` | current |
 | Providers | `[providers.<name>]` in `pack.toml` | current |
 | Runtimes | `[runtimes.<name>]` in `pack.toml` | current |
+| Bead metadata indexes | `[beads]` in `pack.toml` | current |
 | Formulas | `formulas/` | preferred |
 | Orders | `orders/<name>.toml` | preferred |
 | Skills | `skills/` | preferred |
@@ -183,6 +184,7 @@ Conceptually, the file may contain these tables:
 | `[[service]]` | Pack-provided services. | current |
 | `[providers.<name>]` | Pack-provided provider presets. | current |
 | `[runtimes.<name>]` | Pack-shipped runtime provider executables. | current |
+| `[beads]` | Bead metadata keys the pack's queries look up. | current |
 | `[[patches.agent]]` | Pack-level agent patches. | current |
 | `[global]` | Pack-wide live session commands. | current |
 | `[[pricing]]` | Pack-provided pricing estimates. | current |
@@ -685,7 +687,38 @@ Pack pricing entries are lower priority than city-level `[[pricing]]` entries
 and higher priority than the built-in default pricing table. Pricing entries
 are estimates for decision support, not invoice reconciliation.
 
-### 1.2.15. Authoring Summary
+### 1.2.15. `[beads]`
+
+The `[beads]` table declares how the pack's queries use the bead store.
+`metadata_indexes` lists the bead metadata keys the pack looks up with closed
+beads included, such as a key that ties every review and finding back to the
+work it belongs to:
+
+```toml
+[beads]
+metadata_indexes = ["anchor_bead", "branch"]
+```
+
+| Field | Meaning | Status |
+|---|---|---|
+| `metadata_indexes` | Bead metadata keys to index. A key must start with a letter or underscore and contain only letters, digits, underscores, dots and slashes; any other key fails composition. | current |
+
+Without an index, a lookup by metadata key reads the metadata of every bead it
+considers, and with closed beads included that is most of the store. For each
+declared key, and for the keys Gas City's own queries look up, Gas City keeps a
+functional index on the key in the `issues` and `wisps` tables of every bead
+store it manages, so the lookup reads the index instead. Keys are city-wide: a
+key a rig-imported pack declares is indexed on every store, and a key several
+packs declare is indexed once.
+
+Gas City builds a missing index in the background, one at a time, once its
+table has stopped changing. It builds metadata indexes only on a Dolt server
+that passes its index self-test, which replays on a scratch table the ways a
+functional index has broken or corrupted bead writes on Dolt releases. On a
+server that fails the self-test the keys stay unindexed, and `gc doctor`
+reports the failure.
+
+### 1.2.16. Authoring Summary
 
 New packs should use these authoring constructs:
 

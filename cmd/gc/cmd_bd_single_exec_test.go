@@ -343,44 +343,55 @@ func TestGcBdCrossScopeByIDRunsBdOnce(t *testing.T) {
 	}
 }
 
-// TestGcBdPassthroughLoadsCityConfigOnce pins the passthrough's config cost: a
-// `gc bd` invocation composes the city config (packs, includes, site binding)
-// once, and every guard and env builder before the exec shares it. The
-// passthrough used to compose it once per helper (doBd, the by-id twin census,
-// the pinned-bd resolver twice, the hosted-credential probe), about 60 ms each
-// on a production-sized city, which was most of gc's own share of the command.
+// TestGcBdPassthroughLoadsCityConfigOnce pins the passthrough's config cost.
+// A read verb reads the city's deployment layer once and composes nothing: its
+// routing, the by-id door's split check, the pinned-bd resolver and the
+// hosted-credential probe all answer from that one load. A write composes the
+// city config (packs, includes, site binding) once for its guards, and its env
+// builders share the same deployment load. A composition is about 60 ms on a
+// production-sized city; a deployment load reads city.toml, its fragments and
+// the site binding.
 //
 // The probe's own load count keeps it on the measured path: its one load runs
-// inside the scope. That the load is a memo answer rather than a composition of
-// its own is pinned by TestHostedCredentialProbeReadsThroughTheInvocationMemo,
-// because these counts cannot tell the two apart: a direct
-// config.LoadWithIncludesOptions call moves them exactly as a memo answer
-// does, the probe's by one and the composed count by none.
+// inside the scope. That the load is a memo answer rather than a load of its
+// own is pinned by TestHostedCredentialProbeReadsThroughTheInvocationMemo,
+// because these counts cannot tell the two apart.
 func TestGcBdPassthroughLoadsCityConfigOnce(t *testing.T) {
-	for _, args := range [][]string{
-		{"show", "demo-abc"},
-		{"show", "demo-abc", "--json"},
-		{"list", "--json"},
-		{"show", "fe-abc"},
-		{"update", "demo-abc", "--status", "in_progress"},
+	for _, tc := range []struct {
+		args     []string
+		composes int64
+	}{
+		{[]string{"show", "demo-abc"}, 0},
+		{[]string{"show", "demo-abc", "--json"}, 0},
+		{[]string{"list", "--json"}, 0},
+		{[]string{"show", "fe-abc"}, 0},
+		{[]string{"update", "demo-abc", "--status", "in_progress"}, 1},
 	} {
-		t.Run(strings.Join(args, " "), func(t *testing.T) {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			newSingleExecTestCity(t)
+			// A reachable managed Dolt, as on a running city: without one the
+			// env builders take the recovery path, which loads the city to
+			// enumerate the scopes a health check visits.
+			writeReachableManagedDoltState(t, os.Getenv("GC_CITY_PATH"))
 			// The probe's cache is process-wide; start it empty so this
 			// passthrough's probe loads.
 			resetHostedCredentialProbeCache()
 			t.Cleanup(resetHostedCredentialProbeCache)
 			before := composedCityConfigLoads.Load()
+			deploymentsBefore := deploymentCityConfigLoads.Load()
 			probesBefore := hostedCredentialProbeLoads.Load()
 			var stdout, stderr bytes.Buffer
-			if got := doBd(args, &stdout, &stderr); got != 0 {
-				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", args, got, stderr.String())
+			if got := doBd(tc.args, &stdout, &stderr); got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tc.args, got, stderr.String())
 			}
-			if loads := composedCityConfigLoads.Load() - before; loads != 1 {
-				t.Fatalf("doBd(%v) composed the city config %d times, want 1", args, loads)
+			if loads := composedCityConfigLoads.Load() - before; loads != tc.composes {
+				t.Fatalf("doBd(%v) composed the city config %d times, want %d", tc.args, loads, tc.composes)
+			}
+			if loads := deploymentCityConfigLoads.Load() - deploymentsBefore; loads != 1 {
+				t.Fatalf("doBd(%v) loaded the deployment layer %d times, want 1", tc.args, loads)
 			}
 			if probes := hostedCredentialProbeLoads.Load() - probesBefore; probes != 1 {
-				t.Fatalf("doBd(%v) ran the hosted-credential probe's load %d times, want 1", args, probes)
+				t.Fatalf("doBd(%v) ran the hosted-credential probe's load %d times, want 1", tc.args, probes)
 			}
 			if currentInvocationConfigMemo() != nil {
 				t.Fatal("doBd left its invocation config memo open")

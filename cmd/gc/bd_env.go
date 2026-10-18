@@ -102,20 +102,20 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 	if pinned != "" {
 		return pinned, nil
 	}
-	// This re-stats and re-parses the city.toml that
+	// This re-stats and re-reads the city.toml that
 	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
 	// workspace.env configured a PATH at all. The duplicate is deliberate: it
 	// keeps the optional resolver's contract to a single answer ("which bd is
 	// pinned") rather than returning an intermediate signal that exists only
-	// for this one strict caller. Both loads use the no-refresh loader, which
-	// omits the managed-provider-shim rewrite the full loader performs, so what
-	// repeats here is a parse and not a side effect.
+	// for this one strict caller. Both read the deployment layer, which has no
+	// side effect, and inside an invocation scope the second read is a memo
+	// answer.
 	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	} else if err != nil {
 		return "", err
 	}
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	cfg, _, err := loadCityDeploymentConfig(cityPath)
 	if err != nil {
 		return "", err
 	}
@@ -153,12 +153,13 @@ func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	// Resolving an executable is an environment-only operation. Use the
-	// no-refresh loader here: the full loader rewrites the generated managed
-	// provider shim as a config-load side effect, which can race an in-flight
-	// lifecycle operation and replace a caller's already-selected provider
-	// entrypoint.
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// Resolving an executable is an environment-only operation, and
+	// workspace.env is a deployment fact: read the deployment layer, which
+	// walks no pack and has no side effect. The full loader rewrites the
+	// generated managed provider shim as a config-load side effect, which can
+	// race an in-flight lifecycle operation and replace a caller's
+	// already-selected provider entrypoint.
+	cfg, _, err := loadCityDeploymentConfig(cityPath)
 	if err != nil {
 		return "", err
 	}
@@ -762,35 +763,12 @@ func projectCredentialProviderEnv(env map[string]string) {
 	}
 }
 
-// hostedCredentialProbeLoad is the load option set for the hosted Beads
-// credential probe below, which loads city.toml only to read one boolean off
-// the storage binding and then discards the Provenance.
-//
-// The load-time revision snapshot content-hashes every pack directory —
-// reading and SHA-256ing every file, recursively — so that a later
-// config.Revision() can compare against the tree as it was loaded. This probe
-// never computes a Revision, so nothing it loads can observe the snapshot.
-//
-// It is declined here rather than left as harmless prefetch because of where
-// this probe sits: beadsCommandRunnerForHostedCity calls it once per bd
-// command-runner construction, which is once per bd subprocess. On a
-// long-running controller that is thousands of loads per reconcile tick.
-// Measured on gc-management 2026-09-16 (ga-s3cnmy): 72.7% of ALL controller
-// CPU sat inside config.LoadWithIncludesOptions, 80% of that under this
-// function, and declining the snapshot cut one load from 94.6ms to 38.8ms.
-//
-// Same reasoning as advisoryLoad in cmd_agent.go, whose own guard test
-// (TestCityConfigLoadersDeclineTheRevisionSnapshot) deliberately scoped itself
-// to that file and left the other Provenance-discarding call sites — this one
-// among them — for later.
-var hostedCredentialProbeLoad = config.LoadOptions{SkipRevisionSnapshot: true}
-
 // hostedCredentialProbeCache memoizes citySelectsHostedBeadsCredentialProvider
 // per city.
 //
-// The probe answers one boolean, but answering it composes the whole city
-// config: city.toml, every include, and the pack discovery those pull in. The
-// bd environment builder asks up to three times per bd subprocess (once per
+// The probe answers one boolean off the storage binding, from the deployment
+// layer (city.toml and every include), which decodes every one of those files.
+// The bd environment builder asks up to three times per bd subprocess (once per
 // scope-resolution branch), and a single `gc ready` on maintainer-city loaded
 // its 118 KB config 147 times — 30 s of a 33 s query and 381k file opens
 // (cherry, 2026-09-23, after ga-s3cnmy had already dropped the snapshot). The
@@ -804,8 +782,8 @@ var hostedCredentialProbeCache sync.Map // normalized city.toml path → *hosted
 
 // hostedCredentialProbeLoads counts the probe's config loads (its cache misses)
 // so tests can assert that repeated probes reuse the entry. Inside an
-// invocation scope a miss is answered by the memo rather than composed again;
-// composedCityConfigLoads counts real compositions.
+// invocation scope a miss is answered by the memo rather than loaded again;
+// deploymentCityConfigLoads counts real loads.
 var hostedCredentialProbeLoads atomic.Int64
 
 type hostedCredentialProbeEntry struct {
@@ -863,9 +841,9 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		hostedCredentialProbeCache.Delete(key)
 	}
 	// Inside an invocation scope (a `gc bd` passthrough) this is answered from
-	// the composition the rest of the command already read; see
-	// invocationConfigMemo. Outside one it is a plain composed load.
-	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)
+	// the deployment layer the rest of the command already read; see
+	// invocationConfigMemo. Outside one it is a plain deployment-layer load.
+	cfg, prov, err := loadCityDeploymentConfig(cityPath)
 	hostedCredentialProbeLoads.Add(1)
 	if err != nil {
 		return false, fmt.Errorf("load hosted Beads credential configuration: %w", err)
@@ -886,7 +864,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 	// old one; skip caching so the next call reloads. A memo answer inside an
 	// invocation scope can predate both stats, which this cannot see; only
 	// the same one-shot command reads such an entry again, and it already
-	// shares that composition.
+	// shares that load.
 	if after, ok := statHostedCredentialProbeSource(cityConfigPath); !ok || after != before {
 		cacheable = false
 	}
