@@ -9,6 +9,12 @@ from pathlib import Path
 
 ALLOWLIST_PATH = Path(".github/blacksmith-allowlist.txt")
 
+# The one repository Blacksmith's runners serve. A job in any other repository,
+# a fork, that names a Blacksmith label waits for a runner that never comes, so
+# those repositories get GITHUB_RUNNERS. The workflows' own Blacksmith runs-on
+# expressions compare github.repository with the same name.
+BLACKSMITH_REPOSITORY = "gastownhall/gascity"
+
 BLACKSMITH_RUNNERS = {
     "runner_2vcpu": "blacksmith-2vcpu-ubuntu-2404",
     "runner_8vcpu": "blacksmith-8vcpu-ubuntu-2404",
@@ -49,16 +55,27 @@ def select_runners(
     allowlist: set[str],
     *,
     force_blacksmith: bool = False,
+    repository: str = BLACKSMITH_REPOSITORY,
 ) -> tuple[bool, str, dict[str, str]]:
     """Return whether to use Blacksmith, the reason, and runner labels.
 
-    Blacksmith for every event and author: Blacksmith donates compute to this
-    OSS repository, and GitHub-hosted jobs queue behind the organisation's
-    concurrent-job cap (fork and push jobs waited p90 4-9 minutes on
-    2026-10-02/03, Blacksmith jobs 7-9 seconds). The arguments stay for the
-    callers and tests; the allowlist no longer selects runners.
+    Blacksmith for every event and author in BLACKSMITH_REPOSITORY: Blacksmith
+    donates compute to this OSS repository, and GitHub-hosted jobs queue behind
+    the organisation's concurrent-job cap (fork and push jobs waited p90 4-9
+    minutes on 2026-10-02/03, Blacksmith jobs 7-9 seconds). Any other
+    repository gets GitHub-hosted runners, forced or not, because no Blacksmith
+    runner serves it. The repository compares case-insensitively, as a
+    workflow expression compares github.repository. The other arguments stay
+    for the callers and tests; the allowlist no longer selects runners.
     """
     del event_name, author, allowlist, force_blacksmith
+    repository = repository.strip()
+    if repository.lower() != BLACKSMITH_REPOSITORY:
+        return (
+            False,
+            f"Blacksmith serves only {BLACKSMITH_REPOSITORY}; using GitHub-hosted runners for {repository or '<unknown>'}",
+            GITHUB_RUNNERS,
+        )
     return True, "Blacksmith for every event (OSS repository)", BLACKSMITH_RUNNERS
 
 
@@ -89,6 +106,7 @@ def append_summary(use_blacksmith: bool, reason: str, event_name: str, author: s
 
 def main() -> None:
     event_name = os.environ["EVENT_NAME"]
+    repository = os.environ["GITHUB_REPOSITORY"]
     author = os.environ.get("PR_AUTHOR", "").strip()
     force_blacksmith = os.environ.get("FORCE_BLACKSMITH", "").strip().lower() == "true"
     use_blacksmith, reason, runners = select_runners(
@@ -96,6 +114,7 @@ def main() -> None:
         author,
         load_allowlist(),
         force_blacksmith=force_blacksmith,
+        repository=repository,
     )
     append_outputs(use_blacksmith, reason, runners)
     append_summary(use_blacksmith, reason, event_name, author)
