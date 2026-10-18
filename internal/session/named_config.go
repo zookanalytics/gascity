@@ -1053,11 +1053,14 @@ func closedNamedSessionReopenEligible(b beads.Bead) bool {
 // configured named session (109 serial bd calls, +155s, on this city's
 // named-session count).
 //
-// The batched read is exactly ListAllSessionBeads's own shape — two indexed
+// The batched read takes ListAllSessionBeads's own shape — two indexed
 // store.List calls, {Type: BeadType, IncludeClosed: true, Sort:
 // SortCreatedDesc} and {Label: LabelSession, IncludeClosed: true, Sort:
 // SortCreatedDesc} — unioned by bead ID and re-sorted globally with
-// beads.SortBeads. Reusing that shape (rather than a single unfiltered scan)
+// beads.SortBeads. Both calls ask for core rows (beads.FieldsCore): the index
+// decides on status, identity metadata and creation order, and keeps only the
+// winning bead's id, so a session bead's free-form text never crosses the
+// read. Reusing that shape (rather than a single unfiltered scan)
 // is deliberate and load-bearing for the fix's own performance goal: both
 // legs are indexed, bounded reads (measured on this city at ~0.5s, 53 rows,
 // 77KB total — see ga-0t7qjl's exit contract), whereas a single
@@ -1118,7 +1121,8 @@ func closedNamedSessionReopenEligible(b beads.Bead) bool {
 // value in the store is written from an already-normalized
 // NamedSessionSpec.Identity.
 type ClosedNamedSessionBeadIndex struct {
-	byIdentity map[string]beads.Bead
+	// byIdentity maps an identity to the id of its indexed closed bead.
+	byIdentity map[string]string
 }
 
 // BuildClosedNamedSessionBeadIndex performs the two batched store reads
@@ -1142,13 +1146,13 @@ func BuildClosedNamedSessionBeadIndex(store beads.Store) (ClosedNamedSessionBead
 		return ClosedNamedSessionBeadIndex{}, nil
 	}
 
-	byTypeQuery := beads.ListQuery{Type: BeadType, IncludeClosed: true, Sort: beads.SortCreatedDesc}
+	byTypeQuery := beads.ListQuery{Type: BeadType, IncludeClosed: true, Sort: beads.SortCreatedDesc, Fields: beads.FieldsCore}
 	byType, typeErr := store.List(byTypeQuery)
 	if typeErr != nil && !beads.IsPartialResult(typeErr) {
 		return ClosedNamedSessionBeadIndex{}, fmt.Errorf("listing closed named session beads by type: %w", typeErr)
 	}
 
-	byLabelQuery := beads.ListQuery{Label: LabelSession, IncludeClosed: true, Sort: beads.SortCreatedDesc}
+	byLabelQuery := beads.ListQuery{Label: LabelSession, IncludeClosed: true, Sort: beads.SortCreatedDesc, Fields: beads.FieldsCore}
 	byLabel, labelErr := store.List(byLabelQuery)
 	if labelErr != nil && !beads.IsPartialResult(labelErr) {
 		return ClosedNamedSessionBeadIndex{}, fmt.Errorf("listing closed named session beads by label: %w", labelErr)
@@ -1172,8 +1176,8 @@ func BuildClosedNamedSessionBeadIndex(store beads.Store) (ClosedNamedSessionBead
 	// own re-sort for the identical reason.
 	beads.SortBeads(candidates, beads.SortCreatedDesc)
 
-	winners := make(map[string]beads.Bead)
-	fallback := make(map[string]beads.Bead)
+	winners := make(map[string]string)
+	fallback := make(map[string]string)
 	decided := make(map[string]bool)
 	for _, b := range candidates {
 		if b.Status != "closed" {
@@ -1187,17 +1191,17 @@ func BuildClosedNamedSessionBeadIndex(store beads.Store) (ClosedNamedSessionBead
 			continue
 		}
 		if strings.TrimSpace(b.Metadata["session_name"]) != "" {
-			winners[identity] = b
+			winners[identity] = b.ID
 			decided[identity] = true
 			continue
 		}
 		if _, ok := fallback[identity]; !ok {
-			fallback[identity] = b
+			fallback[identity] = b.ID
 		}
 	}
-	for identity, b := range fallback {
+	for identity, id := range fallback {
 		if _, ok := winners[identity]; !ok {
-			winners[identity] = b
+			winners[identity] = id
 		}
 	}
 
@@ -1222,15 +1226,15 @@ func ClosedNamedSessionBeadIndexed(b beads.Bead) bool {
 	return b.Status == "closed" && NamedSessionIdentity(b) != "" && closedNamedSessionReopenEligible(b)
 }
 
-// Find returns the indexed closed bead for identity, matching
-// FindClosedNamedSessionBeadForSessionName(store, identity, "")'s result
-// against the same store snapshot the index was built from.
-func (idx ClosedNamedSessionBeadIndex) Find(identity string) (beads.Bead, bool) {
+// Find returns the id of the indexed closed bead for identity: the bead
+// FindClosedNamedSessionBeadForSessionName(store, identity, "") finds against
+// the same store snapshot the index was built from.
+func (idx ClosedNamedSessionBeadIndex) Find(identity string) (string, bool) {
 	if idx.byIdentity == nil {
-		return beads.Bead{}, false
+		return "", false
 	}
-	b, ok := idx.byIdentity[NormalizeNamedSessionTarget(identity)]
-	return b, ok
+	id, ok := idx.byIdentity[NormalizeNamedSessionTarget(identity)]
+	return id, ok
 }
 
 // findCanonicalNamedSessionBeadStrict checks only the two highest-confidence
