@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -590,10 +591,12 @@ func TestNewControllerStateOpenCityStoreThreadsTheLatchedNativeTransport(t *test
 }
 
 // TestOpenControlBdStoreThroughFactoryStamps pins the control-dispatcher
-// routing: the raw control-plane bd store must come back factory-stamped
-// (and raw — control paths are deliberately unwrapped), with native
-// selection impossible (the control path passes NativeTransportOff).
+// routing for a scope that does not pass the native-store preflight (here
+// /city carries no .beads/metadata.json): the raw control-plane bd store must
+// come back factory-stamped, and raw — control paths are deliberately
+// unwrapped.
 func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
+	useControlStoreRegistryForTest(t)
 	cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -619,65 +622,357 @@ func TestOpenControlBdStoreThroughFactoryStamps(t *testing.T) {
 	}
 }
 
-// TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug pins the control
-// path's logging. Every control-plane open pins the bd store, and the control
-// dispatcher opens a store on every readiness poll and dispatched control
-// bead, so that chosen fallback must not reach the default handler as a WARN
-// native_store_unavailable naming a beads.native_transport the city never
-// set. It still logs at Debug under gate native_transport_off: downgraded,
-// not deleted. The control path passes no Logger, so the record lands on
-// slog.Default, which the test swaps for a recorder (so it cannot run in
-// parallel).
-func TestOpenControlStoreAtForCityLogsTheBdStorePinAtDebug(t *testing.T) {
+// useControlStoreRegistryForTest gives the test an empty nativeControlStores
+// on a clock the test moves through the returned pointer, and restores the
+// process registry when the test ends.
+func useControlStoreRegistryForTest(t *testing.T) *time.Time {
+	t.Helper()
+	clock := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	prev := nativeControlStores
+	nativeControlStores = newControlStoreRegistry(func() time.Time { return clock })
+	t.Cleanup(func() { nativeControlStores = prev })
+	return &clock
+}
+
+// stubControlStoreFactory answers every factory open with answer(opts) and
+// returns the options of each open, in order.
+func stubControlStoreFactory(t *testing.T, answer func(beads.StoreOpenOptions) beads.Store) *[]beads.StoreOpenOptions {
+	t.Helper()
+	var opens []beads.StoreOpenOptions
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(_ context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		opens = append(opens, opts)
+		return beads.StoreOpenResult{Store: answer(opts)}, nil
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+	return &opens
+}
+
+// nativeUnlessOff answers a control open the way the factory does for a
+// native-eligible scope: the native store when the transport allows it, the
+// bd store when it is off.
+func nativeUnlessOff(native, bd beads.Store) func(beads.StoreOpenOptions) beads.Store {
+	return func(opts beads.StoreOpenOptions) beads.Store {
+		if opts.NativeTransport == beads.NativeTransportOff {
+			return bd
+		}
+		return native
+	}
+}
+
+// TestOpenControlStoreKeepsTheFirstNativeStorePerScope pins why the control
+// dispatcher stops forking bd: the first control open of a native-eligible
+// scope asks the factory with the preflight checker and the native opener
+// wired, and every later open of that scope (one per readiness scan, control
+// bead and execution-fact flush) gets the same native store back without
+// another preflight or connection pool. The per-call close each of those
+// callers runs leaves the kept store open.
+func TestOpenControlStoreKeepsTheFirstNativeStorePerScope(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	storage := &closeCountingStorage{}
+	native := beads.NewNativeDoltStoreOverStorageForTest(storage)
+	opens := stubControlStoreFactory(t, nativeUnlessOff(native, beads.NewMemStore()))
+	openBd := func() (beads.Store, error) { return beads.NewMemStore(), nil }
+
+	for i := 0; i < 3; i++ {
+		store, err := openControlBdStoreThroughFactory("/city/rigs/repo", "/city", "bd", cfg, openBd)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		if store != beads.Store(native) {
+			t.Fatalf("open %d returned %T, want the native store the scope opened first", i, store)
+		}
+		if err := closeControlStoreHandle(store); err != nil {
+			t.Fatalf("closeControlStoreHandle after open %d: %v", i, err)
+		}
+	}
+	if len(*opens) != 1 {
+		t.Fatalf("the factory was asked %d times, want once: a kept scope must not pay the preflight and a new pool per open", len(*opens))
+	}
+	if storage.closed != 0 {
+		t.Fatalf("the kept native store was closed %d times by the per-call close; every later open would get a closed store", storage.closed)
+	}
+	opts := (*opens)[0]
+	if opts.NativeTransport == beads.NativeTransportOff {
+		t.Fatal("the control open asked for NativeTransportOff for a city that left native transport on")
+	}
+	if opts.PreflightChecker.BDContext == nil || opts.PreflightChecker.DatabaseProjectID == nil {
+		t.Fatal("the control open passed no preflight checker, so the factory can never pick the native store")
+	}
+	if opts.OpenNativeStore == nil || opts.OpenBdStore == nil {
+		t.Fatal("the control open must pass both the native opener and the bd fallback")
+	}
+
+	other, err := openControlBdStoreThroughFactory("/city/rigs/other", "/city", "bd", cfg, openBd)
+	if err != nil {
+		t.Fatalf("open other scope: %v", err)
+	}
+	if len(*opens) != 2 || other == nil {
+		t.Fatalf("a second scope reused the first scope's store: factory asked %d times", len(*opens))
+	}
+}
+
+// TestControlStoreNativeTransport pins which control opens ask the factory
+// for the native store at all. The city's own beads.native_transport decides,
+// except that an unread config and a library-extension scope ask for off: the
+// first so an unread "off" never opens as "auto", the second because the
+// library arm answers a failed open with an error instead of the bd store.
+func TestControlStoreNativeTransport(t *testing.T) {
+	doltScope := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(doltScope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doltScope, ".beads", "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	libraryScope := writeLibraryBackendScope(t)
+	auto := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	off := &config.City{Workspace: config.Workspace{Name: "demo"}, Beads: config.BeadsConfig{NativeTransport: "off"}}
+
+	for _, tc := range []struct {
+		name  string
+		scope string
+		cfg   *config.City
+		want  beads.NativeTransportMode
+	}{
+		{name: "the city's default", scope: doltScope, cfg: auto, want: beads.NativeTransportAuto},
+		{name: "the city turned native off", scope: doltScope, cfg: off, want: beads.NativeTransportOff},
+		{name: "unread config", scope: doltScope, cfg: nil, want: beads.NativeTransportOff},
+		{name: "library-extension scope", scope: libraryScope, cfg: auto, want: beads.NativeTransportOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := controlStoreNativeTransport(tc.scope, tc.cfg); got != tc.want {
+				t.Fatalf("controlStoreNativeTransport() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOpenControlStoreTurnedOffStopsHandingOutTheKeptNativeStore pins that
+// beads.native_transport = "off" reaches a running control dispatcher on its
+// next open, not at its next restart: the open bypasses the kept native store
+// and asks the factory for the bd store. The kept store stays open, so turning
+// native back on hands it out again.
+func TestOpenControlStoreTurnedOffStopsHandingOutTheKeptNativeStore(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	auto := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	off := &config.City{Workspace: config.Workspace{Name: "demo"}, Beads: config.BeadsConfig{NativeTransport: "off"}}
+	storage := &closeCountingStorage{}
+	native := beads.NewNativeDoltStoreOverStorageForTest(storage)
+	bd := beads.NewMemStore()
+	opens := stubControlStoreFactory(t, nativeUnlessOff(native, bd))
+	openBd := func() (beads.Store, error) { return bd, nil }
+	const scope = "/city/rigs/repo"
+
+	if store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", auto, openBd); err != nil || store != beads.Store(native) {
+		t.Fatalf("first open = (%T, %v), want the native store", store, err)
+	}
+	store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", off, openBd)
+	if err != nil {
+		t.Fatalf("open under native_transport=off: %v", err)
+	}
+	if store != beads.Store(bd) {
+		t.Fatalf("open under native_transport=off returned %T, want the bd store", store)
+	}
+	if got := (*opens)[len(*opens)-1].NativeTransport; got != beads.NativeTransportOff {
+		t.Fatalf("open under native_transport=off asked the factory for %q, want off", got)
+	}
+	if err := closeControlStoreHandle(store); err != nil {
+		t.Fatalf("closeControlStoreHandle(bd store): %v", err)
+	}
+	if storage.closed != 0 {
+		t.Fatal("turning native transport off closed the kept native store")
+	}
+	if store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", auto, openBd); err != nil || store != beads.Store(native) {
+		t.Fatalf("open after native transport came back = (%T, %v), want the kept native store", store, err)
+	}
+}
+
+// TestOpenControlStoreRechecksARefusedScopeOncePerWindow pins the cost of a
+// scope the factory answers with the bd store. Without the window, every
+// readiness scan would rerun the preflight (a bd context subprocess and two
+// database probes) and log the refusal again. Inside the window the open asks
+// for NativeTransportOff, which skips both; the first open after it asks again,
+// so a refusal that has cleared reaches the native store.
+func TestOpenControlStoreRechecksARefusedScopeOncePerWindow(t *testing.T) {
+	clock := useControlStoreRegistryForTest(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	storage := &closeCountingStorage{}
+	native := beads.NewNativeDoltStoreOverStorageForTest(storage)
+	bd := beads.NewMemStore()
+	eligible := false
+	opens := stubControlStoreFactory(t, func(opts beads.StoreOpenOptions) beads.Store {
+		if eligible && opts.NativeTransport != beads.NativeTransportOff {
+			return native
+		}
+		return bd
+	})
+	const scope = "/city/rigs/repo"
+	open := func() beads.Store {
+		t.Helper()
+		store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg,
+			func() (beads.Store, error) { return bd, nil })
+		if err != nil {
+			t.Fatalf("openControlBdStoreThroughFactory: %v", err)
+		}
+		return store
+	}
+	lastTransport := func() beads.NativeTransportMode { return (*opens)[len(*opens)-1].NativeTransport }
+
+	if store := open(); store != beads.Store(bd) || lastTransport() == beads.NativeTransportOff {
+		t.Fatalf("first open = %T under %q, want the factory asked for native and answering bd", store, lastTransport())
+	}
+	*clock = clock.Add(controlStoreNativeRecheck - time.Second)
+	if store := open(); store != beads.Store(bd) || lastTransport() != beads.NativeTransportOff {
+		t.Fatalf("open inside the window = %T under %q, want the bd store under off", store, lastTransport())
+	}
+
+	eligible = true
+	*clock = clock.Add(2 * time.Second)
+	if store := open(); store != beads.Store(native) || lastTransport() == beads.NativeTransportOff {
+		t.Fatalf("open after the window = %T under %q, want the factory asked again and the native store", store, lastTransport())
+	}
+	asked := len(*opens)
+	if store := open(); store != beads.Store(native) || len(*opens) != asked {
+		t.Fatalf("open after the scope turned native = %T with %d factory opens, want the kept store and no new open", store, len(*opens)-asked)
+	}
+}
+
+// TestControlStoreRegistryKeepsTheWinnerOfAConcurrentFirstOpen pins the race
+// between two first opens of one scope: both reach the factory, the first
+// native store recorded is the one every caller gets, and the other is closed
+// rather than leaked with its connection pool.
+func TestControlStoreRegistryKeepsTheWinnerOfAConcurrentFirstOpen(t *testing.T) {
+	registry := newControlStoreRegistry(time.Now)
+	firstStorage, secondStorage := &closeCountingStorage{}, &closeCountingStorage{}
+	first := beads.NewNativeDoltStoreOverStorageForTest(firstStorage)
+	second := beads.NewNativeDoltStoreOverStorageForTest(secondStorage)
+
+	if got := registry.retain("/scope", first); got != beads.Store(first) {
+		t.Fatalf("retain(first) = %T, want the first store", got)
+	}
+	if got := registry.retain("/scope", second); got != beads.Store(first) {
+		t.Fatalf("retain(second) = %T, want the store already kept", got)
+	}
+	if secondStorage.closed != 1 || firstStorage.closed != 0 {
+		t.Fatalf("closes = first %d, second %d; want only the duplicate closed", firstStorage.closed, secondStorage.closed)
+	}
+	if got := registry.lookup("/scope"); got != beads.Store(first) {
+		t.Fatalf("lookup = %T, want the kept store", got)
+	}
+}
+
+// TestCloseControlStoreHandleClosesEveryStoreTheRegistryDoesNotKeep pins the
+// other half of the close exemption: a native store the registry does not keep
+// is closed like any other per-call handle, so the exemption cannot turn into
+// a connection-pool leak.
+func TestCloseControlStoreHandleClosesEveryStoreTheRegistryDoesNotKeep(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	keptStorage, looseStorage := &closeCountingStorage{}, &closeCountingStorage{}
+	kept := beads.NewNativeDoltStoreOverStorageForTest(keptStorage)
+	loose := beads.NewNativeDoltStoreOverStorageForTest(looseStorage)
+	nativeControlStores.retain("/scope", kept)
+
+	if err := closeControlStoreHandle(loose); err != nil {
+		t.Fatalf("closeControlStoreHandle(loose): %v", err)
+	}
+	if err := closeControlStoreHandle(kept); err != nil {
+		t.Fatalf("closeControlStoreHandle(kept): %v", err)
+	}
+	if looseStorage.closed != 1 {
+		t.Fatalf("a native store the registry does not keep was closed %d times, want 1", looseStorage.closed)
+	}
+	if keptStorage.closed != 0 {
+		t.Fatalf("the kept native store was closed %d times, want 0", keptStorage.closed)
+	}
+}
+
+// TestOpenControlStoreAtForCityLogsAChosenBdStoreAtDebug pins the control
+// path's logging. The control dispatcher opens a store on every readiness poll
+// and dispatched control bead. A city that turned native transport off gets
+// the bd store on each of those opens, a chosen fallback that must not reach
+// the default handler as a WARN; it still logs at Debug under gate
+// native_transport_off. A scope the factory refuses logs its refusal once,
+// and the opens inside the recheck window log only the Debug pin. The control
+// path passes no Logger, so the records land on slog.Default, which the test
+// swaps for a recorder (so it cannot run in parallel).
+func TestOpenControlStoreAtForCityLogsAChosenBdStoreAtDebug(t *testing.T) {
 	const serverMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"demo"}`
+	const postgresMetadata = `{"database":"beads","backend":"postgres"}`
+	type logCount struct{ warn, pinned int }
+	countLogs := func(logs *captureHandler) logCount {
+		var c logCount
+		for _, r := range logs.records {
+			if r.Message != "native_store_unavailable" {
+				continue
+			}
+			if r.Level >= slog.LevelWarn {
+				c.warn++
+			}
+			if r.Level == slog.LevelDebug && recordFields(r)["gate"].String() == "native_transport_off" {
+				c.pinned++
+			}
+		}
+		return c
+	}
+	setup := func(t *testing.T, scope, metadata, nativeTransport string) (string, string, *config.City, *captureHandler) {
+		t.Helper()
+		useControlStoreRegistryForTest(t)
+		clearGCEnv(t)
+		disableManagedDoltRecoveryForTest(t)
+		t.Setenv("GC_BEADS", "bd")
+		cityDir := t.TempDir()
+		cfg := &config.City{
+			Workspace: config.Workspace{Name: "demo"},
+			Beads:     config.BeadsConfig{NativeTransport: nativeTransport},
+			Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+		}
+		scopeDir := cityDir
+		if scope == "rig" {
+			scopeDir = filepath.Join(cityDir, "rigs", "frontend")
+		}
+		if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(metadata), 0o644); err != nil {
+			t.Fatalf("write %s metadata: %v", scope, err)
+		}
+		logs := &captureHandler{}
+		prev := slog.Default()
+		slog.SetDefault(slog.New(logs))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+		return cityDir, scopeDir, cfg, logs
+	}
+	openBdStore := func(t *testing.T, scopeDir, cityDir string, cfg *config.City) {
+		t.Helper()
+		store, err := openControlStoreAtForCity(scopeDir, cityDir, cfg)
+		if err != nil {
+			t.Fatalf("openControlStoreAtForCity: %v", err)
+		}
+		if _, ok := store.(*beads.BdStore); !ok {
+			t.Fatalf("store = %T, want the raw control bd store", store)
+		}
+	}
+
 	for _, scope := range []string{"city", "rig"} {
-		t.Run(scope, func(t *testing.T) {
-			clearGCEnv(t)
-			disableManagedDoltRecoveryForTest(t)
-			t.Setenv("GC_BEADS", "bd")
-			cityDir := t.TempDir()
-			cfg := &config.City{
-				Workspace: config.Workspace{Name: "demo"},
-				Rigs:      []config.Rig{{Name: "frontend", Path: "rigs/frontend"}},
+		t.Run("native transport off/"+scope, func(t *testing.T) {
+			cityDir, scopeDir, cfg, logs := setup(t, scope, serverMetadata, "off")
+			openBdStore(t, scopeDir, cityDir, cfg)
+			if got := countLogs(logs); got.warn != 0 || got.pinned != 1 {
+				t.Fatalf("control open logged %d WARN+ and %d DEBUG native_transport_off records, want 0 and 1 (downgraded, not deleted)", got.warn, got.pinned)
 			}
-			scopeDir := cityDir
-			if scope == "rig" {
-				scopeDir = filepath.Join(cityDir, "rigs", "frontend")
+		})
+		t.Run("refused scope/"+scope, func(t *testing.T) {
+			cityDir, scopeDir, cfg, logs := setup(t, scope, postgresMetadata, "")
+			openBdStore(t, scopeDir, cityDir, cfg)
+			if got := countLogs(logs); got.warn != 1 || got.pinned != 0 {
+				t.Fatalf("first open of a refused scope logged %d WARN+ and %d DEBUG pins, want the refusal once and no pin", got.warn, got.pinned)
 			}
-			if err := os.MkdirAll(filepath.Join(scopeDir, ".beads"), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(scopeDir, ".beads", "metadata.json"), []byte(serverMetadata), 0o644); err != nil {
-				t.Fatalf("write %s metadata: %v", scope, err)
-			}
-
-			logs := &captureHandler{}
-			prev := slog.Default()
-			slog.SetDefault(slog.New(logs))
-			t.Cleanup(func() { slog.SetDefault(prev) })
-
-			store, err := openControlStoreAtForCity(scopeDir, cityDir, cfg)
-			if err != nil {
-				t.Fatalf("openControlStoreAtForCity: %v", err)
-			}
-			if _, ok := store.(*beads.BdStore); !ok {
-				t.Fatalf("store = %T, want the raw control bd store", store)
-			}
-			pinned := 0
-			for _, r := range logs.records {
-				if r.Message != "native_store_unavailable" {
-					continue
-				}
-				gateName := recordFields(r)["gate"].String()
-				if r.Level >= slog.LevelWarn {
-					t.Errorf("control open logged %s native_store_unavailable gate=%s; the control path pins the bd store on every open, so the pin must not warn", r.Level, gateName)
-				}
-				if r.Level == slog.LevelDebug && gateName == "native_transport_off" {
-					pinned++
-				}
-			}
-			if pinned != 1 {
-				t.Fatalf("control open logged %d DEBUG native_store_unavailable gate=native_transport_off records, want 1 (downgraded, not deleted)", pinned)
+			openBdStore(t, scopeDir, cityDir, cfg)
+			if got := countLogs(logs); got.warn != 1 || got.pinned != 1 {
+				t.Fatalf("after a second open inside the recheck window: %d WARN+ and %d DEBUG pins, want the refusal still logged once and one pin", got.warn, got.pinned)
 			}
 		})
 	}

@@ -54,9 +54,10 @@ const (
 	// nativeTransportOffGate is the preflight gate recorded when an open's
 	// NativeTransport is "off": the city set beads.native_transport = "off"
 	// (the per-city kill switch), or the caller pinned the bd store, as the
-	// control plane does on every open. It is distinct from the deprecated
-	// process-wide nativeForceFallbackGate even though both end in the same
-	// BdStore fallback, and it logs at Debug (see logNativeUnavailable).
+	// control plane does for a library-extension scope and for a scope the
+	// factory recently answered with the bd store. It is distinct from the
+	// deprecated process-wide nativeForceFallbackGate even though both end in
+	// the same BdStore fallback, and it logs at Debug (see logNativeUnavailable).
 	nativeTransportOffGate = "native_transport_off"
 
 	// gcHookStampPrefix is the comment prefix gc embeds in every hook script
@@ -568,6 +569,16 @@ func libraryExtensionBackend(scopeRoot string) (string, bool) {
 	return backend, true
 }
 
+// ScopeUsesLibraryExtensionBackend reports whether OpenStoreAtForCity opens
+// scopeRoot through its library-extension arm when native transport is
+// allowed. On that arm a failed open is returned as an error rather than
+// answered with the bd store, so a caller that must always get a store asks
+// for NativeTransportOff for such a scope.
+func ScopeUsesLibraryExtensionBackend(scopeRoot string) bool {
+	_, ok := libraryExtensionBackend(scopeRoot)
+	return ok
+}
+
 // openLibraryExtensionStore is the library-extension arm. The Dolt preflight
 // is skipped whole: its bd-context fork and SQL ping describe a local Dolt
 // server this scope does not have, and cost seconds per open. The library's
@@ -929,10 +940,11 @@ func logNativeUnavailable(logger *slog.Logger, scope, gateName, reason string) {
 	if gateName == nativeTransportOffGate {
 		// A chosen fallback, not a degraded store: the city turned native
 		// transport off (logged once at boot), or the caller pinned the bd
-		// store, as the control plane does on every open. It fires on every
-		// store open, so a WARN would read as a degraded store every few
-		// seconds and name a setting the city may never have set. gc doctor
-		// still reports the gate for a city that set "off".
+		// store, as the control plane does for a library-extension scope and
+		// for a scope it recently opened as bd. It fires on every such store
+		// open, so a WARN would read as a degraded store every few seconds and
+		// name a setting the city may never have set. gc doctor still reports
+		// the gate for a city that set "off".
 		logger.Debug(nativeUnavailableMessage, args...)
 		return
 	}

@@ -62,7 +62,7 @@ func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 // TestLogNativeUnavailableDowngradesNativeTransportOffToDebug pins the
 // native_transport_off demotion. The gate fires on every store open of a
 // city that set beads.native_transport = "off" and on every control-plane
-// open, which pins the bd store, so it is silent at the default Info
+// open that pins the bd store, so it is silent at the default Info
 // threshold. It still emits at Debug: downgraded, not deleted.
 func TestLogNativeUnavailableDowngradesNativeTransportOffToDebug(t *testing.T) {
 	var buf bytes.Buffer
@@ -854,10 +854,10 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 // the preflight route: the factory treats the missing checker as
 // preflight-unavailable and takes the bd fallback, stamping it like every
 // other path. The library-extension arm runs before preflight and consults no
-// checker, so a caller that must never be native says so with
-// NativeTransportOff instead, as the control dispatcher does (pinned by
-// TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff here
-// and by cmd/gc's
+// checker, so a caller that must never take that arm says so with
+// NativeTransportOff instead, as the control dispatcher does for such a scope
+// (pinned by TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff
+// here and by cmd/gc's
 // TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope).
 func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")

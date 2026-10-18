@@ -141,7 +141,7 @@ func (d *executionEmitDeferral) projectRoots(roots []deferredExecutionEmit) erro
 		return fmt.Errorf("opening scoped control store %q: %w", d.storePath, err)
 	}
 	defer func() {
-		if cerr := closeBeadStoreHandle(store); cerr != nil {
+		if cerr := closeControlStoreHandle(store); cerr != nil {
 			fmt.Fprintf(d.stderr, "warning: control dispatch: closing scope store %q: %v\n", d.storePath, cerr) //nolint:errcheck // projection outcome is preserved
 		}
 	}()

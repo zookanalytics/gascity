@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -84,34 +87,200 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 	return "rig/" + filepath.Base(scopeRoot)
 }
 
-// openControlBdStoreThroughFactory routes a control-plane bd store through
-// the beads factory so it carries the conditional-writes stamp. The control
-// path never takes a native or library-backend store: NativeTransportOff
-// makes the factory's transport gate return the bd fallback before any
-// native arm (the library-backend arm included) is consulted, so the store
-// comes back raw, matching the control path's deliberately unwrapped
-// handles. That pinned fallback logs at debug under gate
-// native_transport_off, so the control plane does not warn on every open.
+// openControlBdStoreThroughFactory routes a control-plane store through the
+// beads factory so it carries the conditional-writes stamp, and so a scope
+// that passes the native-store preflight answers the control dispatcher's
+// reads and writes in process instead of through one bd subprocess per call.
+// The store comes back raw, with no policy or cache wrapper, matching the
+// control path's deliberately unwrapped handles.
+//
+// The control dispatcher opens its scope store for every readiness scan,
+// every control bead it processes and every execution-fact flush. A native
+// store opened per call would pay the preflight (a bd context subprocess and
+// two database probes) and a new connection pool each time, so
+// nativeControlStores keeps the first native store each scope opens for the
+// life of the process, and a scope the factory answered with the bd store
+// skips the preflight until controlStoreNativeRecheck has passed. The proxied
+// lane is not wired here, so a proxied-server scope keeps the bd store.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
+	transport := controlStoreNativeTransport(scopeRoot, cfg)
+	if transport != beads.NativeTransportOff {
+		if store := nativeControlStores.lookup(scopeRoot); store != nil {
+			return store, nil
+		}
+		if nativeControlStores.refusedRecently(scopeRoot) {
+			transport = beads.NativeTransportOff
+		}
+	}
 	flags, resolved := resolvedConditionalWritesFlags(cfg)
 	mode := gate.ModeUnset
 	if resolved {
 		mode = flags.BeadsConditionalWrites()
 	}
-	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+	result, err := openStoreFactoryForCity(context.Background(), beads.StoreOpenOptions{
 		ScopeRoot:         scopeRoot,
 		CityPath:          cityPath,
 		Provider:          provider,
+		PreflightChecker:  newBeadsPreflightChecker(cityPath, provider, cfg),
 		ConditionalWrites: mode,
+		NativeTransport:   transport,
 		OnConditionalWritesDegraded: lazyConditionalWritesDegradeEmitter(
 			cityPath, conditionalWritesStoreID(scopeRoot, cityPath), flags, resolved),
-		OpenBdStore:     openBd,
-		NativeTransport: beads.NativeTransportOff,
+		OpenBdStore: openBd,
+		OpenNativeStore: func() (beads.Store, error) {
+			return openNativeControlStore(scopeRoot, cityPath, cfg)
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
-	return result.Store, nil
+	if transport == beads.NativeTransportOff {
+		return result.Store, nil
+	}
+	return nativeControlStores.retain(scopeRoot, result.Store), nil
+}
+
+// controlStoreNativeTransport is the native transport a control-plane open
+// of scopeRoot asks the factory for: the city's beads.native_transport, read
+// from the config the caller loaded for this open, so a city that turns native
+// off stops handing out its retained native stores on the next open. Two cases
+// ask for NativeTransportOff instead:
+//   - a nil cfg, because the caller could not read city.toml, and an unread
+//     "off" must not open as "auto" (loadCityConfigForStoreOpen holds the same
+//     line for the shared open path);
+//   - a scope whose metadata names a backend the linked beads library opens as
+//     an extension. The factory's library arm returns a failed open as an
+//     error rather than the bd store, and on the rig: store-ref resolver that
+//     error quarantines the workflow finalizer.
+func controlStoreNativeTransport(scopeRoot string, cfg *config.City) beads.NativeTransportMode {
+	if cfg == nil || beads.ScopeUsesLibraryExtensionBackend(scopeRoot) {
+		return beads.NativeTransportOff
+	}
+	return resolvedNativeTransportMode(cfg)
+}
+
+// openNativeControlStore opens the native store a control-plane scope keeps
+// for the life of the process, the way the controller opens its rig stores
+// (controllerState.openRigStore): the scoped Dolt env with the library's
+// long-lived connection pool, and a reopen hook that re-resolves the current
+// env on every reconnect. The hook reloads the city config, because a
+// dispatcher can outlive a managed-Dolt restart or rebind by days and the env
+// it opened with pins the port as of the open.
+func openNativeControlStore(scopeRoot, cityPath string, cfg *config.City) (beads.Store, error) {
+	env, err := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("project native control store env %s: %w", scopeRoot, err)
+	}
+	reopen := func(ctx context.Context) (beads.NativeStorage, error) {
+		freshEnv, rerr := nativeDoltOpenEnvForScopeContext(ctx, cityPath, nil, scopeRoot)
+		if rerr != nil {
+			return nil, fmt.Errorf("re-resolve native control store env %s: %w", scopeRoot, rerr)
+		}
+		return beads.OpenNativeStorage(ctx, scopeRoot, freshEnv)
+	}
+	return beads.OpenNativeDoltStoreAt(context.Background(), scopeRoot, env, beads.WithNativeReopen(reopen))
+}
+
+// controlStoreNativeRecheck is how long a scope the factory answered with the
+// bd store keeps that answer for control-plane opens. Opens inside the window
+// take the bd store without the preflight and without logging the refusal
+// again; the first open after it asks the factory again. A refusal that has
+// cleared, such as a Dolt server that was down at the first open, reaches the
+// native store within one window, and a standing one costs one preflight per
+// window instead of one per readiness scan.
+const controlStoreNativeRecheck = 5 * time.Minute
+
+// nativeControlStores records the transport each control-plane scope settled
+// on in this process. See openControlBdStoreThroughFactory.
+var nativeControlStores = newControlStoreRegistry(time.Now)
+
+// controlStoreRegistry holds the native store each control-plane scope opened,
+// kept for the life of the process, and the time the factory last answered a
+// scope with the bd store.
+type controlStoreRegistry struct {
+	mu      sync.Mutex
+	now     func() time.Time
+	native  map[string]*beads.NativeDoltStore
+	refused map[string]time.Time
+}
+
+func newControlStoreRegistry(now func() time.Time) *controlStoreRegistry {
+	return &controlStoreRegistry{
+		now:     now,
+		native:  map[string]*beads.NativeDoltStore{},
+		refused: map[string]time.Time{},
+	}
+}
+
+// lookup returns the native store retained for scopeRoot, or nil.
+func (r *controlStoreRegistry) lookup(scopeRoot string) beads.Store {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if store, ok := r.native[scopeRoot]; ok {
+		return store
+	}
+	return nil
+}
+
+// refusedRecently reports whether the factory answered scopeRoot with the bd
+// store within the last controlStoreNativeRecheck.
+func (r *controlStoreRegistry) refusedRecently(scopeRoot string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.refused[scopeRoot]
+	return ok && r.now().Sub(at) < controlStoreNativeRecheck
+}
+
+// retain records what the factory answered for scopeRoot under a transport
+// that allowed the native store, and returns the store to hand out. A native
+// store is kept and returned, unless a concurrent first open of the same scope
+// already kept one: that one is returned and this one is closed. Any other
+// store is returned as it came, and the refusal is recorded.
+func (r *controlStoreRegistry) retain(scopeRoot string, store beads.Store) beads.Store {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	native, ok := store.(*beads.NativeDoltStore)
+	if !ok {
+		r.refused[scopeRoot] = r.now()
+		return store
+	}
+	delete(r.refused, scopeRoot)
+	if kept, ok := r.native[scopeRoot]; ok {
+		if err := native.CloseStore(); err != nil {
+			log.Printf("control store: closing the duplicate native store for %s: %v", scopeRoot, err)
+		}
+		return kept
+	}
+	r.native[scopeRoot] = native
+	return native
+}
+
+// holds reports whether store is a native store this registry keeps.
+func (r *controlStoreRegistry) holds(store beads.Store) bool {
+	native, ok := store.(*beads.NativeDoltStore)
+	if !ok {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, kept := range r.native {
+		if kept == native {
+			return true
+		}
+	}
+	return false
+}
+
+// closeControlStoreHandle releases a control-plane store the caller opened
+// for one readiness scan, control dispatch or execution-fact flush. A native
+// store nativeControlStores keeps is shared by every later open of its scope,
+// so it stays open: CloseStore is a one-way latch, and closing it here would
+// fail every later control open of the scope with ErrStoreClosed.
+func closeControlStoreHandle(store beads.Store) error {
+	if nativeControlStores.holds(store) {
+		return nil
+	}
+	return closeBeadStoreHandle(store)
 }
 
 // conditionalWritesEventStoreKind maps internal store-kind names onto the
