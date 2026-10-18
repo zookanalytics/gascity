@@ -431,10 +431,11 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 // answers it with one `bd ready` call, and a second when that call's page of
 // brief rows comes back full; file, SQLite and native legs answer it in
 // process. A scope that passes the native-store preflight is a native leg,
-// opened once per process and kept (openControlBdStoreThroughFactory). Each
-// read is TierBoth, the tier the dispatcher's queue has always been drawn from
-// (the primed snapshot this replaces held ephemeral rows too), and it applies
-// the same work-outcome veto the snapshot applied.
+// opened once and kept while the scope's binding holds
+// (openControlBdStoreThroughFactory). Each read is TierBoth, the tier the
+// dispatcher's queue has always been drawn from (the primed snapshot this
+// replaces held ephemeral rows too), and it applies the same work-outcome veto
+// the snapshot applied.
 //
 // The legs are the SAME ledgers runControlDispatcherWithStoreAndConfig
 // dispatches against -- controlReadyLegSources applies the routing rule

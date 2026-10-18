@@ -840,27 +840,266 @@ func TestOpenControlStoreRechecksARefusedScopeOncePerWindow(t *testing.T) {
 	}
 }
 
+// bindingAwareControlStoreFactory answers each control open the way the
+// factory answers it from the scope's .beads/metadata.json at the time of the
+// open: a Dolt server scope, under a transport that allows native, gets the
+// native store of its database, made on the first open of that database, and
+// any other scope gets bd. It returns each database's native store and the
+// storage behind it, and the options of each open, in order.
+func bindingAwareControlStoreFactory(t *testing.T, bd beads.Store) (map[string]*beads.NativeDoltStore, map[string]*closeCountingStorage, *[]beads.StoreOpenOptions) {
+	t.Helper()
+	natives := map[string]*beads.NativeDoltStore{}
+	storages := map[string]*closeCountingStorage{}
+	opens := stubControlStoreFactory(t, func(opts beads.StoreOpenOptions) beads.Store {
+		data, err := os.ReadFile(filepath.Join(opts.ScopeRoot, ".beads", "metadata.json"))
+		if err != nil {
+			t.Fatalf("read %s metadata: %v", opts.ScopeRoot, err)
+		}
+		var meta struct {
+			Backend      string `json:"backend"`
+			DoltMode     string `json:"dolt_mode"`
+			DoltDatabase string `json:"dolt_database"`
+		}
+		if err := json.Unmarshal(data, &meta); err != nil {
+			t.Fatalf("parse %s metadata: %v", opts.ScopeRoot, err)
+		}
+		if opts.NativeTransport == beads.NativeTransportOff || meta.Backend != "dolt" || meta.DoltMode != "server" {
+			return bd
+		}
+		if _, ok := natives[meta.DoltDatabase]; !ok {
+			storages[meta.DoltDatabase] = &closeCountingStorage{}
+			natives[meta.DoltDatabase] = beads.NewNativeDoltStoreOverStorageForTest(storages[meta.DoltDatabase])
+		}
+		return natives[meta.DoltDatabase]
+	})
+	return natives, storages, opens
+}
+
+const (
+	// doltOneMetadata binds a scope to database one on a Dolt server.
+	doltOneMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"one"}`
+	// postgresStorageMetadata binds a scope to a Postgres database through storage
+	// fields, which the native store does not serve.
+	postgresStorageMetadata = `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`
+)
+
+// TestOpenControlStoreReopensAScopeWhoseBindingChanged pins that a kept native
+// store serves only the binding its scope had when the store opened. A scope's
+// .beads/metadata.json names its backend, its database and its Dolt mode. When
+// it changes while the old database still answers, no read fails to show the
+// change, so the next control open has to find it: it stops handing out the
+// kept store and asks the factory for the new binding's store, as every other
+// open in the city does. A caller that opened the old store before the change
+// may still be using it, so that store stays open until the caller closes its
+// handle, and is closed then.
+func TestOpenControlStoreReopensAScopeWhoseBindingChanged(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		// database is the Dolt database whose native store the factory answers
+		// the new binding with, or "" when it answers with the bd store.
+		database string
+	}{
+		{name: "another Dolt database", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"two"}`, database: "two"},
+		{name: "proxied-server", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"one"}`},
+		{name: "Postgres with storage fields", metadata: postgresStorageMetadata},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useControlStoreRegistryForTest(t)
+			cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+			scope := t.TempDir()
+			writeBackendMetadata(t, scope, doltOneMetadata)
+			bd := beads.NewMemStore()
+			natives, storages, opens := bindingAwareControlStoreFactory(t, bd)
+			open := func() beads.Store {
+				t.Helper()
+				store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg,
+					func() (beads.Store, error) { return bd, nil })
+				if err != nil {
+					t.Fatalf("openControlBdStoreThroughFactory: %v", err)
+				}
+				return store
+			}
+
+			inFlight := open()
+			if inFlight != beads.Store(natives["one"]) {
+				t.Fatalf("first open = %T, want the native store of database one", inFlight)
+			}
+			writeBackendMetadata(t, scope, tc.metadata)
+			next := open()
+			want := beads.Store(bd)
+			if tc.database != "" {
+				want = natives[tc.database]
+			}
+			if next != want || len(*opens) != 2 {
+				t.Fatalf("open after the binding changed = %T with %d factory opens, want the new binding's store from a second factory open (the kept store serves the retired ledger)", next, len(*opens))
+			}
+			if storages["one"].closed != 0 {
+				t.Fatal("the retired store was closed while a caller that opened it before the change still held it")
+			}
+			if err := closeControlStoreHandle(next); err != nil {
+				t.Fatalf("closeControlStoreHandle(new store): %v", err)
+			}
+			if err := closeControlStoreHandle(inFlight); err != nil {
+				t.Fatalf("closeControlStoreHandle(retired store): %v", err)
+			}
+			if storages["one"].closed != 1 {
+				t.Fatalf("the retired store was closed %d times once its last handle came back, want 1", storages["one"].closed)
+			}
+			if tc.database == "" {
+				return
+			}
+			if again := open(); again != next || len(*opens) != 2 || storages[tc.database].closed != 0 {
+				t.Fatalf("open under the unchanged new binding = %T with %d factory opens, want the store kept for that binding", again, len(*opens))
+			}
+		})
+	}
+}
+
+// TestOpenControlStoreRetiresTheKeptStoreOfAScopeThatTurnsLibraryBacked pins
+// the same rule for an open that asks for NativeTransportOff. A scope converted
+// to a backend the beads library opens as an extension takes the bd store from
+// then on, and the native store kept for its old Dolt database is retired. No
+// caller holds it, so it is closed at once rather than keeping its connection
+// pool to the old database open for the life of the process.
+func TestOpenControlStoreRetiresTheKeptStoreOfAScopeThatTurnsLibraryBacked(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	registerLibraryBackendForTest(t, "http")
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	scope := t.TempDir()
+	writeBackendMetadata(t, scope, doltOneMetadata)
+	bd := beads.NewMemStore()
+	natives, storages, opens := bindingAwareControlStoreFactory(t, bd)
+	openBd := func() (beads.Store, error) { return bd, nil }
+
+	kept, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg, openBd)
+	if err != nil || kept != beads.Store(natives["one"]) {
+		t.Fatalf("first open = (%T, %v), want the native store of database one", kept, err)
+	}
+	if err := closeControlStoreHandle(kept); err != nil {
+		t.Fatalf("closeControlStoreHandle: %v", err)
+	}
+	writeBackendMetadata(t, scope, convertedHTTPMetadata)
+	store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg, openBd)
+	if err != nil || store != beads.Store(bd) {
+		t.Fatalf("open of the library-backed scope = (%T, %v), want the bd store", store, err)
+	}
+	if got := (*opens)[len(*opens)-1].NativeTransport; got != beads.NativeTransportOff {
+		t.Fatalf("open of the library-backed scope asked the factory for %q, want off", got)
+	}
+	if storages["one"].closed != 1 {
+		t.Fatalf("the native store kept for the old binding was closed %d times, want 1", storages["one"].closed)
+	}
+}
+
+// TestOpenControlStoreAsksAgainWhenARefusedScopeIsRebound pins that the recheck
+// window holds a refusal only for the binding the factory refused. A scope
+// moved onto a Dolt server inside the window asks the factory on its next open
+// instead of taking the bd store until the window ends.
+func TestOpenControlStoreAsksAgainWhenARefusedScopeIsRebound(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+	scope := t.TempDir()
+	writeBackendMetadata(t, scope, postgresStorageMetadata)
+	bd := beads.NewMemStore()
+	natives, _, opens := bindingAwareControlStoreFactory(t, bd)
+	openBd := func() (beads.Store, error) { return bd, nil }
+
+	if store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg, openBd); err != nil || store != beads.Store(bd) {
+		t.Fatalf("open of the Postgres scope = (%T, %v), want the bd store", store, err)
+	}
+	writeBackendMetadata(t, scope, doltOneMetadata)
+	store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg, openBd)
+	if err != nil || store != beads.Store(natives["one"]) {
+		t.Fatalf("open inside the recheck window after the scope moved onto Dolt = (%T, %v) under %q, want the factory asked again and the native store", store, err, (*opens)[len(*opens)-1].NativeTransport)
+	}
+}
+
+// TestStoreRefResolverReleaseGivesBackItsControlStoreHandles pins that a
+// dispatch's store-ref resolver does not pin the native stores it opens. Each
+// rig open through the control path takes a handle on the store the rig keeps,
+// and the resolver's release, which the dispatch runs when it returns, gives
+// each one back. A store retired while the dispatch used it then closes,
+// instead of holding its connection pool for the life of the dispatcher.
+func TestStoreRefResolverReleaseGivesBackItsControlStoreHandles(t *testing.T) {
+	useControlStoreRegistryForTest(t)
+	scope := t.TempDir()
+	writeBackendMetadata(t, scope, doltOneMetadata)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs:      []config.Rig{{Name: "repo", Path: scope}},
+	}
+	bd := beads.NewMemStore()
+	natives, storages, _ := bindingAwareControlStoreFactory(t, bd)
+	openRig := func(dir string) (beads.Store, error) {
+		return openControlBdStoreThroughFactory(dir, "/city", "bd", cfg,
+			func() (beads.Store, error) { return bd, nil })
+	}
+	resolve, release := makeStoreRefResolverWithOpen("/city", cfg, openRig)
+
+	for i := 0; i < 2; i++ {
+		store, err := resolve("rig:repo")
+		if err != nil || store != beads.Store(natives["one"]) {
+			t.Fatalf("resolve(rig:repo) #%d = (%T, %v), want the native store the rig keeps", i, store, err)
+		}
+	}
+	writeBackendMetadata(t, scope, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"two"}`)
+	if store, err := openRig(scope); err != nil || store != beads.Store(natives["two"]) {
+		t.Fatalf("open after the rig moved to database two = (%T, %v), want its native store", store, err)
+	}
+	if storages["one"].closed != 0 {
+		t.Fatal("the retired store was closed while the dispatch's resolver still held it")
+	}
+	if err := release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if storages["one"].closed != 1 {
+		t.Fatalf("the retired store was closed %d times after the resolver's release, want 1", storages["one"].closed)
+	}
+}
+
 // TestControlStoreRegistryKeepsTheWinnerOfAConcurrentFirstOpen pins the race
-// between two first opens of one scope: both reach the factory, the first
-// native store recorded is the one every caller gets, and the other is closed
-// rather than leaked with its connection pool.
+// between two first opens of one scope under one binding: both reach the
+// factory, the first native store recorded is the one every caller gets, and
+// the other comes back for the caller to close rather than leak with its
+// connection pool.
 func TestControlStoreRegistryKeepsTheWinnerOfAConcurrentFirstOpen(t *testing.T) {
 	registry := newControlStoreRegistry(time.Now)
-	firstStorage, secondStorage := &closeCountingStorage{}, &closeCountingStorage{}
-	first := beads.NewNativeDoltStoreOverStorageForTest(firstStorage)
-	second := beads.NewNativeDoltStoreOverStorageForTest(secondStorage)
+	first := beads.NewNativeDoltStoreOverStorageForTest(&closeCountingStorage{})
+	second := beads.NewNativeDoltStoreOverStorageForTest(&closeCountingStorage{})
 
-	if got := registry.retain("/scope", first); got != beads.Store(first) {
-		t.Fatalf("retain(first) = %T, want the first store", got)
+	if got, toClose := registry.retain("/scope", "binding", first); got != beads.Store(first) || toClose != nil {
+		t.Fatalf("retain(first) = (%T, %p), want the first store kept and nothing to close", got, toClose)
 	}
-	if got := registry.retain("/scope", second); got != beads.Store(first) {
-		t.Fatalf("retain(second) = %T, want the store already kept", got)
+	if got, toClose := registry.retain("/scope", "binding", second); got != beads.Store(first) || toClose != second {
+		t.Fatalf("retain(second) = (%T, %p), want the store already kept and the second store to close", got, toClose)
 	}
-	if secondStorage.closed != 1 || firstStorage.closed != 0 {
-		t.Fatalf("closes = first %d, second %d; want only the duplicate closed", firstStorage.closed, secondStorage.closed)
+	if got, toClose := registry.acquire("/scope", "binding"); got != beads.Store(first) || toClose != nil {
+		t.Fatalf("acquire = (%T, %p), want the kept store", got, toClose)
 	}
-	if got := registry.lookup("/scope"); got != beads.Store(first) {
-		t.Fatalf("lookup = %T, want the kept store", got)
+}
+
+// TestControlStoreRegistryRetiresTheStoreAnOpenUnderANewBindingReplaces pins
+// two first opens of one scope whose bindings differ because the scope changed
+// between them. The later retain is kept, and the store it replaces is retired,
+// not closed: the open that recorded it handed it out with a handle, and the
+// store is closed when that handle comes back.
+func TestControlStoreRegistryRetiresTheStoreAnOpenUnderANewBindingReplaces(t *testing.T) {
+	registry := newControlStoreRegistry(time.Now)
+	old := beads.NewNativeDoltStoreOverStorageForTest(&closeCountingStorage{})
+	current := beads.NewNativeDoltStoreOverStorageForTest(&closeCountingStorage{})
+
+	if got, toClose := registry.retain("/scope", "old", old); got != beads.Store(old) || toClose != nil {
+		t.Fatalf("retain under the old binding = (%T, %p), want the old store kept", got, toClose)
+	}
+	if got, toClose := registry.retain("/scope", "new", current); got != beads.Store(current) || toClose != nil {
+		t.Fatalf("retain under the new binding = (%T, %p), want the new store kept and the old one left to its handle", got, toClose)
+	}
+	if got, toClose := registry.acquire("/scope", "new"); got != beads.Store(current) || toClose != nil {
+		t.Fatalf("acquire under the new binding = (%T, %p), want the new store", got, toClose)
+	}
+	if tracked, toClose := registry.release(old); !tracked || toClose != old {
+		t.Fatalf("release(old) = (%t, %p), want the retired store back to close on its last handle", tracked, toClose)
 	}
 }
 
@@ -873,7 +1112,7 @@ func TestCloseControlStoreHandleClosesEveryStoreTheRegistryDoesNotKeep(t *testin
 	keptStorage, looseStorage := &closeCountingStorage{}, &closeCountingStorage{}
 	kept := beads.NewNativeDoltStoreOverStorageForTest(keptStorage)
 	loose := beads.NewNativeDoltStoreOverStorageForTest(looseStorage)
-	nativeControlStores.retain("/scope", kept)
+	nativeControlStores.retain("/scope", "binding", kept)
 
 	if err := closeControlStoreHandle(loose); err != nil {
 		t.Fatalf("closeControlStoreHandle(loose): %v", err)

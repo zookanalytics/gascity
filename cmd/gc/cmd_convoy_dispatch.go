@@ -189,7 +189,9 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 	// findBeadScopeAcrossStores' scan stores, makeSourceWorkflowStoresLister's
 	// per-scope opens, and the makeStoreRefResolver handles walkSourceBeadChain
 	// memoizes — stay unclosed: a deliberate scope boundary for this targeted WAL
-	// fix, tracked in ga-6fur2, not an oversight.
+	// fix, tracked in ga-6fur2, not an oversight. The resolver's release gives
+	// back only the handles its opens took on native stores the control path
+	// keeps, so a store retired while the dispatch used it closes afterwards.
 	defer func() {
 		if cerr := closeControlStoreHandle(store); cerr != nil {
 			fmt.Fprintf(stderr, "warning: control dispatch: closing scope store %q: %v\n", storePath, cerr) //nolint:errcheck // dispatch outcome is preserved
@@ -268,7 +270,13 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			}
 			return fmt.Errorf("loading city config for %s: unavailable after warning-only load", cityPath)
 		}
-		opts.ResolveStoreRef = makeStoreRefResolver(cityPath, cfg)
+		resolveStoreRef, releaseStoreRefs := makeStoreRefResolver(cityPath, cfg)
+		defer func() {
+			if err := releaseStoreRefs(); err != nil {
+				fmt.Fprintf(stderr, "warning: control dispatch: releasing source stores: %v\n", err) //nolint:errcheck // dispatch outcome is preserved
+			}
+		}()
+		opts.ResolveStoreRef = resolveStoreRef
 		if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflowFinalize {
 			sourceWorkflowCtx, cancelSourceWorkflowCtx := sourceWorkflowCommandContext()
 			defer cancelSourceWorkflowCtx()
@@ -854,15 +862,38 @@ func controlQuarantineReason(cause error, fallback string) string {
 }
 
 // makeStoreRefResolver returns a dispatch.ProcessOptions.ResolveStoreRef
-// closure for the given city. The resolver maps "city:<name>" and
-// "rig:<name>" gc.source_store_ref values to a beads.Store rooted at the
-// matching scope. processWorkflowFinalize uses it to walk the source bead
-// chain across store boundaries so a successful rig-scope workflow closes
-// the city-scope source bead that spawned it (e.g. PR-review "Adopt PR"
-// requests).
-func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads.Store, error) {
+// closure for the given city, and the release the dispatch runs once it has
+// returned. The resolver maps "city:<name>" and "rig:<name>"
+// gc.source_store_ref values to a beads.Store rooted at the matching scope.
+// processWorkflowFinalize uses it to walk the source bead chain across store
+// boundaries so a successful rig-scope workflow closes the city-scope source
+// bead that spawned it (e.g. PR-review "Adopt PR" requests).
+func makeStoreRefResolver(cityPath string, cfg *config.City) (func(string) (beads.Store, error), func() error) {
+	return makeStoreRefResolverWithOpen(cityPath, cfg, func(dir string) (beads.Store, error) {
+		return openControlStoreAtForCity(dir, cityPath, cfg)
+	})
+}
+
+// makeStoreRefResolverWithOpen is makeStoreRefResolver with the open of a rig
+// scope's control store supplied. Its release gives back the handle each of
+// those opens took on a native store the control path keeps
+// (releaseControlStoreHandle), so a store retired while the dispatch used it
+// closes once the dispatch is done. The release closes no other store the
+// resolver handed out.
+func makeStoreRefResolverWithOpen(cityPath string, cfg *config.City, openRigStore func(dir string) (beads.Store, error)) (func(string) (beads.Store, error), func() error) {
 	cityName := loadedCityName(cfg, cityPath)
-	return func(ref string) (beads.Store, error) {
+	var opened []beads.Store
+	release := func() error {
+		var errs []error
+		for _, store := range opened {
+			if _, err := releaseControlStoreHandle(store); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		opened = nil
+		return errors.Join(errs...)
+	}
+	resolve := func(ref string) (beads.Store, error) {
 		ref = strings.TrimSpace(ref)
 		if ref == "" {
 			return nil, fmt.Errorf("empty store ref")
@@ -893,7 +924,12 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 				if rig.Name != name {
 					continue
 				}
-				return openControlStoreAtForCity(rig.Path, cityPath, cfg)
+				store, err := openRigStore(rig.Path)
+				if err != nil {
+					return nil, err
+				}
+				opened = append(opened, store)
+				return store, nil
 			}
 			// A rig entry can be removed from city.toml while its workflows
 			// are still in flight. A hard error here falls into the cmd-layer
@@ -916,6 +952,7 @@ func makeStoreRefResolver(cityPath string, cfg *config.City) func(string) (beads
 			return nil, fmt.Errorf("unsupported store ref scheme: %q", ref)
 		}
 	}
+	return resolve, release
 }
 
 func makeSourceWorkflowLocker(ctx context.Context, cityPath string, cfg *config.City, defaultStorePath string) func(storeRef, sourceBeadID string, fn func() error) error {
