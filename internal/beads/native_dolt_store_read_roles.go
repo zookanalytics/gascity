@@ -298,7 +298,7 @@ func (s *NativeDoltStore) Ready(queries ...ReadyQuery) ([]Bead, error) {
 		if q.Limit > 0 && len(beads) > q.Limit {
 			beads = beads[:q.Limit]
 		}
-		out = beads
+		out = q.Fields.project(beads)
 		return nil
 	})
 	if err != nil {
@@ -619,6 +619,8 @@ func filterReadyByWorkOutcomeListBlockers(ctx context.Context, reader issueops.R
 		req := nativeListReadRequest()
 		req.IDFilter = strings.Join(blockerIDs[chunkStart:chunkEnd], ",")
 		req.Limit = &unlimited
+		// The veto reads a blocker's status and metadata, never its text.
+		req.Brief = true
 		page, err := reader.List(ctx, req)
 		if err != nil {
 			return nil, nil, err
@@ -762,6 +764,7 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	req := nativeListReadRequest()
 	limit := nativeListLimitPushdown(query)
 	req.Limit = &limit
+	req.Brief = query.Fields.omitsText()
 	switch query.Sort {
 	case SortCreatedDesc:
 		req.SortBy = "created" // SortDefs["created"] defaults DESC
@@ -874,7 +877,8 @@ func nativeReadyRequestFromReadyQuery(q ReadyQuery) issueops.ReadyRequest {
 		// and those two answer with different item SETS. gc re-sorts nothing
 		// here, so a silent flip between them would change which work the
 		// dispatcher is offered.
-		Sort: "hybrid",
+		Sort:  "hybrid",
+		Brief: q.Fields.omitsText(),
 	}
 	if q.TierMode == TierBoth || q.TierMode == TierWisps {
 		req.IncludeEphemeral = true
