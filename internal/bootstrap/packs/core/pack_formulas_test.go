@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -492,6 +493,13 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 // and its tree is this run's to adopt, which is how a re-dispatch recovers a
 // crashed run. A tree no session directory accounts for, and a session list
 // that cannot be read, fail closed.
+//
+// A held tree may be a live session's, so counting its uncommitted paths must
+// not write to it. A status that takes the optional index lock refreshes a
+// stale index entry and writes the index back under index.lock, and a lock
+// held at that moment fails the holder's own git add or commit. Each held tree
+// therefore carries a tracked file whose stat data no longer matches its index
+// entry, and its index must come out of the gate byte-identical.
 func TestWorktreeFormulasHoldOnALivePeerHoldingTheWorkTree(t *testing.T) {
 	for _, tool := range []string{"git", "jq"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -503,7 +511,9 @@ func TestWorktreeFormulasHoldOnALivePeerHoldingTheWorkTree(t *testing.T) {
 	// is, so the gate lists the worktrees of the repository it works in.
 	const repoSetup = `set -e
 git init -q -b main "$ROOT/repo"
-git -C "$ROOT/repo" -c user.name=gate -c user.email=gate@example.invalid -c commit.gpgsign=false commit -q --allow-empty -m init
+echo tracked > "$ROOT/repo/tracked.txt"
+git -C "$ROOT/repo" add tracked.txt
+git -C "$ROOT/repo" -c user.name=gate -c user.email=gate@example.invalid -c commit.gpgsign=false commit -q -m init
 git -C "$ROOT/repo" worktree add -q --detach "$ROOT/own"
 git -C "$ROOT/repo" worktree add -q --detach "$ROOT/peer"
 `
@@ -574,7 +584,9 @@ echo wip > "$ROOT/peer/worktrees/gc-w/wip.txt"`,
 		"GC_AGENT": {}, "GC_ALIAS": {}, "GC_DIR": {}, "GC_SESSION_ID": {}, "GC_SESSION_NAME": {},
 		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {}, "GIT_COMMON_DIR": {}, "GIT_CONFIG_GLOBAL": {},
 		"GIT_CONFIG_NOSYSTEM": {}, "GIT_DIR": {}, "GIT_INDEX_FILE": {}, "GIT_OBJECT_DIRECTORY": {},
-		"GIT_WORK_TREE": {},
+		// An inherited GIT_OPTIONAL_LOCKS=0 keeps every status from writing the
+		// index, and the held-index check would then pass a count that locks.
+		"GIT_OPTIONAL_LOCKS": {}, "GIT_WORK_TREE": {},
 	}
 	vars := strings.NewReplacer("{{convoy_id}}", "gc-convoy", "{{escalation_target}}", "human")
 	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
@@ -592,10 +604,31 @@ echo wip > "$ROOT/peer/worktrees/gc-w/wip.txt"`,
 					"GIT_CONFIG_NOSYSTEM=1",
 					"GIT_CONFIG_GLOBAL=" + os.DevNull,
 				}
+				setup := repoSetup + tc.setup + "\n"
+				if tc.tree != "" {
+					// Backdating the held tree's tracked file leaves its index
+					// entry's stat data stale, so a status that refreshes and
+					// writes the index changes the index file.
+					setup += `touch -t 200001010000 "$ROOT/` + tc.tree + `/tracked.txt"
+git -C "$ROOT/` + tc.tree + `" rev-parse --path-format=absolute --git-path index > "$ROOT/held-index"
+`
+				}
 				setupPath := filepath.Join(root, "setup.sh")
-				writeGateFixture(t, setupPath, repoSetup+tc.setup+"\n")
+				writeGateFixture(t, setupPath, setup)
 				if out, err := runPackScript(t, setupPath, t.TempDir(), skipEnv, env); err != nil {
 					t.Fatalf("laying out the repository: %v\n%s", err, out)
+				}
+				var heldIndex string
+				var heldIndexBefore []byte
+				if tc.tree != "" {
+					pathData, err := os.ReadFile(filepath.Join(root, "held-index"))
+					if err != nil {
+						t.Fatalf("reading the held tree's index path: %v", err)
+					}
+					heldIndex = strings.TrimSpace(string(pathData))
+					if heldIndexBefore, err = os.ReadFile(heldIndex); err != nil {
+						t.Fatalf("reading the held tree's index: %v", err)
+					}
 				}
 
 				sessionsAnswer := "exit 1"
@@ -657,6 +690,13 @@ echo GATE-PASSED
 					if !strings.Contains(gcLog[mailAt:], want) {
 						t.Errorf("the escalation does not mention %q\ngc log:\n%s", want, gcLog)
 					}
+				}
+				heldIndexAfter, indexErr := os.ReadFile(heldIndex)
+				if indexErr != nil {
+					t.Fatalf("reading the held tree's index after the gate: %v", indexErr)
+				}
+				if !bytes.Equal(heldIndexAfter, heldIndexBefore) {
+					t.Error("the gate rewrote the held tree's index: its count took the optional index lock, which can fail the live holder's own git add or commit on index.lock")
 				}
 			})
 		}

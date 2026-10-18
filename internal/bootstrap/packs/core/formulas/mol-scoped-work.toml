@@ -140,7 +140,10 @@ if [ "$OWNER_LIVE" = "0" ]; then
       fi
     fi
     if [ "$OWNER_LIVE" != "0" ]; then
-      if TREE_STATUS=$(git -C "$TREE_DIR" status --porcelain 2>/dev/null); then
+      # The tree may be a live session's, so the count takes no optional lock:
+      # a plain status refreshes the index under index.lock, and a lock held at
+      # the wrong moment fails that session's own git add or commit.
+      if TREE_STATUS=$(git --no-optional-locks -C "$TREE_DIR" status --porcelain 2>/dev/null); then
         HELD_TREE="$TREE_DIR (uncommitted paths: $(printf '%s' "$TREE_STATUS" | grep -c .))"
       else
         HELD_TREE="$TREE_DIR (uncommitted paths: unreadable)"
