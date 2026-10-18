@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -9,16 +10,21 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// invocationConfigMemo shares one composed city config load across the
-// helpers a single short-lived command runs.
+// invocationConfigMemo shares a city's config loads across the helpers a
+// single short-lived command runs.
 //
 // `gc bd` is the case it exists for. Before it execs bd, the passthrough's
-// guards and env builders each loaded the composed config of the same city on
-// their own: doBd itself, the by-id twin census, the pinned-bd resolver
-// (twice, once through the storage-binding env) and the hosted-credential
-// probe. Each load walks every pack, include and order directory; on a
-// production-sized city that is 50-70 ms a time, and the repeats were most of
-// gc's own share of an operator `gc bd show`. A load that calls
+// guards and env builders each need the config of the same city. A read verb
+// routes on deployment facts alone, and so do the env builders every verb runs
+// (the pinned-bd resolver and the hosted-credential probe): they share one
+// deployment-layer load (loadCityDeploymentConfig), which reads city.toml, its
+// fragments and the site binding and no pack. A composed load walks every pack,
+// include and order directory, 50-70 ms a time on a production-sized city, so
+// the scope answers each composed load of the shape below from the first one:
+// doBd's own for a write, and for a read whichever helper asks first (the
+// health check's scope enumeration when managed Dolt is unreachable, the by-id
+// twin census on a split city, or the init-path classifiers of a rig scope
+// with no metadata yet). A load that calls
 // config.LoadWithIncludesOptions itself is not shared, and the one-shot storage
 // funnel's routing read (resolveCLIStorageRoutes) stays one by choice: a by-id
 // `gc bd` that enters the funnel composes there once more, at most once per
@@ -49,21 +55,37 @@ import (
 // the helpers' loads, which the uncached path never guaranteed either (each
 // load already reads its sources one by one).
 //
-// The scope also carries the builtin readiness deferral: the cities whose
-// readiness pass the gc bd passthrough loader skipped
-// (deferBuiltinReadinessForInvocation). It lives here so it dies with the
-// scope and can never leak into a long-lived process.
+// The scope answers a deployment-layer load the same way, from a map of its
+// own: both maps keep one rule (memoizedLoad), so the first load of a city.toml
+// in the scope loads it, every later one gets a copy of that answer under the
+// same copy and no-write-through rules, and an error is never remembered.
+//
+// The scope also carries two builtin readiness records: the cities whose
+// readiness pass a passthrough composition skipped
+// (deferBuiltinReadinessForInvocation), and the readiness rule a load that
+// composed nothing hands to the first composition of its city
+// (armFirstCompositionFallback). Both live here so they die with the scope and
+// can never leak into a long-lived process.
 //
 // The scope also answers the city.toml [beads] peek (peekCityTOMLBeads): the
 // first peek of a file decodes it and later peeks in the scope get that answer.
 // A peek that could not read or parse the file, or decode one of its fields, is
 // not remembered.
 type invocationConfigMemo struct {
-	mu      sync.Mutex
-	entries map[string]invocationConfigMemoEntry
+	mu sync.Mutex
+	// composed holds the composed loads (loadComposedCityConfig) by normalized
+	// city.toml path.
+	composed map[string]invocationConfigMemoEntry
+	// deployments holds the deployment-layer loads (loadCityDeploymentConfig)
+	// by normalized city.toml path.
+	deployments map[string]invocationConfigMemoEntry
 	// readinessDeferred holds normalized city paths whose builtin readiness
-	// pass the passthrough loader deferred in this invocation.
+	// pass a passthrough composition deferred in this invocation.
 	readinessDeferred map[string]struct{}
+	// firstCompositionFallbacks holds the normalized city paths whose first
+	// composition in this invocation runs under composeWithReadinessFallback,
+	// with the writer its readiness pass reports to.
+	firstCompositionFallbacks map[string]io.Writer
 	// beadsPeeks are the decoded [beads] tables of the city.toml files this
 	// scope peeked (peekCityTOMLBeads), by normalized path.
 	beadsPeeks map[string]cityTOMLBeadsPeek
@@ -83,6 +105,35 @@ func deferBuiltinReadinessForInvocation(cityPath string) {
 		memo.readinessDeferred = map[string]struct{}{}
 	}
 	memo.readinessDeferred[normalizePathForCompare(cityPath)] = struct{}{}
+}
+
+// armFirstCompositionFallback records that this invocation has not composed
+// cityPath's config, and that the first composition of it a helper makes runs
+// under composeWithReadinessFallback, reporting to warnings. It is a no-op
+// outside a scope.
+func armFirstCompositionFallback(cityPath string, warnings io.Writer) {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.firstCompositionFallbacks == nil {
+		memo.firstCompositionFallbacks = map[string]io.Writer{}
+	}
+	memo.firstCompositionFallbacks[normalizePathForCompare(cityPath)] = warnings
+}
+
+// takeFirstCompositionFallback reports whether cityPath's next composition
+// runs under composeWithReadinessFallback, and with which writer. It answers
+// true once per arm.
+func (m *invocationConfigMemo) takeFirstCompositionFallback(cityPath string) (io.Writer, bool) {
+	key := normalizePathForCompare(cityPath)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	warnings, ok := m.firstCompositionFallbacks[key]
+	delete(m.firstCompositionFallbacks, key)
+	return warnings, ok
 }
 
 // builtinReadinessDeferredInInvocation reports whether the open invocation
@@ -109,14 +160,19 @@ type invocationConfigMemoEntry struct {
 // config cost.
 var composedCityConfigLoads atomic.Int64
 
+// deploymentCityConfigLoads counts the deployment-layer loads
+// loadCityDeploymentConfig actually performed (memo hits excluded), for tests
+// that pin a command's config cost.
+var deploymentCityConfigLoads atomic.Int64
+
 var (
 	invocationConfigMemoMu     sync.Mutex
 	activeInvocationConfigMemo *invocationConfigMemo
 )
 
 // invocationMemoLoadOptions is the only option set the memo answers: the
-// one-shot load (skipRevisionSnapshot, cliStorageRoutesLoad and
-// hostedCredentialProbeLoad are all exactly this).
+// one-shot load (skipRevisionSnapshot and cliStorageRoutesLoad are both
+// exactly this).
 var invocationMemoLoadOptions = config.LoadOptions{SkipRevisionSnapshot: true}
 
 // beginInvocationConfigMemo opens a memo scope for the rest of a one-shot
@@ -128,7 +184,10 @@ func beginInvocationConfigMemo() func() {
 	if activeInvocationConfigMemo != nil {
 		return func() {}
 	}
-	memo := &invocationConfigMemo{entries: map[string]invocationConfigMemoEntry{}}
+	memo := &invocationConfigMemo{
+		composed:    map[string]invocationConfigMemoEntry{},
+		deployments: map[string]invocationConfigMemoEntry{},
+	}
 	activeInvocationConfigMemo = memo
 	return func() {
 		invocationConfigMemoMu.Lock()
@@ -149,7 +208,7 @@ func currentInvocationConfigMemo() *invocationConfigMemo {
 // decoding the file on the first ask. Only an answer that decoded both fields
 // is remembered: a peek that could not read or parse the file, or decode one of
 // its fields, is retried by the next caller, the rule the composed-config
-// entries keep for errors.
+// loads keep for errors.
 func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsPeek {
 	key := normalizePathForCompare(filepath.Clean(tomlPath))
 	m.mu.Lock()
@@ -169,25 +228,64 @@ func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsP
 
 // loadComposedCityConfig is config.LoadWithIncludesOptions for the cmd/gc
 // loaders, answered from the open invocation memo when there is one and the
-// load is the shape it holds.
+// load is the shape it holds. The first such load of a city a gc bd read handed
+// its readiness rule to (armFirstCompositionFallback) runs under
+// composeWithReadinessFallback.
 func loadComposedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions) (*config.City, *config.Provenance, error) {
-	memo := currentInvocationConfigMemo()
-	if memo == nil || opts != invocationMemoLoadOptions || !usesOSFS(fs) {
+	load := func() (*config.City, *config.Provenance, error) {
 		composedCityConfigLoads.Add(1)
 		return config.LoadWithIncludesOptions(fs, tomlPath, opts)
 	}
+	memo := currentInvocationConfigMemo()
+	if memo == nil || opts != invocationMemoLoadOptions || !usesOSFS(fs) {
+		return load()
+	}
+	compose := func() (*config.City, *config.Provenance, error) {
+		return memo.memoizedLoad(memo.composed, tomlPath, load)
+	}
+	cityPath := filepath.Dir(tomlPath)
+	if warnings, ok := memo.takeFirstCompositionFallback(cityPath); ok {
+		return composeWithReadinessFallback(cityPath, warnings, compose)
+	}
+	return compose()
+}
+
+// loadCityDeploymentConfig is config.LoadDeployment for cityPath's city.toml,
+// answered from the open invocation memo when there is one. It is the load
+// for a caller that reads only deployment facts (rigs and their prefixes, the
+// workspace and its env, [beads], [storage], [dolt], [daemon]), which it
+// returns as a composed load would, without walking a pack.
+func loadCityDeploymentConfig(cityPath string) (*config.City, *config.Provenance, error) {
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	load := func() (*config.City, *config.Provenance, error) {
+		deploymentCityConfigLoads.Add(1)
+		return config.LoadDeployment(fsys.OSFS{}, tomlPath)
+	}
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return load()
+	}
+	return memo.memoizedLoad(memo.deployments, tomlPath, load)
+}
+
+// memoizedLoad is the one rule the memo answers a config load by. entries is
+// one of the memo's maps and load performs the load it holds. The first load
+// of a city.toml in the scope runs load and keeps a copy of a successful
+// answer, and every caller, the first included, gets its own copy
+// (callerCopyOfCityConfig) with the one stored Provenance. An error is never
+// remembered, so a caller whose load failed still fails on its own terms.
+func (m *invocationConfigMemo) memoizedLoad(entries map[string]invocationConfigMemoEntry, tomlPath string, load func() (*config.City, *config.Provenance, error)) (*config.City, *config.Provenance, error) {
 	key := normalizePathForCompare(filepath.Clean(tomlPath))
-	memo.mu.Lock()
-	defer memo.mu.Unlock()
-	if entry, ok := memo.entries[key]; ok {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if entry, ok := entries[key]; ok {
 		return callerCopyOfCityConfig(entry.cfg), entry.prov, nil
 	}
-	composedCityConfigLoads.Add(1)
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
+	cfg, prov, err := load()
 	if err != nil {
 		return cfg, prov, err
 	}
-	memo.entries[key] = invocationConfigMemoEntry{cfg: callerCopyOfCityConfig(cfg), prov: prov}
+	entries[key] = invocationConfigMemoEntry{cfg: callerCopyOfCityConfig(cfg), prov: prov}
 	return cfg, prov, nil
 }
 
