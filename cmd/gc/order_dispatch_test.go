@@ -26,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func trackingBeads(t *testing.T, store beads.Store, label string) []beads.Bead {
@@ -152,6 +153,153 @@ interval = "1m"
 	}
 	if orderSnapshotHasName(removed.Orders, "tick") {
 		t.Fatalf("removed snapshot still contains tick: %#v", removed.Orders)
+	}
+}
+
+// TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport: a rig-scoped
+// order in a pack every rig imports reports its dropped city registration on
+// every scan, and the supervisor scans the order set at start, on every config
+// reload and every orderRescanInterval. A scan logs only the warnings the
+// previous completed scan did not report: an unchanged warning is logged once,
+// a changed one is logged, and so is one that goes away for a scan and comes
+// back.
+func TestUnboundRigScopedLogLogsWhatThePreviousScanDidNotReport(t *testing.T) {
+	var stderr bytes.Buffer
+	var l unboundRigScopedLog
+	type drop struct {
+		order string
+		rigs  []string
+	}
+	// scan runs one scan that reports drops, and completes it unless failed.
+	scan := func(failed bool, drops ...drop) {
+		report, scanned := l.scan(&stderr, "gc patrol: order scan")
+		for _, d := range drops {
+			report(d.order, d.rigs)
+		}
+		if !failed {
+			scanned()
+		}
+	}
+	sweepOnTwo := drop{"sweep", []string{"alpha", "beta"}}
+	sweepOnOne := drop{"sweep", []string{"alpha"}}
+	other := drop{"other", []string{"alpha"}}
+	scan(false, sweepOnTwo, other) // both new
+	scan(false, sweepOnTwo, other) // both unchanged
+	scan(false, sweepOnOne, other) // sweep's warning changed
+	scan(false, other)             // sweep's warning went away
+	scan(false, sweepOnOne, other) // and came back unchanged
+	scan(true)                     // a scan that failed before reaching either
+	scan(false, sweepOnOne, other) // left nothing to log again
+
+	// Two scans in flight at once, as when a config reload's scan overlaps the
+	// lane's rescan: a new warning is logged by the first to report it.
+	reportFirst, scannedFirst := l.scan(&stderr, "gc patrol: order scan")
+	reportSecond, scannedSecond := l.scan(&stderr, "gc patrol: order scan")
+	reportFirst("late", []string{"beta"})
+	reportSecond("late", []string{"beta"})
+	scannedFirst()
+	scannedSecond()
+
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	want := []struct{ order, rigs string }{
+		{"sweep", "alpha, beta"},
+		{"other", "alpha"},
+		{"sweep", "alpha"},
+		{"sweep", "alpha"},
+		{"late", "beta"},
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("logged %d warnings, want %d (a warning the previous scan reported unchanged is not logged):\n%s", len(lines), len(want), stderr.String())
+	}
+	for i, w := range want {
+		if !strings.HasPrefix(lines[i], `gc patrol: order scan: order "`+w.order+`" declares scope = "rig"`) ||
+			!strings.HasSuffix(lines[i], "(still registered on rig(s) "+w.rigs+")") {
+			t.Errorf("warning %d = %q, want order %q still registered on %s", i, lines[i], w.order, w.rigs)
+		}
+	}
+}
+
+// TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce: the orders lane's
+// periodic rescan and the same-revision config reload both scan through
+// CityRuntime.scanOrderSet, so a dropped rig-scope registration is logged
+// once, not on every rescan.
+func TestScanOrderSetLogsAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	cityLayer := filepath.Join(cityPath, "formulas")
+	packDir := filepath.Join(t.TempDir(), "shared-pack")
+	for _, dir := range []string{cityLayer, filepath.Join(packDir, "formulas"), filepath.Join(packDir, "orders")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(packDir, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+	}
+	var stderr bytes.Buffer
+	cr := &CityRuntime{stderr: &stderr}
+
+	for i := 0; i < 3; i++ {
+		snapshot, err := cr.scanOrderSet(cityPath, cfg, "gc patrol: order scan")
+		if err != nil {
+			t.Fatalf("scan %d: %v", i, err)
+		}
+		if !orderSnapshotHasName(snapshot.Orders, "sweep") {
+			t.Fatalf("scan %d dropped the rig-bound registration too: %#v", i, snapshot.Orders)
+		}
+	}
+	if n := strings.Count(stderr.String(), `order "sweep" declares scope = "rig"`); n != 1 {
+		t.Fatalf("dropped-registration warnings across three scans = %d, want 1:\n%s", n, stderr.String())
+	}
+}
+
+// TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce: the scan
+// at start, the scan a config reload rebuilds the dispatcher from, and the
+// orders lane's rescan all log through the runtime's one unboundRigScoped, so
+// a dropped rig-scope registration none of them changes is logged once.
+func TestCityRuntimeOrderScansLogAnUnchangedUnboundRigScopedWarningOnce(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfig(t, tomlPath, "fake")
+	// A city-local order declaring rig scope: no rig imports it, so every scan
+	// drops its city registration and reports the drop.
+	if err := os.MkdirAll(filepath.Join(cityPath, "orders"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	order := "[order]\nscope = \"rig\"\nformula = \"mol-sweep\"\npool = \"worker\"\ntrigger = \"cooldown\"\ninterval = \"6h\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "orders", "sweep.toml"), []byte(order), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cr, _, _ := newPublicationTestRuntime(t, cityPath, runtime.NewFake(), io.Discard, &stderr)
+	const warning = `order "sweep" declares scope = "rig"`
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings from the start scan = %d, want 1:\n%s", n, stderr.String())
+	}
+
+	// A reload that changes the config revision rebuilds the dispatcher from a
+	// fresh scan.
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
+	writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, tomlPath)
+	lastProviderName := "fake"
+	if reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual); reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload reply = %+v, want applied", reply)
+	}
+	// The orders lane's rescan.
+	if _, err := cr.scanOrderSet(cityPath, cr.cfg, "gc patrol: order scan"); err != nil {
+		t.Fatalf("lane rescan: %v", err)
+	}
+
+	if n := strings.Count(stderr.String(), warning); n != 1 {
+		t.Fatalf("dropped-registration warnings across the start scan, a reload and a rescan = %d, want 1:\n%s", n, stderr.String())
 	}
 }
 
@@ -1825,6 +1973,199 @@ func TestOrderDispatchBudgetRotatesAcrossAlwaysDueOrders(t *testing.T) {
 		if got := len(trackingBeads(t, store, label)); got == 0 {
 			t.Fatalf("%s did not dispatch under a rotating budget", label)
 		}
+	}
+}
+
+// alwaysDueCooldownDispatcher builds an exec dispatcher over store whose orders
+// are due on every pass that is offered them (a 1ms cooldown against passes at
+// least a second apart), with a cap of 2 dispatches and the given budget
+// interval.
+func alwaysDueCooldownDispatcher(t *testing.T, store beads.Store, interval time.Duration, names ...string) *memoryOrderDispatcher {
+	t.Helper()
+	aa := make([]orders.Order, 0, len(names))
+	for _, name := range names {
+		aa = append(aa, orders.Order{Name: name, Trigger: "cooldown", Interval: "1ms", Exec: "true"})
+	}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, successfulExec, nil)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	m := ad.(*memoryOrderDispatcher)
+	m.maxDispatchesPerTick = 2
+	m.budgetInterval = interval
+	t.Cleanup(func() { m.dispatchCancel() })
+	return m
+}
+
+// TestOrderDispatchBudgetAccruesPerPatrolInterval pins the budget as a rate:
+// max_dispatches_per_tick dispatches for each patrol interval of wall time,
+// however long the passes between them take, up to one rotation.
+//
+// A pass's length is store latency, maintenance arms and the lane's duty cycle,
+// none of which the cap is about. With more due orders than one pass's budget,
+// every order waits a whole rotation between dispatches, so a budget spent once
+// per pass would let a slow stretch of passes stretch that wait for every order
+// at once.
+func TestOrderDispatchBudgetAccruesPerPatrolInterval(t *testing.T) {
+	store := beads.NewMemStore()
+	names := make([]string, 40)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	cityPath := t.TempDir()
+
+	// Anchored to wall clock: a tracking bead's CreatedAt is real time, so a
+	// pass time in the past would leave a fired order not yet due again.
+	at := time.Now()
+	total := 0
+	// Every order is due on every pass, so each pass dispatches its whole
+	// budget.
+	for _, pass := range []struct {
+		gap  time.Duration
+		want int
+		why  string
+	}{
+		{0, 2, "the first pass has no previous pass to accrue from"},
+		{90 * time.Second, 6, "three patrol intervals since the previous pass began"},
+		{time.Second, 2, "a pass sooner than one interval keeps the configured cap"},
+		{50 * time.Second, 3, "5/3 of an interval accrues 3 1/3; the third carries"},
+		{50 * time.Second, 3, "3 1/3 plus the carried third is 3 2/3; two thirds carry"},
+		{50 * time.Second, 4, "3 1/3 plus the carried two thirds is exactly 4"},
+		{8 * time.Minute, 32, "sixteen intervals, the gap a 7.5-minute pass and the idle interval after it leave, accrue in full"},
+		{30 * time.Minute, 40, "sixty intervals accrue more than one rotation, which is each order once"},
+	} {
+		at = at.Add(pass.gap)
+		m.dispatch(context.Background(), cityPath, at)
+		drainOrderDispatch(t, m)
+		total += pass.want
+		if m.lastPass.budget != pass.want {
+			t.Fatalf("budget of a pass %s after the previous one = %d, want %d: %s", pass.gap, m.lastPass.budget, pass.want, pass.why)
+		}
+		if got := countOrderTrackingRuns(t, store); got != total {
+			t.Fatalf("tracking runs after a pass %s after the previous one = %d, want %d: %s", pass.gap, got, total, pass.why)
+		}
+	}
+}
+
+// TestOrderDispatchBudgetCountsAPassWithNoOrders: a pass computes its budget
+// whether or not it has orders to rotate over, so the previous pass a rebuilt
+// dispatcher accrues from is the last pass, not the last pass that had orders.
+func TestOrderDispatchBudgetCountsAPassWithNoOrders(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	names := make([]string, 40)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	first := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	at := time.Now()
+	first.dispatch(context.Background(), cityPath, at)
+	drainOrderDispatch(t, first)
+
+	// Ten minutes of passes by a dispatcher with no orders, then a rebuild
+	// that has them again.
+	empty := newMemoryOrderDispatcher(nil, nil, cityPath, &config.City{}, events.Discard, &bytes.Buffer{})
+	t.Cleanup(empty.dispatchCancel)
+	empty.maxDispatchesPerTick, empty.budgetInterval = 2, 30*time.Second
+	cr := &CityRuntime{od: first}
+	cr.replaceOrderDispatcher(empty)
+	for gap := 30 * time.Second; gap <= 10*time.Minute; gap += 30 * time.Second {
+		empty.dispatch(context.Background(), cityPath, at.Add(gap))
+	}
+	next := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	cr.replaceOrderDispatcher(next)
+	next.dispatch(context.Background(), cityPath, at.Add(10*time.Minute+30*time.Second))
+	drainOrderDispatch(t, next)
+
+	if got := countOrderTrackingRuns(t, store); got != 4 {
+		t.Fatalf("tracking runs = %d, want 4: 2 before the empty stretch, then one interval's accrual of 2 since its last pass", got)
+	}
+}
+
+// TestNewMemoryOrderDispatcherBudgetsOverThePatrolInterval wires the budget's
+// period to the patrol interval, the cadence the cap is configured against.
+func TestNewMemoryOrderDispatcherBudgetsOverThePatrolInterval(t *testing.T) {
+	for _, tc := range []struct {
+		patrol string
+		want   time.Duration
+	}{
+		{"", 30 * time.Second},
+		{"15s", 15 * time.Second},
+	} {
+		cfg := &config.City{Daemon: config.DaemonConfig{PatrolInterval: tc.patrol}}
+		m := newMemoryOrderDispatcher(nil, nil, t.TempDir(), cfg, events.Discard, &bytes.Buffer{})
+		m.dispatchCancel()
+		if m.budgetInterval != tc.want {
+			t.Errorf("patrol_interval %q: budget interval = %s, want %s", tc.patrol, m.budgetInterval, tc.want)
+		}
+	}
+}
+
+// TestReplaceOrderDispatcherResumesTheRotationByName: a reload or rescan
+// rebuilds the dispatcher, and a rebuild whose rotation started over at the head
+// of the order list would make every order the cursor had not reached yet wait
+// another full rotation. The rebuilt set can add and drop orders, so the cursor
+// resumes by scoped name, not by index.
+func TestReplaceOrderDispatcherResumesTheRotationByName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rebuilt []string
+		fires   []string
+	}{
+		{"orders added ahead of the cursor move its index", []string{"o5", "o6", "o0", "o2", "o3", "o4"}, []string{"o2", "o3"}},
+		{"the order at the cursor was dropped", []string{"o0", "o1", "o3", "o4"}, []string{"o3", "o4"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			cityPath := t.TempDir()
+			prev := alwaysDueCooldownDispatcher(t, store, 0, "o0", "o1", "o2", "o3", "o4")
+			at := time.Now()
+			// Fires o0 and o1 and leaves the cursor on o2.
+			prev.dispatch(context.Background(), cityPath, at)
+			drainOrderDispatch(t, prev)
+
+			next := alwaysDueCooldownDispatcher(t, store, 0, tc.rebuilt...)
+			cr := &CityRuntime{od: prev}
+			cr.replaceOrderDispatcher(next)
+			next.dispatch(context.Background(), cityPath, at.Add(time.Second))
+			drainOrderDispatch(t, next)
+
+			want := map[string]int{"o0": 1, "o1": 1}
+			for _, name := range tc.fires {
+				want[name]++
+			}
+			for _, name := range []string{"o0", "o1", "o2", "o3", "o4", "o5", "o6"} {
+				if got := runCountFor(t, store, name); got != want[name] {
+					t.Errorf("%s runs = %d, want %d: the rebuilt dispatcher's first pass must fire %v", name, got, want[name], tc.fires)
+				}
+			}
+		})
+	}
+}
+
+// TestReplaceOrderDispatcherCarriesTheBudgetAccrual: the rebuilt dispatcher's
+// first pass accrues from the outgoing dispatcher's last pass, instead of
+// starting over at the per-pass cap.
+func TestReplaceOrderDispatcherCarriesTheBudgetAccrual(t *testing.T) {
+	store := beads.NewMemStore()
+	cityPath := t.TempDir()
+	names := make([]string, 10)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%d", i)
+	}
+	prev := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	at := time.Now()
+	prev.dispatch(context.Background(), cityPath, at)
+	drainOrderDispatch(t, prev)
+
+	next := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	(&CityRuntime{od: prev}).replaceOrderDispatcher(next)
+	next.dispatch(context.Background(), cityPath, at.Add(90*time.Second))
+	drainOrderDispatch(t, next)
+
+	if got := countOrderTrackingRuns(t, store); got != 8 {
+		t.Fatalf("tracking runs = %d, want 8: 2 before the rebuild, then three intervals' accrual of 2", got)
 	}
 }
 
