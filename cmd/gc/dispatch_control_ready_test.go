@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -422,70 +421,124 @@ esac
 	}
 }
 
-// TestControlReadyFallbackReadyLogsWhenResultHitsLimit is ga-bbj6wv Finding 1:
-// a fallback batch that comes back at exactly controlReadyFallbackLimit is a
-// truncation signal (some candidate/route may have been starved of ready
-// beads that exist but didn't fit) and must be observable, not silent.
-func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-
-	items := make([]map[string]string, controlReadyFallbackLimit)
-	for i := range items {
-		items[i] = map[string]string{"id": fmt.Sprintf("ga-fallback-%d", i)}
+// readyPagePayload renders one full page of open task rows routed elsewhere
+// (controlReadyFallbackLimit of them), then one row per extra id assigned to
+// assignee, as the array bd ready prints.
+func readyPagePayload(t *testing.T, assignee string, extra ...string) []byte {
+	t.Helper()
+	rows := make([]map[string]string, 0, controlReadyFallbackLimit+len(extra))
+	for i := 0; i < controlReadyFallbackLimit; i++ {
+		rows = append(rows, map[string]string{"id": fmt.Sprintf("ga-other-%d", i), "status": "open", "issue_type": "task", "assignee": "gascity/worker"})
 	}
-	payload, err := json.Marshal(items)
+	for _, id := range extra {
+		rows = append(rows, map[string]string{"id": id, "status": "open", "issue_type": "task", "assignee": assignee})
+	}
+	payload, err := json.Marshal(rows)
 	if err != nil {
-		t.Fatalf("marshal fixture beads: %v", err)
+		t.Fatalf("marshal ready rows: %v", err)
 	}
-	payloadPath := filepath.Join(tmp, "payload.json")
-	if err := os.WriteFile(payloadPath, payload, 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
+	return payload
+}
+
+// installPagedReadyBD puts a fake bd first on PATH. It appends each call's
+// arguments to the log it returns, answers a read with no limit (--limit 0 or
+// --limit=0) with whole, and answers any other ready read with page.
+func installPagedReadyBD(t *testing.T, page, whole []byte) (logPath string) {
+	t.Helper()
+	tmp := t.TempDir()
+	pagePath := filepath.Join(tmp, "page.json")
+	wholePath := filepath.Join(tmp, "whole.json")
+	for path, payload := range map[string][]byte{pagePath: page, wholePath: whole} {
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
 	}
-	bdPath := filepath.Join(tmp, "bd")
-	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", payloadPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+	logPath = filepath.Join(tmp, "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"--limit 0"*|*"--limit=0"*) cat %q ;;
+  *ready*) cat %q ;;
+  *) printf '[]' ;;
+esac
+`, logPath, wholePath, pagePath)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
+	return logPath
+}
 
-	var logBuf bytes.Buffer
-	restore := captureLogOutput(&logBuf)
-	defer restore()
+func readBDCalls(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// TestTryControlReadyScanReadsTheWholeReadySetOnABdLeg pins the bd leg's read:
+// brief rows, one page first, and the whole ready set when that page comes back
+// full. The scan picks out the dispatcher's own beads after the read, so a page
+// cut short would hide a control bead that sorts after other agents' work.
+func TestTryControlReadyScanReadsTheWholeReadySetOnABdLeg(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	target := "gascity/control-dispatcher"
+	logPath := installPagedReadyBD(t,
+		readyPagePayload(t, target),
+		readyPagePayload(t, target, "ga-control"))
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	queue, handled, err := tryControlReadyScan(workflowServeControlReadyQuery(agentCfg), cityDir, nil)
+	if err != nil || !handled {
+		t.Fatalf("tryControlReadyScan = handled %t, err %v; want handled, nil", handled, err)
+	}
+	if len(queue) != 1 || queue[0].ID != "ga-control" {
+		t.Fatalf("queue = %#v, want the dispatcher's ga-control from past the first page", queue)
+	}
+	want := []string{
+		"ready --json --include-ephemeral --limit 5000 --brief",
+		"ready --json --include-ephemeral --limit 0 --brief",
+	}
+	if calls := readBDCalls(t, logPath); strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("bd calls = %q, want a brief page and then the whole set %q", calls, want)
+	}
+}
+
+// TestControlReadyFallbackReadyReadsTheWholeSetWhenThePageFills pins the shell
+// arm's read: a page that comes back full may have stopped short of the
+// dispatcher's own beads, so the arm reads the whole ready set again.
+func TestControlReadyFallbackReadyReadsTheWholeSetWhenThePageFills(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	logPath := installPagedReadyBD(t,
+		readyPagePayload(t, ""),
+		readyPagePayload(t, "", "ga-past-the-page"))
 
 	dir := t.TempDir()
 	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
-	if len(result) != controlReadyFallbackLimit {
-		t.Fatalf("len(result) = %d, want %d", len(result), controlReadyFallbackLimit)
+	if len(result) != controlReadyFallbackLimit+1 || !containsID(result, "ga-past-the-page") {
+		t.Fatalf("len(result) = %d (row past the page present: %t), want the whole set of %d", len(result), containsID(result, "ga-past-the-page"), controlReadyFallbackLimit+1)
 	}
-	if !strings.Contains(logBuf.String(), "may be truncated") {
-		t.Fatalf("expected a truncation warning in log output, got: %q", logBuf.String())
-	}
-	if !strings.Contains(logBuf.String(), dir) {
-		t.Fatalf("expected log to name the dir %q, got: %q", dir, logBuf.String())
+	calls := readBDCalls(t, logPath)
+	if len(calls) != 2 || !strings.Contains(calls[0], "--limit=5000") || !strings.Contains(calls[1], "--limit=0") {
+		t.Fatalf("bd calls = %q, want the page and then the whole set", calls)
 	}
 }
 
-// TestControlReadyFallbackReadyNoWarningBelowLimit is the negative case: a
-// batch below the limit is a complete result, not a truncation signal, and
-// must not log anything.
-func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
+// TestControlReadyFallbackReadyReadsOncePastAShortPage is the other half: a
+// page below the limit is the whole ready set, read in one call.
+func TestControlReadyFallbackReadyReadsOncePastAShortPage(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '[{\"id\":\"ga-fallback-only\"}]'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_BEADS", "bd")
-
-	var logBuf bytes.Buffer
-	restore := captureLogOutput(&logBuf)
-	defer restore()
+	logPath := installPagedReadyBD(t, []byte(`[{"id":"ga-fallback-only"}]`), []byte(`[]`))
 
 	dir := t.TempDir()
 	result, err := controlReadyFallbackReady(dir, dir, nil, false)
@@ -495,8 +548,8 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
-	if logBuf.Len() != 0 {
-		t.Fatalf("expected no log output below the limit, got: %q", logBuf.String())
+	if calls := readBDCalls(t, logPath); len(calls) != 1 {
+		t.Fatalf("bd calls = %q, want one read", calls)
 	}
 }
 
