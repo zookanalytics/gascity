@@ -31,7 +31,7 @@ func platformAlive(pid int) bool {
 		if probeErr == nil && errors.Is(err, fs.ErrNotExist) && procMounted() {
 			return false
 		}
-		return !psReportsZombie(pid)
+		return !platformDead(pid)
 	}
 	state, ok := procStatState(string(data))
 	if ok && state == "Z" {

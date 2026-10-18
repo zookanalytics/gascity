@@ -3,9 +3,9 @@
 package proctable
 
 import (
-	"errors"
 	"fmt"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"golang.org/x/sys/unix"
 )
 
@@ -17,7 +17,7 @@ func ProcessIdentity(pid int) (string, error) {
 	}
 	process, err := unix.SysctlKinfoProc("kern.proc.pid", pid)
 	if err != nil {
-		if darwinKinfoErrorMeansGone(pid, err, func(pid int) error { return unix.Kill(pid, 0) }) {
+		if pidutil.KinfoErrorMeansGone(pid, err, func(pid int) error { return unix.Kill(pid, 0) }) {
 			return "", fmt.Errorf("%w: PID %d", ErrProcessGone, pid)
 		}
 		return "", fmt.Errorf("reading process identity for PID %d: %w", pid, err)
@@ -33,14 +33,4 @@ func ProcessIdentity(pid int) (string, error) {
 		return "", fmt.Errorf("process identity for PID %d: %w", pid, err)
 	}
 	return identity, nil
-}
-
-func darwinKinfoErrorMeansGone(pid int, err error, probe func(int) error) bool {
-	if errors.Is(err, unix.ESRCH) {
-		return true
-	}
-	if (!errors.Is(err, unix.EIO) && !errors.Is(err, unix.ENOENT)) || probe == nil {
-		return false
-	}
-	return errors.Is(probe(pid), unix.ESRCH)
 }
