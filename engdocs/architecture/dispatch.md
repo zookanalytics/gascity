@@ -317,6 +317,20 @@ accepts a city route, and a city dispatcher never stands in for a rig route.
 This keeps `gc.routed_to`, physical storage, demand, and the eventual executor
 in agreement.
 
+Every readiness scan reads each ledger it covers as that ledger is when the
+scan runs, and nothing is reused from an earlier scan. A ledger that is a bd
+workspace is read with one `bd ready` call that asks for brief rows, which leave
+out each bead's description, design and notes, because the scan reads none of
+them. A bd older than 1.2.0 has no brief rows and answers with full ones. The
+call reads one page, and the scan reads the whole set again when the page comes
+back full. Every scan sees each ledger's whole ready set, because it picks out
+the dispatcher's own beads only after the read, and a read cut short could
+leave them out. The loop scans again when a bead event arrives from a store it
+reads. Bead events from the city's other stores do not wake it, because bd
+decides a bead's readiness from its own store's rows. Without an event, the
+loop sweeps on an idle timer that backs off from one second to five, which is
+how it sees a step closed by a raw `bd` write that publishes no event.
+
 ## Interactions
 
 | Depends on | How |
