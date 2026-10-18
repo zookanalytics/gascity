@@ -216,7 +216,7 @@ func assembleMembers(legacyChildren []beads.Bead, deps []beads.Dep, includeClose
 //
 // The reads are: every convoy's tracks edges (one DepListBatch, or one DepList
 // per convoy when the store cannot batch them), every convoy's legacy
-// parent-child rows (one List), and every tracked member bead, resolved as
+// parent-child rows (one beads.ChildrenOfAny), and every tracked member bead, resolved as
 // MembersIn resolves them: one beads.ExactBatchGetter read when the store
 // offers it, then a Get for each member that read did not return.
 func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (map[string][]beads.Bead, error) {
@@ -228,16 +228,12 @@ func MembersBatch(store beads.Store, convoyIDs []string, includeClosed bool) (ma
 		return out, nil
 	}
 
-	// Legacy parent-child children for every convoy in one read, not one read
-	// per convoy: a per-convoy ParentID read costs a store round trip each. The
-	// store answers ParentIDs exactly, and the bd and native Dolt stores read
-	// only the parent-child edges that target the convoys and the children
-	// those edges name.
-	legacyRows, err := store.List(beads.ListQuery{
-		ParentIDs:     convoyIDs,
-		IncludeClosed: includeClosed,
-		Sort:          beads.SortCreatedAsc,
-	})
+	// Legacy parent-child children for every convoy through the store's batched
+	// children read (beads.ChildrenOfAny): one edge read plus one keyed batch on
+	// a store that offers the capability, one exact per-parent read otherwise,
+	// never a scan of the ledger. Rows carry their ParentID, so they are grouped
+	// here; assembleMembers applies the closed filter and the member order.
+	legacyRows, err := beads.ChildrenOfAny(store, convoyIDs, beads.IncludeClosed)
 	if err != nil {
 		return nil, fmt.Errorf("listing legacy convoy children: %w", err)
 	}

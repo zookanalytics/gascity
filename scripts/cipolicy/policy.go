@@ -307,12 +307,17 @@ const (
 	// event (the action's defaults). Reviewed delta: two `with` inputs; no
 	// new job, step command or permission.
 	//
+	// Bumped again (installation rate limit): the changes job's paths-filter
+	// gets `token: ''`, so pull requests diff with git instead of calling the
+	// pulls/files API on the shared github.token budget. Reviewed delta: one
+	// `with` input; no new job, step command or permission.
+	//
 	// Bumped again (fork runners): the runner-policy job's own runs-on selects
 	// blacksmith-2vcpu-ubuntu-2404 only when github.repository is
 	// gastownhall/gascity, the one repository Blacksmith's runners serve, and
 	// ubuntu-latest in a fork, matching runner_policy.py. Reviewed delta: that
 	// one runs-on value; no new job, step, trigger or permission.
-	expectedCIExecutionHash     = "83eecbf37432f0764f78b71e8fa1d4cb9ca1b2a9b1e18d0318e16cc9f6056924"
+	expectedCIExecutionHash     = "9d5c8199157cdf98db0c8c3fa242106c6fb8a21be172355fca0d45ed8647a127"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,

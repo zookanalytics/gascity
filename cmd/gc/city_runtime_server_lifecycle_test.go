@@ -309,6 +309,7 @@ var (
 // live. It also confirms the owned+enumerated gate lets the teardown through
 // on the force path.
 func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -360,7 +361,7 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
