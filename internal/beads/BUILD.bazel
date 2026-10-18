@@ -65,6 +65,7 @@ go_test(
         "bdstore_internal_test.go",
         "bdstore_list_pushdown_test.go",
         "bdstore_parent_projection_test.go",
+        "bdstore_ready_brief_test.go",
         "bdstore_ready_projection_capability_internal_test.go",
         "bdstore_ready_projection_internal_test.go",
         "bdstore_ready_projection_library_backend_internal_test.go",

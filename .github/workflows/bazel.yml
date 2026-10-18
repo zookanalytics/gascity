@@ -119,7 +119,7 @@ permissions:
 jobs:
   rbe:
     name: execution mode
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions:
       contents: read
@@ -336,8 +336,10 @@ jobs:
     # npm, Starlark) is CPU-bound and gates every action: analysis-only
     # measurements per lane (ga-vnycm2.8, seeded runner cache) took 34-58 s
     # on 2 vCPU, 23-34 s on 4 and 15-19 s on 8. Unit and acceptance are the
-    # critical lanes (ga-vnycm2.12).
-    runs-on: ${{ (matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404' }}
+    # critical lanes (ga-vnycm2.12). A fork, which no Blacksmith runner
+    # serves, runs every job here on ubuntu-latest
+    # (scripts/ci_fork_runners_test.go).
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && ((matrix.lane == 'unit' || matrix.lane == 'acceptance') && 'blacksmith-8vcpu-ubuntu-2404' || 'blacksmith-4vcpu-ubuntu-2404') || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -731,7 +733,7 @@ jobs:
     name: bazel / repo contents cache seed
     needs: rbe
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 30
     permissions:
       contents: read
@@ -800,7 +802,7 @@ jobs:
     name: bazel / repo contents cache verify
     needs: rbe
     if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.rbe.outputs.mode == 'remote' && needs.rbe.outputs.rrc != 'off'
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
       contents: read
@@ -890,7 +892,7 @@ jobs:
     name: bazel / test cache report
     needs: [rbe, lane]
     if: always() && needs.rbe.result == 'success' && needs.rbe.outputs.lanes != '[]'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -968,7 +970,7 @@ jobs:
     name: bazel / coverage
     needs: rbe
     if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.rbe.outputs.mode == 'remote'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -1078,7 +1080,7 @@ jobs:
   sync-check:
     name: BUILD files in sync
     needs: rbe
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1152,7 +1154,7 @@ jobs:
   worker-host:
     name: rbe worker host
     needs: rbe
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 25
     permissions:
       contents: read
@@ -1290,7 +1292,7 @@ jobs:
     name: bazel test (side-by-side)
     needs: [rbe, lane, sync-check, worker-host]
     if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'gastownhall/gascity' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Evaluate

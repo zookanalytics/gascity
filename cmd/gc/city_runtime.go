@@ -204,6 +204,11 @@ type CityRuntime struct {
 
 	// orderSetScan overrides the order-set scan (tests); nil scans the city.
 	orderSetScan func(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error)
+	// unboundRigScoped logs the rig-scope registrations the supervisor's order
+	// scans drop: the start scan, each config reload's, and the orders lane's
+	// rescans. Sharing it keeps a warning one scan logged from being logged
+	// again by the next scan that reports it unchanged.
+	unboundRigScoped unboundRigScopedLog
 	// afterReloadStagesOrders, when set (tests), runs right after a config
 	// reload stages its order dispatcher.
 	afterReloadStagesOrders func()
@@ -535,8 +540,6 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	sweepOrphanedOrderTrackingAtBoot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr)
 
-	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan")
-
 	suspendedNames := computeSuspendedNames(p.Cfg, p.CityName, p.CityPath)
 
 	cr := &CityRuntime{
@@ -563,11 +566,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		mat:                     mat,
 		adt:                     adt,
 		wg:                      wg,
-		od:                      od,
-		orderSet:                orderSnapshot.Orders,
-		orderSetSignature:       orderSnapshot.Signature,
 		orderRescanEnabled:      true,
-		orderRescanLast:         time.Now(),
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
 		rec:                     p.Rec,
 		reapSkips:               newReapSkipTracker(),
@@ -605,6 +604,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		stdout:            p.Stdout,
 		stderr:            p.Stderr,
 	}
+	// The start scan logs through cr.unboundRigScoped, so the lane's first
+	// rescan does not log its warnings a second time.
+	od, orderSnapshot := buildOrderDispatcherWithSnapshot(routes, p.CityPath, p.Cfg, p.Rec, p.Stderr, "gc start: order scan", &cr.unboundRigScoped)
+	cr.od, cr.orderSet, cr.orderSetSignature, cr.orderRescanLast = od, orderSnapshot.Orders, orderSnapshot.Signature, time.Now()
 	if p.ReconcilerMode == reconcilerV2 {
 		cr.installPlanner(p.V2)
 	}
@@ -2069,9 +2072,9 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data, active gate-backoff state, and open-work suppression
-// streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
-// them instead of cold-starting (#3201).
+// warm last-run data, active gate-backoff state, open-work suppression streaks,
+// and the budget rotation from the outgoing dispatcher so a rebuild (reload or
+// rescan) reuses them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 	if prev, ok := cr.od.(*memoryOrderDispatcher); ok {
@@ -2079,6 +2082,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryDispatchRotationFrom(prev)
 		}
 	}
 	cr.od = next
@@ -2942,7 +2946,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	// with reload short-circuits it; timed-out dispatchers are retained and
 	// drained again during shutdown. A lane mid-pass installs it at the
 	// start of its next pass instead — the reload never waits on dispatch.
-	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan")
+	nextOD, orderSnapshot := buildOrderDispatcherWithSnapshot(cr.storageRoutes, cityRoot, nextCfg, cr.rec, cr.stderr, "gc reload: order scan", &cr.unboundRigScoped)
 	orderSummary := cr.stageOrderDispatcher(nextOD, orderSnapshot.Orders, orderSnapshot.Signature, time.Now())
 	cr.tryInstallPendingOrderDispatcher(ctx)
 	if cr.afterReloadStagesOrders != nil {

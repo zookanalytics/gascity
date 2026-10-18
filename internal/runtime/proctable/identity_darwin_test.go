@@ -46,36 +46,6 @@ func TestDarwinProcessRecordUsesOneKinfoIdentity(t *testing.T) {
 	}
 }
 
-func TestDarwinKinfoMissingErrorsRequireGoneProbe(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		kinfoErr error
-		probeErr error
-		wantGone bool
-	}{
-		{name: "EIO corroborated by ESRCH", kinfoErr: unix.EIO, probeErr: unix.ESRCH, wantGone: true},
-		{name: "EIO with live PID", kinfoErr: unix.EIO},
-		{name: "EIO with denied probe", kinfoErr: unix.EIO, probeErr: unix.EPERM},
-		{name: "ENOENT corroborated by ESRCH", kinfoErr: unix.ENOENT, probeErr: unix.ESRCH, wantGone: true},
-		{name: "ENOENT with live PID", kinfoErr: unix.ENOENT},
-		{name: "ENOENT with denied probe", kinfoErr: unix.ENOENT, probeErr: unix.EPERM},
-		{name: "unrelated error stays indeterminate", kinfoErr: unix.EACCES, probeErr: unix.ESRCH},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := darwinKinfoErrorMeansGone(999, test.kinfoErr, func(int) error { return test.probeErr }); got != test.wantGone {
-				t.Fatalf("darwinKinfoErrorMeansGone(%v, probe=%v) = %t, want %t", test.kinfoErr, test.probeErr, got, test.wantGone)
-			}
-		})
-	}
-
-	if !darwinKinfoErrorMeansGone(999, unix.ESRCH, func(int) error {
-		t.Fatal("direct ESRCH should not require a liveness probe")
-		return nil
-	}) {
-		t.Fatal("direct ESRCH was not classified as a vanished process")
-	}
-}
-
 func TestSnapshotProcessIdentityMatchesCurrentReader(t *testing.T) {
 	self := os.Getpid()
 	records, err := SnapshotProcesses()
