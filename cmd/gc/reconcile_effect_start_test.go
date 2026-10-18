@@ -515,6 +515,99 @@ func TestAdoptProbesTheRepairedWorkDir(t *testing.T) {
 	}
 }
 
+// Kills a launchWorkDir that is not the dir prepare launches in
+// (SESSION-START-018). PreWake probes the session key's transcript there
+// (transcriptOf) and clears a key whose transcript is absent, so reading a task
+// work_dir that prepare refused would drop the conversation the session keeps
+// in its own work dir. On each route that resolves a task work_dir, refused or
+// kept, launchWorkDir is prepare's launch dir.
+func TestLaunchWorkDirIsPreparesLaunchDir(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// setup returns the store both reads use and the pass's assigned work.
+		setup func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead)
+	}{
+		{"another session's worktree as the trigger's drain source", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			root := f.createDrainItemRoot(t, f.otherWorktree)
+			trigger, err := f.store.Create(beads.Bead{Title: "unclaimed drain item step", Type: "task", Status: "open", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+				beadmeta.TriggerBeadStoreRefMetadataKey: "rig:frontend",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return f.store, nil
+		}},
+		{"another session's worktree on a bead held under the role", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+			return f.store, nil
+		}},
+		{"another session's worktree stamped on an assigned drain item step", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			step := f.createInProgressBead(t, f.session.ID, map[string]string{
+				beadmeta.WorkDirMetadataKey:       f.otherWorktree,
+				beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree,
+			})
+			return f.store, []beads.Bead{step}
+		}},
+		{"an unreadable session list", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+			if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+			return &sessionListFailingStore{MemStore: f.store}, nil
+		}},
+		{"the session's own worktree", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+			if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+			return f.store, nil
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newForeignWorktreeFixture(t)
+			store, assigned := c.setup(t, f)
+			var resolver taskWorkDirResolver
+			if len(assigned) > 0 {
+				resolver = newAssignedTaskWorkDirResolver("", assigned)
+			}
+			want := f.prepare(t, store, resolver).cfg.WorkDir
+			candidate := f.candidate(t)
+			w := &World{Env: &reconcileEnv{Cfg: foreignWorktreeCity()}, Demand: demandView{AssignedWork: assigned}}
+			if got := launchWorkDir(effectReads{city: store}, w, candidate.info, candidate.tp); got != want {
+				t.Fatalf("launchWorkDir = %q, want %q, the dir prepare launches in", got, want)
+			}
+		})
+	}
+}
+
+// Kills PreWake dropping the conversation of a session whose task work_dir is
+// inside another open session's work dir: prepare launches the session in its
+// own work dir, so transcriptOf probes the key there and finds it.
+func TestTranscriptOfProbesOwnWorkDirOverARefusedTaskWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	candidate := f.candidate(t)
+	candidate.info.SessionKey = "k-1"
+	candidate.tp.ResolvedProvider = claudeResumeProvider()
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) {
+		probed = append(probed, dir)
+		return dir == f.ownHome, true
+	}
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	w := &World{Env: &reconcileEnv{Cfg: foreignWorktreeCity()}}
+	if got := transcriptOf(effectReads{city: f.store}, w, candidate.info, candidate.tp); got != sessTranscriptPresent {
+		t.Fatalf("transcriptOf = %v after probing %v, want present: the conversation is in the session's own work dir %q", got, probed, f.ownHome)
+	}
+}
+
 // Kills a prepare that writes (S-1): an adopt over a concrete pool row whose
 // work_dir needs repair commits, its prepare folding the repair in memory
 // only (the read-only stores would fail a write), and leaves the work_dir to

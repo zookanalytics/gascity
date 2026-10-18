@@ -1254,11 +1254,11 @@ func buildPreparedStartWithTranscript(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
-	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" && preparedTaskWorkDirLaunchable(candidate, cityPath, preOverrideWorkDir, wd, store) {
-		agentCfg.WorkDir = wd
-	} else if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
-		agentCfg.WorkDir = resolveWorkDirAgainstCity(cityPath, wd)
+	launchDir, refusal := preparedLaunchWorkDir(candidate, cityPath, cfg, store, workDirResolver, preOverrideWorkDir)
+	if refusal != "" {
+		log.Printf("session %s: launching in its own work dir, not %s", candidate.name(), refusal)
 	}
+	agentCfg.WorkDir = launchDir
 	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
 		return nil, candidate.info, err
 	}
@@ -1677,11 +1677,37 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 	}
 }
 
+// preparedLaunchWorkDir returns the directory a starting candidate launches
+// in: the task work_dir resolvePreparedTaskWorkDir finds, unless
+// preparedTaskWorkDirRefusal refuses it, then the session's recorded work dir
+// resolved against cityPath, then configuredWorkDir. refusal says why a task
+// work_dir was refused, and is "" when none was. Start preparation and the v2
+// start effect's transcript probe (launchWorkDir) both take the launch
+// directory from here, so the probe reads the directory the session runs in.
+func preparedLaunchWorkDir(
+	candidate startCandidate,
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	workDirResolver taskWorkDirResolver,
+	configuredWorkDir string,
+) (workDir, refusal string) {
+	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
+		if refusal = preparedTaskWorkDirRefusal(candidate, cityPath, configuredWorkDir, wd, store); refusal == "" {
+			return wd, ""
+		}
+	}
+	if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
+		return resolveWorkDirAgainstCity(cityPath, wd), refusal
+	}
+	return configuredWorkDir, refusal
+}
+
 // resolvePreparedTaskWorkDir returns the task work_dir a starting candidate
 // would launch in, or "" when no task names one. It tries the trigger bead's
 // drain source, then workDirResolver, then the beads in progress under the
-// candidate's identities. buildPreparedStartWithWorkDirResolver launches there
-// only when preparedTaskWorkDirLaunchable accepts the directory.
+// candidate's identities. preparedLaunchWorkDir launches there only when
+// preparedTaskWorkDirRefusal accepts the directory.
 func resolvePreparedTaskWorkDir(
 	candidate startCandidate,
 	cityPath string,
@@ -1708,28 +1734,24 @@ func resolvePreparedTaskWorkDir(
 	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
 }
 
-// preparedTaskWorkDirLaunchable reports whether the candidate may launch in
-// taskWorkDir. Launching inside another open session's own work directory
-// makes the candidate a second writer in a checkout a live agent owns, so it
-// refuses a directory preparedTaskWorkDirOwner assigns to another session. It
-// also refuses when the session list cannot be read, because nothing then
-// shows that the directory is clear of every other session. A refusal is
-// logged, and the caller launches the candidate in its own work directory.
-func preparedTaskWorkDirLaunchable(candidate startCandidate, cityPath, configuredWorkDir, taskWorkDir string, store beads.Store) bool {
+// preparedTaskWorkDirRefusal says why the candidate may not launch in
+// taskWorkDir, and returns "" when it may. Launching inside another open
+// session's own work directory makes the candidate a second writer in a
+// checkout a live agent owns, so it refuses a directory
+// preparedTaskWorkDirOwner assigns to another session. It also refuses when the
+// session list cannot be read, because nothing then shows that the directory is
+// clear of every other session.
+func preparedTaskWorkDirRefusal(candidate startCandidate, cityPath, configuredWorkDir, taskWorkDir string, store beads.Store) string {
 	snapshot, err := loadSessionBeadSnapshot(store)
 	if err != nil {
-		log.Printf("session %s: launching in its own work dir, not task work_dir %q: listing sessions to find the directory's owner: %v",
-			candidate.name(), taskWorkDir, err)
-		return false
+		return fmt.Sprintf("task work_dir %q: listing sessions to find the directory's owner: %v", taskWorkDir, err)
 	}
 	ownDirs := append([]string{configuredWorkDir}, sessionRecordedWorktreeDirs(candidate.info)...)
 	owner, ownerDir, found := preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidate.info.ID, ownDirs, snapshot.OpenInfos())
 	if !found {
-		return true
+		return ""
 	}
-	log.Printf("session %s: launching in its own work dir, not task work_dir %q: it is inside session %s's work dir %q",
-		candidate.name(), taskWorkDir, owner.ID, ownerDir)
-	return false
+	return fmt.Sprintf("task work_dir %q: it is inside session %s's work dir %q", taskWorkDir, owner.ID, ownerDir)
 }
 
 // preparedTaskWorkDirOwner returns the open session, other than the launching

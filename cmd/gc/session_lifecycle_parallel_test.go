@@ -1436,27 +1436,39 @@ func (f *foreignWorktreeFixture) createInProgressBead(t *testing.T, assignee str
 	return bead
 }
 
-// prepare runs start preparation for the launching session through
-// prepareStartCandidateForCity, the call executePlannedStartsTraced makes.
-func (f *foreignWorktreeFixture) prepare(t *testing.T, store beads.Store, workDirResolver taskWorkDirResolver) *preparedStart {
+// candidate is the launching session's start candidate, read from the store
+// when it is called, so it carries metadata a test set before the call.
+func (f *foreignWorktreeFixture) candidate(t *testing.T) startCandidate {
 	t.Helper()
 	session, err := f.store.Get(f.session.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := prepareStartCandidateForCity(startCandidate{
+	return startCandidate{
 		info: sessiontest.SeedBead(t, session),
 		tp: TemplateParams{
 			TemplateName: "frontend/worker",
 			SessionName:  "custom-worker-1",
 			WorkDir:      f.ownHome,
 		},
-	}, "", "", &config.City{
+	}
+}
+
+// foreignWorktreeCity is the city both of the fixture's sessions belong to.
+func foreignWorktreeCity() *config.City {
+	return &config.City{
 		Agents: []config.Agent{
 			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 			{Name: "builder", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
 		},
-	}, nil, store, &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}, io.Discard, workDirResolver, dispatchOptionSources{})
+	}
+}
+
+// prepare runs start preparation for the launching session through
+// prepareStartCandidateForCity, the call executePlannedStartsTraced makes.
+func (f *foreignWorktreeFixture) prepare(t *testing.T, store beads.Store, workDirResolver taskWorkDirResolver) *preparedStart {
+	t.Helper()
+	prepared, err := prepareStartCandidateForCity(f.candidate(t), "", "", foreignWorktreeCity(), nil, store, &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}, io.Discard, workDirResolver, dispatchOptionSources{})
 	if err != nil {
 		t.Fatalf("prepareStartCandidateForCity: %v", err)
 	}

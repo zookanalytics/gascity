@@ -102,16 +102,13 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	return sessTranscriptAbsent
 }
 
-// launchWorkDir is the work dir prepare launches row in: the task's, the
-// row's, the template's.
+// launchWorkDir is the work dir prepare launches row in
+// (preparedLaunchWorkDir): the task's unless it is refused, the row's, the
+// template's. The prepare that launches the row logs a refusal; this read
+// does not.
 func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
-		return dir
-	}
-	if dir := preparedStartSessionWorkDir(row); dir != "" {
-		return resolveWorkDirAgainstCity(w.CityPath, dir)
-	}
-	return tp.WorkDir
+	dir, _ := preparedLaunchWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), tp.WorkDir)
+	return dir
 }
 
 // errTemplateUnresolved: the pass's memo holds no template for the row.
