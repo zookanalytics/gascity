@@ -1,6 +1,8 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import runner_policy
 
@@ -70,6 +72,86 @@ class RunnerPolicyTests(unittest.TestCase):
         self.assertIn("every event", reason)
         self.assertEqual(runners["runner_macos"], "blacksmith-6vcpu-macos-15")
         self.assertEqual(runners["runner_windows"], "blacksmith-4vcpu-windows-2025")
+
+
+    def test_fork_repository_uses_github_hosted_runners(self) -> None:
+        use_blacksmith, reason, runners = runner_policy.select_runners(
+            "push",
+            "zook-bot",
+            set(),
+            repository="zookanalytics/gascity",
+        )
+
+        self.assertFalse(use_blacksmith)
+        self.assertIn("GitHub-hosted", reason)
+        self.assertIn("zookanalytics/gascity", reason)
+        self.assertEqual(runners, runner_policy.GITHUB_RUNNERS)
+        self.assertEqual(runners["runner_32vcpu"], "ubuntu-latest")
+        self.assertEqual(runners["runner_macos"], "macos-15")
+        self.assertEqual(runners["runner_windows"], "windows-latest")
+
+    def test_fork_pull_request_from_allowlisted_author_uses_github_hosted_runners(self) -> None:
+        use_blacksmith, _, runners = runner_policy.select_runners(
+            "pull_request",
+            "Quad341",
+            {"quad341"},
+            repository="quad341/gascity",
+        )
+
+        self.assertFalse(use_blacksmith)
+        self.assertEqual(runners, runner_policy.GITHUB_RUNNERS)
+
+    def test_fork_repository_ignores_forced_blacksmith(self) -> None:
+        use_blacksmith, _, runners = runner_policy.select_runners(
+            "workflow_call",
+            "",
+            set(),
+            force_blacksmith=True,
+            repository="zookanalytics/gascity",
+        )
+
+        self.assertFalse(use_blacksmith)
+        self.assertEqual(runners, runner_policy.GITHUB_RUNNERS)
+
+    def test_canonical_repository_matches_case_insensitively(self) -> None:
+        use_blacksmith, _, runners = runner_policy.select_runners(
+            "push",
+            "",
+            set(),
+            repository="GastownHall/GasCity",
+        )
+
+        self.assertTrue(use_blacksmith)
+        self.assertEqual(runners, runner_policy.BLACKSMITH_RUNNERS)
+
+    def test_main_selects_runners_for_the_workflow_repository(self) -> None:
+        for repository, use_blacksmith, runner_2vcpu in (
+            ("gastownhall/gascity", "true", "blacksmith-2vcpu-ubuntu-2404"),
+            ("zookanalytics/gascity", "false", "ubuntu-latest"),
+        ):
+            with self.subTest(repository=repository), tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "github_output"
+                env = {
+                    "EVENT_NAME": "push",
+                    "GITHUB_REPOSITORY": repository,
+                    "GITHUB_OUTPUT": str(output),
+                }
+                with mock.patch.dict(os.environ, env, clear=True):
+                    runner_policy.main()
+
+                lines = output.read_text(encoding="utf-8").splitlines()
+                self.assertIn(f"use_blacksmith={use_blacksmith}", lines)
+                self.assertIn(f"runner_2vcpu={runner_2vcpu}", lines)
+
+    def test_main_requires_the_workflow_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "github_output"
+            env = {"EVENT_NAME": "push", "GITHUB_OUTPUT": str(output)}
+            with mock.patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(KeyError):
+                    runner_policy.main()
+
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
