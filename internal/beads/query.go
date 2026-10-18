@@ -205,6 +205,12 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+	// Brief says the caller reads none of a row's free-form text: its
+	// description, design, acceptance criteria and notes. On a ledger whose
+	// beads carry long notes that text is most of what a ready read sends, so a
+	// store that sends rows across a process boundary may leave it empty. A
+	// store that holds rows in process ignores it.
+	Brief bool
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
