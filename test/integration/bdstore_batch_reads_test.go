@@ -86,18 +86,19 @@ func TestBdStoreBatchedDispatchReadsMatchPerCallReads(t *testing.T) {
 }
 
 // TestControlDispatchReadyAgreesBetweenBdAndNativeStores pins the ready set
-// the control dispatcher's readiness scan reads, Ready at TierBoth, as the same
-// set whether its scope opens as a BdStore over the real bd or as the native
-// store the linked beads library opens over the same database. The dispatcher
-// filters only this set (by assignee, route, type, label and the instantiating
-// mark), so a disagreement here offers a control bead on one transport that
-// the other withholds.
+// the control dispatcher's readiness scan reads, a Brief Ready at TierBoth, as
+// the same set whether its scope opens as a BdStore over the real bd or as the
+// native store the linked beads library opens over the same database. The
+// dispatcher filters only this set (by assignee, route, type, label and the
+// instantiating mark), so a disagreement here offers a control bead on one
+// transport that the other withholds.
 //
 // The corpus covers what the two reads compute differently. BdStore takes its
-// candidates from `bd ready` and vetoes one whose closed blocker recorded
-// gc.work_outcome=blocked, reading the blockers by id with a closed-inclusive
-// `bd list` that includes infra, gate and template rows, plus a `bd query` of
-// closed wisps. The native store reads the candidates' edges and the blockers
+// candidates from `bd ready --brief` and vetoes one whose closed blocker
+// recorded gc.work_outcome=blocked, reading the blockers by id with a
+// closed-inclusive `bd list` that includes infra, gate and template rows. A
+// `bd query` of closed wisps runs only when that list misses a blocker. The
+// native store ignores Brief and reads the candidates' edges and the blockers
 // through the library's reader roles. So the blockers here close with and
 // without the blocked outcome as a task, a step, a gate and a wisp, and the
 // candidates carry the fields the dispatcher filters on afterwards.
@@ -172,17 +173,18 @@ func TestControlDispatchReadyAgreesBetweenBdAndNativeStores(t *testing.T) {
 		expect(behind("behind a "+kind.name+" blocker closed blocked", blocked, kind.ephemeral), false)
 	}
 
-	viaBd, err := bd.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	query := beads.ReadyQuery{TierMode: beads.TierBoth, Brief: true}
+	viaBd, err := bd.Ready(query)
 	if err != nil {
-		t.Fatalf("BdStore.Ready(TierBoth): %v", err)
+		t.Fatalf("BdStore.Ready(TierBoth, Brief): %v", err)
 	}
-	viaNative, err := native.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+	viaNative, err := native.Ready(query)
 	if err != nil {
-		t.Fatalf("NativeDoltStore.Ready(TierBoth): %v", err)
+		t.Fatalf("NativeDoltStore.Ready(TierBoth, Brief): %v", err)
 	}
 	bdRows, nativeRows := controlReadyProjection(viaBd), controlReadyProjection(viaNative)
 	if !slices.Equal(bdRows, nativeRows) {
-		t.Fatalf("Ready(TierBoth) differs between the stores:\n bd:     %s\n native: %s", strings.Join(bdRows, "\n         "), strings.Join(nativeRows, "\n         "))
+		t.Fatalf("Ready(TierBoth, Brief) differs between the stores:\n bd:     %s\n native: %s", strings.Join(bdRows, "\n         "), strings.Join(nativeRows, "\n         "))
 	}
 	got := map[string]bool{}
 	for _, b := range viaNative {
