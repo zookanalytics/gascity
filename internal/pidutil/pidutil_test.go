@@ -12,9 +12,15 @@ import (
 	"time"
 )
 
+// TestAliveTreatsZombieAsDead pins that an exited, unreaped child reads as
+// dead, from /proc on linux and from kinfo_proc on darwin, and that neither
+// forks ps to say so. Every gc bd passthrough asks this about the managed Dolt
+// server, so a fork here is paid on every bd command. The shadowing ps prints
+// no state and records that it ran: a ps-backed probe both misses the zombie
+// and leaves the record behind.
 func TestAliveTreatsZombieAsDead(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("zombie detection uses /proc on linux")
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("zombie detection reads /proc on linux and kinfo_proc on darwin")
 	}
 
 	cmd := exec.Command("sh", "-c", "exit 0")
@@ -23,14 +29,39 @@ func TestAliveTreatsZombieAsDead(t *testing.T) {
 	}
 	defer func() { _ = cmd.Wait() }()
 
+	marker := recordingPS(t)
+
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !Alive(cmd.Process.Pid) {
+			if psRan(marker) {
+				t.Fatal("Alive forked ps to read the zombie state")
+			}
 			return
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatalf("Alive(%d) stayed true for exited child", cmd.Process.Pid)
+	t.Fatalf("Alive(%d) stayed true for exited child (ps ran: %t)", cmd.Process.Pid, psRan(marker))
+}
+
+// recordingPS replaces PATH with a ps that prints no state and records that it
+// ran, and returns the path of that record. A ps-backed probe both misses any
+// state and leaves the record behind.
+func recordingPS(t *testing.T) string {
+	t.Helper()
+	binDir := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "ps-ran")
+	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte(fmt.Sprintf("#!/bin/sh\n: > %q\n", marker)), 0o755); err != nil {
+		t.Fatalf("WriteFile(ps): %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	return marker
+}
+
+// psRan reports whether the recordingPS stub behind marker was run.
+func psRan(marker string) bool {
+	_, err := os.Stat(marker)
+	return err == nil
 }
 
 func TestProcStatState(t *testing.T) {

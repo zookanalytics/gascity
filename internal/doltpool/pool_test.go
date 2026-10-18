@@ -2,6 +2,7 @@ package doltpool
 
 import (
 	"database/sql"
+	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -211,6 +212,56 @@ func TestSocketPoolSharesTheIdleBound(t *testing.T) {
 		}
 		if got := tc.db.Stats().MaxOpenConnections; got != maxOpenConns {
 			t.Errorf("%s pool MaxOpenConnections = %d, want %d", tc.pool, got, maxOpenConns)
+		}
+	}
+}
+
+// TestOpenDedicatedIsUnpooledWithItsReadTimeout pins that a dedicated handle
+// stays out of the registry, holds one connection, and waits for a reply as
+// long as its caller asked: a CREATE INDEX sends nothing back until it
+// finishes, so the pool's read deadline would cut it off.
+func TestOpenDedicatedIsUnpooledWithItsReadTimeout(t *testing.T) {
+	resetForTest(t)
+	const wait = 10 * time.Minute
+	tcp, err := OpenDedicated("::1", "3307", "root", "pw", "hq", wait)
+	if err != nil {
+		t.Fatalf("OpenDedicated: %v", err)
+	}
+	defer tcp.Close() //nolint:errcheck // no connection was dialed
+	sock, err := OpenDedicatedSocket("/tmp/dolt.sock", "root", "pw", "hq", wait)
+	if err != nil {
+		t.Fatalf("OpenDedicatedSocket: %v", err)
+	}
+	defer sock.Close() //nolint:errcheck // no connection was dialed
+	if Len() != 0 {
+		t.Fatalf("dedicated handles entered the registry: Len() = %d", Len())
+	}
+	for name, db := range map[string]*sql.DB{"tcp": tcp, "socket": sock} {
+		if got := db.Stats().MaxOpenConnections; got != 1 {
+			t.Errorf("%s dedicated handle MaxOpenConnections = %d, want 1", name, got)
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		cfg      *mysql.Config
+		wantNet  string
+		wantAddr string
+	}{
+		{"tcp", dedicatedConfig("tcp", net.JoinHostPort("::1", "3307"), "root", "pw", "hq", wait), "tcp", "[::1]:3307"},
+		{"socket", dedicatedConfig("unix", "/tmp/dolt.sock", "root", "pw", "hq", wait), "unix", "/tmp/dolt.sock"},
+	} {
+		parsed, err := mysql.ParseDSN(tc.cfg.FormatDSN())
+		if err != nil {
+			t.Fatalf("%s: ParseDSN: %v", tc.name, err)
+		}
+		if parsed.Net != tc.wantNet || parsed.Addr != tc.wantAddr {
+			t.Errorf("%s: endpoint = %s %s, want %s %s", tc.name, parsed.Net, parsed.Addr, tc.wantNet, tc.wantAddr)
+		}
+		if parsed.ReadTimeout != wait {
+			t.Errorf("%s: ReadTimeout = %v, want %v", tc.name, parsed.ReadTimeout, wait)
+		}
+		if parsed.DBName != "hq" || parsed.User != "root" || parsed.Passwd != "pw" {
+			t.Errorf("%s: credentials or database not carried: %+v", tc.name, parsed)
 		}
 	}
 }

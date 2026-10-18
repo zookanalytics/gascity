@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -842,6 +843,92 @@ func TestCloseSpecSidecarsForRootClosesOnlyOpenSpecs(t *testing.T) {
 	}
 }
 
+// TestCloseSpecSidecarsForRootListsOnlyOpenMembers pins the sidecar lookup to
+// open beads. A closed sidecar has nothing left to close, so a lookup that
+// includes closed members only buys a scan of every closed row's metadata.
+func TestCloseSpecSidecarsForRootListsOnlyOpenMembers(t *testing.T) {
+	store := &rootIDQueryRecordingStore{MemStore: beads.NewMemStore()}
+	root, err := store.Create(beads.Bead{
+		Title: "root",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(root): %v", err)
+	}
+	openSpec, err := store.Create(beads.Bead{
+		Title: "Step spec for review",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "review",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(open spec): %v", err)
+	}
+	doneSpec, err := store.Create(beads.Bead{
+		Title: "Step spec for build",
+		Type:  "spec",
+		Metadata: map[string]string{
+			"gc.kind":         "spec",
+			"gc.root_bead_id": root.ID,
+			"gc.spec_for":     "build",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(closed spec): %v", err)
+	}
+	if err := store.Close(doneSpec.ID); err != nil {
+		t.Fatalf("Close(closed spec): %v", err)
+	}
+
+	closed, err := CloseSpecSidecarsForRoot(store, root.ID, "")
+	if err != nil {
+		t.Fatalf("CloseSpecSidecarsForRoot: %v", err)
+	}
+	if closed != 1 {
+		t.Fatalf("CloseSpecSidecarsForRoot closed %d beads, want 1", closed)
+	}
+	specAfter, err := store.Get(openSpec.ID)
+	if err != nil {
+		t.Fatalf("Get(open spec): %v", err)
+	}
+	if specAfter.Status != "closed" {
+		t.Fatalf("open spec status = %q, want closed", specAfter.Status)
+	}
+	if len(store.rootIDQueries) == 0 {
+		t.Fatal("CloseSpecSidecarsForRoot issued no gc.root_bead_id query")
+	}
+	for _, q := range store.rootIDQueries {
+		if q.IncludeClosed {
+			t.Errorf("sidecar query %+v includes closed beads; the caller discards them, so it must ask for open beads only", q)
+		}
+		if q.TierMode != beads.TierBoth {
+			t.Errorf("sidecar query TierMode = %v, want TierBoth so wisp-tier sidecars still close", q.TierMode)
+		}
+	}
+}
+
+// rootIDQueryRecordingStore records every List query that filters on
+// gc.root_bead_id, so a test can pin the status scope a membership lookup asks
+// for.
+type rootIDQueryRecordingStore struct {
+	*beads.MemStore
+	rootIDQueries []beads.ListQuery
+}
+
+func (s *rootIDQueryRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Metadata["gc.root_bead_id"] != "" {
+		s.rootIDQueries = append(s.rootIDQueries, query)
+	}
+	return s.MemStore.List(query)
+}
+
 func TestListWorkflowBeadsQueriesBothTiersForRootOwnedDescendants(t *testing.T) {
 	store := &workflowTierAssertingStore{MemStore: beads.NewMemStore()}
 	root, err := store.Create(beads.Bead{
@@ -1197,5 +1284,94 @@ func TestGraphStoreRefIsAStoreSentinelNotAScopeKind(t *testing.T) {
 	}
 	if NormalizeSourceStoreRef(ref) == NormalizeSourceStoreRef("city:bright-lights") {
 		t.Error("the graph leg's ref compares equal to the city store's; the two legs would be conflated")
+	}
+}
+
+// TestCloseWorkflowSubtreeNeverClosesASessionRow (mc-dkblm, architecture
+// B): a controller-owned row that carries a workflow's gc.root_bead_id
+// (written past the API) is no member a workflow's teardown closes, a
+// session row typed or crash-damaged, an episode or a convergence root, as
+// sling's force and run cancel close a subtree; the workflow's own beads
+// close.
+func TestCloseWorkflowSubtreeNeverClosesASessionRow(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{Title: "step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, err := store.Create(beads.Bead{Title: "s", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged, err := store.Create(beads.Bead{Title: "s2", Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := "" // a create is typed; the crash damage drops it
+	if err := store.Update(damaged.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	// Every controller-owned kind (architecture B): an episode, a
+	// convergence root, a session spelled in another case.
+	want := map[string]bool{root.ID: true, step.ID: true, typed.ID: false, damaged.ID: false}
+	for _, typ := range []string{session.StartupHealthEpisodeType, "convergence", " Session "} {
+		b, err := store.Create(beads.Bead{Title: typ, Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
+			t.Fatal(err)
+		}
+		want[b.ID] = false
+	}
+	if _, err := CloseWorkflowSubtree(store, root.ID); err != nil {
+		t.Fatal(err)
+	}
+	for id, wantClosed := range want {
+		if b, _ := store.Get(id); (b.Status == "closed") != wantClosed {
+			t.Fatalf("%s (%q): status %s, want closed %v", id, b.Type, b.Status, wantClosed)
+		}
+	}
+}
+
+// TestCloseSpecSidecarsNeverClosesASessionRow (mc-dkblm, S02): a session row
+// carrying a root's gc.root_bead_id and the spec kind (written past the
+// API) is no sidecar the root's sidecar close closes; a real sidecar is.
+func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar, err := store.Create(beads.Bead{Title: "spec", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Title: "s", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.Get(sidecar.ID); b.Status != "closed" {
+		t.Fatalf("sidecar %s, want closed", b.Status)
+	}
+	if b, _ := store.Get(row.ID); b.Status == "closed" {
+		t.Fatal("the session row was closed as a spec sidecar")
+	}
+	episode, err := store.Create(beads.Bead{Title: "e", Type: session.StartupHealthEpisodeType, Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.Get(episode.ID); b.Status == "closed" {
+		t.Fatal("the startup-health episode was closed as a spec sidecar")
 	}
 }

@@ -1209,7 +1209,7 @@ func closeFormulaCookFailedGraphV2Roots(store beads.Store, recipe *formula.Recip
 	if key == "" {
 		return nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1232,7 +1232,7 @@ func existingFormulaCookGraphV2Root(store beads.Store, recipe *formula.Recipe) (
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}

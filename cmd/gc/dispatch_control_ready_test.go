@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -198,8 +197,8 @@ func TestMergeControlReadyGroupsSkipsInstantiatingWithoutMarkingSeen(t *testing.
 // TestEvaluateControlReadyMatchesShellQueryPriority ports
 // TestWorkflowServeControlReadyQueryPreservesQueryPriorityWhenMerging's
 // scenario (cmd_convoy_dispatch_test.go) at the Go level: given the same
-// parsed query + env, and a ready set shaped like what CachedReady/the
-// batched fallback would return, evaluateControlReady must merge candidates
+// parsed query + env, and a ready set shaped like what the per-leg Ready
+// reads or the batched fallback would return, evaluateControlReady must merge candidates
 // before routes and drop later ID duplicates exactly like the shell's jq
 // reduce does.
 func TestEvaluateControlReadyMatchesShellQueryPriority(t *testing.T) {
@@ -279,11 +278,11 @@ func stringSlicesEqual(a, b []string) bool {
 	return true
 }
 
-// --- End-to-end: nextWorkflowServeBeads wiring (cache + fallback) ---
+// --- End-to-end: nextWorkflowServeBeads wiring (per-leg Ready + fallback) ---
 
 // setUpControlReadyFileStoreCity builds a scope-local FileStore-backed city
-// so tryControlReadyFromCacheOrFallback's cache path can PrimeActive() and
-// CachedReady() without any bd/dolt process at all, and returns the opened
+// so tryControlReadyScan's leg read answers in-process without any bd/dolt
+// process at all, and returns the opened
 // store for seeding fixture beads directly.
 func setUpControlReadyFileStoreCity(t *testing.T) (cityDir string, store *beads.FileStore) {
 	t.Helper()
@@ -315,7 +314,7 @@ func noBDOnPathForTest(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 }
 
-func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCalls(t *testing.T) {
+func TestTryControlReadyScanAnswersFileLegWithZeroSubprocessCalls(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -336,12 +335,12 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: handled = false, want true for a control-ready query")
+		t.Fatalf("tryControlReadyScan: handled = false, want true for a control-ready query")
 	}
 
 	var gotIDs []string
@@ -354,9 +353,9 @@ func TestTryControlReadyFromCacheOrFallbackAnswersFromCacheWithZeroSubprocessCal
 	}
 }
 
-func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t *testing.T) {
+func TestTryControlReadyScanReturnsUnhandledForNonControlQuery(t *testing.T) {
 	cityDir := t.TempDir()
-	_, handled, err := tryControlReadyFromCacheOrFallback("bd ready --json --limit=20", cityDir, nil)
+	_, handled, err := tryControlReadyScan("bd ready --json --limit=20", cityDir, nil)
 	if handled {
 		t.Fatalf("handled = true, want false for a non-control-ready query")
 	}
@@ -365,11 +364,11 @@ func TestTryControlReadyFromCacheOrFallbackReturnsUnhandledForNonControlQuery(t 
 	}
 }
 
-// TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable
-// forces the cache path to fail (PrimeActive against a bd stub that errors on
-// `list`) and asserts the fallback makes exactly one bd invocation covering
-// the whole tick, not the shell script's N per-candidate/route calls.
-func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnavailable(t *testing.T) {
+// TestTryControlReadyScanMakesOneBDCallPerBdLeg pins the scan's cost on a
+// bd-backed scope (ga-vnycm2.19): the whole tick is one `bd ready` call -- not
+// the shell script's N per-candidate/route calls, and not the four-list prime
+// plus ready projection the snapshot it replaced paid on every scan.
+func TestTryControlReadyScanMakesOneBDCallPerBdLeg(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -384,19 +383,14 @@ func TestTryControlReadyFromCacheOrFallbackUsesSingleBatchedBDCallWhenCacheUnava
 set -eu
 printf '%%s\n' "$*" >> "%s"
 case "$1" in
-  list)
-    exit 7
-    ;;
-esac
-case "$*" in
-  "--readonly --sandbox ready --json --exclude-type=epic --limit=%d")
-    printf '[{"id":"ga-fallback-ready","assignee":"%s"}]'
+  ready)
+    printf '[{"id":"ga-ready","status":"open","issue_type":"task","assignee":"%s"}]'
     ;;
   *)
     printf '[]'
     ;;
 esac
-`, logPath, controlReadyFallbackLimit, target)
+`, logPath, target)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
@@ -406,15 +400,15 @@ esac
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
 	query := workflowServeControlReadyQuery(agentCfg)
 
-	queue, handled, err := tryControlReadyFromCacheOrFallback(query, cityDir, nil)
+	queue, handled, err := tryControlReadyScan(query, cityDir, nil)
 	if err != nil {
-		t.Fatalf("tryControlReadyFromCacheOrFallback: %v", err)
+		t.Fatalf("tryControlReadyScan: %v", err)
 	}
 	if !handled {
 		t.Fatalf("handled = false, want true")
 	}
-	if len(queue) != 1 || queue[0].ID != "ga-fallback-ready" {
-		t.Fatalf("queue = %#v, want single ga-fallback-ready bead", queue)
+	if len(queue) != 1 || queue[0].ID != "ga-ready" {
+		t.Fatalf("queue = %#v, want single ga-ready bead", queue)
 	}
 
 	logData, err := os.ReadFile(logPath)
@@ -422,81 +416,129 @@ esac
 		t.Fatalf("read bd log: %v", err)
 	}
 	calls := strings.Split(strings.TrimSpace(string(logData)), "\n")
-	readyCalls := 0
-	for _, c := range calls {
-		if strings.HasPrefix(c, "--readonly --sandbox ready") {
-			readyCalls++
-		}
-	}
-	if readyCalls != 1 {
-		t.Fatalf("bd ready calls = %d, want exactly 1; all calls:\n%s", readyCalls, string(logData))
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "ready ") || !strings.Contains(calls[0], "--include-ephemeral") {
+		t.Fatalf("bd calls = %q, want exactly one `bd ready --include-ephemeral` call per scan", calls)
 	}
 }
 
-// TestControlReadyFallbackReadyLogsWhenResultHitsLimit is ga-bbj6wv Finding 1:
-// a fallback batch that comes back at exactly controlReadyFallbackLimit is a
-// truncation signal (some candidate/route may have been starved of ready
-// beads that exist but didn't fit) and must be observable, not silent.
-func TestControlReadyFallbackReadyLogsWhenResultHitsLimit(t *testing.T) {
-	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-
-	items := make([]map[string]string, controlReadyFallbackLimit)
-	for i := range items {
-		items[i] = map[string]string{"id": fmt.Sprintf("ga-fallback-%d", i)}
+// readyPagePayload renders one full page of open task rows routed elsewhere
+// (controlReadyFallbackLimit of them), then one row per extra id assigned to
+// assignee, as the array bd ready prints.
+func readyPagePayload(t *testing.T, assignee string, extra ...string) []byte {
+	t.Helper()
+	rows := make([]map[string]string, 0, controlReadyFallbackLimit+len(extra))
+	for i := 0; i < controlReadyFallbackLimit; i++ {
+		rows = append(rows, map[string]string{"id": fmt.Sprintf("ga-other-%d", i), "status": "open", "issue_type": "task", "assignee": "gascity/worker"})
 	}
-	payload, err := json.Marshal(items)
+	for _, id := range extra {
+		rows = append(rows, map[string]string{"id": id, "status": "open", "issue_type": "task", "assignee": assignee})
+	}
+	payload, err := json.Marshal(rows)
 	if err != nil {
-		t.Fatalf("marshal fixture beads: %v", err)
+		t.Fatalf("marshal ready rows: %v", err)
 	}
-	payloadPath := filepath.Join(tmp, "payload.json")
-	if err := os.WriteFile(payloadPath, payload, 0o644); err != nil {
-		t.Fatalf("write payload: %v", err)
+	return payload
+}
+
+// installPagedReadyBD puts a fake bd first on PATH. It appends each call's
+// arguments to the log it returns, answers a read with no limit (--limit 0 or
+// --limit=0) with whole, and answers any other ready read with page.
+func installPagedReadyBD(t *testing.T, page, whole []byte) (logPath string) {
+	t.Helper()
+	tmp := t.TempDir()
+	pagePath := filepath.Join(tmp, "page.json")
+	wholePath := filepath.Join(tmp, "whole.json")
+	for path, payload := range map[string][]byte{pagePath: page, wholePath: whole} {
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			t.Fatalf("write payload: %v", err)
+		}
 	}
-	bdPath := filepath.Join(tmp, "bd")
-	script := fmt.Sprintf("#!/bin/sh\ncat %q\n", payloadPath)
-	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+	logPath = filepath.Join(tmp, "bd.log")
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' "$*" >> %q
+case "$*" in
+  *"--limit 0"*|*"--limit=0"*) cat %q ;;
+  *ready*) cat %q ;;
+  *) printf '[]' ;;
+esac
+`, logPath, wholePath, pagePath)
+	if err := os.WriteFile(filepath.Join(tmp, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("GC_BEADS", "bd")
+	return logPath
+}
 
-	var logBuf bytes.Buffer
-	restore := captureLogOutput(&logBuf)
-	defer restore()
+func readBDCalls(t *testing.T, logPath string) []string {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read bd log: %v", err)
+	}
+	return strings.Split(strings.TrimSpace(string(data)), "\n")
+}
+
+// TestTryControlReadyScanReadsTheWholeReadySetOnABdLeg pins the bd leg's read:
+// brief rows, one page first, and the whole ready set when that page comes back
+// full. The scan picks out the dispatcher's own beads after the read, so a page
+// cut short would hide a control bead that sorts after other agents' work.
+func TestTryControlReadyScanReadsTheWholeReadySetOnABdLeg(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	target := "gascity/control-dispatcher"
+	logPath := installPagedReadyBD(t,
+		readyPagePayload(t, target),
+		readyPagePayload(t, target, "ga-control"))
+
+	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
+	queue, handled, err := tryControlReadyScan(workflowServeControlReadyQuery(agentCfg), cityDir, nil)
+	if err != nil || !handled {
+		t.Fatalf("tryControlReadyScan = handled %t, err %v; want handled, nil", handled, err)
+	}
+	if len(queue) != 1 || queue[0].ID != "ga-control" {
+		t.Fatalf("queue = %#v, want the dispatcher's ga-control from past the first page", queue)
+	}
+	want := []string{
+		"ready --json --include-ephemeral --limit 5000 --brief",
+		"ready --json --include-ephemeral --limit 0 --brief",
+	}
+	if calls := readBDCalls(t, logPath); strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("bd calls = %q, want a brief page and then the whole set %q", calls, want)
+	}
+}
+
+// TestControlReadyFallbackReadyReadsTheWholeSetWhenThePageFills pins the shell
+// arm's read: a page that comes back full may have stopped short of the
+// dispatcher's own beads, so the arm reads the whole ready set again.
+func TestControlReadyFallbackReadyReadsTheWholeSetWhenThePageFills(t *testing.T) {
+	configureIsolatedRuntimeEnv(t)
+	logPath := installPagedReadyBD(t,
+		readyPagePayload(t, ""),
+		readyPagePayload(t, "", "ga-past-the-page"))
 
 	dir := t.TempDir()
 	result, err := controlReadyFallbackReady(dir, dir, nil, false)
 	if err != nil {
 		t.Fatalf("controlReadyFallbackReady: %v", err)
 	}
-	if len(result) != controlReadyFallbackLimit {
-		t.Fatalf("len(result) = %d, want %d", len(result), controlReadyFallbackLimit)
+	if len(result) != controlReadyFallbackLimit+1 || !containsID(result, "ga-past-the-page") {
+		t.Fatalf("len(result) = %d (row past the page present: %t), want the whole set of %d", len(result), containsID(result, "ga-past-the-page"), controlReadyFallbackLimit+1)
 	}
-	if !strings.Contains(logBuf.String(), "may be truncated") {
-		t.Fatalf("expected a truncation warning in log output, got: %q", logBuf.String())
-	}
-	if !strings.Contains(logBuf.String(), dir) {
-		t.Fatalf("expected log to name the dir %q, got: %q", dir, logBuf.String())
+	calls := readBDCalls(t, logPath)
+	if len(calls) != 2 || !strings.Contains(calls[0], "--limit=5000") || !strings.Contains(calls[1], "--limit=0") {
+		t.Fatalf("bd calls = %q, want the page and then the whole set", calls)
 	}
 }
 
-// TestControlReadyFallbackReadyNoWarningBelowLimit is the negative case: a
-// batch below the limit is a complete result, not a truncation signal, and
-// must not log anything.
-func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
+// TestControlReadyFallbackReadyReadsOncePastAShortPage is the other half: a
+// page below the limit is the whole ready set, read in one call.
+func TestControlReadyFallbackReadyReadsOncePastAShortPage(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '[{\"id\":\"ga-fallback-only\"}]'\n"), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("GC_BEADS", "bd")
-
-	var logBuf bytes.Buffer
-	restore := captureLogOutput(&logBuf)
-	defer restore()
+	logPath := installPagedReadyBD(t, []byte(`[{"id":"ga-fallback-only"}]`), []byte(`[]`))
 
 	dir := t.TempDir()
 	result, err := controlReadyFallbackReady(dir, dir, nil, false)
@@ -506,8 +548,8 @@ func TestControlReadyFallbackReadyNoWarningBelowLimit(t *testing.T) {
 	if len(result) != 1 {
 		t.Fatalf("len(result) = %d, want 1", len(result))
 	}
-	if logBuf.Len() != 0 {
-		t.Fatalf("expected no log output below the limit, got: %q", logBuf.String())
+	if calls := readBDCalls(t, logPath); len(calls) != 1 {
+		t.Fatalf("bd calls = %q, want one read", calls)
 	}
 }
 

@@ -90,7 +90,7 @@ func TestListLiveInputConvoyRootsEmptyInputs(t *testing.T) {
 // only at its input convoy, which tracks the bead. Each pour mints a FRESH
 // synthetic input convoy, so gating on a convoy ID alone cannot see a
 // predecessor — the walk must start from the bead.
-func TestListLiveInputConvoyRootsForItem(t *testing.T) {
+func TestListLiveInputConvoyRootsForConvoys(t *testing.T) {
 	store := beads.NewMemStore()
 	work, err := store.Create(beads.Bead{Title: "work", Type: "task", Status: "open"})
 	if err != nil {
@@ -112,9 +112,9 @@ func TestListLiveInputConvoyRootsForItem(t *testing.T) {
 	predecessor := graphRoot(t, store, "predecessor", first.ID, "key-first")
 	graphRoot(t, store, "mine", second.ID, "key-mine")
 
-	roots, err := ListLiveInputConvoyRootsForItem(store, store, work.ID, "key-mine")
+	roots, err := liveInputConvoyRootsForItem(t, store, work.ID, "key-mine")
 	if err != nil {
-		t.Fatalf("ListLiveInputConvoyRootsForItem: %v", err)
+		t.Fatalf("ListLiveInputConvoyRootsForConvoys: %v", err)
 	}
 	if len(roots) != 1 || roots[0].ID != predecessor.ID {
 		t.Fatalf("roots = %v, want only %s", BlockingWorkflowIDs(roots), predecessor.ID)
@@ -124,8 +124,19 @@ func TestListLiveInputConvoyRootsForItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create untracked: %v", err)
 	}
-	roots, err = ListLiveInputConvoyRootsForItem(store, store, untracked.ID, "")
+	roots, err = liveInputConvoyRootsForItem(t, store, untracked.ID, "")
 	if err != nil || len(roots) != 0 {
 		t.Fatalf("untracked bead: (%v, %v), want (nil, nil)", BlockingWorkflowIDs(roots), err)
 	}
+}
+
+// liveInputConvoyRootsForItem walks itemID's tracking convoys the way the
+// route-recovery caller does, then asks for their live roots.
+func liveInputConvoyRootsForItem(t *testing.T, store beads.Store, itemID, allowedRootKey string) ([]beads.Bead, error) {
+	t.Helper()
+	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
+	if err != nil {
+		t.Fatalf("TrackingConvoysForItem(%s): %v", itemID, err)
+	}
+	return ListLiveInputConvoyRootsForConvoys(store, convoys, allowedRootKey)
 }
