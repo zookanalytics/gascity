@@ -1487,7 +1487,7 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	if err := hydrateSQLiteDeps(context.Background(), s.readDB, result); err != nil {
 		return nil, fmt.Errorf("listing sqlite beads: %w", err)
 	}
-	return result, nil
+	return query.Fields.project(result), nil
 }
 
 func sqliteListSQL(q ListQuery, projection string) (string, []any) {
@@ -1703,7 +1703,7 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 		if ctxErr := contextErr(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return result, err
+		return q.Fields.project(result), err
 	}
 	if err := contextErr(); err != nil {
 		return nil, err
@@ -1716,7 +1716,7 @@ func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, erro
 	if q.Limit > 0 && len(result) > q.Limit {
 		result = result[:q.Limit]
 	}
-	return result, nil
+	return q.Fields.project(result), nil
 }
 
 // sqliteReadySQL builds the ready projection query for q. It carries no ORDER

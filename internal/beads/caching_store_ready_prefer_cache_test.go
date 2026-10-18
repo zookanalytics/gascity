@@ -278,12 +278,19 @@ func TestReadyPreferCacheFallsBackForPlainStores(t *testing.T) {
 	}
 }
 
+// readyQueryProjectionFields are the ReadyQuery fields that shape the rows a
+// read returns (which fields each row carries) rather than which rows it
+// returns. A query that sets only these selects Ready's default rows.
+var readyQueryProjectionFields = map[string]bool{"Fields": true}
+
 // TestReadyQueryIsZeroConsultsEveryField pins IsZero to ReadyQuery's field set.
 // CachingStore.Ready answers a query IsZero calls zero from its snapshot, which
 // applies no selector at all, so a field IsZero does not consult would have a
 // query that sets it served the unnarrowed cached answer. Each field is set on
 // its own and must make the query non-zero; a field of a kind this test cannot
-// set fails it until the test learns that kind.
+// set fails it until the test learns that kind. A projection field
+// (readyQueryProjectionFields) selects no rows, so the cache may answer it
+// from the same snapshot; it is not a selector and IsZero does not consult it.
 func TestReadyQueryIsZeroConsultsEveryField(t *testing.T) {
 	if !(ReadyQuery{}).IsZero() {
 		t.Fatal("ReadyQuery{}.IsZero() = false, want true")
@@ -291,6 +298,9 @@ func TestReadyQueryIsZeroConsultsEveryField(t *testing.T) {
 	typ := reflect.TypeOf(ReadyQuery{})
 	for i := range typ.NumField() {
 		field := typ.Field(i)
+		if readyQueryProjectionFields[field.Name] {
+			continue
+		}
 		t.Run(field.Name, func(t *testing.T) {
 			var q ReadyQuery
 			v := reflect.ValueOf(&q).Elem().Field(i)
