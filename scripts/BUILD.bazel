@@ -113,6 +113,7 @@ go_test(
         "check_routed_test_rows_test.go",
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
+        "ci_fork_runners_test.go",
         "ci_merge_queue_test.go",
         "ci_required_coverage_test.go",
         "cmd_gc_shards_test.go",
