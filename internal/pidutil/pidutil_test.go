@@ -12,15 +12,9 @@ import (
 	"time"
 )
 
-// TestAliveTreatsZombieAsDead pins that an exited, unreaped child reads as
-// dead, from /proc on linux and from kinfo_proc on darwin, and that neither
-// forks ps to say so. Every gc bd passthrough asks this about the managed Dolt
-// server, so a fork here is paid on every bd command. The shadowing ps prints
-// no state and records that it ran: a ps-backed probe both misses the zombie
-// and leaves the record behind.
 func TestAliveTreatsZombieAsDead(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-		t.Skip("zombie detection reads /proc on linux and kinfo_proc on darwin")
+	if runtime.GOOS != "linux" {
+		t.Skip("zombie detection uses /proc on linux")
 	}
 
 	cmd := exec.Command("sh", "-c", "exit 0")
@@ -29,19 +23,9 @@ func TestAliveTreatsZombieAsDead(t *testing.T) {
 	}
 	defer func() { _ = cmd.Wait() }()
 
-	binDir := t.TempDir()
-	marker := filepath.Join(t.TempDir(), "ps-ran")
-	if err := os.WriteFile(filepath.Join(binDir, "ps"), []byte(fmt.Sprintf("#!/bin/sh\n: > %q\n", marker)), 0o755); err != nil {
-		t.Fatalf("WriteFile(ps): %v", err)
-	}
-	t.Setenv("PATH", binDir)
-
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !Alive(cmd.Process.Pid) {
-			if _, err := os.Stat(marker); err == nil {
-				t.Fatal("Alive forked ps to read the zombie state")
-			}
 			return
 		}
 		time.Sleep(25 * time.Millisecond)

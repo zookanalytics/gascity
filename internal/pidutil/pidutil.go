@@ -77,14 +77,14 @@ func Alive(pid int) bool {
 	data, err := readProcStat(statPath)
 	if err != nil {
 		// With /proc mounted, a missing entry after a successful kill(0)
-		// means the process was reaped in between. The zombie probe below
-		// finds nothing for a vanished PID and would report it alive.
+		// means the process was reaped in between. The ps zombie probe
+		// below finds nothing for a vanished PID and would report it alive.
 		// After EPERM the process exists: its entry can be hidden (hidepid)
-		// rather than gone, so that case keeps the zombie probe.
+		// rather than gone, so that case keeps the ps probe.
 		if probeErr == nil && errors.Is(err, fs.ErrNotExist) && procMounted() {
 			return false
 		}
-		return !platformZombie(pid)
+		return !psReportsZombie(pid)
 	}
 	state, ok := procStatState(string(data))
 	if ok && state == "Z" {
