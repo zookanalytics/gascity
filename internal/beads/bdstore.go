@@ -3229,8 +3229,20 @@ func (r bdListRead) holdsEveryID(ids []string) bool {
 }
 
 // readBDList runs the bd list read for query. An IDs query is read by id
-// (bdIDReads), so the read is bounded by the ids rather than by the store.
+// (bdIDReads), so the read is bounded by the ids rather than by the store. A
+// query whose field set omits the text asks bd for brief rows (bdBriefFlag).
 func (s *BdStore) readBDList(query ListQuery) (bdListRead, error) {
+	if !query.Fields.omitsText() {
+		return s.readBDListRows(query, false)
+	}
+	return ReadWithBdBrief(s.dir, func(brief bool) (bdListRead, error) {
+		return s.readBDListRows(query, brief)
+	})
+}
+
+// readBDListRows is readBDList's bd invocation, with --brief exactly when
+// brief is set.
+func (s *BdStore) readBDListRows(query ListQuery, brief bool) (bdListRead, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3275,6 +3287,9 @@ func (s *BdStore) readBDList(query ListQuery) (bdListRead, error) {
 	}
 	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {
 		args = append(args, "--skip-labels")
+	}
+	if brief {
+		args = append(args, bdBriefFlag)
 	}
 
 	reads := [][]string{args}
@@ -3664,6 +3679,8 @@ func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr
 	if query.Limit > 0 && len(merged) > query.Limit {
 		merged = merged[:query.Limit]
 	}
+	// The bd query leg has no brief flag, so its rows arrive whole.
+	merged = query.Fields.project(merged)
 
 	switch {
 	case primaryErr != nil:
@@ -3738,7 +3755,8 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 }
 
 // Ready returns open ready beads via bd ready, including ephemeral rows for
-// wisp-aware tier modes. A Brief query is read through readyBriefOutput.
+// wisp-aware tier modes. A query whose field set omits the text is read
+// through readyBriefOutput.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
@@ -3746,10 +3764,10 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		out []byte
 		err error
 	)
-	if q.Brief {
+	if q.Fields.omitsText() {
 		out, err = s.readyBriefOutput(q, includeEphemeral)
 	} else {
-		out, err = s.runBDTransientRead(bdReadyArgs(q, includeEphemeral, 0)...)
+		out, err = s.runBDTransientRead(bdReadyArgs(q, includeEphemeral, 0, false)...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
@@ -3786,6 +3804,7 @@ func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if q.Limit > 0 && len(result) > q.Limit {
 		result = result[:q.Limit]
 	}
+	result = q.Fields.project(result)
 	if parseErr != nil {
 		if len(result) == 0 {
 			return nil, fmt.Errorf("bd ready: %w", parseErr)
@@ -3866,7 +3885,7 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	// default query drops every closed row on both sides, and a closed
 	// blocker is the ONLY kind this veto can ever fire on, so without it the
 	// statusByID lookup below is empty and the whole check is dead code.
-	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed"})
+	blockers, err := s.List(ListQuery{IDs: blockerIDs, TierMode: TierBoth, Status: "closed", Fields: FieldsCore})
 	if err != nil {
 		return nil, fmt.Errorf("checking blocking dependency outcomes: fetching blockers: %w", err)
 	}
@@ -3895,9 +3914,9 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	return result, nil
 }
 
-// bdReadyArgs spells a `bd ready` call for q that returns at most limit rows.
-// A limit of 0 is bd's unbounded read.
-func bdReadyArgs(q ReadyQuery, includeEphemeral bool, limit int) []string {
+// bdReadyArgs spells a `bd ready` call for q that returns at most limit rows,
+// with --brief exactly when brief is set. A limit of 0 is bd's unbounded read.
+func bdReadyArgs(q ReadyQuery, includeEphemeral bool, limit int, brief bool) []string {
 	args := []string{"ready", "--json"}
 	if includeEphemeral {
 		args = append(args, "--include-ephemeral")
@@ -3906,6 +3925,9 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral bool, limit int) []string {
 		args = append(args, "--assignee", q.Assignee)
 	}
 	args = append(args, "--limit", strconv.Itoa(limit))
+	if brief {
+		args = append(args, bdBriefFlag)
+	}
 	return args
 }
 

@@ -5,6 +5,7 @@ package beadstest
 
 import (
 	"errors"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -1204,6 +1205,121 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		s := newStore()
 		if err := s.Tx("conformance nil tx", nil); err == nil {
 			t.Fatal("Tx(nil) returned nil, want error")
+		}
+	})
+
+	t.Run("CoreFieldSetOmitsOnlyTheText", func(t *testing.T) {
+		s := newStore()
+		worked, err := s.Create(beads.Bead{
+			Title:       "worked",
+			Description: "worked description",
+			Assignee:    "worker",
+			Labels:      []string{"core-read"},
+			Metadata:    map[string]string{"route": "pool"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Description: "blocker description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Description: "dependent description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		finished, err := s.Create(beads.Bead{Title: "finished", Description: "finished description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(finished.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// A core read must return the rows a full read returns, each equal to
+		// its whole row with the description cleared.
+		sameRows := func(t *testing.T, what string, full, core []beads.Bead) {
+			t.Helper()
+			if len(core) != len(full) {
+				t.Fatalf("%s: core read returned %v, full read %v", what, titlesOf(core), titlesOf(full))
+			}
+			withText := 0
+			byID := make(map[string]beads.Bead, len(full))
+			for _, b := range full {
+				if b.Description != "" {
+					withText++
+				}
+				b.Description = ""
+				byID[b.ID] = b
+			}
+			if withText == 0 {
+				t.Fatalf("%s: full read returned no description; the fixture proves nothing", what)
+			}
+			for _, b := range core {
+				want, ok := byID[b.ID]
+				if !ok {
+					t.Fatalf("%s: core read returned %s (%q), which the full read did not", what, b.ID, b.Title)
+				}
+				if b.Description != "" {
+					t.Errorf("%s: core row %s has Description %q, want empty", what, b.ID, b.Description)
+				}
+				if !reflect.DeepEqual(b, want) {
+					t.Errorf("%s: core row %s = %+v, want the full row without its description %+v", what, b.ID, b, want)
+				}
+			}
+		}
+
+		for _, q := range []struct {
+			name  string
+			query beads.ListQuery
+		}{
+			{"open scan", beads.ListQuery{AllowScan: true, Sort: beads.SortCreatedAsc}},
+			{"scan with closed", beads.ListQuery{AllowScan: true, IncludeClosed: true, Sort: beads.SortCreatedAsc}},
+			{"label", beads.ListQuery{Label: "core-read"}},
+			{"assignee", beads.ListQuery{Assignee: "worker"}},
+			{"both tiers", beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Sort: beads.SortCreatedAsc}},
+			{"ids", beads.ListQuery{IDs: []string{worked.ID, dependent.ID}}},
+		} {
+			full, err := s.List(q.query)
+			if err != nil {
+				t.Fatalf("List(%s) full: %v", q.name, err)
+			}
+			core := q.query
+			core.Fields = beads.FieldsCore
+			projected, err := s.List(core)
+			if err != nil {
+				t.Fatalf("List(%s) core: %v", q.name, err)
+			}
+			sameRows(t, "List("+q.name+")", full, projected)
+		}
+
+		for _, q := range []struct {
+			name  string
+			query beads.ReadyQuery
+		}{
+			{"default", beads.ReadyQuery{}},
+			{"both tiers", beads.ReadyQuery{TierMode: beads.TierBoth}},
+			{"assignee", beads.ReadyQuery{Assignee: "worker"}},
+		} {
+			full, err := s.Ready(q.query)
+			if err != nil {
+				t.Fatalf("Ready(%s) full: %v", q.name, err)
+			}
+			core := q.query
+			core.Fields = beads.FieldsCore
+			projected, err := s.Ready(core)
+			if err != nil {
+				t.Fatalf("Ready(%s) core: %v", q.name, err)
+			}
+			sameRows(t, "Ready("+q.name+")", full, projected)
+			for _, b := range projected {
+				if b.ID == dependent.ID {
+					t.Errorf("Ready(%s) core read offered %s while its blocker is open", q.name, dependent.ID)
+				}
+			}
 		}
 	})
 
