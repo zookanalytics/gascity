@@ -343,13 +343,21 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 }
 
 // controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
-// shelling `bd` in the scope directory, exactly as it always was.
+// shelling `bd` in the scope directory. It asks bd for brief rows, because
+// evaluateControlReady reads no text, and reads whole rows from a bd that
+// refuses --brief (beads.ReadWithBdBrief).
 func controlReadyScopeShellReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
 	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
-	output, err := shellWorkQueryWithEnv(query, dir, mergeRuntimeEnv(os.Environ(), env))
+	runEnv := mergeRuntimeEnv(os.Environ(), env)
+	output, err := beads.ReadWithBdBrief(dir, func(brief bool) (string, error) {
+		if brief {
+			return shellWorkQueryWithEnv(query+" --brief", dir, runEnv)
+		}
+		return shellWorkQueryWithEnv(query, dir, runEnv)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -378,12 +386,18 @@ func controlReadyScopeShellReady(dir string, env map[string]string, includeEphem
 // applies, --exclude-type is applied in Go because ReadyQuery carries no type
 // selector, and the limit is taken after that exclusion so the batched cap means
 // the same thing on both arms.
+//
+// The read asks for core rows (beads.FieldsCore). Nothing tryControlReadyScan
+// hands its rows to reads their text: evaluateControlReady decides on ids,
+// types, assignees, labels, metadata and ready order, and the queue it returns
+// carries ids and metadata. A drain therefore moves no description, design or
+// notes, whatever their size.
 func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool) ([]beads.Bead, error) {
 	tier := beads.TierIssues
 	if includeEphemeral {
 		tier = beads.TierBoth
 	}
-	ready, err := binding.Ready(beads.ReadyQuery{TierMode: tier})
+	ready, err := binding.Ready(beads.ReadyQuery{TierMode: tier, Fields: beads.FieldsCore})
 	if err != nil {
 		return nil, fmt.Errorf("control-ready fallback: reading the graph binding for %s: %w", dir, err)
 	}
