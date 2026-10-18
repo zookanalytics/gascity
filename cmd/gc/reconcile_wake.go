@@ -26,6 +26,11 @@ type controllerWake struct {
 	planner                     *planner
 	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
 	waitDepClosed func(id string)
+	// closedNamed, set by the city runtime (initWake), hears every bead event
+	// and event gap in both modes, so its closed named-session index is built
+	// again after a named session closes. It is atomic because the controller
+	// socket can hold the wake before the runtime sets it.
+	closedNamed atomic.Pointer[closedNamedIndexCache]
 	// now, when set, is the clock routed enqueues rate-limit their landed
 	// report by; nil is time.Now, whose readings compare on the monotonic
 	// clock, so a wall-clock step neither floods nor silences the report.
@@ -57,13 +62,15 @@ func (cs *controllerState) wakeOf() *controllerWake {
 // already use, so the runtime's follow-ups, lanes and event pump reach the
 // same reconciler; a v2 controller always has one (checkReconcilerWiring). A
 // directly-built legacy runtime gets a wake over the signals its run loop
-// selects on. newCityRuntime calls it; wakeOf never builds one.
+// selects on. Either way the wake delivers bead events to the runtime's closed
+// named-session index cache. newCityRuntime calls it; wakeOf never builds one.
 func (cr *CityRuntime) initWake(wired *controllerWake) {
 	if wired != nil {
 		cr.wake = wired
-		return
+	} else {
+		cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
 	}
-	cr.wake = newLegacyWake(cr.pokeCh, cr.controlDispatcherCh)
+	cr.wake.closedNamed.Store(cr.closedNamedIndex())
 }
 
 // wakeOf returns the city runtime's wake (initWake).
@@ -127,15 +134,17 @@ func (w *controllerWake) WakeMaintenance() {
 }
 
 // OnBeadEvent wakes the reconciler for one bead event after the caches
-// applied it. A cache-reconcile replay (snapshot) never wakes the legacy
-// reconciler: the controller's own writes echo back as replays, and a poke
-// per echo is the ga-yoix1 churn shape. Under v2 an event on any leg,
-// replays included, marks the planner dirty when beadEventRelevant says a
-// pass would care, and never pokes the tick.
+// applied it. In both modes every event, replays included, first reaches the
+// closed named-session index cache (noteBeadEvent). A cache-reconcile replay
+// (snapshot) never wakes the legacy reconciler: the controller's own writes
+// echo back as replays, and a poke per echo is the ga-yoix1 churn shape.
+// Under v2 an event on any leg, replays included, marks the planner dirty
+// when beadEventRelevant says a pass would care, and never pokes the tick.
 func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot bool) {
 	if w == nil {
 		return
 	}
+	w.closedNamed.Load().noteBeadEvent(evt)
 	if p := w.planner; p != nil {
 		var recent relevantSet
 		if r := p.out.relevant.Load(); r != nil {
@@ -158,10 +167,16 @@ func (w *controllerWake) OnBeadEvent(evt events.Event, snapshot bool) {
 }
 
 // OnEventGap reports that the bead event tail broke or regressed, so events
-// may be missing. The legacy reconciler re-reads every store each tick and
-// needs nothing; the planner runs a pass, which reads every store too.
+// may be missing. A named session's close may be among them, so the closed
+// named-session index cache builds again (noteEventGap). Otherwise the legacy
+// reconciler re-reads every store each tick and needs nothing; the planner
+// runs a pass, which reads every store too.
 func (w *controllerWake) OnEventGap() {
-	if w == nil || w.planner == nil {
+	if w == nil {
+		return
+	}
+	w.closedNamed.Load().noteEventGap()
+	if w.planner == nil {
 		return
 	}
 	w.planner.markDirty("event-gap")

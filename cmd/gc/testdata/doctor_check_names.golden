@@ -60,7 +60,7 @@ beads-role
 controller
 supervisor-http-api
 supervisor-unit-ownership
-supervisor-stale-image
+supervisor-binary
 agent-sessions
 zombie-sessions
 orphan-sessions
@@ -82,10 +82,12 @@ order-tracking-retention
 agent-token-telemetry
 session-model
 startup-health-episodes
+ownerless-runtimes
 gate-sandbox-reads
 dolt-server
 fork-rate
 dolt-noms-size
+dolt-compact-state
 dolt-journal-size
 dolt-log-size
 dolt-config

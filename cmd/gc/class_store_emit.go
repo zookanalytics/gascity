@@ -123,6 +123,72 @@ func (r *storageRoutes) withCLIEmission(cityPath string) *storageRoutes {
 	return r
 }
 
+// withMainStoreEmission is withCLIEmission for the session class of a city
+// that relocates nothing: the one-shot CLI's session writes land in the city's
+// own store, and they must be announced just as a split city's are (mc-03yxh).
+// Nothing else tells the controller's cache about them — gc no longer installs
+// the bd event hooks — so a cache-served session census (the legacy patrol
+// tick, v2's census) missed a `gc session new` until a poke's live read ran.
+//
+// The city store reaches here inside the bead-policy layer, which every store
+// open applies outermost (openStoreResultAtForCityScoped). The emitter goes
+// directly on the engine beneath it and the policy layer is rebuilt over the
+// emitter, so the policy stays outermost and a row is appended only after the
+// engine write lands.
+//
+// Only the engines the wrapper is pinned against are wrapped
+// (TestEmittingClassStoreKeepsEveryEngineCapability; see mainStoreEmissionEngine).
+// Any other store is returned untouched: a bd subprocess store may run hooks
+// that already emit and carries capabilities the wrapper does not forward, a
+// CachingStore emits through its own notifyChange, and a relocated class store
+// the funnel wrapped already emits.
+func withMainStoreEmission(store beads.Store, cityPath string) beads.Store {
+	cityPath = strings.TrimSpace(cityPath)
+	if cityPath == "" {
+		return store
+	}
+	engine, policy, underPolicy := unwrapBeadPolicyStore(store)
+	if !mainStoreEmissionEngine(engine) {
+		return store
+	}
+	emitting := &emittingClassStore{Store: engine, cityPath: cityPath}
+	if !underPolicy {
+		return emitting
+	}
+	return wrapStoreWithBeadPolicies(emitting, policy.cfg)
+}
+
+// mainStoreEmissionEngine reports whether store is an engine the one-shot
+// emitter may wrap on the main store: the SQLite and native Dolt engines. They
+// run no bd hooks (the store factory refuses the native store while executable
+// bd hooks exist), so nothing else announces their writes, and the wrapper
+// forwards every capability they declare.
+func mainStoreEmissionEngine(store beads.Store) bool {
+	switch store.(type) {
+	case *beads.SQLiteStore, *beads.NativeDoltStore:
+		return true
+	default:
+		return false
+	}
+}
+
+// storeEngine strips the layers a one-shot store open puts over a bead engine —
+// the bead-policy layer and the emitting wrapper — and returns the engine, for
+// callers that compare stores by what serves them.
+func storeEngine(store beads.Store) beads.Store {
+	for {
+		if inner, _, ok := unwrapBeadPolicyStore(store); ok {
+			store = inner
+			continue
+		}
+		emitting, ok := store.(*emittingClassStore)
+		if !ok {
+			return store
+		}
+		store = emitting.Store
+	}
+}
+
 // emittingClassStore is a relocated class store that appends a bead.* event
 // after each successful mutation. The embedded Store carries the required
 // surface; every optional capability either bead engine declares is forwarded
@@ -279,11 +345,19 @@ func (s *emittingClassStore) emitUpdated(id string) {
 // carried one, so a committed close still rides bead.closed with a non-empty
 // status, and skipped otherwise.
 func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, wasClosed bool) {
+	if emission, ok := s.afterUpdateEmission(id, opts, wasClosed); ok {
+		s.emit(emission)
+	}
+}
+
+// afterUpdateEmission is emitAfterUpdate's row, for a caller that records
+// several in one journal open.
+func (s *emittingClassStore) afterUpdateEmission(id string, opts beads.UpdateOpts, wasClosed bool) (classStoreEmission, bool) {
 	bead, ok := s.snapshot(id)
 	if !ok {
 		if opts.Status == nil {
 			warnClassStoreEmit(fmt.Errorf("bead.updated skipped: %s could not be re-read after the update", id))
-			return
+			return classStoreEmission{}, false
 		}
 		bead = beads.Bead{ID: id, Status: *opts.Status, Metadata: maps.Clone(opts.Metadata)}
 	}
@@ -291,7 +365,7 @@ func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, w
 	if !wasClosed && beadStatusIsClosed(bead.Status) {
 		eventType = events.BeadClosed
 	}
-	s.emit(classStoreEmission{eventType: eventType, bead: bead})
+	return classStoreEmission{eventType: eventType, bead: bead}, true
 }
 
 // emitClosed records bead.closed for a close this store proved committed.
@@ -489,10 +563,17 @@ func (s *emittingClassStore) DepRemove(issueID, dependsOnID string) error {
 // beads package publishes for it, or with the zero value where the question is
 // a capability question and the honest answer is "no".
 
+// CreateWithStorage forwards a storage-class create. The wrapper carries the
+// method for every engine, so a caller's StorageCreateStore assertion always
+// matches it, including over the native Dolt engine, which has no such
+// capability. Over such an engine it does what that caller does for a store
+// without one (createWithStoragePolicy): the storage class rides the bead's
+// own flags through the plain create, which still emits (mc-03yxh: refusing
+// broke `gc session new` on every single-store native Dolt city).
 func (s *emittingClassStore) CreateWithStorage(bead beads.Bead, storage beads.StorageClass) (beads.Bead, error) {
 	creator, ok := s.Store.(beads.StorageCreateStore)
 	if !ok {
-		return beads.Bead{}, fmt.Errorf("creating with a storage class: %T does not support it", s.Store)
+		return s.Create(applyStorageClass(bead, storage))
 	}
 	created, err := creator.CreateWithStorage(bead, storage)
 	s.emitCreated(created, err)
@@ -650,7 +731,7 @@ func (s *emittingClassStore) Claim(id, assignee string) (beads.Bead, bool, error
 		Claim(string, string) (beads.Bead, bool, error)
 	})
 	if !ok {
-		return beads.Bead{}, false, beads.ErrConditionalWriteUnsupported
+		return beads.Bead{}, false, beads.ErrClaimUnsupported
 	}
 	bead, claimed, err := claimer.Claim(id, assignee)
 	if err == nil && claimed {
@@ -671,6 +752,18 @@ func (s *emittingClassStore) ReleaseIfCurrent(id, expectedAssignee string) (bool
 	return released, err
 }
 
+func (s *emittingClassStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (bool, error) {
+	mover, ok := s.Store.(beads.ConditionalAssigneeTransferer)
+	if !ok {
+		return false, beads.ErrConditionalTransferUnsupported
+	}
+	moved, err := mover.TransferIfCurrent(id, fromAssignee, toAssignee)
+	if err == nil && moved {
+		s.emitUpdated(id)
+	}
+	return moved, err
+}
+
 func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	deleter, ok := s.Store.(beads.BatchDeleter)
 	if !ok {
@@ -682,6 +775,27 @@ func (s *emittingClassStore) DeleteBatch(ids []string) error {
 	}
 	s.emitDeleted(snapshots)
 	return nil
+}
+
+// DepListBatch forwards the batched dep-edge read.
+//
+// It emits nothing because it writes nothing — but it has to exist, because the
+// embedded Store interface does not promote an optional capability and this
+// wrapper is what a class-routed caller holds. Without it the batch is invisible
+// and the caller silently pays a round trip per anchor (ga-50tsx).
+// ChildrenOfAny forwards the batched children read. Emission has nothing to
+// say about a read, so the answer passes through; an inner store without the
+// capability is read one exact Children per parent (beads.ChildrenOfAny).
+func (s *emittingClassStore) ChildrenOfAny(parentIDs []string, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	return beads.ChildrenOfAny(s.Store, parentIDs, opts...)
+}
+
+func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep, error) {
+	batch, ok := beads.DepListBatchFor(s.Store)
+	if !ok {
+		return nil, beads.ErrDepListBatchUnsupported
+	}
+	return batch.DepListBatch(ids)
 }
 
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {
@@ -718,6 +832,18 @@ func (s *emittingClassStore) Count(ctx context.Context, query beads.ListQuery, e
 		return 0, beads.ErrCountUnsupported
 	}
 	return counter.Count(ctx, query, excludeTypes...)
+}
+
+// GetExactBatch forwards the inner store's exact batch read. Emission has
+// nothing to say about a read, so the answer passes through. An inner store
+// without the read reports beads.ErrExactBatchGetUnsupported, and the caller
+// reads each id with Get.
+func (s *emittingClassStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	getter, ok := s.Store.(beads.ExactBatchGetter)
+	if !ok {
+		return nil, nil, beads.ErrExactBatchGetUnsupported
+	}
+	return getter.GetExactBatch(ids)
 }
 
 // ReadOnly forwards the inner store's mutation fence.
