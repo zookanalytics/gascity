@@ -66,7 +66,7 @@ func TestBdStoreCoreReadyAsksBdForBriefRows(t *testing.T) {
 	if len(ready) != 1 {
 		t.Fatalf("bd ready ran %d times, want 1: %v", len(ready), ready)
 	}
-	if want := []string{"bd", "ready", "--json", "--include-ephemeral", "--limit", "0", "--brief"}; !slices.Equal(ready[0], want) {
+	if want := []string{"bd", "ready", "--json", "--include-ephemeral", "--limit", "5000", "--brief"}; !slices.Equal(ready[0], want) {
 		t.Fatalf("bd ready argv = %v, want %v", ready[0], want)
 	}
 	if len(got) != 1 || got[0].ID != "bd-1" {

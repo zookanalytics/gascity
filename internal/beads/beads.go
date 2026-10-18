@@ -13,7 +13,9 @@
 //     columns from bd's SELECT and from its JSON. A bd older than 1.2.0
 //     refuses the flag as unknown. The store then re-reads without it and
 //     records the refusal for the scope, so later reads of that scope in the
-//     process read whole rows without trying the flag again. The wisp leg of a
+//     process read whole rows without trying the flag again. A FieldsCore
+//     ready read asks bd for one page of rows first and reads the whole ready
+//     set when that page comes back full (readyBriefOutput). The wisp leg of a
 //     TierWisps or TierBoth list runs bd query, which has no such flag, so its
 //     rows arrive whole and the store clears their text.
 //   - NativeDoltStore sets Brief on its reader-role list and ready requests,

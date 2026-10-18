@@ -3755,21 +3755,19 @@ func (s *BdStore) Children(parentID string, opts ...QueryOpt) ([]Bead, error) {
 }
 
 // Ready returns open ready beads via bd ready, including ephemeral rows for
-// wisp-aware tier modes.
+// wisp-aware tier modes. A query whose field set omits the text is read
+// through readyBriefOutput.
 func (s *BdStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	q := readyQueryFromArgs(query)
 	includeEphemeral := q.TierMode == TierBoth || q.TierMode == TierWisps
-	readyRows := func(brief bool) ([]byte, error) {
-		return s.runBDTransientRead(bdReadyArgs(q, includeEphemeral, brief)...)
-	}
 	var (
 		out []byte
 		err error
 	)
 	if q.Fields.omitsText() {
-		out, err = ReadWithBdBrief(s.dir, readyRows)
+		out, err = s.readyBriefOutput(q, includeEphemeral)
 	} else {
-		out, err = readyRows(false)
+		out, err = s.runBDTransientRead(bdReadyArgs(q, includeEphemeral, 0, false)...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("bd ready: %w", err)
@@ -3916,7 +3914,9 @@ func (s *BdStore) filterReadyByWorkOutcome(candidates []Bead) ([]Bead, error) {
 	return result, nil
 }
 
-func bdReadyArgs(q ReadyQuery, includeEphemeral, brief bool) []string {
+// bdReadyArgs spells a `bd ready` call for q that returns at most limit rows,
+// with --brief exactly when brief is set. A limit of 0 is bd's unbounded read.
+func bdReadyArgs(q ReadyQuery, includeEphemeral bool, limit int, brief bool) []string {
 	args := []string{"ready", "--json"}
 	if includeEphemeral {
 		args = append(args, "--include-ephemeral")
@@ -3924,7 +3924,7 @@ func bdReadyArgs(q ReadyQuery, includeEphemeral, brief bool) []string {
 	if q.Assignee != "" {
 		args = append(args, "--assignee", q.Assignee)
 	}
-	args = append(args, "--limit", "0")
+	args = append(args, "--limit", strconv.Itoa(limit))
 	if brief {
 		args = append(args, bdBriefFlag)
 	}

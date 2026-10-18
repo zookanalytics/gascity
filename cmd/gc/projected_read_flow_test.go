@@ -33,7 +33,7 @@ type projectedReadFlow struct {
 var projectedReadFlows = []projectedReadFlow{
 	{
 		name:     "control-dispatcher readiness scan",
-		sites:    []string{"cmd/gc.controlReadyLegReady", "cmd/gc.controlReadyScopeShellReady"},
+		sites:    []string{"cmd/gc.controlReadyLegReady", "cmd/gc.controlReadyShellRead"},
 		boundary: "cmd/gc.tryControlReadyScan",
 	},
 	{

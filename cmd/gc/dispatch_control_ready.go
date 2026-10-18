@@ -46,17 +46,12 @@ const controlReadyQueryMarkerPrefix = "BD_EXPORT_AUTO=false GC_CONTROL_TARGET="
 // controlReadyExcludeType mirrors the shell script's --exclude-type=epic.
 const controlReadyExcludeType = "epic"
 
-// controlReadyFallbackLimit bounds the single batched bd ready call issued
-// when the cache can't answer. It must be generous enough that per-candidate/
-// per-route filtering in Go (each capped at workflowServeScanLimit) is never
-// starved by an earlier truncation at the bd layer -- unlike the shell script
-// this replaces (which ran each candidate/route's own independently-capped bd
-// call), this single batched call's cap is shared across every candidate and
-// route, so it must hold a whole city's ready set even during the write
-// bursts that make the cache dirty in the first place. It costs one bd call
-// regardless of value, so err on the generous side; controlReadyFallbackReady
-// also logs if a response ever comes back exactly at this limit, so silent
-// truncation is at least observable.
+// controlReadyFallbackLimit is the row limit of the first `bd ready` page the
+// shell arm reads (controlReadyScopeShellReady). Unlike the shell script this
+// arm replaces, which gave each candidate and route its own capped call, the
+// page is shared by every candidate and route the scan filters for in Go
+// afterward. A page that comes back full may therefore have stopped short of
+// the dispatcher's own beads, so the arm then reads the whole ready set.
 const controlReadyFallbackLimit = 5000
 
 // parsedControlReadyQuery holds the values workflowServeControlReadyQueryForBeads
@@ -342,12 +337,30 @@ func mergeControlReadyLegs(legs ...[]beads.Bead) []beads.Bead {
 	return merged
 }
 
-// controlReadyScopeShellReady is the scope leg: the batched ready scan taken by
-// shelling `bd` in the scope directory. It asks bd for brief rows, because
-// evaluateControlReady reads no text, and reads whole rows from a bd that
-// refuses --brief (beads.ReadWithBdBrief).
+// controlReadyScopeShellReady is the scope leg taken by shelling `bd` in the
+// scope directory. It returns the whole ready set: the first read is one page
+// (controlReadyFallbackLimit), and a page that comes back full is replaced by
+// an unbounded read.
 func controlReadyScopeShellReady(dir string, env map[string]string, includeEphemeral bool) ([]beads.Bead, error) {
-	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, controlReadyFallbackLimit)
+	result, err := controlReadyShellRead(dir, env, includeEphemeral, controlReadyFallbackLimit)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) >= controlReadyFallbackLimit {
+		if result, err = controlReadyShellRead(dir, env, includeEphemeral, 0); err != nil {
+			return nil, err
+		}
+	}
+	beads.SortBeadsReadyOrder(result)
+	return result, nil
+}
+
+// controlReadyShellRead takes one `bd ready` read in dir, returning at most
+// limit rows. A limit of 0 is bd's unbounded read. It asks bd for brief rows,
+// because evaluateControlReady reads no text, and reads whole rows from a bd
+// that refuses --brief (beads.ReadWithBdBrief).
+func controlReadyShellRead(dir string, env map[string]string, includeEphemeral bool, limit int) ([]beads.Bead, error) {
+	query := fmt.Sprintf("bd --readonly --sandbox ready --json --exclude-type=%s --limit=%d", controlReadyExcludeType, limit)
 	if includeEphemeral {
 		query += " --include-ephemeral"
 	}
@@ -369,10 +382,6 @@ func controlReadyScopeShellReady(dir string, env map[string]string, includeEphem
 	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
 		return nil, fmt.Errorf("control-ready fallback: unexpected bd ready output: %s", trimmed)
 	}
-	if len(result) == controlReadyFallbackLimit {
-		log.Printf("control-ready fallback: bd ready for %s returned exactly the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
-	}
-	beads.SortBeadsReadyOrder(result)
 	return result, nil
 }
 
@@ -381,11 +390,12 @@ func controlReadyScopeShellReady(dir string, env map[string]string, includeEphem
 // the fallback, where the binding is read in-process instead of by shelling
 // `bd` in a directory that no longer holds the class.
 //
-// It reproduces the shell arm's three filters rather than approximating them:
+// It returns the leg's whole ready set, as the shell arm does, because
+// evaluateControlReady picks the dispatcher's own beads out of it afterward and
+// a leg cut short could hide them. It reproduces the shell arm's filters:
 // --include-ephemeral is the TierBoth/TierIssues split BdStore.Ready itself
-// applies, --exclude-type is applied in Go because ReadyQuery carries no type
-// selector, and the limit is taken after that exclusion so the batched cap means
-// the same thing on both arms.
+// applies, and --exclude-type is applied in Go because ReadyQuery carries no
+// type selector.
 //
 // The read asks for core rows (beads.FieldsCore). Nothing tryControlReadyScan
 // hands its rows to reads their text: evaluateControlReady decides on ids,
@@ -407,10 +417,6 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 			continue
 		}
 		result = append(result, bead)
-		if len(result) == controlReadyFallbackLimit {
-			log.Printf("control-ready fallback: the graph binding for %s returned at least the %d-item limit -- city-wide ready set may be truncated, some candidates/routes could see fewer beads than are actually ready", dir, controlReadyFallbackLimit)
-			break
-		}
 	}
 	beads.SortBeadsReadyOrder(result)
 	return result, nil
@@ -434,11 +440,12 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 // just closed, and it hides the control bead a worker's close just made ready
 // (ga-vnycm2.9).
 //
-// One Ready read per leg is the whole cost of a scan (ga-vnycm2.19): one
-// `bd ready` call on a bd leg, in-process on file, SQLite and native legs. Each
-// read is TierBoth, the tier the dispatcher's queue has always been drawn from
-// (the primed snapshot this replaces held ephemeral rows too), and it applies
-// the same work-outcome veto the snapshot applied.
+// One Ready read per leg is the whole cost of a scan (ga-vnycm2.19). A bd leg
+// answers it with one `bd ready` call, and a second when that call's page of
+// brief rows comes back full; file, SQLite and native legs answer it in
+// process. Each read is TierBoth, the tier the dispatcher's queue has always
+// been drawn from (the primed snapshot this replaces held ephemeral rows too),
+// and it applies the same work-outcome veto the snapshot applied.
 //
 // The legs are the SAME ledgers runControlDispatcherWithStoreAndConfig
 // dispatches against -- controlReadyLegSources applies the routing rule
