@@ -35,6 +35,7 @@ go_test(
         "starttime_portable_test.go",
         "subreaper_test.go",
         "testenv_import_test.go",
+        "vanish_darwin_test.go",
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
