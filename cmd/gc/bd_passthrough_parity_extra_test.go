@@ -98,12 +98,16 @@ func makeBundledCacheUnhealable(t *testing.T, cacheDir string) {
 // TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal pins the
 // fallback's failure path: when the cache composition rejects cannot be
 // healed, a gc bd write reports the readiness pass's own error, as the full
-// load does, not the composition error the pass was run to repair. A read
-// reads no pack cache, so the same city still answers it.
+// load does, not the composition error the pass was run to repair. A read on a
+// running city composes nothing (TestGcBdPassthroughRunsNoFullConfigLoad), so
+// the same city still answers it.
 func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
-	run := func(legacy bool, args ...string) (int, string, bdTrimCounters) {
+	run := func(legacy, runningDolt bool, args ...string) (int, string, bdTrimCounters) {
 		cityDir := newBdTrimsTestCity(t)
 		makeBundledCacheUnhealable(t, corruptBundledBdCacheMarker(t, cityDir))
+		if runningDolt {
+			writeReachableManagedDoltState(t, cityDir)
+		}
 		if legacy {
 			defer useLegacyBdPassthroughSeams()()
 		}
@@ -115,8 +119,8 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 		return code, strings.ReplaceAll(out, cityDir, "$CITY"), got
 	}
 	write := []string{"update", "demo-abc", "--status", "in_progress"}
-	legacyCode, legacyStderr, _ := run(true, write...)
-	code, stderr, got := run(false, write...)
+	legacyCode, legacyStderr, _ := run(true, false, write...)
+	code, stderr, got := run(false, false, write...)
 
 	const want = "gc bd: loading config: preparing builtin pack caches: "
 	if code != 1 || !strings.HasPrefix(stderr, want) {
@@ -132,12 +136,42 @@ func TestBdPassthroughConfigReportsAReadinessPassThatCannotHeal(t *testing.T) {
 		t.Fatalf("fallbacks = %d, passes = %d; want 1 and 1", got.fallbacks, got.passes)
 	}
 
-	readCode, readStderr, read := run(false, "show", "demo-abc")
+	readCode, readStderr, _ := run(false, true, "show", "demo-abc")
 	if readCode != 0 {
-		t.Fatalf("a read over an unhealable cache exited %d, want 0 (it reads no pack cache); stderr=%q", readCode, readStderr)
+		t.Fatalf("a read on a running city over an unhealable cache exited %d, want 0 (it reads no pack cache); stderr=%q", readCode, readStderr)
 	}
-	if read.fallbacks != 0 || read.passes != 0 {
-		t.Fatalf("a read ran fallbacks = %d, passes = %d; want 0 and 0", read.fallbacks, read.passes)
+}
+
+// TestGcBdReadHealsABundledCacheCompositionRejects pins the builtin-cache
+// self-heal on a read. A read loads only the deployment layer, but with no
+// reachable managed Dolt its env builders compose the full config, to find the
+// scopes a health check visits. That composition takes the passthrough rule
+// the read handed it: a bundled cache whose marker it rejects runs the
+// readiness pass once, which heals the cache, and the read is answered, as a
+// write would be. The rig scope reaches the same composition through the
+// city's env, and its own full load then finds the city readied.
+func TestGcBdReadHealsABundledCacheCompositionRejects(t *testing.T) {
+	for _, args := range [][]string{{"show", "demo-abc"}, {"--rig", "frontend", "show", "fe-abc"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			cityDir := newBdTrimsTestCity(t)
+			cacheDir := corruptBundledBdCacheMarker(t, cityDir)
+			before := snapBdTrimCounters()
+			var stdout, stderr bytes.Buffer
+			code := doBd(args, &stdout, &stderr)
+			got := snapBdTrimCounters().since(before)
+			if code != 0 {
+				t.Fatalf("doBd(%q) = %d over a cache the readiness pass heals; stderr=%q", args, code, stderr.String())
+			}
+			if got.fallbacks != 1 || got.passes != 1 {
+				t.Fatalf("doBd(%q) cost %+v; want one fallback and one readiness pass", args, got)
+			}
+			source, _ := builtinpacks.Source("bd")
+			repository, _ := builtinpacks.RepositoryForSource(source)
+			commit := strings.TrimPrefix(config.BundledSourcePinnedVersion(source), "sha:")
+			if err := builtinpacks.ValidateSyntheticRepo(cacheDir, repository, commit); err != nil {
+				t.Fatalf("the read did not heal the cache: %v", err)
+			}
+		})
 	}
 }
 

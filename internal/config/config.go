@@ -4975,9 +4975,9 @@ func Parse(data []byte) (*City, error) {
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
 // (conditional_writes, guarded_release, native_transport). Parse runs it on
-// its single layer and LoadWithIncludesOptions runs it again on the composed
+// its single layer and validateDeploymentLayer runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
-// keeps the two load paths from drifting when a field is added.
+// keeps the load paths from drifting when a field is added.
 func validateBeadsModes(b BeadsConfig) error {
 	if err := validateConditionalWrites(b.ConditionalWrites); err != nil {
 		return err

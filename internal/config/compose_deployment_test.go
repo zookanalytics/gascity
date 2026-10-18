@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -206,36 +207,158 @@ func TestLoadDeploymentReadsNoPack(t *testing.T) {
 	}
 }
 
-// TestLoadDeploymentRefusesInvalidDeploymentConfig pins that skipping packs
-// skips no check on the layers LoadDeployment does compose.
-func TestLoadDeploymentRefusesInvalidDeploymentConfig(t *testing.T) {
+// TestLoadDeploymentChecksWhatTheFullLoadChecks pins that the deployment layer
+// is checked exactly as the full composition checks it. Each config is invalid
+// only in a field the deployment layer composes: both loaders refuse it with
+// the same error, or both accept it and report the same warning. Every warning
+// the deployment load reports, the full load reports too.
+func TestLoadDeploymentChecksWhatTheFullLoadChecks(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	const schema2Pack = "[pack]\nname = \"demo\"\nschema = 2\n"
+	const monitor = "[[rigs]]\nname = \"frontend\"\n\n[[github.pr_monitor]]\nname = \"main\"\nowner = \"acme\"\nrepo = \"app\"\n" +
+		"base_branches = [\"main\"]\nrig = \"ghost\"\nrepair_route = \"frontend/fixer\"\n"
 	for _, tc := range []struct {
-		name    string
-		city    string
-		wantErr string
+		name        string
+		files       map[string]string
+		wantErr     string // both loads fail with this in the error
+		wantWarning string // both loads succeed with this in a warning
 	}{
 		{
 			name:    "rig patch for an undeclared rig",
-			city:    "[[rigs]]\nname = \"frontend\"\n\n[[patches.rigs]]\nname = \"ghost\"\nsuspended = true\n",
+			files:   map[string]string{"city.toml": "[[rigs]]\nname = \"frontend\"\n\n[[patches.rigs]]\nname = \"ghost\"\nsuspended = true\n"},
 			wantErr: "patches.rigs[0]",
 		},
 		{
 			name:    "reserved storage binding",
-			city:    "[storage.bindings.work]\nprovider = \"sqlite-beads\"\n",
+			files:   map[string]string{"city.toml": "[storage.bindings.work]\nprovider = \"sqlite-beads\"\n"},
 			wantErr: "storage.bindings.work is reserved",
 		},
 		{
+			name: "storage class naming no binding",
+			files: map[string]string{"city.toml": "[storage.classes]\nwork = \"work\"\ngraph = \"infra\"\nsessions = \"work\"\n" +
+				"messaging = \"work\"\norders = \"work\"\nnudges = \"work\"\n"},
+			wantErr: "storage.classes.graph references undefined binding \"infra\"",
+		},
+		{
 			name:    "negative dolt limit",
-			city:    "[dolt]\nmax_connections = -1\n",
+			files:   map[string]string{"city.toml": "[dolt]\nmax_connections = -1\n"},
 			wantErr: "max_connections must not be negative",
+		},
+		{
+			name:    "negative dolt stop timeout",
+			files:   map[string]string{"city.toml": "[daemon]\ndolt_stop_timeout = \"-5s\"\n"},
+			wantErr: "dolt_stop_timeout must not be negative",
+		},
+		{
+			name:    "bead policy storage the bd compatibility mode cannot keep",
+			files:   map[string]string{"city.toml": "[beads.policies.workflow]\nstorage = \"no_history\"\n"},
+			wantErr: "[beads.policies.workflow] storage = \"no_history\" is not bd-1.0.4-compatible",
+		},
+		{
+			name:    "bead retention that is not positive",
+			files:   map[string]string{"city.toml": "[beads.policies.session]\ndelete_after_close = \"0s\"\n"},
+			wantErr: "delete_after_close must be a positive duration",
+		},
+		{
+			name:    "beads mode a fragment sets out of its enum",
+			files:   map[string]string{"city.toml": "include = [\"frag.toml\"]\n", "frag.toml": "[beads]\nnative_transport = \"bogus\"\n"},
+			wantErr: "beads.native_transport: invalid mode \"bogus\"",
+		},
+		{
+			name:    "GitHub PR monitor on an undeclared rig",
+			files:   map[string]string{"city.toml": monitor},
+			wantErr: "rig \"ghost\" is not declared",
+		},
+		{
+			name:    "schema-2 city with a rig path in city.toml",
+			files:   map[string]string{"pack.toml": schema2Pack, "city.toml": "[[rigs]]\nname = \"frontend\"\npath = \"/srv/frontend\"\n"},
+			wantErr: "unsupported pre-1.0 rig.path for rig \"frontend\"",
+		},
+		{
+			name:    "schema-2 city with PackV1 workspace includes",
+			files:   map[string]string{"pack.toml": schema2Pack, "city.toml": "[workspace]\nincludes = [\"packs/tools\"]\n"},
+			wantErr: "unsupported PackV1 workspace.includes",
+		},
+		{
+			name: "schema-2 fragment with PackV1 workspace includes",
+			files: map[string]string{
+				"pack.toml": schema2Pack,
+				"city.toml": "include = [\"frag.toml\"]\n",
+				"frag.toml": "[workspace]\nincludes = [\"packs/tools\"]\n",
+			},
+			wantErr: "fragment \"frag.toml\": PackV1 config surfaces are no longer supported",
+		},
+		{
+			name:    "city pack.toml that does not parse",
+			files:   map[string]string{"pack.toml": "[pack\n", "city.toml": "[[rigs]]\nname = \"frontend\"\n"},
+			wantErr: "parsing city pack.toml",
+		},
+		{
+			name:        "duration that does not parse",
+			files:       map[string]string{"city.toml": "[daemon]\npatrol_interval = \"5mins\"\n"},
+			wantWarning: "[daemon] patrol_interval = \"5mins\" is not a valid duration",
+		},
+		{
+			name:        "rig session sleep that does not parse",
+			files:       map[string]string{"city.toml": "[[rigs]]\nname = \"frontend\"\n\n[rigs.session_sleep]\nnoninteractive = \"later\"\n"},
+			wantWarning: "rig \"frontend\" [session_sleep] noninteractive = \"later\"",
+		},
+		{
+			name:        "events rotation that deletes recent archives",
+			files:       map[string]string{"city.toml": "[events.rotation]\narchive_retain_age = \"1h\"\n"},
+			wantWarning: "archive_retain_age=1h may delete recent archives",
+		},
+		{
+			name:        "proxied idle timeout that does not parse",
+			files:       map[string]string{"city.toml": "[beads]\nproxied_idle_timeout = \"soon\"\n"},
+			wantWarning: "[beads] proxied_idle_timeout",
+		},
+		{
+			name:        "deprecated workspace field",
+			files:       map[string]string{"city.toml": "[workspace]\nstart_command = \"run\"\n"},
+			wantWarning: "workspace.start_command is deprecated",
+		},
+		{
+			name:        "schema-2 city with workspace identity in city.toml",
+			files:       map[string]string{"pack.toml": schema2Pack, "city.toml": "[workspace]\nname = \"demo\"\n"},
+			wantWarning: legacyWorkspaceIdentityWarningFragment,
+		},
+		{
+			name:  "GitHub PR monitor a patch moves onto a declared rig",
+			files: map[string]string{"city.toml": monitor + "\n[[patches.github_pr_monitor]]\nname = \"main\"\nrig = \"frontend\"\n"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fs := fsys.NewFake()
-			fs.Files["/city/city.toml"] = []byte(tc.city)
-			_, _, err := LoadDeployment(fs, "/city/city.toml")
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("LoadDeployment error = %v, want one containing %q", err, tc.wantErr)
+			cityTOML := filepath.Join(writeDeploymentFixture(t, t.TempDir(), tc.files), "city.toml")
+			_, fullProv, fullErr := LoadWithIncludes(fsys.OSFS{}, cityTOML)
+			_, depProv, depErr := LoadDeployment(fsys.OSFS{}, cityTOML)
+			if tc.wantErr != "" {
+				if fullErr == nil || depErr == nil {
+					t.Fatalf("full load error = %v, deployment load error = %v; want both to fail with %q", fullErr, depErr, tc.wantErr)
+				}
+				if fullErr.Error() != depErr.Error() {
+					t.Fatalf("the loaders refuse it differently:\n full       %v\n deployment %v", fullErr, depErr)
+				}
+				if !strings.Contains(depErr.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", depErr, tc.wantErr)
+				}
+				return
+			}
+			if fullErr != nil || depErr != nil {
+				t.Fatalf("full load error = %v, deployment load error = %v; want both to succeed", fullErr, depErr)
+			}
+			for _, w := range depProv.Warnings {
+				if !slices.Contains(fullProv.Warnings, w) {
+					t.Errorf("the deployment load warns %q, which the full load does not; full warnings %q", w, fullProv.Warnings)
+				}
+			}
+			if tc.wantWarning == "" {
+				return
+			}
+			for name, warnings := range map[string][]string{"full": fullProv.Warnings, "deployment": depProv.Warnings} {
+				if !slices.ContainsFunc(warnings, func(w string) bool { return strings.Contains(w, tc.wantWarning) }) {
+					t.Errorf("%s load warnings %q, want one containing %q", name, warnings, tc.wantWarning)
+				}
 			}
 		})
 	}
