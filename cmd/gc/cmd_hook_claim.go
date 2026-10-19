@@ -498,9 +498,17 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		verdict, canonical := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
 		if verdict != hookAdoptionRefused {
-			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
+			if restamped, adopt := restampHookAdoption(bead, canonical.Assignee, verdict, *opts, *ops, dir, stderr); adopt {
+				// The step renders from the canonical bead, because the row can
+				// lag an edit made after the claim. An unverified adoption has
+				// no readback, so it renders the row it adopts on.
+				step := bead
+				if verdict == hookAdoptionOwned {
+					step = canonical
+				}
+				result.StepReminder = hookClaimStepReminder(step, result.BeadID)
 				bead = restamped
 				result.Assignee = restamped.Assignee
 				// minted=false: adoption returns work this session already owned.
@@ -861,6 +869,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if result.Assignee == "" {
 			result.Assignee = claimActor
 		}
+		result.StepReminder = hookClaimStepReminder(claimed, result.BeadID)
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
@@ -1114,27 +1123,28 @@ const (
 // lifecycle record", and failing closed here would idle every seat behind one
 // store hiccup, the same trade the F-D probe makes for the same reason.
 //
-// On hookAdoptionOwned it also returns the canonical assignee spelling, which
-// may differ from the work query's (cached) row.
-func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string) {
+// On hookAdoptionOwned it also returns the canonical bead, whose assignee
+// spelling and step text may differ from the work query's (cached) row. Every
+// other verdict returns the zero bead.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, beads.Bead) {
 	beadID := strings.TrimSpace(bead.ID)
 	if beadID == "" || ops.ReadWorkMeta == nil {
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, beads.Bead{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, beads.Bead{}
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
-		return hookAdoptionRefused, ""
+		return hookAdoptionRefused, beads.Bead{}
 	}
-	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+	return hookAdoptionOwned, canonical
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy
@@ -1276,7 +1286,6 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
-	result.StepReminder = hookClaimStepReminder(bead)
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
@@ -1327,35 +1336,47 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	return 0
 }
 
-// hookClaimStepReminder renders the claimed bead as the step its work result
-// carries. A session that wakes holding a claim has no memory of making it, so
-// the reply to the claim has to say what the work is. The reminder is rendered
-// from the bead the result names, never from a step resolved off the session's
-// identity, so it cannot describe a bead other than bead_id, and it costs no
-// store read: every tier hands this function the full bead. It goes through
-// formatWispStepReminder, the renderer behind the step gc nudge and
-// gc prime --hook inject, so a session reads the same text on every channel. A
-// bead with no description renders nothing; it carries no instruction beyond
-// its title, and an empty reminder leaves the result byte-identical to one
-// without the field.
-func hookClaimStepReminder(bead beads.Bead) string {
-	if strings.TrimSpace(bead.Description) == "" {
+// hookClaimStepReminder renders the step a held claim stands for, which the
+// existing_assignment and ready_assignment results carry: a session handed a
+// claim it has no memory of making learns what the work is from the reply to
+// its claim. The claimed tier carries none, because the session minted that
+// claim on the same call. The step is rendered from bead under beadID, the id
+// the result names, through formatWispStepReminder, the renderer behind the
+// step gc nudge and gc prime --hook inject. It renders nothing for a bead with
+// neither a title nor a description, or for a bead whose work runs as other
+// beads (hookClaimStepRunsElsewhere), and then the result is the identifiers
+// alone.
+func hookClaimStepReminder(bead beads.Bead, beadID string) string {
+	if hookClaimStepRunsElsewhere(bead) ||
+		(strings.TrimSpace(bead.Title) == "" && strings.TrimSpace(bead.Description) == "") {
 		return ""
 	}
+	bead.ID = beadID
 	return formatWispStepReminder(&bead)
 }
 
-// writeHookClaimResultLine writes a claim result to its consumer in one write,
-// and — unlike the plain-text path it replaces — reports whether that write
-// actually landed. The non-JSON form used to discard the error, which is
-// precisely the shape a dead tool pipe takes. The JSON form is one line. The
-// non-JSON form is the bead id alone on its first line, followed by the step
-// reminder when the result carries one.
+// hookClaimStepRunsElsewhere reports whether a claimed bead's work runs as
+// other beads, so that its own title and description are not the step to
+// continue. A molecule root's step is one of its children, which gc nudge and
+// gc prime --hook resolve to (resolveActiveWispStep). A source bead carrying a
+// molecule_id leads them to that molecule's step the same way. A graph.v2
+// workflow root's work runs as its step beads, which the hook hands out in
+// turn.
+func hookClaimStepRunsElsewhere(bead beads.Bead) bool {
+	return beads.IsMoleculeType(strings.TrimSpace(bead.Type)) ||
+		strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
+}
+
+// writeHookClaimResultLine writes the one line that carries a claim result to
+// its consumer and returns the write's error, which is how the caller learns
+// that a dead tool pipe never received the claim. The JSON form is the whole
+// result; the plain form is the bead id alone.
 func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout io.Writer) error {
 	if jsonOut {
 		return writeCLIJSONLine(stdout, result)
 	}
-	_, err := io.WriteString(stdout, result.BeadID+"\n"+result.StepReminder)
+	_, err := fmt.Fprintln(stdout, result.BeadID)
 	return err
 }
 
