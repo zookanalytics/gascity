@@ -7129,10 +7129,12 @@ type primeRigImport struct {
 	source  string
 }
 
-// primeFixtureRig is a fixture rig and the packs it imports.
+// primeFixtureRig is a fixture rig and the packs it imports. patches is TOML
+// written after the rig's imports, such as its [[rigs.patches]] tables.
 type primeFixtureRig struct {
 	name    string
 	imports []primeRigImport
+	patches string
 }
 
 // writePrimeRigCity writes a schema 2 city whose rigs each import packs
@@ -7148,6 +7150,7 @@ func writePrimeRigCity(t *testing.T, cityDir string, rigs []primeFixtureRig, fil
 		for _, imp := range r.imports {
 			fmt.Fprintf(&cityTOML, "\n[rigs.imports.%s]\nsource = %q\n", imp.binding, imp.source)
 		}
+		cityTOML.WriteString(r.patches)
 		fmt.Fprintf(&siteTOML, "\n[[rig]]\nname = %q\npath = \"./%s\"\n", r.name, r.name)
 		all[r.name+"/.keep"] = ""
 	}
@@ -7235,6 +7238,27 @@ func TestDoPrimeBareNameSharedByPacksBoundToOneNameIsAmbiguous(t *testing.T) {
 	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/tk.polecat, beta/tk.polecat; use a qualified name`)
 	requirePrimeRenders(t, "alpha/tk.polecat", "pack a polecat\n")
 	requirePrimeRenders(t, "beta/tk.polecat", "pack b polecat\n")
+}
+
+func TestDoPrimeBareNameSharedByACopyPatchedToAnotherTemplateIsAmbiguous(t *testing.T) {
+	// A rig patch that points its rig's copy of a pack agent at another prompt
+	// template makes that copy a different agent from the other rigs' copies.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	tk := []primeRigImport{{binding: "tk", source: "./packs/tk"}}
+	files := primeRigPackFiles("packs/tk", "tk", "polecat", "tk polecat\n")
+	files["prompts/beta-polecat.md"] = "beta polecat\n"
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: tk},
+		{name: "beta", imports: tk, patches: "\n[[rigs.patches]]\nagent = \"polecat\"\nprompt_template = \"prompts/beta-polecat.md\"\n"},
+	}, files)
+	requireAgentsNamed(t, dir, "polecat", "alpha/tk.polecat", "beta/tk.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "alpha/tk.polecat", "tk polecat\n")
+	requirePrimeRenders(t, "beta/tk.polecat", "beta polecat\n")
+	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/tk.polecat, beta/tk.polecat; use a qualified name`)
 }
 
 // writePrimeInlineRigCity writes a city with rigs alpha and beta whose

@@ -3493,11 +3493,12 @@ import brings in: the city's agent for the current rig when run inside a
 rig directory, then one the city defines with no dir. Failing those, the
 name picks the one agent that has it. The copies of one declared agent
 count as one agent: a pack agent's copy in each rig that imports the pack,
-and its copy under each binding name the pack is imported with. Agents
-declared separately, such as two [[agent]] tables, are different agents
-even when they share a prompt template. When different agents share the
-name, it picks none of them: gc prime warns and outputs the default
-prompt. Use a qualified name to pick one, for example
+and its copy under each binding name the pack is imported with. A copy
+that a patch or override points at another prompt template is a
+different agent. So are agents declared separately, such as two
+[[agent]] tables, even when they share a prompt template. When different
+agents share the name, it picks none of them: gc prime warns and outputs
+the default prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to

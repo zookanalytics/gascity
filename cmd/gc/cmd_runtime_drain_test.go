@@ -2271,8 +2271,9 @@ func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
 			Declaration:    "/packs/gastown/agents/polecat",
 		}
 	}
-	overridden := copyOf("tk", "beta")
-	overridden.PromptTemplate = "/city/prompts/beta-polecat.template.md"
+	reconfigured := copyOf("tk", "beta")
+	reconfigured.Env = map[string]string{"MODE": "beta"}
+	reconfigured.AppendFragments = []string{"beta-notes"}
 	for _, tc := range []struct {
 		name    string
 		matches []config.Agent
@@ -2281,8 +2282,9 @@ func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
 		{"a copy in each rig", []config.Agent{copyOf("tk", "alpha"), copyOf("tk", "beta")}, "alpha/tk.polecat"},
 		{"a copy under each binding name", []config.Agent{copyOf("gastown", "alpha"), copyOf("gt", "beta")}, "alpha/gastown.polecat"},
 		{"a city-scoped copy before rig copies", []config.Agent{copyOf("gastown", "alpha"), copyOf("gastown", "")}, "gastown.polecat"},
-		// A patch or override that changes one copy leaves it a copy.
-		{"a copy a rig override changed", []config.Agent{copyOf("tk", "alpha"), overridden}, "alpha/tk.polecat"},
+		// A patch or override that changes a copy's env or fragments leaves it
+		// a copy.
+		{"a copy an override gave its own env and fragments", []config.Agent{copyOf("tk", "alpha"), reconfigured}, "alpha/tk.polecat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ok, names := primeAgentFromMatches(tc.matches)
@@ -2312,6 +2314,8 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 	inlineDog := func(dir, declaration string) config.Agent {
 		return config.Agent{Name: "dog", Dir: dir, PromptTemplate: "prompts/dog.template.md", Declaration: declaration}
 	}
+	retemplated := packDog("tk", "beta", "/packs/tk")
+	retemplated.PromptTemplate = "/city/prompts/beta-dog.template.md"
 	for _, tc := range []struct {
 		name      string
 		matches   []config.Agent
@@ -2345,6 +2349,13 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 			wantNames: []string{"alpha/dog", "beta/dog"},
 		},
 		{
+			// A copy that a patch or override points at another prompt
+			// template is a different agent from the other copies.
+			name:      "a copy an override points at another prompt template",
+			matches:   []config.Agent{packDog("tk", "alpha", "/packs/tk"), retemplated},
+			wantNames: []string{"alpha/tk.dog", "beta/tk.dog"},
+		},
+		{
 			// One name per pack, not one per rig copy.
 			name: "two packs' rig-scoped agents in three rigs",
 			matches: []config.Agent{
@@ -2358,7 +2369,7 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ok, names := primeAgentFromMatches(tc.matches)
 			if ok {
-				t.Fatalf("primeAgentFromMatches resolved %q, want no match for agents from different declarations", a.QualifiedName())
+				t.Fatalf("primeAgentFromMatches resolved %q, want no match for different agents", a.QualifiedName())
 			}
 			if !slices.Equal(names, tc.wantNames) {
 				t.Errorf("names = %q, want %q", names, tc.wantNames)

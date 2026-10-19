@@ -85,11 +85,12 @@ import brings in: the city's agent for the current rig when run inside a
 rig directory, then one the city defines with no dir. Failing those, the
 name picks the one agent that has it. The copies of one declared agent
 count as one agent: a pack agent's copy in each rig that imports the pack,
-and its copy under each binding name the pack is imported with. Agents
-declared separately, such as two [[agent]] tables, are different agents
-even when they share a prompt template. When different agents share the
-name, it picks none of them: gc prime warns and outputs the default
-prompt. Use a qualified name to pick one, for example
+and its copy under each binding name the pack is imported with. A copy
+that a patch or override points at another prompt template is a
+different agent. So are agents declared separately, such as two
+[[agent]] tables, even when they share a prompt template. When different
+agents share the name, it picks none of them: gc prime warns and outputs
+the default prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to
@@ -1020,27 +1021,36 @@ func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	return false
 }
 
+// agentCopyKey identifies the agent a copy belongs to: the declaration the
+// copy was composed from and the prompt template it renders.
+type agentCopyKey struct {
+	declaration    string
+	promptTemplate string
+}
+
 // primeAgentFromMatches picks the agent gc prime renders for a bare name that
 // the agents in matches share. Copies of one declaration count as one agent:
 // composition gives a pack agent a copy in each rig that imports the pack and
 // one under each binding name the pack is imported with, and every copy keeps
-// the declaration it came from (config.Agent.Declaration). A patch or override
-// that changes one copy leaves it a copy. Agents declared separately are
-// different agents even when they share a prompt template, and an agent with
-// no declaration counts as its own. Each declaration is represented by its
-// copy with no dir if it has one, else by its first copy. When every match is
-// a copy of one declaration, its representative is returned. Matches from
-// more than one declaration are ambiguous: nothing is returned but the
-// qualified names of the declarations' representatives, sorted, one per
-// declaration.
+// the declaration it came from (config.Agent.Declaration). A copy that a patch
+// or override points at another prompt template is a different agent, while
+// one that changes anything else, such as its env or fragments, leaves it a
+// copy. Agents declared separately are different agents even when they share
+// a prompt template, and an agent with no declaration counts as its own. Each
+// agent is represented by its copy with no dir if it has one, else by its
+// first copy. When every match is a copy of one agent, its representative is
+// returned. Matches from more than one agent are ambiguous: nothing is
+// returned but the qualified names of the agents' representatives, sorted,
+// one per agent.
 func primeAgentFromMatches(matches []config.Agent) (config.Agent, bool, []string) {
 	var reps []config.Agent
-	repOf := make(map[string]int)
+	repOf := make(map[agentCopyKey]int)
 	for _, m := range matches {
-		i, seen := repOf[m.Declaration]
+		key := agentCopyKey{declaration: m.Declaration, promptTemplate: m.PromptTemplate}
+		i, seen := repOf[key]
 		if !seen {
 			if m.Declaration != "" {
-				repOf[m.Declaration] = len(reps)
+				repOf[key] = len(reps)
 			}
 			reps = append(reps, m)
 			continue
@@ -1060,8 +1070,8 @@ func primeAgentFromMatches(matches []config.Agent) (config.Agent, bool, []string
 	return config.Agent{}, false, names
 }
 
-// primeAmbiguity is a name gc prime tried that agents from more than one
-// declaration share, with the names that tell those declarations apart.
+// primeAmbiguity is a name gc prime tried that more than one agent shares,
+// with the names that tell those agents apart.
 type primeAmbiguity struct {
 	candidate string
 	names     []string
