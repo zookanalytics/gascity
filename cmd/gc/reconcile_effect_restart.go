@@ -190,7 +190,12 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 		out.Err = runtime.ErrRelaunchUnsupported
 		return out, nil
 	}
-	prepared, err := prepareRow(c.reads, p.w, p.row, p.tp, transcriptOf(c.reads, p.w, p.row, p.tp))
+	// One launch dir choice for the transcript probe and the respawn.
+	launch, err := launchWorkDirChoiceOf(c.reads, p.w, p.row, p.tp)
+	var prepared *preparedStart
+	if err == nil {
+		prepared, err = prepareRow(c.reads, p.w, p.row, p.tp, launch, transcriptIn(p.w, p.row, p.tp, launch.dir))
+	}
 	switch {
 	case err != nil:
 		out.Err = err

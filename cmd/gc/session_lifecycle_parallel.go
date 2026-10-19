@@ -10,7 +10,6 @@ import (
 	"maps"
 	"path/filepath"
 	"runtime/debug"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1132,8 +1131,8 @@ func prepareStartCandidateForCity(
 // launch, so a start prepared while this one is still coming up already sees
 // the session there. It is written here, where a launch follows, and not by
 // buildPreparedStart: the heal of a start whose runtime is already up
-// (recoverRunningPendingCreate) prepares again and launches nothing, so the
-// record must stay where that start wrote it.
+// (recoverRunningPendingCreate) launches nothing and reads the record as that
+// start wrote it (recordedLaunchWorkDir).
 func recordLaunchTaskWorkDir(prepared *preparedStart, store beads.Store) error {
 	if prepared == nil || store == nil || prepared.candidate.info.ID == "" {
 		return nil
@@ -1216,15 +1215,20 @@ func buildPreparedStartWithWorkDirResolver(
 	workDirResolver taskWorkDirResolver,
 	dispatchSources dispatchOptionSources,
 ) (*preparedStart, sessionpkg.Info, error) {
-	return buildPreparedStartWithTranscript(candidate, cityPath, cfg, store, workDirResolver, dispatchSources, nil)
+	return buildPreparedStartWithTranscript(candidate, cityPath, cfg, store, workDirResolver, dispatchSources, nil, nil)
 }
 
 // buildPreparedStartWithTranscript is buildPreparedStartWithWorkDirResolver
-// with the v2 start effect's transcript option (S-1): nil for legacy. When
-// set, it is the transcript state of the candidate's session_key, which the
-// effect probed, cleared and filled in its PreWake CAS (CONTRACT v5 S1), so
-// the helper neither probes, clears nor mints the key, and folds the
-// concrete-pool work_dir repair in memory only: it writes nothing.
+// with two inputs its caller read first, each nil when it did not. launch is
+// the directory the session launches in: the choice the v2 start effect's
+// probe made, or the directory a heal or adoption reads from the start it
+// completes (recordedLaunchWorkDir); nil chooses it here
+// (preparedLaunchWorkDir). transcript is the v2 start effect's transcript
+// option (S-1): nil for legacy. When set, it is the transcript state of the
+// candidate's session_key in that directory, which the effect probed, cleared
+// and filled in its PreWake CAS (CONTRACT v5 S1), so the helper neither
+// probes, clears nor mints the key, and folds the concrete-pool work_dir
+// repair in memory only: it writes nothing.
 func buildPreparedStartWithTranscript(
 	candidate startCandidate,
 	cityPath string,
@@ -1232,6 +1236,7 @@ func buildPreparedStartWithTranscript(
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
 	dispatchSources dispatchOptionSources,
+	launch *launchWorkDirChoice,
 	transcript *sessTranscriptState,
 ) (*preparedStart, sessionpkg.Info, error) {
 	tp := candidate.tp
@@ -1286,11 +1291,16 @@ func buildPreparedStartWithTranscript(
 	if _, err := repairConcretePoolTemplateWorkDirOverride(&candidate, cityPath, cfg, repairStore); err != nil {
 		return nil, candidate.info, err
 	}
-	launch := preparedLaunchWorkDir(candidate, cityPath, cfg, store, workDirResolver, preOverrideWorkDir)
-	if launch.refusal != "" {
-		log.Printf("session %s: launching in its own work dir, not %s", candidate.name(), launch.refusal)
+	var chosen launchWorkDirChoice
+	if launch != nil {
+		chosen = *launch
+	} else if chosen, err = preparedLaunchWorkDir(candidate, cityPath, cfg, store, workDirResolver, preOverrideWorkDir); err != nil {
+		return nil, candidate.info, err
 	}
-	agentCfg.WorkDir = launch.dir
+	if chosen.refusal != "" {
+		log.Printf("session %s: launching in its own work dir, not %s", candidate.name(), chosen.refusal)
+	}
+	agentCfg.WorkDir = chosen.dir
 	if err := validateConcretePoolPreparedWorkDir(candidate, cityPath, cfg, agentCfg.WorkDir); err != nil {
 		return nil, candidate.info, err
 	}
@@ -1512,7 +1522,7 @@ func buildPreparedStartWithTranscript(
 		transcriptRoots:   transcriptRoots,
 		conversationReset: conversationReset,
 		resumed:           resumed,
-		launchTaskWorkDir: launch.task,
+		launchTaskWorkDir: chosen.task,
 	}, candidate.info, nil
 }
 
@@ -1711,11 +1721,11 @@ func applySchemaOptionOverridesForLaunch(agentCfg *runtime.Config, tp *TemplateP
 }
 
 // launchWorkDirChoice is the directory a starting candidate launches in
-// (preparedLaunchWorkDir).
+// (preparedLaunchWorkDir, recordedLaunchWorkDir).
 type launchWorkDirChoice struct {
 	// dir is the launch directory.
 	dir string
-	// task is dir when dir is a task work_dir, and "" when the candidate
+	// task is the task work_dir the candidate launches in, and "" when it
 	// launches in its own work dir. A start records it on the session
 	// (launch_task_work_dir).
 	task string
@@ -1723,13 +1733,22 @@ type launchWorkDirChoice struct {
 	refusal string
 }
 
+// errTaskWorkDirUnchecked defers a start whose task work_dir could not be
+// checked against the open sessions, because they could not be listed. The
+// task work_dir may be another session's checkout and the session's own work
+// dir is not where its task is, so the start launches in neither, and a later
+// pass decides again.
+var errTaskWorkDirUnchecked = errors.New("the open sessions could not be read to check the task work_dir")
+
 // preparedLaunchWorkDir returns the directory a starting candidate launches
 // in: the task work_dir resolvePreparedTaskWorkDir finds, unless
-// preparedTaskWorkDirRefusal refuses it, then the session's recorded work dir
-// resolved against cityPath, then configuredWorkDir. Start preparation and the
-// v2 start effect's PreWake (launchWorkDirChoiceOf) both take the launch
-// directory from here, so the PreWake probes the transcript in, and records,
-// the directory the session runs in.
+// preparedTaskWorkDirRefusal refuses it, then the candidate's own work dir
+// (ownLaunchWorkDir). It returns errTaskWorkDirUnchecked, and no directory,
+// when the open sessions a task work_dir is checked against cannot be read. A
+// start that launches decides its directory here once: legacy start
+// preparation and a relaunch inside buildPreparedStartWithTranscript, and the
+// v2 start effect in its probe (launchWorkDirChoiceOf), whose choice its
+// prepare launches in.
 func preparedLaunchWorkDir(
 	candidate startCandidate,
 	cityPath string,
@@ -1737,18 +1756,41 @@ func preparedLaunchWorkDir(
 	store beads.Store,
 	workDirResolver taskWorkDirResolver,
 	configuredWorkDir string,
-) launchWorkDirChoice {
-	var choice launchWorkDirChoice
+) (launchWorkDirChoice, error) {
+	var refusal string
 	if wd := resolvePreparedTaskWorkDir(candidate, cityPath, cfg, store, workDirResolver); wd != "" {
-		if choice.refusal = preparedTaskWorkDirRefusal(candidate, cityPath, configuredWorkDir, wd, store); choice.refusal == "" {
-			return launchWorkDirChoice{dir: wd, task: wd}
+		var err error
+		if refusal, err = preparedTaskWorkDirRefusal(candidate, cityPath, configuredWorkDir, wd, store); err != nil {
+			return launchWorkDirChoice{}, err
+		}
+		if refusal == "" {
+			return launchWorkDirChoice{dir: wd, task: wd}, nil
 		}
 	}
-	choice.dir = configuredWorkDir
-	if wd := preparedStartSessionWorkDir(candidate.info); wd != "" {
-		choice.dir = resolveWorkDirAgainstCity(cityPath, wd)
+	return launchWorkDirChoice{dir: ownLaunchWorkDir(candidate.info, cityPath, configuredWorkDir), refusal: refusal}, nil
+}
+
+// recordedLaunchWorkDir is the directory a session's running incarnation was
+// launched in, as its start recorded it: the task work_dir
+// (launch_task_work_dir) resolved against cityPath, else the session's own
+// work dir (ownLaunchWorkDir). The heal of a start whose runtime is already up
+// (recoverRunningPendingCreate) and the v2 adoption (prepareAdoption) prepare
+// a runtime that is running, so they read where it runs instead of choosing
+// again, and probe the transcript it writes.
+func recordedLaunchWorkDir(info sessionpkg.Info, cityPath, configuredWorkDir string) launchWorkDirChoice {
+	if task := strings.TrimSpace(info.LaunchTaskWorkDir); task != "" {
+		return launchWorkDirChoice{dir: resolveWorkDirAgainstCity(cityPath, task), task: task}
 	}
-	return choice
+	return launchWorkDirChoice{dir: ownLaunchWorkDir(info, cityPath, configuredWorkDir)}
+}
+
+// ownLaunchWorkDir is a session's own launch directory: its recorded work dir
+// resolved against cityPath, else configuredWorkDir.
+func ownLaunchWorkDir(info sessionpkg.Info, cityPath, configuredWorkDir string) string {
+	if wd := preparedStartSessionWorkDir(info); wd != "" {
+		return resolveWorkDirAgainstCity(cityPath, wd)
+	}
+	return configuredWorkDir
 }
 
 // resolvePreparedTaskWorkDir returns the task work_dir a starting candidate
@@ -1786,20 +1828,28 @@ func resolvePreparedTaskWorkDir(
 // taskWorkDir, and returns "" when it may. Launching inside a directory another
 // open session works in makes the candidate a second writer in a checkout a
 // live agent holds, so it refuses a directory preparedTaskWorkDirOwner assigns
-// to another session. It also refuses when the session list cannot be read,
-// because nothing then shows that the directory is clear of every other
-// session.
-func preparedTaskWorkDirRefusal(candidate startCandidate, cityPath, configuredWorkDir, taskWorkDir string, store beads.Store) string {
-	snapshot, err := loadSessionBeadSnapshot(store)
-	if err != nil {
-		return fmt.Sprintf("task work_dir %q: listing sessions to find the directory's owner: %v", taskWorkDir, err)
+// to another session. It also refuses a directory that is still relative once
+// resolved against cityPath: nothing anchors it to compare with the sessions'
+// directories, and the resolvers' os.Stat read it against the controller's
+// working directory. When the open sessions cannot be listed it returns
+// errTaskWorkDirUnchecked.
+func preparedTaskWorkDirRefusal(candidate startCandidate, cityPath, configuredWorkDir, taskWorkDir string, store beads.Store) (string, error) {
+	if !filepath.IsAbs(resolveWorkDirAgainstCity(cityPath, strings.TrimSpace(taskWorkDir))) {
+		return fmt.Sprintf("task work_dir %q: it is relative, and no city path anchors it", taskWorkDir), nil
 	}
-	ownDirs := append([]string{configuredWorkDir}, sessionOwnWorkDirs(candidate.info)...)
-	owner, ownerDir, found := preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidate.info.ID, ownDirs, snapshot.OpenInfos())
+	var open []sessionpkg.Info
+	if store != nil {
+		listed, err := sessionFrontDoor(store).ListAll(sessionpkg.ListAllOptions{})
+		if err != nil {
+			return "", fmt.Errorf("%w: task work_dir %q: %w", errTaskWorkDirUnchecked, taskWorkDir, err)
+		}
+		open = listed
+	}
+	owner, ownerDir, found := preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidate.info.ID, configuredWorkDir, open)
 	if !found {
-		return ""
+		return "", nil
 	}
-	return fmt.Sprintf("task work_dir %q: it is inside %q, where session %s works", taskWorkDir, ownerDir, owner.ID)
+	return fmt.Sprintf("task work_dir %q: it is inside %q, where session %s works", taskWorkDir, ownerDir, owner.ID), nil
 }
 
 // preparedTaskWorkDirOwner returns the open session, other than the launching
@@ -1814,43 +1864,41 @@ func preparedTaskWorkDirRefusal(candidate startCandidate, cityPath, configuredWo
 // step resolves to its source member's work_dir the same way. A session
 // started in such a task work_dir records it (launch_task_work_dir), so the
 // directory stays that session's while it is open, even after the session
-// that created it closes. A session directory that also contains one of the
-// candidate's own directories (ownDirs) is a shared root, such as the city or a
-// rig checkout, and makes no session an owner. The candidate's own recorded
-// task work_dir is left out of ownDirs, so a directory it was launched in
-// before cannot make the session that owns that directory read as a shared
-// root.
+// that created it closes. A session directory that also contains the
+// candidate's configured work dir is a shared root, such as the city or a rig
+// checkout, and makes no session an owner. Only the configured dir counts:
+// the candidate's recorded dirs are written by its starts and by dispatch, so
+// one that named another session's checkout would make that session read as a
+// shared root.
 //
 // Recorded directories are resolved against cityPath, and one that is still
-// relative is skipped.
-func preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidateID string, ownDirs []string, sessions []sessionpkg.Info) (sessionpkg.Info, string, bool) {
+// relative is skipped. Each distinct directory is normalized once.
+func preparedTaskWorkDirOwner(cityPath, taskWorkDir, candidateID, configuredWorkDir string, sessions []sessionpkg.Info) (sessionpkg.Info, string, bool) {
+	normalized := make(map[string]string)
 	normalize := func(dir string) string {
 		dir = resolveWorkDirAgainstCity(cityPath, strings.TrimSpace(dir))
 		if dir == "" || !filepath.IsAbs(dir) {
 			return ""
 		}
-		return pathutil.NormalizePathForCompare(dir)
+		if n, ok := normalized[dir]; ok {
+			return n
+		}
+		n := pathutil.NormalizePathForCompare(dir)
+		normalized[dir] = n
+		return n
 	}
 	target := normalize(taskWorkDir)
 	if target == "" {
 		return sessionpkg.Info{}, "", false
 	}
-	own := make([]string, 0, len(ownDirs))
-	for _, dir := range ownDirs {
-		if normalized := normalize(dir); normalized != "" {
-			own = append(own, normalized)
-		}
-	}
+	configured := normalize(configuredWorkDir)
 	for _, info := range sessions {
-		if info.ID == candidateID {
+		if info.ID == candidateID || info.Closed {
 			continue
 		}
 		for _, recorded := range sessionRecordedWorktreeDirs(info) {
 			dir := normalize(recorded)
-			if dir == "" || !pathAtOrUnder(dir, target) {
-				continue
-			}
-			if slices.ContainsFunc(own, func(ownDir string) bool { return pathAtOrUnder(dir, ownDir) }) {
+			if dir == "" || !pathAtOrUnder(dir, target) || pathAtOrUnder(dir, configured) {
 				continue
 			}
 			return info, dir, true
@@ -3679,13 +3727,18 @@ func recoverRunningPendingCreate(
 		defer release()
 		lease = held
 	}
-	// buildPreparedStart reads template_overrides / trigger-bead env + the
+	// The prepare reads template_overrides / trigger-bead env + the
 	// start-prep metadata off the candidate's typed twin, so thread the caller's
 	// coherent infoByID snapshot in. It returns the post-mutation Info even on error:
 	// any persisted start-prep mutation (a stale-resume started_config_hash clear
 	// before a session-key/instance-token mint error) is folded onto it the moment it
-	// lands, so the abort residue below matches the store.
-	prepared, partialInfo, err := buildPreparedStart(startCandidate{info: info, tp: tp}, cfg, store)
+	// lands, so the abort residue below matches the store. The runtime is already
+	// up where its start launched it, so the prepare takes that directory from the
+	// start's record and probes the transcript the runtime writes; cityPath anchors
+	// a city-relative recorded dir.
+	healing := startCandidate{info: info, tp: tp}
+	launch := recordedLaunchWorkDir(info.ApplyPatch(concretePoolWorkDirRepairPatch(healing, cityPath, cfg)), cityPath, tp.WorkDir)
+	prepared, partialInfo, err := buildPreparedStartWithTranscript(healing, cityPath, cfg, store, nil, dispatchOptionSources{}, &launch, nil)
 	if err != nil {
 		if trace != nil {
 			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRebuildFailed, TraceOutcomeFailed, tp.TemplateName, tp.SessionName, traceRecordPayload{

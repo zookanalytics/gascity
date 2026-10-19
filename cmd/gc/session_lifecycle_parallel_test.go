@@ -1683,25 +1683,65 @@ func (s *sessionListFailingStore) List(query beads.ListQuery) ([]beads.Bead, err
 	return s.MemStore.List(query)
 }
 
-// TestPrepareStartCandidate_RefusesTaskWorkDirWhenSessionsUnreadable fails
-// closed: when the session list cannot be read, nothing shows the task
-// work_dir is outside every other session's checkout, so the session launches
-// in its own work dir.
-func TestPrepareStartCandidate_RefusesTaskWorkDirWhenSessionsUnreadable(t *testing.T) {
+// TestPrepareStartCandidate_DefersTaskWorkDirStartWhenSessionsUnreadable
+// fails closed without moving the session. When the open sessions cannot be
+// read, nothing shows the task work_dir is clear of every other session's
+// checkout, and the session's own work dir is not where its task is, so
+// preparation returns errTaskWorkDirUnchecked and nothing launches until a
+// later pass reads them. That holds for a worker resuming its own per-bead
+// worktree too: a merge session may have been started in it.
+func TestPrepareStartCandidate_DefersTaskWorkDirStartWhenSessionsUnreadable(t *testing.T) {
 	f := newForeignWorktreeFixture(t)
 	ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
 	if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
-	logged := captureStdLog(t)
 
-	prepared := f.prepare(t, &sessionListFailingStore{MemStore: f.store}, nil)
-	if prepared.cfg.WorkDir != f.ownHome {
-		t.Fatalf("prepared.cfg.WorkDir = %q, want the session's own work dir %q when the session list is unreadable", prepared.cfg.WorkDir, f.ownHome)
+	prepared, err := prepareStartCandidateForCity(f.candidate(t), "", "", foreignWorktreeCity(), nil, &sessionListFailingStore{MemStore: f.store}, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if !errors.Is(err, errTaskWorkDirUnchecked) || prepared != nil {
+		t.Fatalf("prepareStartCandidateForCity = (%v, %v), want no start and errTaskWorkDirUnchecked", prepared, err)
 	}
-	if got := logged.String(); !strings.Contains(got, ownWorktree) || !strings.Contains(got, "session list unavailable") {
-		t.Fatalf("log = %q, want the refused task work_dir %q and the session list error", got, ownWorktree)
+	if !strings.Contains(err.Error(), ownWorktree) || !strings.Contains(err.Error(), "session list unavailable") {
+		t.Fatalf("error %q, want the task work_dir %q and the session list error", err, ownWorktree)
+	}
+	if got := f.launchRecord(t, f.session.ID); got != "" {
+		t.Fatalf("launch_task_work_dir = %q, want nothing recorded for a start that launched nowhere", got)
+	}
+}
+
+// TestPrepareStartCandidate_RecordedDirsMakeNoSharedRoot pins that only the
+// candidate's configured work dir decides a shared root. Its worker_dir names
+// another session's per-bead worktree, as a launch into that worktree could
+// have left it, and that session's work dir contains the worktree. The
+// session's work dir is still its checkout, so the candidate is refused the
+// worktree.
+func TestPrepareStartCandidate_RecordedDirsMakeNoSharedRoot(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.SetMetadata(f.session.ID, beadmeta.WorkerDirMetadataKey, f.otherWorktree); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+}
+
+// TestPreparedTaskWorkDirRefusal_RefusesARelativeTaskWorkDir pins the guard
+// failing closed on a task work_dir no city path anchors: nothing compares it
+// with the sessions' directories, so the candidate is refused it. Anchored to
+// the city, the same work_dir is checked as usual.
+func TestPreparedTaskWorkDirRefusal_RefusesARelativeTaskWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	candidate := f.candidate(t)
+	rel, err := filepath.Rel(f.cityPath, f.otherWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusal, err := preparedTaskWorkDirRefusal(candidate, "", f.ownHome, rel, f.store); err != nil || !strings.Contains(refusal, "relative") {
+		t.Fatalf("with no city path: refusal %q (err %v), want %q refused as relative", refusal, err, rel)
+	}
+	if refusal, err := preparedTaskWorkDirRefusal(candidate, f.cityPath, f.ownHome, rel, f.store); err != nil || !strings.Contains(refusal, f.otherSession.ID) {
+		t.Fatalf("anchored to the city: refusal %q (err %v), want it refused as session %s's checkout", refusal, err, f.otherSession.ID)
 	}
 }
 
@@ -1791,10 +1831,15 @@ func TestPreparedTaskWorkDirOwner(t *testing.T) {
 			target:   filepath.Join(other, "worktrees", "fe-1"),
 			sessions: []sessionpkg.Info{startedIn("city", filepath.Join(root, "overseer"), root)},
 		},
+		{
+			name:     "a closed session",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{{ID: "builder", WorkDir: other, WorkDirCanonical: other, Closed: true}},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			owner, dir, found := preparedTaskWorkDirOwner("", tt.target, "self", []string{own}, tt.sessions)
+			owner, dir, found := preparedTaskWorkDirOwner("", tt.target, "self", own, tt.sessions)
 			if tt.wantOwner == "" {
 				if found {
 					t.Fatalf("owner = %s (dir %q), want none", owner.ID, dir)
@@ -1947,6 +1992,88 @@ func TestRecoverRunningPendingCreate_KeepsTheLaunchRecordOfTheLiveRuntime(t *tes
 	if prepared := f.prepareBuilder(t, replacement, f.otherHome); prepared.cfg.WorkDir != f.otherHome {
 		t.Fatalf("replacement: prepared.cfg.WorkDir = %q, want its own work dir %q: session %s runs in %q",
 			prepared.cfg.WorkDir, f.otherHome, f.session.ID, f.otherWorktree)
+	}
+}
+
+// healProbe stubs the transcript probe for a heal: it records each directory
+// probed and reports the keyed transcript present only in present.
+func healProbe(t *testing.T, present string) *[]string {
+	t.Helper()
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) {
+		probed = append(probed, dir)
+		return dir == present, true
+	}
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	return &probed
+}
+
+// TestRecoverRunningPendingCreate_PreparesWhereTheRuntimeWasLaunched covers
+// the heal's transcript probe. The worker's start launched it in a handed-off
+// worktree and recorded that, and then a replacement builder opened in the
+// directory holding the worktree, so a launch dir chosen now would be the
+// worker's own. The heal launches nothing: it prepares where the runtime runs,
+// as its start recorded, so the probe finds the conversation there and the
+// committed key is kept.
+func TestRecoverRunningPendingCreate_PreparesWhereTheRuntimeWasLaunched(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if started := f.prepare(t, f.store, nil); started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("handoff: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		"state": "active", "pending_create_claim": "true", "session_key": "k-1", "started_config_hash": "h-earlier",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	probed := healProbe(t, f.otherWorktree)
+
+	healing := f.candidate(t)
+	healing.tp.ResolvedProvider = claudeResumeProvider()
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if len(*probed) == 0 || (*probed)[0] != f.otherWorktree {
+		t.Fatalf("the heal probed %v, want the recorded launch dir %q", *probed, f.otherWorktree)
+	}
+	healed, err := f.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healed.Metadata["session_key"]; got != "k-1" {
+		t.Fatalf("session_key = %q after the heal, want the running conversation's k-1 kept", got)
+	}
+}
+
+// TestRecoverRunningPendingCreate_AnchorsTheWorkDirToTheCity covers the heal's
+// city path: a session work dir recorded city-relative is prepared under the
+// city, never under the controller's working directory.
+func TestRecoverRunningPendingCreate_AnchorsTheWorkDirToTheCity(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	rel, err := filepath.Rel(f.cityPath, f.ownHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		"state": "active", "pending_create_claim": "true", "session_key": "k-1",
+		beadmeta.WorkDirMetadataKey: rel, beadmeta.LegacyWorkDirMetadataKey: rel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probed := healProbe(t, f.ownHome)
+
+	healing := f.candidate(t)
+	healing.tp.ResolvedProvider = claudeResumeProvider()
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if len(*probed) == 0 || (*probed)[0] != f.ownHome {
+		t.Fatalf("the heal probed %v, want %q, the recorded %q under the city", *probed, f.ownHome, rel)
 	}
 }
 

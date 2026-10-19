@@ -539,6 +539,90 @@ func TestLaunchRecordsTheTaskWorkDirItStartsIn(t *testing.T) {
 	}
 }
 
+// sessionListReads wraps the sessions store an effect reads through: it
+// counts the lists of session rows, and fails them when fail is set.
+type sessionListReads struct {
+	beads.Store
+	fail  bool
+	lists int
+}
+
+func (s *sessionListReads) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Type == sessionBeadType {
+		s.lists++
+	}
+	if s.fail && (q.Type == sessionBeadType || q.Label == sessionBeadLabel) {
+		return nil, errors.New("session list unavailable")
+	}
+	return s.Store.List(q)
+}
+
+// taskWorkDirLaunchKit is a launch whose assigned work names taskDir, a
+// per-bead worktree inside holderDir, while the template's own work dir is a
+// directory of its own; reads wraps the sessions store the effect reads
+// through.
+func taskWorkDirLaunchKit(t *testing.T) (k *txKit, leaf *startHookLeaf, reads *sessionListReads, holderDir, taskDir string) {
+	t.Helper()
+	k, leaf = launchKit(t, "asleep", "session_key", "k-1")
+	k.p.Clock.(*fakePlannerClock).auto = true // the stale-key wait
+	holderDir, ownDir := t.TempDir(), t.TempDir()
+	taskDir = filepath.Join(holderDir, "worktrees", "fe-1")
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	row := k.p.World.Census.Rows[k.it.Key]
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: TemplateParams{TemplateName: "worker", WorkDir: ownDir}}}}
+	k.p.World.Demand = demandView{AssignedWork: []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{"work_dir": taskDir}}}}
+	reads = &sessionListReads{Store: k.cache}
+	k.p.reads.city = readOnlyStore{blindWriteRefusingStore{inner: reads}}
+	return k, leaf, reads, holderDir, taskDir
+}
+
+// Kills a launch that chooses its work dir twice (SESSION-START-018): its
+// PreWake chooses the task work_dir, probes the key's transcript there and
+// records it, and the launch runs there, though a session opens in the
+// directory holding the worktree before the launch, where a second choice
+// would refuse it. The open sessions are read once, by that one choice.
+func TestLaunchRunsInThePreWakesWorkDir(t *testing.T) {
+	k, leaf, reads, holderDir, taskDir := taskWorkDirLaunchKit(t)
+	k.on(seamAfterWrite, func() { // the PreWake's write landed; the launch Call is next
+		if _, err := k.cache.Create(beads.Bead{
+			Title:    "holder",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: map[string]string{"template": "holder", "session_name": "s-holder", "state": "active", "work_dir": holderDir},
+		}); err != nil {
+			t.Error(err)
+		}
+	})
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = append(probed, dir); return true, true }
+	s := k.runKind()
+	staleResumeKeyProbe = old
+	if s.Outcome != settledLanded || len(leaf.cfgs) != 1 || leaf.cfgs[0].WorkDir != taskDir {
+		t.Fatalf("settlement %+v, launched in %v; want landed in the PreWake's choice %q", s, leaf.cfgs, taskDir)
+	}
+	if len(probed) == 0 || probed[0] != taskDir || k.meta(session.LaunchTaskWorkDirMetadataKey) != taskDir {
+		t.Fatalf("probed %v, launch_task_work_dir %q; want both %q", probed, k.meta(session.LaunchTaskWorkDirMetadataKey), taskDir)
+	}
+	if reads.lists != 1 {
+		t.Fatalf("the launch listed the open sessions %d times, want once", reads.lists)
+	}
+}
+
+// Kills a launch that moves a session out of its task work_dir because the
+// open sessions could not be read: neither that dir nor the own dir is known
+// to be right, so the PreWake refuses, writing nothing and starting nothing,
+// and a later pass decides again.
+func TestLaunchDefersWhenTheOpenSessionsCannotBeRead(t *testing.T) {
+	k, _, reads, _, _ := taskWorkDirLaunchKit(t)
+	reads.fail = true
+	if s := k.runKind(); s.Outcome != settledRefused || s.Cause != causeWorkDirUnchecked || k.meta("generation") != "3" || len(k.starts()) != 0 {
+		t.Fatalf("settlement %+v, generation %q, starts %d; want refused %s with nothing written or started", s, k.meta("generation"), len(k.starts()), causeWorkDirUnchecked)
+	}
+}
+
 // Kills a launch under an empty session name (START-012): it refuses at
 // PreWake, writing nothing and starting nothing.
 func TestLaunchRefusesEmptySessionName(t *testing.T) {
