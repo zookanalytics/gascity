@@ -1915,6 +1915,41 @@ func TestPrepareStartCandidate_RecordsTheTaskWorkDirItLaunchesIn(t *testing.T) {
 	}
 }
 
+// TestRecoverRunningPendingCreate_KeepsTheLaunchRecordOfTheLiveRuntime covers
+// the heal of a start whose runtime came up in a handed-off worktree while its
+// commit left the claim set. A replacement builder, whose own work dir
+// contains that worktree, opened before the heal, so a start prepared now
+// would refuse the worktree. The heal launches nothing: the runtime still runs
+// where its start recorded, so the record stays, and the replacement is
+// refused the worktree.
+func TestRecoverRunningPendingCreate_KeepsTheLaunchRecordOfTheLiveRuntime(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if started := f.prepare(t, f.store, nil); started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("handoff: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"state": "active", "pending_create_claim": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	f.createInProgressBead(t, replacement.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+
+	healing := f.candidate(t)
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if got := f.launchRecord(t, f.session.ID); got != f.otherWorktree {
+		t.Fatalf("after the heal, launch_task_work_dir = %q, want %q, where the healed runtime runs", got, f.otherWorktree)
+	}
+	if prepared := f.prepareBuilder(t, replacement, f.otherHome); prepared.cfg.WorkDir != f.otherHome {
+		t.Fatalf("replacement: prepared.cfg.WorkDir = %q, want its own work dir %q: session %s runs in %q",
+			prepared.cfg.WorkDir, f.otherHome, f.session.ID, f.otherWorktree)
+	}
+}
+
 func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing.T) {
 	base := beads.NewMemStore()
 	store := &taskWorkDirLiveListCountingStore{Store: base}

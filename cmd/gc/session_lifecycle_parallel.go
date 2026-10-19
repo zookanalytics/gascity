@@ -316,9 +316,10 @@ type preparedStart struct {
 	runtimeBinding sessionpkg.MetadataPatch
 	// launchTaskWorkDir is the task work_dir the start launches the session
 	// in, "" when it launches in the session's own work dir. Legacy start
-	// preparation and the v2 PreWake record it before the launch
-	// (launch_task_work_dir), and the start commit records it where the row
-	// does not hold it yet.
+	// preparation (recordLaunchTaskWorkDir) and the v2 PreWake record it
+	// before the launch (launch_task_work_dir), a warm relaunch records it
+	// with its baseline, and the start commit records it where the row does
+	// not hold it yet.
 	launchTaskWorkDir string
 }
 
@@ -1116,7 +1117,32 @@ func prepareStartCandidateForCity(
 		undo.token = prepared.candidate.info.InstanceToken
 		prepared.preWakeUndo = undo
 	}
-	return prepared, err
+	if err != nil {
+		return prepared, err
+	}
+	if err := recordLaunchTaskWorkDir(prepared, store); err != nil {
+		return nil, err
+	}
+	return prepared, nil
+}
+
+// recordLaunchTaskWorkDir records on the session the task work_dir prepared
+// launches it in (launch_task_work_dir), and clears a recorded one for a
+// launch in the session's own work dir. A legacy start records it before the
+// launch, so a start prepared while this one is still coming up already sees
+// the session there. It is written here, where a launch follows, and not by
+// buildPreparedStart: the heal of a start whose runtime is already up
+// (recoverRunningPendingCreate) prepares again and launches nothing, so the
+// record must stay where that start wrote it.
+func recordLaunchTaskWorkDir(prepared *preparedStart, store beads.Store) error {
+	if prepared == nil || store == nil || prepared.candidate.info.ID == "" {
+		return nil
+	}
+	if err := sessionFrontDoor(store).ApplyPatch(prepared.candidate.info.ID, sessionpkg.LaunchTaskWorkDirPatch(prepared.candidate.info, prepared.launchTaskWorkDir)); err != nil {
+		return fmt.Errorf("recording the task work_dir session %s launches in: %w", prepared.candidate.name(), err)
+	}
+	prepared.candidate.info = prepared.candidate.info.ApplyPatch(sessionpkg.LaunchTaskWorkDirPatch(prepared.candidate.info, prepared.launchTaskWorkDir))
+	return nil
 }
 
 func refreshConfiguredNamedStartCandidate(
@@ -1455,16 +1481,6 @@ func buildPreparedStartWithTranscript(
 		// preWakeCommit already minted the token, so this only fires for the
 		// recoverRunningPendingCreate / direct-call paths where it was empty.
 		candidate.info = candidate.info.ApplyPatch(sessionpkg.MetadataPatch{"instance_token": instanceToken})
-	}
-	// The task work_dir the session launches in is recorded before the launch,
-	// so a start prepared while this one is still coming up already sees the
-	// session there. The v2 start effect's preparation writes nothing; its
-	// PreWake and its commit record the same choice.
-	if transcript == nil && store != nil && candidate.info.ID != "" {
-		if err := sessionFrontDoor(store).ApplyPatch(candidate.info.ID, sessionpkg.LaunchTaskWorkDirPatch(candidate.info, launch.task)); err != nil {
-			return nil, candidate.info, fmt.Errorf("recording the task work_dir session %s launches in: %w", candidate.name(), err)
-		}
-		candidate.info = candidate.info.ApplyPatch(sessionpkg.LaunchTaskWorkDirPatch(candidate.info, launch.task))
 	}
 	runtimeInfo := candidate.info
 	runtimeInfo.SessionName = candidate.name()
