@@ -79,9 +79,15 @@ When agent-name is omitted, ` + "`GC_ALIAS`" + ` is used (falling back to ` + "`
 
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
-When agents from two different packs share a bare agent-name, that name
-matches neither of them. gc prime then warns and outputs the default
-prompt. Use the qualified name to pick one, for example
+
+A bare agent-name picks an agent the city defines itself before one an
+import brings in: the city's agent for the current rig when run inside a
+rig directory, then one the city defines with no dir. Failing those, the
+name picks the one agent that has it. The copies of one pack agent count
+as one agent: a copy in each rig that imports the pack, and one under each
+binding name the pack is imported with. When agents from different packs
+share the name, it picks none of them: gc prime warns and outputs the
+default prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to
@@ -388,33 +394,32 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		agentName = primeHookAgentFromWorkDir(cfg)
 	}
 
-	// Look up agent in config. First try qualified identity resolution
-	// (handles "rig/agent" and rig-context matching), then fall back to
-	// bare template name lookup (handles "gc prime polecat" for pool agents
-	// whose config name is "polecat" regardless of dir). The bare lookup
-	// refuses a name that agents from different packs share, and that
-	// refusal is reported when no candidate resolves. Hook-driven manual
-	// sessions may have GC_ALIAS set to a user-facing alias that is not an
-	// agent name, so also try GC_TEMPLATE before falling back to the generic
-	// run-once prompt.
+	// Look up agent in config with the CLI's agent resolution (qualified
+	// names, rig context, then a bare name across every dir). A bare name
+	// that several agents share still renders when they are copies of one
+	// agent (primeAgentFromMatches), and is reported as ambiguous when no
+	// candidate resolves. Hook-driven manual sessions may have GC_ALIAS set
+	// to a user-facing alias that is not an agent name, so also try
+	// GC_TEMPLATE before falling back to the generic run-once prompt.
 	var resolvedAgents []config.Agent
-	var ambiguousErr error
+	var ambiguities []primeAmbiguity
 	agentCandidates := primeAgentCandidates(agentName, hookMode, cityPath)
 	for _, candidate := range agentCandidates {
-		a, ok := resolveAgentIdentity(cfg, candidate, currentRigContext(cfg))
-		if !ok {
-			var ambiguous []string
-			a, ok, ambiguous = findAgentByName(cfg, candidate)
-			if len(ambiguous) > 0 && ambiguousErr == nil {
-				ambiguousErr = fmt.Errorf("agent %q is ambiguous: matches %s; use a qualified name", candidate, strings.Join(ambiguous, ", "))
+		a, ok, matches := lookupAgentIdentity(cfg, candidate, currentRigContext(cfg))
+		if len(matches) > 0 {
+			var names []string
+			a, ok, names = primeAgentFromMatches(matches)
+			if !ok {
+				ambiguities = append(ambiguities, primeAmbiguity{candidate: candidate, names: names})
 			}
 		}
 		if ok {
 			resolvedAgents = append(resolvedAgents, a)
 		}
 	}
-	if len(resolvedAgents) > 0 {
-		ambiguousErr = nil
+	var ambiguousErr error
+	if len(resolvedAgents) == 0 && len(ambiguities) > 0 {
+		ambiguousErr = primeAmbiguityError(agentName, ambiguities)
 	}
 
 	// Strict preconditions: fail now, before any hook side effects or the
@@ -520,7 +525,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// When formula_v2 is enabled, all agents use graph-worker.md.
 		// Otherwise pool agents use pool-worker.template.md.
 		// Pool instances have Pool=nil after resolution, so also check the
-		// template agent via findAgentByName.
+		// template agent via isPoolInstance.
 		//
 		// The read goes through renderPrompt, not os.ReadFile, so a builtin
 		// prompt that composes a core-pack template fragment (pool-worker
@@ -1013,46 +1018,77 @@ func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	return false
 }
 
-// findAgentByName looks up an agent by its bare config name, ignoring dir.
-// This allows "gc prime polecat" to find an agent with name="polecat" even
-// when it has dir="myrig". Also handles pool instance names: "polecat-3"
-// strips the "-N" suffix to match the base pool agent "polecat". An exact
-// name match takes precedence over a pool instance match.
-//
-// Every match must be the same agent. The copies of a rig-scoped agent
-// stamped into each rig share one binding-qualified name, so they count as one
-// agent and the first copy is returned. Matches with different
-// binding-qualified names come from different packs. For those the lookup
-// reports not found and returns the matches' qualified names, sorted, so the
-// caller can say which names to use instead.
-func findAgentByName(cfg *config.City, name string) (config.Agent, bool, []string) {
-	var matches []config.Agent
-	for _, a := range cfg.Agents {
-		if a.Name == name {
-			matches = append(matches, a)
+// agentDefinitionKey identifies the definition an agent is a copy of: the
+// directory its config came from and its prompt template.
+type agentDefinitionKey struct {
+	sourceDir      string
+	promptTemplate string
+}
+
+// primeAgentFromMatches picks the agent gc prime renders for a bare name that
+// the agents in matches share. gc prime renders an agent's prompt, and copies
+// of one definition render the same prompt. A pack agent has a copy in each
+// rig that imports the pack and one under each binding name the pack is
+// imported with, and the copies share the pack directory and prompt template.
+// Each definition is represented by its copy with no dir if it has one, else
+// by its first copy. When every match is a copy of one definition, its
+// representative is returned. Matches from more than one definition are
+// ambiguous: nothing is returned but the qualified names of the definitions'
+// representatives, sorted, one per definition.
+func primeAgentFromMatches(matches []config.Agent) (config.Agent, bool, []string) {
+	var keys []agentDefinitionKey
+	chosen := make(map[agentDefinitionKey]config.Agent)
+	for _, m := range matches {
+		key := agentDefinitionKey{sourceDir: m.SourceDir, promptTemplate: m.PromptTemplate}
+		prev, seen := chosen[key]
+		if !seen {
+			keys = append(keys, key)
+		}
+		if !seen || (prev.Dir != "" && m.Dir == "") {
+			chosen[key] = m
 		}
 	}
-	if len(matches) == 0 {
-		// Pool suffix stripping: "polecat-3" → try "polecat" if it's a pool.
-		for _, a := range cfg.Agents {
-			if _, isInstance := matchPoolInstance(a, name); isInstance {
-				matches = append(matches, a)
-			}
+	if len(keys) == 1 {
+		return chosen[keys[0]], true, nil
+	}
+	names := make([]string, 0, len(keys))
+	for _, key := range keys {
+		a := chosen[key]
+		names = append(names, a.QualifiedName())
+	}
+	slices.Sort(names)
+	return config.Agent{}, false, names
+}
+
+// primeAmbiguity is a name gc prime tried that agents from more than one
+// definition share, with the names that tell those definitions apart.
+type primeAmbiguity struct {
+	candidate string
+	names     []string
+}
+
+// primeAmbiguityError reports every ambiguous name gc prime tried for
+// agentName. agentName is the name gc prime was asked for, and any other
+// candidate is the session template that hook mode tries after it.
+func primeAmbiguityError(agentName string, ambiguities []primeAmbiguity) error {
+	inputAmbiguous := false
+	for _, amb := range ambiguities {
+		if amb.candidate == agentName {
+			inputAmbiguous = true
 		}
 	}
-	if len(matches) == 0 {
-		return config.Agent{}, false, nil
+	var parts []string
+	if agentName != "" && !inputAmbiguous {
+		parts = append(parts, fmt.Sprintf("agent %q not found in city config", agentName))
 	}
-	first := matches[0].BindingQualifiedName()
-	if slices.ContainsFunc(matches[1:], func(m config.Agent) bool { return m.BindingQualifiedName() != first }) {
-		ambiguous := make([]string, 0, len(matches))
-		for _, m := range matches {
-			ambiguous = append(ambiguous, m.QualifiedName())
+	for _, amb := range ambiguities {
+		subject := fmt.Sprintf("agent %q", amb.candidate)
+		if agentName != "" && amb.candidate != agentName {
+			subject = fmt.Sprintf("its template %q", amb.candidate)
 		}
-		slices.Sort(ambiguous)
-		return config.Agent{}, false, ambiguous
+		parts = append(parts, fmt.Sprintf("%s is ambiguous: matches %s", subject, strings.Join(amb.names, ", ")))
 	}
-	return matches[0], true, nil
+	return fmt.Errorf("%s; use a qualified name", strings.Join(parts, "; "))
 }
 
 // buildPrimeContext constructs a PromptContext for gc prime. Uses GC_*

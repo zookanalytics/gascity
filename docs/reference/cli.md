@@ -3487,9 +3487,15 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
-When agents from two different packs share a bare agent-name, that name
-matches neither of them. gc prime then warns and outputs the default
-prompt. Use the qualified name to pick one, for example
+
+A bare agent-name picks an agent the city defines itself before one an
+import brings in: the city's agent for the current rig when run inside a
+rig directory, then one the city defines with no dir. Failing those, the
+name picks the one agent that has it. The copies of one pack agent count
+as one agent: a copy in each rig that imports the pack, and one under each
+binding name the pack is imported with. When agents from different packs
+share the name, it picks none of them: gc prime warns and outputs the
+default prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to

@@ -368,6 +368,15 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 // This context sensitivity is for interactive CLI input. Persisted routes such
 // as gc.routed_to must already be canonical and must not be re-resolved here.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
+	a, ok, _ := lookupAgentIdentity(cfg, input, currentRigDir)
+	return a, ok
+}
+
+// lookupAgentIdentity resolves input exactly as resolveAgentIdentity does.
+// When step 3 finds more than one agent with the bare name, it also returns
+// those agents in config order, pool members synthesized, so a caller can
+// name them in its error.
+func lookupAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool, []config.Agent) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
 	// "claude", prefer the rig-scoped agent (hello-world/claude) over the
@@ -375,12 +384,12 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	// the agent by bare name.
 	if !strings.Contains(input, "/") && currentRigDir != "" {
 		if a, ok := findAgentByQualified(cfg, currentRigDir+"/"+input); ok {
-			return a, true
+			return a, true, nil
 		}
 	}
 	// Step 2: literal match (qualified or city-scoped).
 	if a, ok := findAgentByQualified(cfg, input); ok {
-		return a, true
+		return a, true, nil
 	}
 	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
 	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
@@ -390,28 +399,33 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	// (#4843).
 	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
-			return a, true
+			return a, true, nil
 		}
 	}
 	// Step 3: unambiguous bare name — scan all agents by Name (ignoring Dir).
 	// Succeeds only when exactly one agent matches. Handles pool instances too.
-	if !strings.Contains(input, "/") {
-		var matches []config.Agent
-		for _, a := range cfg.Agents {
-			if a.Name == input {
-				matches = append(matches, a)
-				continue
-			}
-			// Pool instance: "polecat-2" matches pool "polecat" with Max >= 2 (or unlimited).
-			if a, ok := matchPoolInstance(a, input); ok {
-				matches = append(matches, a)
-			}
+	if strings.Contains(input, "/") {
+		return config.Agent{}, false, nil
+	}
+	var matches []config.Agent
+	for _, a := range cfg.Agents {
+		if a.Name == input {
+			matches = append(matches, a)
+			continue
 		}
-		if len(matches) == 1 {
-			return matches[0], true
+		// Pool instance: "polecat-2" matches pool "polecat" with Max >= 2 (or unlimited).
+		if a, ok := matchPoolInstance(a, input); ok {
+			matches = append(matches, a)
 		}
 	}
-	return config.Agent{}, false
+	switch len(matches) {
+	case 0:
+		return config.Agent{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		return config.Agent{}, false, matches
+	}
 }
 
 // resolvePoolInstance handles qualified pool instance names like "rig/polecat-2"
