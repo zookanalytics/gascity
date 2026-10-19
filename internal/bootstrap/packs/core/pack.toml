@@ -7,9 +7,10 @@
 # use Gas City, default worker prompts, core formulas such as mol-do-work
 # and mol-scoped-work, mechanical housekeeping orders (gate/orphan/wisp
 # sweeps, convoy autoclose reconciliation, branch pruning, nudge relays,
-# beads health), the check-binaries doctor check, per-provider hook
-# overlays, and the scope-local control-dispatcher lane that handles
-# formulas v2 control beads.
+# beads health), the check-binaries doctor check, the scripts-dir command
+# that formula steps call core scripts through, per-provider hook overlays,
+# and the scope-local control-dispatcher lane that handles formulas v2
+# control beads.
 #
 # Inspect this directory after `gc init` or `gc start` to see the exact
 # behavior your city received from the bundled core pack.
