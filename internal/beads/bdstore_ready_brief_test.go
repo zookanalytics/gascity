@@ -51,7 +51,7 @@ func containsReadyID(items []beads.Bead, id string) bool {
 func TestBdStoreReadyBriefReadsOnePageOfBriefRows(t *testing.T) {
 	runner := newRecordingRunner(map[string]string{briefPageCmd: readyRowsJSON(t, 2)})
 
-	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Brief: true})
+	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Fields: beads.FieldsCore})
 	if err != nil {
 		t.Fatalf("Ready(brief): %v", err)
 	}
@@ -71,7 +71,7 @@ func TestBdStoreReadyBriefRereadsTheWholeSetWhenThePageFills(t *testing.T) {
 		briefUnboundedCmd: readyRowsJSON(t, bdReadyPageRows, "bd-past-the-page"),
 	})
 
-	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Brief: true})
+	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Fields: beads.FieldsCore})
 	if err != nil {
 		t.Fatalf("Ready(brief): %v", err)
 	}
@@ -92,7 +92,7 @@ func TestBdStoreReadyBriefRereadsAPageWithACorruptRow(t *testing.T) {
 		briefUnboundedCmd: readyRowsJSON(t, bdReadyPageRows, "bd-past-the-page"),
 	})
 
-	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Brief: true})
+	got, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Fields: beads.FieldsCore})
 	if err != nil {
 		t.Fatalf("Ready(brief): %v", err)
 	}
@@ -114,7 +114,7 @@ func TestBdStoreReadyBriefFallsBackWhenBdLacksTheFlag(t *testing.T) {
 	dir := t.TempDir()
 
 	first := newRecordingRunner(map[string]string{fullRowsCmd: readyRowsJSON(t, 1)}).fail(refusedCmd, refusal)
-	got, err := beads.NewBdStore(dir, first.run).Ready(beads.ReadyQuery{Brief: true})
+	got, err := beads.NewBdStore(dir, first.run).Ready(beads.ReadyQuery{Fields: beads.FieldsCore})
 	if err != nil {
 		t.Fatalf("Ready(brief) on a bd without --brief: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestBdStoreReadyBriefFallsBackWhenBdLacksTheFlag(t *testing.T) {
 	assertSent(t, first, refusedCmd, fullRowsCmd)
 
 	second := newRecordingRunner(map[string]string{fullRowsCmd: readyRowsJSON(t, 1)}).fail(refusedCmd, refusal)
-	if _, err := beads.NewBdStore(dir, second.run).Ready(beads.ReadyQuery{Brief: true}); err != nil {
+	if _, err := beads.NewBdStore(dir, second.run).Ready(beads.ReadyQuery{Fields: beads.FieldsCore}); err != nil {
 		t.Fatalf("second store's Ready(brief): %v", err)
 	}
 	assertSent(t, second, fullRowsCmd)
@@ -143,7 +143,7 @@ func TestBdStoreReadyBriefSurfacesOtherFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			runner := newRecordingRunner(nil).fail(briefPageCmd, tc.err)
-			if _, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Brief: true}); err == nil {
+			if _, err := beads.NewBdStore(t.TempDir(), runner.run).Ready(beads.ReadyQuery{TierMode: beads.TierBoth, Fields: beads.FieldsCore}); err == nil {
 				t.Fatal("Ready(brief) error = nil, want the read's failure")
 			}
 			assertSent(t, runner, briefPageCmd)

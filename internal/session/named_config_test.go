@@ -1170,6 +1170,45 @@ func TestClosedNamedSessionBeadIndexedMatchesTheIndex(t *testing.T) {
 	}
 }
 
+// fieldSetListRecorder records the queries BuildClosedNamedSessionBeadIndex
+// sends its store.
+type fieldSetListRecorder struct {
+	beads.Store
+	queries []beads.ListQuery
+}
+
+func (r *fieldSetListRecorder) List(query beads.ListQuery) ([]beads.Bead, error) {
+	r.queries = append(r.queries, query)
+	return r.Store.List(query)
+}
+
+// The index decides on status, identity metadata and creation order and keeps
+// only bead ids, so both of its reads ask for core rows: a session bead's text
+// never crosses them, whatever its size.
+func TestBuildClosedNamedSessionBeadIndexReadsCoreRows(t *testing.T) {
+	closed := beads.Bead{
+		ID: "gc-1", Type: BeadType, Labels: []string{LabelSession}, Status: "closed",
+		Description: "a session transcript nobody here reads",
+		Metadata:    map[string]string{NamedSessionMetadataKey: "true", NamedSessionIdentityMetadata: "witness", "session_name": "rt-witness"},
+	}
+	rec := &fieldSetListRecorder{Store: beads.NewMemStoreFrom(0, []beads.Bead{closed}, nil)}
+	idx, err := BuildClosedNamedSessionBeadIndex(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.queries) != 2 {
+		t.Fatalf("index read the store %d times, want 2: %+v", len(rec.queries), rec.queries)
+	}
+	for _, q := range rec.queries {
+		if q.Fields != beads.FieldsCore {
+			t.Errorf("index read %+v, want Fields: FieldsCore", q)
+		}
+	}
+	if id, ok := idx.Find("witness"); !ok || id != closed.ID {
+		t.Fatalf("Find(witness) = %q, %t; want %q from core rows", id, ok, closed.ID)
+	}
+}
+
 // TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup is the equivalence
 // oracle for ga-0t7qjl: it proves BuildClosedNamedSessionBeadIndex(store).Find
 // agrees with FindClosedNamedSessionBeadForSessionName(store, identity, "")
@@ -1317,7 +1356,7 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 				t.Fatalf("reference lookup ok = %v, want %v (identity=%q)", refOK, tt.wantFound, tt.identity)
 			}
 
-			idxBead, idxOK := idx.Find(tt.identity)
+			idxID, idxOK := idx.Find(tt.identity)
 			if idxOK != tt.wantFound {
 				t.Fatalf("index lookup ok = %v, want %v (identity=%q)", idxOK, tt.wantFound, tt.identity)
 			}
@@ -1326,12 +1365,12 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 				return
 			}
 
-			if idxBead.ID != refBead.ID {
+			if idxID != refBead.ID {
 				t.Fatalf("index and per-identity lookup disagree: index=%q reference=%q (identity=%q)",
-					idxBead.ID, refBead.ID, tt.identity)
+					idxID, refBead.ID, tt.identity)
 			}
-			if tt.wantBeadID != "" && idxBead.ID != tt.wantBeadID {
-				t.Fatalf("index returned %q, want %q (identity=%q)", idxBead.ID, tt.wantBeadID, tt.identity)
+			if tt.wantBeadID != "" && idxID != tt.wantBeadID {
+				t.Fatalf("index returned %q, want %q (identity=%q)", idxID, tt.wantBeadID, tt.identity)
 			}
 		})
 	}
