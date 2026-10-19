@@ -130,7 +130,7 @@ esac
 # A session running this workflow never claims the work bead, so the assignee
 # cannot show it. workspace-setup records the run beside the work's tree
 # instead, as metadata.work_holder, and the core pack's work-holder.sh judges
-# that record and the worktree with metadata.branch checked out.
+# each tree this run could adopt by every holder recorded beside it.
 TREE_RC=0
 TREE_FINDING=""
 if [ "$OWNER_LIVE" = "0" ]; then
@@ -203,14 +203,16 @@ the tree it entered and `metadata.work_holder` the session that entered it.
 The core pack's `work-holder.sh`, found through `gc core scripts-dir`, judges
 that record, never where the tree sits on disk. A holder that is this session
 is a resume. A holder present in the session list parks this step the way a
-live assignee does. A holder absent from it is gone, and its tree is yours to
-adopt. The worktree with `metadata.branch` checked out, listed in the rig
-repository (`$GC_RIG_ROOT`, or `$GC_DIR` without one), is judged by the
-holder recorded beside it, on this bead or on the unclosed bead on that
-branch whose `work_dir` it is. A branch tree that no unclosed bead records, a session list, bead listing or worktree
-listing that cannot be read, and a script that cannot be run park the step
-too. Each finding names the tree, counts its uncommitted paths so the holder's
-work can be salvaged, and says what clears it.
+live assignee does. A holder absent from it is gone. The trees this run could
+adopt are this bead's `work_dir` and the worktree with `metadata.branch`
+checked out, listed in the rig repository (`$GC_RIG_ROOT`, or `$GC_DIR`
+without one). Each is judged by every holder recorded beside it, on this bead
+and on each other unclosed bead on that branch whose `work_dir` it is, so a
+tree is yours to adopt only when none of those records names a live holder
+other than you. A branch tree that no unclosed bead records, a session list,
+bead listing or worktree listing that cannot be read, and a script that cannot
+be run park the step too. Each finding names the tree, counts its uncommitted
+paths so the holder's work can be salvaged, and says what clears it.
 
 Owner liveness, not staleness, is the gate: an idle pool worker between claims
 looks identical to an abandoned one. Only a session absent from

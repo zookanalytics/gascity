@@ -21,15 +21,17 @@
 # unclaimed. A holder is matched against each listed session's id,
 # session_name and alias.
 #
-# The worktree with --branch checked out is judged by the holder recorded
-# beside it: the work bead's own when it is the bead's work_dir, otherwise the
-# holder of the unclosed bead on that branch whose work_dir it is, such as an
-# anchor or a sibling rework child. A tree with the branch checked out that no
-# unclosed bead on the branch records names no holder, so it is undecided, and
-# the finding says how to free it. The worktrees are listed in $GC_RIG_ROOT, or
-# in $GC_DIR when no rig root is set, never in the current directory, which may
-# be neither. A directory that is not a git repository has no worktrees to
-# list.
+# The trees a dispatch could adopt are the bead's work_dir and the worktree with
+# --branch checked out. Each of them on disk is judged by every holder recorded
+# beside it: the work bead's own, and that of each other unclosed bead on the
+# branch whose work_dir it is, such as an anchor or a sibling rework child. A
+# live holder in any one of those records holds the tree, whatever the others
+# record. Without --branch, the work bead's own record is the only one read. A
+# tree with the branch checked out that no unclosed bead on the branch records
+# names no holder, so it is undecided, and the finding says how to free it. The
+# worktrees are listed in $GC_RIG_ROOT, or in $GC_DIR when no rig root is set,
+# never in the current directory, which may be neither. A directory that is not
+# a git repository has no worktrees to list.
 #
 # An unreadable session list, bead listing or worktree listing is undecided.
 #
@@ -171,26 +173,45 @@ judge() {
   HELD="$HELD${HELD:+$NL}$recorder records live $name as the holder of $(describe "$tree"). If $name is not working $recorder, clear the record with gc bd update $recorder --unset-metadata work_holder."
 }
 
-# judge_branch_tree TREE — judge the tree with BRANCH checked out that is not
-# the work bead's own recorded tree.
-judge_branch_tree() {
-  local tree="$1" rows id wd holder recorded=""
-  # bd lists every bead that is not closed unless a status is named, so a
-  # parked bead's record counts too.
-  rows=$(gc bd list --metadata-field "branch=$BRANCH" --json --brief --limit 0 2>/dev/null </dev/null | scrub)
-  if ! printf '%s' "$rows" | jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1; then
-    UNDECIDED="$UNDECIDED${UNDECIDED:+$NL}$BRANCH is checked out in $(describe "$tree"), and the beads on $BRANCH could not be listed, so who holds it cannot be read. Retry once gc bd list answers."
+ROWS=""
+ROWS_READ=""
+# read_rows — list the unclosed beads on BRANCH once, as one line per bead
+# other than the work bead: its id, work_dir and work_holder. The work bead's
+# own record is the one the caller passed.
+read_rows() {
+  local listed
+  if [ -z "$ROWS_READ" ]; then
+    # bd lists every bead that is not closed unless a status is named, so a
+    # parked bead's record counts too.
+    listed=$(gc bd list --metadata-field "branch=$BRANCH" --json --brief --limit 0 2>/dev/null </dev/null | scrub)
+    if printf '%s' "$listed" | jq -e 'type == "array" and all(.[]; type == "object")' >/dev/null 2>&1; then
+      # Fields are split on US (0x1f), which the scrub removed from every
+      # value. A tab would not do: read folds a run of tabs into one
+      # separator, so an empty work_dir would shift the holder into its place.
+      ROWS=$(printf '%s' "$listed" | jq -r --arg bead "$BEAD" '.[] | select((.id // "") != $bead) | [(.id // ""), (.metadata.work_dir // ""), (.metadata.work_holder // "")] | map(tostring) | join("\u001f")')
+      ROWS_READ=ok
+    else
+      ROWS_READ=failed
+    fi
+  fi
+  [ "$ROWS_READ" = ok ]
+}
+
+# judge_tree TREE RECORDED — judge the holder each other unclosed bead on
+# BRANCH records beside TREE, a tree on disk that the work could be adopted
+# from. RECORDED is non-empty when the work bead's own record names TREE.
+judge_tree() {
+  local tree="$1" recorded="$2" id wd holder
+  if ! read_rows; then
+    UNDECIDED="$UNDECIDED${UNDECIDED:+$NL}Whether an unclosed bead on $BRANCH records a live holder of $(describe "$tree") cannot be read, because the beads on $BRANCH could not be listed. Retry once gc bd list answers."
     return 0
   fi
-  # Fields are split on US (0x1f), which the scrub removed from every value. A
-  # tab would not do: read folds a run of tabs into one separator, so an empty
-  # work_dir would shift the holder into its place.
   while IFS="$US" read -r id wd holder; do
     [ -n "$id" ] && [ -n "$wd" ] && [ "$wd" -ef "$tree" ] || continue
     recorded=1
     judge "$id" "$tree" "$holder"
   done <<EOF
-$(printf '%s' "$rows" | jq -r '.[] | [(.id // ""), (.metadata.work_dir // ""), (.metadata.work_holder // "")] | map(tostring) | join("\u001f")')
+$ROWS
 EOF
   [ -n "$recorded" ] && return 0
   UNDECIDED="$UNDECIDED${UNDECIDED:+$NL}$BRANCH is checked out in $(describe "$tree"), which no unclosed bead on $BRANCH records as its work_dir, so nothing names who is working there. If nobody is, move the branch off it with git -C $tree switch --detach."
@@ -199,19 +220,28 @@ EOF
 judge "$BEAD" "$WORK_DIR" "$HOLDER"
 
 if [ -n "$BRANCH" ]; then
+  # A tree with no directory behind it holds nothing to adopt.
+  OWN_DIR=""
+  if [ -n "$WORK_DIR" ]; then
+    OWN_DIR=$(cd "$WORK_DIR" 2>/dev/null && pwd -P) || OWN_DIR=""
+  fi
+  BRANCH_DIR=""
   REPO="${GC_RIG_ROOT:-${GC_DIR:-}}"
   if [ -n "$REPO" ] && git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1; then
     if WORKTREES=$(git -C "$REPO" worktree list --porcelain 2>/dev/null); then
       BRANCH_TREE=$(printf '%s\n' "$WORKTREES" | awk -v ref="branch refs/heads/$BRANCH" 'index($0, "worktree ") == 1 { tree = substr($0, 10) } $0 == ref { print tree; exit }')
-      # A listed tree with no directory behind it holds nothing to adopt, and
-      # the work bead's own tree was judged above.
-      if [ -n "$BRANCH_TREE" ] && BRANCH_DIR=$(cd "$BRANCH_TREE" 2>/dev/null && pwd -P) \
-        && ! { [ -n "$WORK_DIR" ] && [ "$WORK_DIR" -ef "$BRANCH_DIR" ]; }; then
-        judge_branch_tree "$BRANCH_DIR"
+      if [ -n "$BRANCH_TREE" ]; then
+        BRANCH_DIR=$(cd "$BRANCH_TREE" 2>/dev/null && pwd -P) || BRANCH_DIR=""
       fi
     else
       UNDECIDED="$UNDECIDED${UNDECIDED:+$NL}git could not list the worktrees of $REPO, so a tree with $BRANCH checked out cannot be ruled out. Retry once git -C $REPO worktree list --porcelain succeeds."
     fi
+  fi
+  if [ -n "$OWN_DIR" ]; then
+    judge_tree "$OWN_DIR" own
+  fi
+  if [ -n "$BRANCH_DIR" ] && ! { [ -n "$OWN_DIR" ] && [ "$OWN_DIR" -ef "$BRANCH_DIR" ]; }; then
+    judge_tree "$BRANCH_DIR" ""
   fi
 fi
 

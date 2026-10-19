@@ -59,12 +59,15 @@ const (
 // a live peer through in the first case and parks legitimate work in the
 // second.
 //
-// The worktree with the work's branch checked out is judged by the holder its
-// own record names, on the work bead or on the unclosed bead on that branch
-// whose work_dir it is. A branch tree no unclosed bead records names no holder,
-// so it is undecided, and the finding says how to free it. Worktrees are listed in the
-// rig repository, never in the current directory, which every case here sets
-// outside the repository.
+// The trees a dispatch could adopt, the work bead's work_dir and the worktree
+// with its branch checked out, are each judged by every holder recorded beside
+// them: the work bead's own and that of each other unclosed bead on the branch
+// whose work_dir it is. One live holder among those records holds the tree, so
+// a gone holder, or this session, recorded on the work bead never frees a tree
+// that a live sibling records. A branch tree no unclosed bead records names no
+// holder, so it is undecided, and the finding says how to free it. Worktrees
+// are listed in the rig repository, never in the current directory, which
+// every case here sets outside the repository.
 //
 // A finding may name a live session's tree, so counting its uncommitted paths
 // must not write to it: a status that takes the optional index lock refreshes
@@ -203,6 +206,67 @@ echo wip > "$ROOT/repo/worktrees/gc-anchor/wip.txt"`,
 			sessions: both,
 			rows:     `[{"id":"gc-anchor","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-anchor","work_holder":"s-gone"}}]`,
 			branch:   "polecat/gc-w",
+		},
+		{
+			name: "a live sibling holds the work's own branch tree, though the work bead's own holder is gone",
+			setup: `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/repo/worktrees/gc-w"
+echo wip > "$ROOT/repo/worktrees/gc-w/wip.txt"`,
+			sessions: both,
+			rows:     `[{"id":"gc-w","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-gone"}},{"id":"gc-rework","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			workDir:  "$ROOT/repo/worktrees/gc-w",
+			holder:   "s-gone",
+			branch:   "polecat/gc-w",
+			wantRC:   1,
+			tree:     "repo/worktrees/gc-w",
+			wantInOut: []string{
+				"gc-rework records live pool__worker-s-peer as the holder of worktree",
+				"(uncommitted paths: 1)",
+				"gc bd update gc-rework --unset-metadata work_holder",
+			},
+		},
+		{
+			name: "a live sibling holds the work's own tree with the branch checked out nowhere",
+			setup: `git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
+echo wip > "$ROOT/repo/worktrees/gc-w/wip.txt"`,
+			sessions: both,
+			rows:     `[{"id":"gc-rework","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			workDir:  "$ROOT/repo/worktrees/gc-w",
+			holder:   "s-gone",
+			branch:   "polecat/gc-w",
+			wantRC:   1,
+			tree:     "repo/worktrees/gc-w",
+			wantInOut: []string{
+				"gc-rework records live pool__worker-s-peer as the holder of worktree",
+				"(uncommitted paths: 1)",
+			},
+		},
+		{
+			name:     "this session's own record does not free a tree a live sibling records",
+			setup:    `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/repo/worktrees/gc-w"`,
+			sessions: both,
+			rows:     `[{"id":"gc-w","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-me"}},{"id":"gc-rework","status":"open","metadata":{"branch":"polecat/gc-w","work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			workDir:  "$ROOT/repo/worktrees/gc-w",
+			holder:   "s-me",
+			branch:   "polecat/gc-w",
+			wantRC:   1,
+			tree:     "repo/worktrees/gc-w",
+			wantInOut: []string{
+				"gc-rework records live pool__worker-s-peer as the holder of worktree",
+			},
+		},
+		{
+			name:     "an unreadable bead listing leaves the work's own tree undecided",
+			setup:    `git -C "$ROOT/repo" worktree add -q -b polecat/gc-w "$ROOT/repo/worktrees/gc-w"`,
+			sessions: both,
+			workDir:  "$ROOT/repo/worktrees/gc-w",
+			holder:   "s-gone",
+			branch:   "polecat/gc-w",
+			wantRC:   2,
+			tree:     "repo/worktrees/gc-w",
+			wantInOut: []string{
+				"the beads on polecat/gc-w could not be listed",
+				"Retry once gc bd list answers.",
+			},
 		},
 		{
 			name:     "the branch checked out in the main worktree is undecided, and the finding says how to free it",
