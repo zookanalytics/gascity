@@ -947,6 +947,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		SessionLive:                  []string{"live-cmd"},
 		OverlayDir:                   "overlays/test",
 		SourceDir:                    "/src",
+		Declaration:                  "/src/agents/original",
 		DefaultSlingFormula:          strPtr("mol-work"),
 		InheritedDefaultSlingFormula: strPtr("mol-pack"),
 		InjectFragments:              []string{"frag1"},

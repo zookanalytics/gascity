@@ -83,11 +83,13 @@ that template is output. Otherwise outputs a default worker prompt.
 A bare agent-name picks an agent the city defines itself before one an
 import brings in: the city's agent for the current rig when run inside a
 rig directory, then one the city defines with no dir. Failing those, the
-name picks the one agent that has it. The copies of one pack agent count
-as one agent: a copy in each rig that imports the pack, and one under each
-binding name the pack is imported with. When agents from different packs
-share the name, it picks none of them: gc prime warns and outputs the
-default prompt. Use a qualified name to pick one, for example
+name picks the one agent that has it. The copies of one declared agent
+count as one agent: a pack agent's copy in each rig that imports the pack,
+and its copy under each binding name the pack is imported with. Agents
+declared separately, such as two [[agent]] tables, are different agents
+even when they share a prompt template. When different agents share the
+name, it picks none of them: gc prime warns and outputs the default
+prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to
@@ -97,7 +99,7 @@ the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
-  - agent name shared by agents from different packs (use a qualified name)
+  - agent name shared by different agents (use a qualified name)
   - agent's prompt_template points at a file that cannot be read
 
 Without --strict, a prompt_template that cannot be read is reported on
@@ -1018,50 +1020,48 @@ func isPoolInstance(cfg *config.City, a config.Agent) bool {
 	return false
 }
 
-// agentDefinitionKey identifies the definition an agent is a copy of: the
-// directory its config came from and its prompt template.
-type agentDefinitionKey struct {
-	sourceDir      string
-	promptTemplate string
-}
-
 // primeAgentFromMatches picks the agent gc prime renders for a bare name that
-// the agents in matches share. gc prime renders an agent's prompt, and copies
-// of one definition render the same prompt. A pack agent has a copy in each
-// rig that imports the pack and one under each binding name the pack is
-// imported with, and the copies share the pack directory and prompt template.
-// Each definition is represented by its copy with no dir if it has one, else
-// by its first copy. When every match is a copy of one definition, its
-// representative is returned. Matches from more than one definition are
-// ambiguous: nothing is returned but the qualified names of the definitions'
-// representatives, sorted, one per definition.
+// the agents in matches share. Copies of one declaration count as one agent:
+// composition gives a pack agent a copy in each rig that imports the pack and
+// one under each binding name the pack is imported with, and every copy keeps
+// the declaration it came from (config.Agent.Declaration). A patch or override
+// that changes one copy leaves it a copy. Agents declared separately are
+// different agents even when they share a prompt template, and an agent with
+// no declaration counts as its own. Each declaration is represented by its
+// copy with no dir if it has one, else by its first copy. When every match is
+// a copy of one declaration, its representative is returned. Matches from
+// more than one declaration are ambiguous: nothing is returned but the
+// qualified names of the declarations' representatives, sorted, one per
+// declaration.
 func primeAgentFromMatches(matches []config.Agent) (config.Agent, bool, []string) {
-	var keys []agentDefinitionKey
-	chosen := make(map[agentDefinitionKey]config.Agent)
+	var reps []config.Agent
+	repOf := make(map[string]int)
 	for _, m := range matches {
-		key := agentDefinitionKey{sourceDir: m.SourceDir, promptTemplate: m.PromptTemplate}
-		prev, seen := chosen[key]
+		i, seen := repOf[m.Declaration]
 		if !seen {
-			keys = append(keys, key)
+			if m.Declaration != "" {
+				repOf[m.Declaration] = len(reps)
+			}
+			reps = append(reps, m)
+			continue
 		}
-		if !seen || (prev.Dir != "" && m.Dir == "") {
-			chosen[key] = m
+		if reps[i].Dir != "" && m.Dir == "" {
+			reps[i] = m
 		}
 	}
-	if len(keys) == 1 {
-		return chosen[keys[0]], true, nil
+	if len(reps) == 1 {
+		return reps[0], true, nil
 	}
-	names := make([]string, 0, len(keys))
-	for _, key := range keys {
-		a := chosen[key]
-		names = append(names, a.QualifiedName())
+	names := make([]string, 0, len(reps))
+	for i := range reps {
+		names = append(names, reps[i].QualifiedName())
 	}
 	slices.Sort(names)
 	return config.Agent{}, false, names
 }
 
 // primeAmbiguity is a name gc prime tried that agents from more than one
-// definition share, with the names that tell those definitions apart.
+// declaration share, with the names that tell those declarations apart.
 type primeAmbiguity struct {
 	candidate string
 	names     []string

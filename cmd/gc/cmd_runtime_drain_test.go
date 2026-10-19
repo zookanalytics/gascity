@@ -2259,8 +2259,8 @@ func TestLookupAgentIdentityReturnsNoMatchesUnlessABareNameIsShared(t *testing.T
 
 func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
 	// A pack agent has a copy in each rig that imports the pack and one under
-	// each binding name the pack is imported with. Every copy renders the same
-	// prompt, so the bare name still renders it.
+	// each binding name the pack is imported with. Every copy keeps the
+	// declaration it came from, so the bare name still renders it.
 	copyOf := func(binding, dir string) config.Agent {
 		return config.Agent{
 			Name:           "polecat",
@@ -2268,8 +2268,11 @@ func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
 			Dir:            dir,
 			SourceDir:      "/packs/gastown",
 			PromptTemplate: "/packs/gastown/agents/polecat/prompt.template.md",
+			Declaration:    "/packs/gastown/agents/polecat",
 		}
 	}
+	overridden := copyOf("tk", "beta")
+	overridden.PromptTemplate = "/city/prompts/beta-polecat.template.md"
 	for _, tc := range []struct {
 		name    string
 		matches []config.Agent
@@ -2278,6 +2281,8 @@ func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
 		{"a copy in each rig", []config.Agent{copyOf("tk", "alpha"), copyOf("tk", "beta")}, "alpha/tk.polecat"},
 		{"a copy under each binding name", []config.Agent{copyOf("gastown", "alpha"), copyOf("gt", "beta")}, "alpha/gastown.polecat"},
 		{"a city-scoped copy before rig copies", []config.Agent{copyOf("gastown", "alpha"), copyOf("gastown", "")}, "gastown.polecat"},
+		// A patch or override that changes one copy leaves it a copy.
+		{"a copy a rig override changed", []config.Agent{copyOf("tk", "alpha"), overridden}, "alpha/tk.polecat"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ok, names := primeAgentFromMatches(tc.matches)
@@ -2299,10 +2304,13 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 			Dir:            dir,
 			SourceDir:      packDir,
 			PromptTemplate: packDir + "/agents/dog/prompt.template.md",
+			Declaration:    packDir + "/agents/dog",
 		}
 	}
-	inlineDog := func(dir, prompt string) config.Agent {
-		return config.Agent{Name: "dog", Dir: dir, PromptTemplate: prompt}
+	// inlineDog is a dog that city.toml declares with one prompt template for
+	// every dog, so only its declaration tells it apart.
+	inlineDog := func(dir, declaration string) config.Agent {
+		return config.Agent{Name: "dog", Dir: dir, PromptTemplate: "prompts/dog.template.md", Declaration: declaration}
 	}
 	for _, tc := range []struct {
 		name      string
@@ -2322,8 +2330,18 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 			wantNames: []string{"alpha/tk.dog", "beta/tk.dog"},
 		},
 		{
-			name:      "inline rig agents with their own prompts",
-			matches:   []config.Agent{inlineDog("alpha", "prompts/alpha-dog.md"), inlineDog("beta", "prompts/beta-dog.md")},
+			// Two [[agent]] tables are two agents even with one prompt template.
+			name: "inline rig agents sharing a prompt template",
+			matches: []config.Agent{
+				inlineDog("alpha", "/city/city.toml ([[agent]] 1)"),
+				inlineDog("beta", "/city/city.toml ([[agent]] 2)"),
+			},
+			wantNames: []string{"alpha/dog", "beta/dog"},
+		},
+		{
+			// An agent built in code has no declaration to share.
+			name:      "agents with no declaration",
+			matches:   []config.Agent{inlineDog("alpha", ""), inlineDog("beta", "")},
 			wantNames: []string{"alpha/dog", "beta/dog"},
 		},
 		{
@@ -2340,7 +2358,7 @@ func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ok, names := primeAgentFromMatches(tc.matches)
 			if ok {
-				t.Fatalf("primeAgentFromMatches resolved %q, want no match for agents from different definitions", a.QualifiedName())
+				t.Fatalf("primeAgentFromMatches resolved %q, want no match for agents from different declarations", a.QualifiedName())
 			}
 			if !slices.Equal(names, tc.wantNames) {
 				t.Errorf("names = %q, want %q", names, tc.wantNames)

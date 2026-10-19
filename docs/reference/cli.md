@@ -3491,11 +3491,13 @@ that template is output. Otherwise outputs a default worker prompt.
 A bare agent-name picks an agent the city defines itself before one an
 import brings in: the city's agent for the current rig when run inside a
 rig directory, then one the city defines with no dir. Failing those, the
-name picks the one agent that has it. The copies of one pack agent count
-as one agent: a copy in each rig that imports the pack, and one under each
-binding name the pack is imported with. When agents from different packs
-share the name, it picks none of them: gc prime warns and outputs the
-default prompt. Use a qualified name to pick one, for example
+name picks the one agent that has it. The copies of one declared agent
+count as one agent: a pack agent's copy in each rig that imports the pack,
+and its copy under each binding name the pack is imported with. Agents
+declared separately, such as two [[agent]] tables, are different agents
+even when they share a prompt template. When different agents share the
+name, it picks none of them: gc prime warns and outputs the default
+prompt. Use a qualified name to pick one, for example
 gc prime gastown.mayor.
 
 Pass --strict to fail on debugging mistakes instead of falling back to
@@ -3505,7 +3507,7 @@ the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
-  - agent name shared by agents from different packs (use a qualified name)
+  - agent name shared by different agents (use a qualified name)
   - agent's prompt_template points at a file that cannot be read
 
 Without --strict, a prompt_template that cannot be read is reported on

@@ -7237,30 +7237,12 @@ func TestDoPrimeBareNameSharedByPacksBoundToOneNameIsAmbiguous(t *testing.T) {
 	requirePrimeRenders(t, "beta/tk.polecat", "pack b polecat\n")
 }
 
-func TestDoPrimeBareNameSharedByInlineRigAgentsIsAmbiguous(t *testing.T) {
-	// Agents the city declares inline in two rigs, each with its own prompt,
-	// are two agents.
-	clearGCEnv(t)
-	dir := t.TempDir()
-	writePrimeFixtureFiles(t, dir, map[string]string{
-		"city.toml": `[workspace]
-
-[[rigs]]
-name = "alpha"
-
-[[rigs]]
-name = "beta"
-
-[[agent]]
-name = "polecat"
-dir = "alpha"
-prompt_template = "prompts/alpha-polecat.md"
-
-[[agent]]
-name = "polecat"
-dir = "beta"
-prompt_template = "prompts/beta-polecat.md"
-`,
+// writePrimeInlineRigCity writes a city with rigs alpha and beta whose
+// city.toml declares agentTables, plus files.
+func writePrimeInlineRigCity(t *testing.T, cityDir, agentTables string, files map[string]string) {
+	t.Helper()
+	all := map[string]string{
+		"city.toml": "[workspace]\n\n[[rigs]]\nname = \"alpha\"\n\n[[rigs]]\nname = \"beta\"\n\n" + agentTables,
 		".gc/site.toml": `workspace_name = "test-city"
 
 [[rig]]
@@ -7271,8 +7253,30 @@ path = "./alpha"
 name = "beta"
 path = "./beta"
 `,
-		"alpha/.keep":              "",
-		"beta/.keep":               "",
+		"alpha/.keep": "",
+		"beta/.keep":  "",
+	}
+	for rel, content := range files {
+		all[rel] = content
+	}
+	writePrimeFixtureFiles(t, cityDir, all)
+}
+
+func TestDoPrimeBareNameSharedByInlineRigAgentsIsAmbiguous(t *testing.T) {
+	// Agents the city declares inline in two rigs, each with its own prompt,
+	// are two agents.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeInlineRigCity(t, dir, `[[agent]]
+name = "polecat"
+dir = "alpha"
+prompt_template = "prompts/alpha-polecat.md"
+
+[[agent]]
+name = "polecat"
+dir = "beta"
+prompt_template = "prompts/beta-polecat.md"
+`, map[string]string{
 		"prompts/alpha-polecat.md": "alpha polecat\n",
 		"prompts/beta-polecat.md":  "beta polecat\n",
 	})
@@ -7281,6 +7285,35 @@ path = "./beta"
 	t.Setenv("GC_CITY_PATH", dir)
 
 	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/polecat, beta/polecat; use a qualified name`)
+}
+
+func TestDoPrimeBareNameSharedByInlineAgentsWithOneTemplateIsAmbiguous(t *testing.T) {
+	// Two [[agent]] tables are two agents even when they share a prompt
+	// template. Each sets its own MODE, so the template renders different
+	// instructions for each.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeInlineRigCity(t, dir, `[[agent]]
+name = "worker"
+dir = "alpha"
+prompt_template = "prompts/shared.template.md"
+env = { MODE = "alpha" }
+
+[[agent]]
+name = "worker"
+dir = "beta"
+prompt_template = "prompts/shared.template.md"
+env = { MODE = "beta" }
+`, map[string]string{
+		"prompts/shared.template.md": "{{ .MODE }} worker doctrine\n",
+	})
+	requireAgentsNamed(t, dir, "worker", "alpha/worker", "beta/worker")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "alpha/worker", "alpha worker doctrine\n")
+	requirePrimeRenders(t, "beta/worker", "beta worker doctrine\n")
+	requirePrimeStrictRefuses(t, "worker", `agent "worker" is ambiguous: matches alpha/worker, beta/worker; use a qualified name`)
 }
 
 func TestDoPrimeAmbiguityNamesEachPackOnce(t *testing.T) {
