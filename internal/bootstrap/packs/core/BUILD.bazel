@@ -21,6 +21,9 @@ go_library(
         "assets/scripts/renudge-stale-human-gates.sh",
         "assets/scripts/spawn-storm-detect.sh",
         "assets/scripts/wisp-compact.sh",
+        "assets/scripts/work-holder.sh",
+        "commands/scripts-dir/command.toml",
+        "commands/scripts-dir/run.sh",
         "doctor/check-binaries/doctor.toml",
         "doctor/check-binaries/run.sh",
         "formulas/mol-do-work.toml",
@@ -87,6 +90,7 @@ go_test(
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
         "testenv_import_test.go",
+        "work_holder_script_test.go",
     ],
     data = glob(
         ["**"],

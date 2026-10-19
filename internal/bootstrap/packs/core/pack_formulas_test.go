@@ -2,7 +2,11 @@ package core
 
 import (
 	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -538,5 +542,369 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 				t.Error("load-context creates a worktree before the owner-liveness gate; the gate must run first")
 			}
 		})
+	}
+}
+
+// TestWorktreeFormulasParkOnTheWorkHolderFinding pins how the load-context
+// gate uses the work's recorded holder, by running the gate itself.
+//
+// A session running this workflow never claims the work bead, so the
+// assignee check passes a second dispatch while the first is mid-flight. The
+// gate then asks the core pack's work-holder.sh whether a live session holds
+// the work's tree, reaching it through `gc core scripts-dir`, the one path a
+// formula step has to core's scripts, and has it claim the work when none
+// does. A gate that passes has claimed the work for this session with a
+// compare-and-set on the holder it read, in the store that owns the work bead
+// whether or not a rig scopes the session. A finding parks the step the way a
+// live assignee does, and the note and the escalation carry the finding, which
+// names the holder and the tree and says what clears it; a claim another
+// dispatch made after the gate's read is such a finding. A script the gate
+// cannot reach fails closed. A live assignee parks before the tree is
+// consulted, and its release names that assignee.
+func TestWorktreeFormulasParkOnTheWorkHolderFinding(t *testing.T) {
+	for _, tool := range []string{"git", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not available; the load-context gate requires it", tool)
+		}
+	}
+	scriptsDir, err := filepath.Abs("assets/scripts")
+	if err != nil {
+		t.Fatalf("resolving the core scripts directory: %v", err)
+	}
+	const repoSetup = `set -e
+git init -q -b main "$ROOT/repo"
+echo tracked > "$ROOT/repo/tracked.txt"
+git -C "$ROOT/repo" add tracked.txt
+git -C "$ROOT/repo" -c user.name=gate -c user.email=gate@example.invalid -c commit.gpgsign=false commit -q -m init
+git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
+`
+	sessions := `{"sessions":[` + holderSessionMe + `,` + holderSessionPeer + `]}`
+	cases := []struct {
+		name string
+		bead string
+		// scriptsDir is the `gc core scripts-dir` answer; empty means it fails.
+		scriptsDir string
+		// claim is the outcome `gc beads metadata-cas` answers, swapped when
+		// empty, and reread the work bead `gc bd show gc-w` returns after it.
+		claim, reread string
+		wantHold      bool
+		// wantInMail must appear in the escalation, and its first entry in the
+		// note on the work bead too.
+		wantInMail []string
+		// wantInLog must appear in the gc log, and wantNotInLog nowhere in it.
+		wantInLog    string
+		wantNotInLog string
+		// env overrides the defaults: this session is s-me, in rig demo.
+		env []string
+	}{
+		{
+			name:       "a live recorded holder parks the step, and the escalation carries the finding",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			scriptsDir: scriptsDir,
+			wantHold:   true,
+			wantInMail: []string{
+				"gc-w records live pool__worker-s-peer as the holder of worktree",
+				"gc bd update gc-w --unset-metadata work_holder",
+				"Once each finding above is resolved: gc bd update gc-step --status=open",
+			},
+			wantNotInLog: "gc beads metadata-cas",
+		},
+		{
+			name:       "a gone recorded holder leaves the tree to adopt, and the gate claims it for this session",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-old"}}]`,
+			scriptsDir: scriptsDir,
+			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected=s-old --next=s-me --json",
+		},
+		{
+			name:       "a session no rig scopes claims rig work in the store that owns it",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w"}}]`,
+			scriptsDir: scriptsDir,
+			env:        []string{"GC_RIG="},
+			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json",
+		},
+		{
+			name:       "a dispatch that claimed the work after the gate's read parks the step on that holder",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w"}}]`,
+			scriptsDir: scriptsDir,
+			claim:      "conflict",
+			reread:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			wantHold:   true,
+			wantInMail: []string{
+				"gc-w records live pool__worker-s-peer as the holder of worktree",
+				"gc bd update gc-w --unset-metadata work_holder",
+				"Once each finding above is resolved: gc bd update gc-step --status=open",
+			},
+			wantInLog: "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json",
+		},
+		{
+			name:     "a work-holder.sh the gate cannot reach fails closed",
+			bead:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{}}]`,
+			wantHold: true,
+			wantInMail: []string{
+				"could not be run, because gc core scripts-dir did not name a directory holding it",
+			},
+		},
+		{
+			name:       "a live assignee parks before the tree is consulted, and its release names the assignee",
+			bead:       `[{"id":"gc-w","status":"in_progress","assignee":"pool__worker-s-peer","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			scriptsDir: scriptsDir,
+			wantHold:   true,
+			wantInMail: []string{
+				"assigned to pool__worker-s-peer, which is live or not provably gone",
+				"Only if pool__worker-s-peer is truly gone: gc bd update gc-step --status=open",
+			},
+			wantNotInLog: "gc core scripts-dir",
+		},
+	}
+	vars := strings.NewReplacer("{{convoy_id}}", "gc-convoy", "{{escalation_target}}", "human")
+	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
+		gate := vars.Replace(bashFenceContaining(t, formulaStep(t, readFormula(t, file), "load-context"), "OWNER_LIVE=0"))
+		if strings.Contains(gate, "{{") {
+			t.Fatalf("%s: the load-context gate carries an unsubstituted formula variable", file)
+		}
+		for _, tc := range cases {
+			t.Run(file+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				expand := strings.NewReplacer("$ROOT", root)
+				env := []string{"ROOT=" + root, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+				setupPath := filepath.Join(root, "setup.sh")
+				writeGateFixture(t, setupPath, repoSetup)
+				if out, err := runPackScript(t, setupPath, t.TempDir(), workHolderEnvKeys, env); err != nil {
+					t.Fatalf("laying out the repository: %v\n%s", err, out)
+				}
+				sessionsPath := filepath.Join(root, "sessions.json")
+				writeGateFixture(t, sessionsPath, expand.Replace(sessions))
+				scriptsAnswer := "exit 1"
+				if tc.scriptsDir != "" {
+					scriptsAnswer = "echo '" + tc.scriptsDir + "'"
+				}
+				claim := tc.claim
+				if claim == "" {
+					claim = "swapped"
+				}
+				beadPath := filepath.Join(root, "bead.json")
+				writeGateFixture(t, beadPath, expand.Replace(tc.bead))
+				rereadPath := filepath.Join(root, "reread.json")
+				reread := tc.reread
+				if reread == "" {
+					reread = tc.bead
+				}
+				writeGateFixture(t, rereadPath, expand.Replace(reread))
+				rigsPath := filepath.Join(root, "rigs.json")
+				writeGateFixture(t, rigsPath, expand.Replace(workHolderRigs))
+				binDir, logPath := fakeGCBin(t, `if [ "$1" = bd ]; then
+  shift
+  while [ "$1" = --city ] || [ "$1" = --rig ]; do shift 2; done
+  set -- bd "$@"
+fi
+case "$1 $2" in
+"core scripts-dir") `+scriptsAnswer+` ;;
+"session list") cat '`+sessionsPath+`' ;;
+"rig list") cat '`+rigsPath+`' ;;
+"bd list") echo '[]' ;;
+"hook current") echo gc-step ;;
+"beads metadata-cas") echo '{"schema_version":"1","ok":true,"bead_id":"gc-w","store_ref":"rig:demo","key":"work_holder","outcome":"`+claim+`"}' ;;
+"bd show")
+  case "$3" in
+  gc-w) cat '`+rereadPath+`' ;;
+  *) echo '[{"id":"gc-step","metadata":{"gc.root_bead_id":"gc-root"}}]' ;;
+  esac ;;
+esac
+exit 0
+`)
+				gatePath := filepath.Join(root, "gate.sh")
+				writeGateFixture(t, gatePath, `WORK_BEAD_ID=gc-w
+WORK_BEAD_JSON=$(cat '`+beadPath+`')
+`+gate+`
+echo GATE-PASSED
+`)
+				out, err := runPackScript(t, gatePath, binDir, workHolderEnvKeys, append(append(env,
+					"GC_DIR="+filepath.Join(root, "repo"),
+					"GC_RIG=demo",
+					"GC_RIG_ROOT="+filepath.Join(root, "repo"),
+					"GC_SESSION_ID=s-me",
+					"GC_SESSION_NAME=pool__worker-s-me",
+					"GC_AGENT=s-me",
+					"GC_ALIAS=",
+				), tc.env...))
+				logData, readErr := os.ReadFile(logPath)
+				if readErr != nil && !os.IsNotExist(readErr) {
+					t.Fatalf("reading the gc log: %v", readErr)
+				}
+				gcLog := string(logData)
+				parked := strings.Contains(gcLog, "gc bd update gc-step --status=blocked")
+				if tc.wantInLog != "" && !strings.Contains(gcLog, tc.wantInLog) {
+					t.Errorf("the gate did not run %q\ngc log:\n%s", tc.wantInLog, gcLog)
+				}
+				if tc.wantNotInLog != "" && strings.Contains(gcLog, tc.wantNotInLog) {
+					t.Errorf("the gate ran %q\ngc log:\n%s", tc.wantNotInLog, gcLog)
+				}
+				if !tc.wantHold {
+					if err != nil || !strings.Contains(out, "GATE-PASSED") || parked {
+						t.Fatalf("the gate held a dispatch it should pass (err=%v)\noutput:\n%s\ngc log:\n%s", err, out, gcLog)
+					}
+					if !strings.Contains(gcLog, "gc core scripts-dir") {
+						t.Errorf("the gate passed without asking work-holder.sh\ngc log:\n%s", gcLog)
+					}
+					return
+				}
+				if err == nil || strings.Contains(out, "GATE-PASSED") || !parked {
+					t.Fatalf("the gate passed a dispatch it must hold (err=%v)\noutput:\n%s\ngc log:\n%s", err, out, gcLog)
+				}
+				noteAt := strings.Index(gcLog, "gc bd update gc-w --append-notes")
+				mailAt := strings.Index(gcLog, "gc mail send")
+				if noteAt < 0 || mailAt < noteAt {
+					t.Fatalf("the gate held without noting the work bead and then escalating\ngc log:\n%s", gcLog)
+				}
+				if !strings.Contains(gcLog[noteAt:mailAt], tc.wantInMail[0]) {
+					t.Errorf("the note on the work bead does not mention %q\ngc log:\n%s", tc.wantInMail[0], gcLog)
+				}
+				for _, want := range tc.wantInMail {
+					if !strings.Contains(gcLog[mailAt:], want) {
+						t.Errorf("the escalation does not mention %q\ngc log:\n%s", want, gcLog)
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestWorktreeFormulasLetOneOfTwoRacingDispatchesThrough runs the race the
+// load-context gate's claim closes. Two dispatches of one work bead both read
+// it before either has claimed it, so both judge it free, and both reach the
+// claim at once. The store lands one compare-and-set at a time, so exactly one
+// gate passes, holding the work, and the other parks its own step on the
+// holder that won.
+func TestWorktreeFormulasLetOneOfTwoRacingDispatchesThrough(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the load-context gate requires it")
+	}
+	scriptsDir, err := filepath.Abs("assets/scripts")
+	if err != nil {
+		t.Fatalf("resolving the core scripts directory: %v", err)
+	}
+	vars := strings.NewReplacer("{{convoy_id}}", "gc-convoy", "{{escalation_target}}", "human")
+	ids := []string{"s-me", "s-peer"}
+	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
+		gate := vars.Replace(bashFenceContaining(t, formulaStep(t, readFormula(t, file), "load-context"), "OWNER_LIVE=0"))
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+			for round := range 4 {
+				root := t.TempDir()
+				writeWorkHolderClaimAnswers(t, root)
+				gatePath := filepath.Join(root, "gate.sh")
+				writeGateFixture(t, gatePath, `WORK_BEAD_ID=gc-w
+WORK_BEAD_JSON='[{"id":"gc-w","status":"open","assignee":"","metadata":{}}]'
+`+gate+`
+echo GATE-PASSED
+`)
+				binDir, logPath := fakeGCBin(t, workHolderClaimFakeGC)
+				outs := make([]string, len(ids))
+				errs := make([]error, len(ids))
+				var wg sync.WaitGroup
+				for i, id := range ids {
+					wg.Go(func() {
+						outs[i], errs[i] = runPackScript(t, gatePath, binDir, workHolderEnvKeys,
+							append(workHolderClaimEnv(root, id), "FAKE_SCRIPTS_DIR="+scriptsDir))
+					})
+				}
+				wg.Wait()
+				gcLog, _ := os.ReadFile(logPath)
+				var passed []string
+				for i, id := range ids {
+					parked := strings.Contains(string(gcLog), "gc bd update gc-step-"+id+" --status=blocked")
+					switch {
+					case errs[i] == nil && strings.Contains(outs[i], "GATE-PASSED") && !parked:
+						passed = append(passed, id)
+					case errs[i] != nil && !strings.Contains(outs[i], "GATE-PASSED") && parked:
+					default:
+						t.Errorf("round %d: %s's gate neither passed nor parked its own step (err=%v)\noutput:\n%s", round, id, errs[i], outs[i])
+					}
+				}
+				if len(passed) != 1 {
+					t.Fatalf("round %d: %d gates passed (%v), want exactly one\ngc log:\n%s", round, len(passed), passed, gcLog)
+				}
+				if stored, _ := os.ReadFile(filepath.Join(root, "holder")); string(stored) != passed[0] {
+					t.Errorf("round %d: the store holds work_holder=%q, want the gate that passed, %q", round, stored, passed[0])
+				}
+			}
+		})
+	}
+}
+
+// TestWorktreeFormulasShareOneDuplicateDispatchGate pins the two worktree
+// formulas to one gate. Its judgment of the work's tree lives in
+// work-holder.sh, and what each load-context step keeps (the assignee check,
+// the park and the escalation) must read the same in both, apart from the
+// escalation's recipient: mol-polecat-base mails {{escalation_target}} and
+// mol-scoped-work mails human.
+func TestWorktreeFormulasShareOneDuplicateDispatchGate(t *testing.T) {
+	gate := func(file string) string {
+		return bashFenceContaining(t, formulaStep(t, readFormula(t, file), "load-context"), "OWNER_LIVE=0")
+	}
+	base := strings.ReplaceAll(gate("mol-polecat-base.toml"), "gc mail send {{escalation_target}}", "gc mail send human")
+	if scoped := gate("mol-scoped-work.toml"); scoped != base {
+		t.Errorf("the load-context gates of mol-polecat-base and mol-scoped-work have drifted apart; change both together\nmol-polecat-base:\n%s\nmol-scoped-work:\n%s", base, scoped)
+	}
+}
+
+// TestWorktreeFormulasRecordTheWorkHolderBesideTheTree pins the record the
+// gate reads. workspace-setup records the tree it enters and the session that
+// entered it in one write, on every entry, so a resumed or adopted tree names
+// its current holder, and the step that removes the tree clears both. The
+// base formula's placeholder step tells a variant to do the same.
+func TestWorktreeFormulasRecordTheWorkHolderBesideTheTree(t *testing.T) {
+	scoped := readFormula(t, "mol-scoped-work.toml")
+	setup := formulaStep(t, scoped, "workspace-setup")
+	const record = `gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE" --set-metadata work_holder="${GC_SESSION_ID:-}" || exit 1`
+	enterAt := strings.Index(setup, `cd "$WORKTREE" || exit 1`)
+	if recordAt := strings.Index(setup, record); enterAt < 0 || recordAt < enterAt {
+		t.Errorf("mol-scoped-work workspace-setup must enter the tree and then record it with its holder, on a resume as well as a create: %s", record)
+	}
+	if !strings.Contains(formulaStep(t, scoped, "cleanup-worktree"), "--unset-metadata work_dir --unset-metadata work_holder") {
+		t.Error("mol-scoped-work cleanup-worktree must clear work_holder with work_dir")
+	}
+
+	commit := readFormula(t, "mol-polecat-commit.toml")
+	if !strings.Contains(formulaStep(t, commit, "workspace-setup"), `--set-metadata work_dir="$(pwd)" --set-metadata work_holder="${GC_SESSION_ID:-}"`) {
+		t.Error("mol-polecat-commit workspace-setup must record the tree and its holder in one write")
+	}
+	if !strings.Contains(formulaStep(t, commit, "commit-and-push"), "--unset-metadata work_dir --unset-metadata work_holder") {
+		t.Error("mol-polecat-commit commit-and-push must clear work_holder with work_dir")
+	}
+
+	if !strings.Contains(formulaStep(t, readFormula(t, "mol-polecat-base.toml"), "workspace-setup"), "`metadata.work_holder` (`$GC_SESSION_ID`)") {
+		t.Error("mol-polecat-base workspace-setup must tell a variant to record the session holding its tree as metadata.work_holder")
+	}
+}
+
+// bashFenceContaining returns the body of the first bash fence in text whose
+// body contains marker.
+func bashFenceContaining(t *testing.T, text, marker string) string {
+	t.Helper()
+	const open, closing = "```bash\n", "\n```"
+	rest := text
+	for {
+		start := strings.Index(rest, open)
+		if start < 0 {
+			t.Fatalf("no bash fence contains %q", marker)
+		}
+		rest = rest[start+len(open):]
+		end := strings.Index(rest, closing)
+		if end < 0 {
+			t.Fatal("unterminated bash fence")
+		}
+		if body := rest[:end]; strings.Contains(body, marker) {
+			return body
+		}
+		rest = rest[end+len(closing):]
+	}
+}
+
+func writeGateFixture(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
 	}
 }
