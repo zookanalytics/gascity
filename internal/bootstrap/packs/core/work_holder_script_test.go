@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -16,11 +17,11 @@ import (
 const workHolderScriptPath = "assets/scripts/work-holder.sh"
 
 // workHolderEnvKeys are the settings each work-holder test supplies itself. A
-// live Gas City session exports its own identity and directories, and an
+// live Gas City session exports its own identity, rig and directories, and an
 // inherited git setting would point the fixture's git at the host's
 // repositories or config.
 var workHolderEnvKeys = map[string]struct{}{
-	"GC_AGENT": {}, "GC_ALIAS": {}, "GC_DIR": {}, "GC_RIG_ROOT": {}, "GC_SESSION_ID": {}, "GC_SESSION_NAME": {},
+	"GC_AGENT": {}, "GC_ALIAS": {}, "GC_DIR": {}, "GC_RIG": {}, "GC_RIG_ROOT": {}, "GC_SESSION_ID": {}, "GC_SESSION_NAME": {},
 	"GIT_ALTERNATE_OBJECT_DIRECTORIES": {}, "GIT_COMMON_DIR": {}, "GIT_CONFIG_GLOBAL": {},
 	"GIT_CONFIG_NOSYSTEM": {}, "GIT_DIR": {}, "GIT_INDEX_FILE": {}, "GIT_OBJECT_DIRECTORY": {},
 	// An inherited GIT_OPTIONAL_LOCKS=0 keeps every status from writing the
@@ -395,6 +396,10 @@ exec bash '`+script+`' "$@"
 			if rc != tc.wantRC {
 				t.Fatalf("work-holder.sh exited %d, want %d\noutput:\n%s\ngc log:\n%s", rc, tc.wantRC, out, gcLog)
 			}
+			// Judging alone takes nothing: only --claim writes to the work bead.
+			if strings.Contains(string(gcLog), "gc beads metadata-cas") || strings.Contains(string(gcLog), "gc bd update") {
+				t.Errorf("work-holder.sh wrote to the store without --claim\ngc log:\n%s", gcLog)
+			}
 			if tc.wantRC == 0 {
 				if strings.TrimSpace(out) != "" {
 					t.Errorf("work-holder.sh reported a finding on work nothing holds:\n%s", out)
@@ -432,6 +437,342 @@ exec bash '`+script+`' "$@"
 	}
 }
 
+// workHolderClaimFakeGC is the gc the claim tests run against. Its store is one
+// file, $ROOT/holder, holding work bead gc-w's work_holder. `gc beads
+// metadata-cas` compares and sets it under a mkdir lock, so concurrent claims
+// land one at a time the way the store lands them; `gc bd show gc-w` reads it
+// back and `gc bd update` writes it plainly. FAKE_CAS makes the
+// compare-and-set answer as a store that cannot compare-and-set (unsupported),
+// as one that fails (fail), or as one whose record changes before every write
+// (conflict). It answers the rest of what the load-context gate asks of gc
+// too: FAKE_SCRIPTS_DIR is `gc core scripts-dir`, and each session's current
+// step is gc-step-<session id>.
+const workHolderClaimFakeGC = `holder="$ROOT/holder"
+case "$1 $2" in
+"core scripts-dir") [ -n "${FAKE_SCRIPTS_DIR:-}" ] || exit 1; echo "$FAKE_SCRIPTS_DIR" ;;
+"hook current") echo "gc-step-$GC_SESSION_ID" ;;
+"session list") cat "$ROOT/sessions.json" ;;
+"bd list") echo '[]' ;;
+"rig list") [ -f "$ROOT/rigs.json" ] || exit 1; cat "$ROOT/rigs.json" ;;
+"bd show")
+  case "$3" in
+  gc-w) printf '[{"id":"gc-w","status":"open","metadata":{"work_holder":"%s"}}]\n' "$(cat "$holder" 2>/dev/null)" ;;
+  *) printf '[{"id":"%s","metadata":{"gc.root_bead_id":"gc-root"}}]\n' "$3" ;;
+  esac ;;
+"bd update")
+  for arg in "$@"; do
+    case "$arg" in work_holder=*) printf '%s' "${arg#work_holder=}" > "$holder" ;; esac
+  done ;;
+"beads metadata-cas")
+  case "${FAKE_CAS:-}" in
+  unsupported)
+    echo 'gc beads metadata-cas: metadata CAS for "gc-w" key "work_holder": conditional writes unsupported' >&2
+    echo '{"schema_version":"1","ok":false,"error":{"code":"command_failed","message":"command failed; see stderr for diagnostics","exit_code":1}}'
+    exit 1 ;;
+  fail)
+    echo 'gc beads metadata-cas: opening rig:demo: dial tcp 127.0.0.1:3307: connection refused' >&2
+    exit 1 ;;
+  conflict)
+    echo '{"schema_version":"1","ok":true,"bead_id":"gc-w","store_ref":"rig:demo","key":"work_holder","outcome":"conflict"}'
+    exit 0 ;;
+  esac
+  expected=""; next=""
+  for arg in "$@"; do
+    case "$arg" in
+    --expected=*) expected="${arg#--expected=}" ;;
+    --next=*) next="${arg#--next=}" ;;
+    esac
+  done
+  until mkdir "$holder.lock" 2>/dev/null; do :; done
+  current=$(cat "$holder" 2>/dev/null)
+  if [ "$current" = "$expected" ]; then
+    printf '%s' "$next" > "$holder"
+    outcome=swapped
+  elif [ "$current" = "$next" ]; then
+    outcome=already_next
+  else
+    outcome=conflict
+  fi
+  rmdir "$holder.lock"
+  printf '{"schema_version":"1","ok":true,"bead_id":"%s","store_ref":"rig:demo","key":"work_holder","outcome":"%s"}\n' "$3" "$outcome" ;;
+esac
+exit 0
+`
+
+// workHolderClaimEnv is the environment a claim test's session runs in: the
+// fake's store under root, the session id, its session name, and rig demo.
+func workHolderClaimEnv(root, id string) []string {
+	return []string{
+		"ROOT=" + root,
+		"GC_SESSION_ID=" + id,
+		"GC_SESSION_NAME=pool__worker-" + id,
+		"GC_AGENT=" + id,
+		"GC_ALIAS=",
+		"GC_RIG=demo",
+		"GC_DIR=" + root,
+		"GC_RIG_ROOT=" + root,
+	}
+}
+
+// runWorkHolderClaim runs work-holder.sh --claim for work bead gc-w, whose
+// work_holder the caller read as holder. It returns the combined output and
+// the exit code, and an error only when the script could not be run at all.
+func runWorkHolderClaim(t *testing.T, script, binDir string, env []string, holder string) (string, int, error) {
+	t.Helper()
+	out, err := runPackScript(t, script, binDir, workHolderEnvKeys, env,
+		"--claim", "--bead", "gc-w", "--work-dir", "", "--holder", holder)
+	if err == nil {
+		return out, 0, nil
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return out, 0, err
+	}
+	return out, exitErr.ExitCode(), nil
+}
+
+// TestWorkHolderScriptClaimsTheWork pins --claim, which takes the work in the
+// step that judges it free.
+//
+// The claim records this session as the work bead's work_holder with one
+// compare-and-set whose expected value is the record the caller judged, so a
+// dispatch that judged the same record and wrote first leaves this one's
+// write to conflict. The holder a conflict finds is judged the way the
+// caller's record was: a live one holds the work, and a gone one is claimed
+// over once more. A store that cannot compare-and-set gets a read and a plain
+// write, and the script says so. A claim the store refuses for any other
+// reason is undecided, and so is a session with no identity to record or no
+// store to write it to.
+func TestWorkHolderScriptClaimsTheWork(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; work-holder.sh requires it")
+	}
+	script, err := filepath.Abs(workHolderScriptPath)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", workHolderScriptPath, err)
+	}
+	cases := []struct {
+		name string
+		// stored is the work_holder the store holds when the script starts,
+		// and holder the record the caller read and judged.
+		stored, holder string
+		// fakeCAS is the fake's FAKE_CAS mode.
+		fakeCAS string
+		// rigs is the `gc rig list --json` answer; empty means it fails.
+		rigs string
+		// env overrides the defaults: this session is s-me, in rig demo.
+		env        []string
+		wantRC     int
+		wantStored string
+		// wantInOut must appear in the output; an exit 0 with none expected
+		// must print nothing.
+		wantInOut []string
+		wantInLog []string
+		// wantNotInLog must appear nowhere in the gc log.
+		wantNotInLog string
+	}{
+		{
+			name:       "an unheld bead is claimed for this session in its rig's store",
+			wantStored: "s-me",
+			wantInLog:  []string{"gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json"},
+		},
+		{
+			name:       "a gone holder's record is claimed over",
+			stored:     "s-gone",
+			holder:     "s-gone",
+			wantStored: "s-me",
+			wantInLog:  []string{"--expected=s-gone --next=s-me"},
+		},
+		{
+			name:       "this session's own record stays this session's",
+			stored:     "s-me",
+			holder:     "s-me",
+			wantStored: "s-me",
+		},
+		{
+			name:         "a live holder is not claimed over",
+			stored:       "s-peer",
+			holder:       "s-peer",
+			wantRC:       1,
+			wantStored:   "s-peer",
+			wantInOut:    []string{"gc-w records live pool__worker-s-peer as the holder of its tree (none recorded)"},
+			wantNotInLog: "gc beads metadata-cas",
+		},
+		{
+			name:       "a live dispatch that claimed the work since the read holds it",
+			stored:     "s-peer",
+			wantRC:     1,
+			wantStored: "s-peer",
+			wantInOut: []string{
+				"gc-w records live pool__worker-s-peer as the holder of its tree (none recorded)",
+				"gc bd update gc-w --unset-metadata work_holder",
+			},
+			wantInLog: []string{"gc bd show gc-w --json"},
+		},
+		{
+			name:       "a gone dispatch's claim made since the read is claimed over",
+			stored:     "s-gone",
+			wantStored: "s-me",
+			wantInLog:  []string{"--expected=s-gone --next=s-me"},
+		},
+		{
+			name:       "a record that changes again under the claim is undecided",
+			stored:     "s-gone",
+			fakeCAS:    "conflict",
+			wantRC:     2,
+			wantStored: "s-gone",
+			wantInOut:  []string{"changed again while this dispatch claimed it"},
+		},
+		{
+			name:       "a store that cannot compare-and-set gets a read and a plain write, and says so",
+			fakeCAS:    "unsupported",
+			wantStored: "s-me",
+			wantInOut:  []string{"rig:demo cannot compare-and-set"},
+			wantInLog:  []string{"gc bd update gc-w --set-metadata work_holder=s-me"},
+		},
+		{
+			name:         "on a store that cannot compare-and-set, a live dispatch's claim since the read still holds the work",
+			stored:       "s-peer",
+			fakeCAS:      "unsupported",
+			wantRC:       1,
+			wantStored:   "s-peer",
+			wantInOut:    []string{"gc-w records live pool__worker-s-peer as the holder of its tree (none recorded)"},
+			wantNotInLog: "gc bd update",
+		},
+		{
+			name:         "a claim the store refuses for another reason is undecided",
+			fakeCAS:      "fail",
+			wantRC:       2,
+			wantInOut:    []string{"connection refused", "Retry once gc beads metadata-cas answers."},
+			wantNotInLog: "gc bd update",
+		},
+		{
+			name:         "a session with no GC_SESSION_ID has nothing to record and is undecided",
+			env:          []string{"GC_SESSION_ID="},
+			wantRC:       2,
+			wantInOut:    []string{"GC_SESSION_ID is unset"},
+			wantNotInLog: "gc beads metadata-cas",
+		},
+		{
+			name:       "a session no rig scopes claims in the city store",
+			env:        []string{"GC_RIG="},
+			rigs:       `{"schema_version":"1","city_name":"metro","rigs":[{"name":"metro","hq":true,"prefix":"gc"}]}`,
+			wantStored: "s-me",
+			wantInLog:  []string{"gc beads metadata-cas gc-w --store-ref=city:metro"},
+		},
+		{
+			name:         "a city store that cannot be named is undecided",
+			env:          []string{"GC_RIG="},
+			wantRC:       2,
+			wantInOut:    []string{"Retry once gc rig list --json answers."},
+			wantNotInLog: "gc beads metadata-cas",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			sessions := strings.ReplaceAll(`{"sessions":[`+holderSessionMe+`,`+holderSessionPeer+`]}`, "$ROOT", root)
+			writeGateFixture(t, filepath.Join(root, "sessions.json"), sessions)
+			if tc.stored != "" {
+				writeGateFixture(t, filepath.Join(root, "holder"), tc.stored)
+			}
+			if tc.rigs != "" {
+				writeGateFixture(t, filepath.Join(root, "rigs.json"), tc.rigs)
+			}
+			binDir, logPath := fakeGCBin(t, workHolderClaimFakeGC)
+			env := append(workHolderClaimEnv(root, "s-me"), "FAKE_CAS="+tc.fakeCAS)
+			out, rc, err := runWorkHolderClaim(t, script, binDir, append(env, tc.env...), tc.holder)
+			if err != nil {
+				t.Fatalf("running work-holder.sh --claim: %v\n%s", err, out)
+			}
+			gcLog, _ := os.ReadFile(logPath)
+			if rc != tc.wantRC {
+				t.Fatalf("work-holder.sh --claim exited %d, want %d\noutput:\n%s\ngc log:\n%s", rc, tc.wantRC, out, gcLog)
+			}
+			stored, _ := os.ReadFile(filepath.Join(root, "holder"))
+			if string(stored) != tc.wantStored {
+				t.Errorf("the store holds work_holder=%q, want %q\ngc log:\n%s", stored, tc.wantStored, gcLog)
+			}
+			if tc.wantRC == 0 && len(tc.wantInOut) == 0 && strings.TrimSpace(out) != "" {
+				t.Errorf("work-holder.sh --claim reported a finding on work it claimed:\n%s", out)
+			}
+			for _, want := range tc.wantInOut {
+				if !strings.Contains(out, want) {
+					t.Errorf("the output does not mention %q:\n%s", want, out)
+				}
+			}
+			for _, want := range tc.wantInLog {
+				if !strings.Contains(string(gcLog), want) {
+					t.Errorf("the gc log does not show %q:\n%s", want, gcLog)
+				}
+			}
+			if tc.wantNotInLog != "" && strings.Contains(string(gcLog), tc.wantNotInLog) {
+				t.Errorf("the script ran %q:\n%s", tc.wantNotInLog, gcLog)
+			}
+		})
+	}
+}
+
+// TestWorkHolderScriptClaimLetsOneOfTwoRacingDispatchesHoldTheWork pins the
+// race --claim closes. Two dispatches read the same unheld record, so both
+// judge the work free, and each claims it at the same moment. The store lands
+// one compare-and-set at a time, so exactly one claim lands: that dispatch
+// holds the work, and the other finds it as the live holder and stays off.
+func TestWorkHolderScriptClaimLetsOneOfTwoRacingDispatchesHoldTheWork(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; work-holder.sh requires it")
+	}
+	script, err := filepath.Abs(workHolderScriptPath)
+	if err != nil {
+		t.Fatalf("resolving %s: %v", workHolderScriptPath, err)
+	}
+	ids := []string{"s-me", "s-peer"}
+	for round := range 8 {
+		root := t.TempDir()
+		writeGateFixture(t, filepath.Join(root, "sessions.json"),
+			strings.ReplaceAll(`{"sessions":[`+holderSessionMe+`,`+holderSessionPeer+`]}`, "$ROOT", root))
+		binDir, _ := fakeGCBin(t, workHolderClaimFakeGC)
+		outs := make([]string, len(ids))
+		rcs := make([]int, len(ids))
+		errs := make([]error, len(ids))
+		var wg sync.WaitGroup
+		for i, id := range ids {
+			wg.Go(func() {
+				outs[i], rcs[i], errs[i] = runWorkHolderClaim(t, script, binDir, workHolderClaimEnv(root, id), "")
+			})
+		}
+		wg.Wait()
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("round %d: running %s's claim: %v\n%s", round, ids[i], err, outs[i])
+			}
+		}
+		stored, _ := os.ReadFile(filepath.Join(root, "holder"))
+		var winners []string
+		for i, id := range ids {
+			switch rcs[i] {
+			case 0:
+				winners = append(winners, id)
+			case 1:
+			default:
+				t.Errorf("round %d: %s's claim exited %d, want 0 or 1:\n%s", round, id, rcs[i], outs[i])
+			}
+		}
+		if len(winners) != 1 {
+			t.Fatalf("round %d: %d dispatches hold the work (%v), want exactly one\n%s: %s\n%s: %s", round, len(winners), winners, ids[0], outs[0], ids[1], outs[1])
+		}
+		if string(stored) != winners[0] {
+			t.Errorf("round %d: the store holds work_holder=%q, want the winner %q", round, stored, winners[0])
+		}
+		for i, id := range ids {
+			if id != winners[0] && !strings.Contains(outs[i], "gc-w records live pool__worker-"+winners[0]+" as the holder") {
+				t.Errorf("round %d: %s lost the claim without naming %s as the live holder:\n%s", round, id, winners[0], outs[i])
+			}
+		}
+	}
+}
+
 // TestWorkHolderScriptRejectsAMissingBead pins the usage contract: the bead is
 // required, and an option given no value is a usage error rather than a hang.
 func TestWorkHolderScriptRejectsAMissingBead(t *testing.T) {
@@ -439,6 +780,7 @@ func TestWorkHolderScriptRejectsAMissingBead(t *testing.T) {
 		{"--work-dir", "/tmp/x"},
 		{"--bead"},
 		{"--bead", "--holder", "s-peer"},
+		{"--bead", "gc-w", "--holder", "--claim"},
 	} {
 		out, err := runPackScript(t, workHolderScriptPath, t.TempDir(), workHolderEnvKeys, nil, args...)
 		var exitErr *exec.ExitError

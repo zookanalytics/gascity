@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # work-holder — whether a live session other than this one holds a work bead's
 # tree, so a second dispatch of the work does not adopt a tree that a run is
-# still using.
+# still using, and with --claim, taking the work for this session when none
+# does.
 #
-#   work-holder.sh --bead <id> [--work-dir <path>] [--holder <session>] [--branch <name>]
+#   work-holder.sh --bead <id> [--work-dir <path>] [--holder <session>] [--branch <name>] [--claim]
 #
 # A session running a worktree workflow never claims its work bead, so the
-# bead's assignee cannot show the run. The run records itself instead:
-# workspace-setup sets the bead's metadata.work_dir to the tree it enters and
-# metadata.work_holder to the session that entered it. The caller passes the
-# work bead's metadata.work_dir, metadata.work_holder and metadata.branch as it
-# read them.
+# bead's assignee cannot show the run. The run records itself instead, as the
+# bead's metadata.work_holder: load-context's claim records the session that
+# took the work, and workspace-setup sets metadata.work_dir to the tree it
+# enters and records the session that entered it. The caller passes the work
+# bead's metadata.work_dir, metadata.work_holder and metadata.branch as it read
+# them.
 #
 # The recorded holder decides, never where the tree sits on disk. A holder
 # that names this session is a resume. A holder listed by
@@ -35,10 +37,25 @@
 #
 # An unreadable session list, bead listing or worktree listing is undecided.
 #
+# With --claim, work that no live session holds is taken for this session in
+# the same run that judged it free: one compare-and-set (gc beads metadata-cas)
+# records GC_SESSION_ID as the bead's work_holder only while the record still
+# holds the --holder value the caller judged. Of two dispatches that judged the
+# work free from the same record, the second one's compare-and-set finds the
+# first one's record and conflicts, so only one of them takes the work. The
+# holder a conflict finds is judged the way the caller's record was: a live
+# one holds the work, and a gone one, or this session, is claimed over once
+# more. The claim is written to the store of this session's rig ($GC_RIG), or
+# to the city store when no rig is set. A store that cannot compare-and-set
+# gets a read and a plain write instead, and the script says so on stderr,
+# because a dispatch writing between the two can still take the work beside
+# this one. A claim the store refuses for any other reason is undecided.
+#
 # stdout: one sentence per finding, naming the tree and its count of
 #         uncommitted paths, who holds it or why that is undecided, and what
 #         clears it.
-# exit:   0 no live session holds the work · 1 a live session holds it ·
+# exit:   0 no live session holds the work, and with --claim this session's
+#         claim on it is recorded · 1 a live session holds it ·
 #         2 undecided · 64 usage
 set -uo pipefail
 
@@ -46,18 +63,23 @@ PROG="work-holder"
 
 usage() {
   cat >&2 <<'USAGE'
-usage: work-holder.sh --bead <id> [--work-dir <path>] [--holder <session>] [--branch <name>]
+usage: work-holder.sh --bead <id> [--work-dir <path>] [--holder <session>] [--branch <name>] [--claim]
 
   --bead      the work bead (required)
   --work-dir  the bead's metadata.work_dir; empty when it records none
   --holder    the bead's metadata.work_holder; empty when it records none
   --branch    the bead's metadata.branch; empty when it records none
+  --claim     when no live session holds the work, record this session as
+              its holder, compare-and-set on the --holder value
 
-env: GC_SESSION_ID, GC_SESSION_NAME, GC_AGENT and GC_ALIAS name this session.
-     GC_RIG_ROOT is the repository whose worktrees are listed, and GC_DIR is
-     used when it is unset.
+env: GC_SESSION_ID, GC_SESSION_NAME, GC_AGENT and GC_ALIAS name this session,
+     and --claim records GC_SESSION_ID. GC_RIG names the rig whose store
+     --claim writes to; the city store is used when it is unset. GC_RIG_ROOT is
+     the repository whose worktrees are listed, and GC_DIR is used when it is
+     unset.
 
-exit: 0 no live session holds the work · 1 a live session holds it · 2 undecided · 64 usage
+exit: 0 no live session holds the work, and with --claim this session's claim is
+      recorded · 1 a live session holds it · 2 undecided · 64 usage
 USAGE
 }
 
@@ -70,20 +92,21 @@ require_value() {
     exit 64
   fi
   case "$2" in
-    --bead|--work-dir|--holder|--branch|-h|--help)
+    --bead|--work-dir|--holder|--branch|--claim|-h|--help)
       echo "$PROG: $1 requires a value, but the next argument is the option '$2'" >&2
       usage
       exit 64 ;;
   esac
 }
 
-BEAD=""; WORK_DIR=""; HOLDER=""; BRANCH=""
+BEAD=""; WORK_DIR=""; HOLDER=""; BRANCH=""; CLAIM=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --bead)     require_value "$@"; BEAD="$2";     shift 2 ;;
     --work-dir) require_value "$@"; WORK_DIR="$2"; shift 2 ;;
     --holder)   require_value "$@"; HOLDER="$2";   shift 2 ;;
     --branch)   require_value "$@"; BRANCH="$2";   shift 2 ;;
+    --claim)    CLAIM=1;                            shift ;;
     -h|--help)  usage; exit 64 ;;
     *)          echo "$PROG: unknown argument '$1'" >&2; usage; exit 64 ;;
   esac
@@ -217,6 +240,108 @@ EOF
   UNDECIDED="$UNDECIDED${UNDECIDED:+$NL}$BRANCH is checked out in $(describe "$tree"), which no unclosed bead on $BRANCH records as its work_dir, so nothing names who is working there. If nobody is, move the branch off it with git -C $tree switch --detach."
 }
 
+# store_ref — the exact store the claim is written to: the store of this
+# session's rig, or the city store when no rig is set.
+store_ref() {
+  local name
+  if [ -n "${GC_RIG:-}" ]; then
+    printf 'rig:%s' "$GC_RIG"
+    return 0
+  fi
+  name=$(gc rig list --json 2>/dev/null </dev/null | scrub | jq -r '.city_name // empty' 2>/dev/null)
+  [ -n "$name" ] || return 1
+  printf 'city:%s' "$name"
+}
+
+# read_holder — print the work_holder the work bead records now.
+read_holder() {
+  gc bd show "$BEAD" --json 2>/dev/null </dev/null | scrub | jq -er '(if type == "array" then .[0] else . end) | if type == "object" then (.metadata.work_holder // "" | tostring) else error("no bead") end' 2>/dev/null
+}
+
+STORE=""
+PLAIN=""
+OUTCOME=""
+CAS_ERROR=""
+CAS_CMD=""
+# cas EXPECTED — set the work bead's work_holder to this session only while it
+# holds EXPECTED, leaving the outcome in OUTCOME: swapped, already_next or
+# conflict. A store that cannot compare-and-set gets the same comparison as a
+# read and a plain write. A command that fails returns non-zero, and leaves
+# which one in CAS_CMD and why in CAS_ERROR.
+cas() {
+  local expected="$1" out current
+  OUTCOME=""
+  if [ -z "$PLAIN" ]; then
+    CAS_CMD="gc beads metadata-cas"
+    if out=$(gc beads metadata-cas "$BEAD" --store-ref="$STORE" --key=work_holder --expected="$expected" --next="$GC_SESSION_ID" --json 2>&1 </dev/null); then
+      OUTCOME=$(printf '%s\n' "$out" | grep '^{' | tail -n 1 | jq -r '.outcome // empty' 2>/dev/null)
+      return 0
+    fi
+    case "$out" in
+      *"conditional writes unsupported"*) ;;
+      *)
+        CAS_ERROR=$(printf '%s\n' "$out" | grep -v '^{' | head -n 1)
+        return 1 ;;
+    esac
+    PLAIN=1
+    echo "$PROG: $STORE cannot compare-and-set metadata, so the claim on $BEAD is a read and a plain write, and a dispatch writing between the two can still take the work beside this one." >&2
+  fi
+  CAS_CMD="gc bd show $BEAD"
+  if ! current=$(read_holder); then
+    CAS_ERROR="$BEAD could not be read"
+    return 1
+  fi
+  if [ "$current" = "$GC_SESSION_ID" ]; then
+    OUTCOME=already_next
+  elif [ "$current" != "$expected" ]; then
+    OUTCOME=conflict
+  else
+    CAS_CMD="gc bd update $BEAD"
+    if ! out=$(gc bd update "$BEAD" --set-metadata work_holder="$GC_SESSION_ID" 2>&1 </dev/null); then
+      CAS_ERROR=$(printf '%s\n' "$out" | head -n 1)
+      return 1
+    fi
+    OUTCOME=swapped
+  fi
+}
+
+# claim — take the work for this session: compare-and-set its holder from the
+# record the caller judged. The holder a conflict finds is judged the same way,
+# so a live one holds the work, and a gone one, or this session, is claimed over
+# once more.
+claim() {
+  local expected="$HOLDER" current
+  if [ -z "${GC_SESSION_ID:-}" ]; then
+    UNDECIDED="$BEAD cannot be claimed, because GC_SESSION_ID is unset, so this run has no session to record as the holder of $(describe "$WORK_DIR"). Retry from a session gc started."
+    return 0
+  fi
+  if ! STORE=$(store_ref); then
+    UNDECIDED="$BEAD cannot be claimed, because GC_RIG is unset and gc rig list --json named no city, so there is no store to record this session's claim in. Retry once gc rig list --json answers."
+    return 0
+  fi
+  for _ in 1 2; do
+    if ! cas "$expected"; then
+      UNDECIDED="The claim on $BEAD could not be written to $STORE (${CAS_ERROR:-no reason given}), so whether another dispatch holds the work cannot be ruled out. Retry once $CAS_CMD answers."
+      return 0
+    fi
+    case "$OUTCOME" in
+      swapped|already_next) return 0 ;;
+      conflict) ;;
+      *)
+        UNDECIDED="gc beads metadata-cas answered no outcome for the claim on $BEAD in $STORE, so whether another dispatch holds the work cannot be ruled out. Retry once gc beads metadata-cas answers."
+        return 0 ;;
+    esac
+    if ! current=$(read_holder); then
+      UNDECIDED="The holder recorded on $BEAD changed while this dispatch claimed it, and $BEAD could not be read back, so whether another dispatch holds the work cannot be ruled out. Retry once gc bd show $BEAD answers."
+      return 0
+    fi
+    judge "$BEAD" "$WORK_DIR" "$current"
+    [ -z "$HELD$UNDECIDED" ] || return 0
+    expected="$current"
+  done
+  UNDECIDED="The holder recorded on $BEAD changed again while this dispatch claimed it, so another dispatch is claiming the work at the same moment. Retry once one claim on $BEAD stands."
+}
+
 judge "$BEAD" "$WORK_DIR" "$HOLDER"
 
 if [ -n "$BRANCH" ]; then
@@ -243,6 +368,10 @@ if [ -n "$BRANCH" ]; then
   if [ -n "$BRANCH_DIR" ] && ! { [ -n "$OWN_DIR" ] && [ "$OWN_DIR" -ef "$BRANCH_DIR" ]; }; then
     judge_tree "$BRANCH_DIR" ""
   fi
+fi
+
+if [ -n "$CLAIM" ] && [ -z "$HELD$UNDECIDED" ]; then
+  claim
 fi
 
 if [ -n "$HELD" ]; then
