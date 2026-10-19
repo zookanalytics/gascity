@@ -821,6 +821,25 @@ func TestWorkHolderScriptClaimsTheWork(t *testing.T) {
 			wantInOut:    []string{"no one bound store in gc rig list --json holds the prefix gc-w carries"},
 			wantNotInLog: "gc beads metadata-cas",
 		},
+		{
+			name: "work whose prefix the HQ and a rig both hold is undecided",
+			rigs: `{"schema_version":"1","city_name":"metro","city_path":"$ROOT","rigs":[` +
+				`{"name":"metro","path":"$ROOT","prefix":"gc","hq":true},` +
+				`{"name":"demo","path":"$ROOT/demo","prefix":"gc"}]}`,
+			wantRC:       2,
+			wantInOut:    []string{"no one bound store in gc rig list --json holds the prefix gc-w carries"},
+			wantNotInLog: "gc beads metadata-cas",
+		},
+		{
+			name: "work whose prefix two rigs hold, whatever its case, is undecided",
+			rigs: `{"schema_version":"1","city_name":"metro","city_path":"$ROOT","rigs":[` +
+				`{"name":"metro","path":"$ROOT","prefix":"mt","hq":true},` +
+				`{"name":"demo","path":"$ROOT/demo","prefix":"gc"},` +
+				`{"name":"tributary","path":"$ROOT/tributary","prefix":"GC"}]}`,
+			wantRC:       2,
+			wantInOut:    []string{"no one bound store in gc rig list --json holds the prefix gc-w carries"},
+			wantNotInLog: "gc beads metadata-cas",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
