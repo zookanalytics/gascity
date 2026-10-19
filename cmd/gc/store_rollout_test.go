@@ -1154,6 +1154,229 @@ func TestOpenControlStoreAsksAgainWhenARefusedScopeIsRebound(t *testing.T) {
 	}
 }
 
+// nativeEligibleMetadata binds a scope to database one on a Dolt server, with
+// the project id passingControlPreflightForTest's probes report, so the real
+// factory admits the native store for it.
+const nativeEligibleMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"one","project_id":"gc-local"}`
+
+// foreignBdHook is a bd hook script gc did not install.
+const foreignBdHook = "#!/bin/sh\nexit 0\n"
+
+// passingControlPreflightForTest is a native-store preflight whose probes all
+// answer in process for a nativeEligibleMetadata scope: bd reports a Dolt
+// server, the database reports the scope's project id, and its schema sits at
+// the library's ceiling.
+func passingControlPreflightForTest() contract.PreflightChecker {
+	return contract.PreflightChecker{
+		Provider:            "bd",
+		BeadsLibraryVersion: "1.0.4",
+		BDContext: func(string) (contract.PreflightBDContext, error) {
+			return contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.0.4"}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+		SchemaLatestVersion:        1,
+		SchemaLatestIgnoredVersion: 1,
+		DatabaseSchemaCursors: func(string) (contract.PreflightSchemaCursors, bool, error) {
+			return contract.PreflightSchemaCursors{Main: 1, Ignored: 1, IgnoredChecked: true}, true, nil
+		},
+	}
+}
+
+// realControlStoreFactory answers each control open with the real beads
+// factory. Only the preflight's probes and the native open are supplied: the
+// preflight passes (passingControlPreflightForTest), and each native open makes
+// a new native store. So whether an open gets a native store or the bd store is
+// the factory's own decision, its executable-bd-hook rule included. It returns
+// the native stores made and the storage behind each, in order, and the options
+// of each open.
+func realControlStoreFactory(t *testing.T) (*[]*beads.NativeDoltStore, *[]*closeCountingStorage, *[]beads.StoreOpenOptions) {
+	t.Helper()
+	var natives []*beads.NativeDoltStore
+	var storages []*closeCountingStorage
+	var opens []beads.StoreOpenOptions
+	restore := openStoreFactoryForCity
+	openStoreFactoryForCity = func(ctx context.Context, opts beads.StoreOpenOptions) (beads.StoreOpenResult, error) {
+		opens = append(opens, opts)
+		opts.PreflightChecker = passingControlPreflightForTest()
+		opts.OpenNativeStore = func() (beads.Store, error) {
+			storage := &closeCountingStorage{}
+			storages = append(storages, storage)
+			natives = append(natives, beads.NewNativeDoltStoreOverStorageForTest(storage))
+			return natives[len(natives)-1], nil
+		}
+		return beads.OpenStoreAtForCity(ctx, opts)
+	}
+	t.Cleanup(func() { openStoreFactoryForCity = restore })
+	return &natives, &storages, &opens
+}
+
+// bdHookPathForTest is the path of scope's bd on_update hook.
+func bdHookPathForTest(scope string) string {
+	return filepath.Join(scope, ".beads", "hooks", "on_update")
+}
+
+// writeBdHookForTest writes scope's bd on_update hook with content and mode
+// perm.
+func writeBdHookForTest(t *testing.T, scope, content string, perm os.FileMode) {
+	t.Helper()
+	path := bdHookPathForTest(scope)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), perm); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile applies the umask, and leaves the mode of an existing file.
+	if err := os.Chmod(path, perm); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestControlStoreBindingCarriesTheFactorysNativeAdmission pins that a scope's
+// binding changes when the factory's admission of the native store changes
+// (beads.NativeStoreAdmitted), with nothing else about the scope changed. An
+// executable bd hook gc did not install turns the factory away from the native
+// store, so it changes the binding. A hook that is not executable, or one that
+// carries gc's stamp, does not, because the factory still admits the native
+// store for the scope.
+func TestControlStoreBindingCarriesTheFactorysNativeAdmission(t *testing.T) {
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+	for _, tc := range []struct {
+		name    string
+		content string
+		perm    os.FileMode
+		changes bool
+	}{
+		{name: "an executable hook gc did not install", content: foreignBdHook, perm: 0o755, changes: true},
+		{name: "a hook that is not executable", content: foreignBdHook, perm: 0o644},
+		{name: "an executable hook gc stamped", content: "#!/bin/sh\n# gc-hook-stamp: 2026-10-18 abc123\nexit 0\n", perm: 0o755},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			writeBackendMetadata(t, scope, doltOneMetadata)
+			before := controlStoreBinding(scope, "bd", nil, nil)
+			writeBdHookForTest(t, scope, tc.content, tc.perm)
+			if changed := controlStoreBinding(scope, "bd", nil, nil) != before; changed != tc.changes {
+				t.Fatalf("the binding changed = %t, want %t", changed, tc.changes)
+			}
+		})
+	}
+}
+
+// TestOpenControlStoreTakesTheBdStoreWhileAScopeHasAnExecutableBdHook pins that
+// a kept native store is handed out only while the factory would still admit
+// it. The native store writes in process and never runs bd's hook scripts, so
+// the factory answers a scope that has an executable bd hook gc did not install
+// with the bd store. Installing such a hook, or making one executable, after
+// the scope's native store opened changes neither .beads/metadata.json nor the
+// native open env, so the next control open has to find it through the
+// factory's admission in the binding: it retires the kept store, and the
+// factory answers with the bd store, whose writes run the hook. While the hook
+// stands, the opens inside the recheck window take the bd store without the
+// preflight. Taking the hook away lets the next open ask the factory for the
+// native store at once. The factory here is the real one with only its probes
+// and its native open supplied, so the hook rule the test exercises is the
+// factory's own.
+func TestOpenControlStoreTakesTheBdStoreWhileAScopeHasAnExecutableBdHook(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// before readies the scope's on_update hook before the first open,
+		// which the factory still answers with the native store.
+		before func(t *testing.T, scope string)
+		// enable leaves the scope with an executable hook gc did not install.
+		enable func(t *testing.T, scope string)
+		// disable takes that hook away again.
+		disable func(t *testing.T, scope string)
+	}{
+		{
+			name:   "a hook installed",
+			before: func(*testing.T, string) {},
+			enable: func(t *testing.T, scope string) {
+				writeBdHookForTest(t, scope, foreignBdHook, 0o755)
+			},
+			disable: func(t *testing.T, scope string) {
+				if err := os.Remove(bdHookPathForTest(scope)); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a hook made executable",
+			before: func(t *testing.T, scope string) {
+				writeBdHookForTest(t, scope, foreignBdHook, 0o644)
+			},
+			enable: func(t *testing.T, scope string) {
+				if err := os.Chmod(bdHookPathForTest(scope), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			disable: func(t *testing.T, scope string) {
+				if err := os.Chmod(bdHookPathForTest(scope), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useControlStoreRegistryForTest(t)
+			t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+			cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+			scope := t.TempDir()
+			writeBackendMetadata(t, scope, nativeEligibleMetadata)
+			tc.before(t, scope)
+			natives, storages, opens := realControlStoreFactory(t)
+			bd := beads.NewMemStore()
+			open := func() beads.Store {
+				t.Helper()
+				store, err := openControlBdStoreThroughFactory(scope, "/city", "bd", cfg,
+					func() (beads.Store, error) { return bd, nil })
+				if err != nil {
+					t.Fatalf("openControlBdStoreThroughFactory: %v", err)
+				}
+				return store
+			}
+			lastTransport := func() beads.NativeTransportMode { return (*opens)[len(*opens)-1].NativeTransport }
+
+			inFlight := open()
+			if len(*natives) != 1 || inFlight != beads.Store((*natives)[0]) {
+				t.Fatalf("first open = %T, want the native store the factory opened", inFlight)
+			}
+			tc.enable(t, scope)
+			next := open()
+			if next != beads.Store(bd) || len(*opens) != 2 {
+				t.Fatalf("open after the hook became executable = %T with %d factory opens, want the bd store from a second factory open (the kept native store would not run the hook)", next, len(*opens))
+			}
+			if (*storages)[0].closed != 0 {
+				t.Fatal("the retired store was closed while a caller that opened it before the hook still held it")
+			}
+			if err := closeControlStoreHandle(next); err != nil {
+				t.Fatalf("closeControlStoreHandle(bd store): %v", err)
+			}
+			if err := closeControlStoreHandle(inFlight); err != nil {
+				t.Fatalf("closeControlStoreHandle(retired store): %v", err)
+			}
+			if (*storages)[0].closed != 1 {
+				t.Fatalf("the retired store was closed %d times once its last handle came back, want 1", (*storages)[0].closed)
+			}
+			if store := open(); store != beads.Store(bd) || lastTransport() != beads.NativeTransportOff {
+				t.Fatalf("open inside the recheck window = %T under %q, want the bd store under off, so no preflight runs while the hook stands", store, lastTransport())
+			}
+
+			tc.disable(t, scope)
+			back := open()
+			if len(*natives) != 2 || back != beads.Store((*natives)[1]) || lastTransport() == beads.NativeTransportOff {
+				t.Fatalf("open after the hook went away = %T under %q, want the factory asked for the native store at once and a new native store", back, lastTransport())
+			}
+			asked := len(*opens)
+			if again := open(); again != back || len(*opens) != asked {
+				t.Fatalf("open under the unchanged binding = %T with %d more factory opens, want the kept native store", again, len(*opens)-asked)
+			}
+		})
+	}
+}
+
 // TestStoreRefResolverReleaseGivesBackItsControlStoreHandles pins that a
 // dispatch's store-ref resolver does not pin the native stores it opens. Each
 // rig open through the control path takes a handle on the store the rig keeps,

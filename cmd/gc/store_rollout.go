@@ -109,14 +109,16 @@ func conditionalWritesStoreID(scopeRoot, cityPath string) string {
 // database, to proxied-server or to another backend. So does a change to the
 // server, the credentials or the open options the env projects, such as gc rig
 // set-endpoint pointing the scope at another server while the old one still
-// answers. The proxied lane is not wired here, so a proxied-server scope keeps
-// the bd store.
+// answers. So does a change to whether the factory admits the native store by
+// the checks it makes without a probe, such as a bd hook the native store would
+// not run becoming executable or going away. The proxied lane is not wired
+// here, so a proxied-server scope keeps the bd store.
 func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg *config.City, openBd func() (beads.Store, error)) (beads.Store, error) {
 	// The binding is read before the factory opens anything, and a native open
 	// uses the env the binding names, so a store is never recorded under a
 	// binding newer than the one it opened under.
 	env, envErr := nativeDoltOpenEnvForScope(cityPath, cfg, scopeRoot)
-	binding := controlStoreBinding(scopeRoot, env, envErr)
+	binding := controlStoreBinding(scopeRoot, provider, env, envErr)
 	transport := controlStoreNativeTransport(scopeRoot, cfg)
 	if transport == beads.NativeTransportOff {
 		closeUnheldControlStore(scopeRoot, nativeControlStores.retireRebound(scopeRoot, binding))
@@ -170,12 +172,30 @@ func openControlBdStoreThroughFactory(scopeRoot, cityPath, provider string, cfg 
 // the error resolving env. An env that could not be resolved is named as
 // unresolved, without the error's text, so a failure that stands keeps one
 // binding and its refusal stays held for controlStoreNativeRecheck.
-func controlStoreBinding(scopeRoot string, env map[string]string, envErr error) string {
+//
+// The binding also carries whether the factory admits the native store for
+// the scope by every check it makes other than its preflight probe and the
+// native open (beads.NativeStoreAdmitted), asked for provider. Those checks
+// read the scope as it is now, so a change that turns the factory away from
+// the native store changes the binding, such as a bd hook the native store
+// would not run becoming executable. The next open then retires the kept store,
+// and the factory answers with the bd store, whose writes run the hook. A
+// change that lifts the refusal changes the binding back, so the next open asks
+// the factory for the native store without waiting out
+// controlStoreNativeRecheck. The admission is asked with the native transport
+// unset, because every open applies the city's beads.native_transport itself
+// (controlStoreNativeTransport), and an open under "off" stops handing out the
+// kept store without retiring it.
+func controlStoreBinding(scopeRoot, provider string, env map[string]string, envErr error) string {
 	endpoint := "unresolved"
 	if envErr == nil {
 		endpoint = beads.NativeDoltOpenEnvDigest(env)
 	}
-	return "metadata:" + scopeMetadataDigest(scopeRoot) + " env:" + endpoint
+	admission := "refused"
+	if beads.NativeStoreAdmitted(beads.StoreOpenOptions{ScopeRoot: scopeRoot, Provider: provider}) {
+		admission = "admitted"
+	}
+	return "metadata:" + scopeMetadataDigest(scopeRoot) + " env:" + endpoint + " native:" + admission
 }
 
 // controlStoreNativeTransport is the native transport a control-plane open
