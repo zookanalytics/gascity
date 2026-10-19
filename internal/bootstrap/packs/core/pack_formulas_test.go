@@ -486,7 +486,8 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 // the work's tree, reaching it through `gc core scripts-dir`, the one path a
 // formula step has to core's scripts, and has it claim the work when none
 // does. A gate that passes has claimed the work for this session with a
-// compare-and-set on the holder it read. A finding parks the step the way a
+// compare-and-set on the holder it read, in the store that owns the work bead
+// whether or not a rig scopes the session. A finding parks the step the way a
 // live assignee does, and the note and the escalation carry the finding, which
 // names the holder and the tree and says what clears it; a claim another
 // dispatch made after the gate's read is such a finding. A script the gate
@@ -525,6 +526,8 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 		// wantInLog must appear in the gc log, and wantNotInLog nowhere in it.
 		wantInLog    string
 		wantNotInLog string
+		// env overrides the defaults: this session is s-me, in rig demo.
+		env []string
 	}{
 		{
 			name:       "a live recorded holder parks the step, and the escalation carries the finding",
@@ -543,6 +546,13 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-old"}}]`,
 			scriptsDir: scriptsDir,
 			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected=s-old --next=s-me --json",
+		},
+		{
+			name:       "a session no rig scopes claims rig work in the store that owns it",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w"}}]`,
+			scriptsDir: scriptsDir,
+			env:        []string{"GC_RIG="},
+			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json",
 		},
 		{
 			name:       "a dispatch that claimed the work after the gate's read parks the step on that holder",
@@ -613,9 +623,17 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 					reread = tc.bead
 				}
 				writeGateFixture(t, rereadPath, expand.Replace(reread))
-				binDir, logPath := fakeGCBin(t, `case "$1 $2" in
+				rigsPath := filepath.Join(root, "rigs.json")
+				writeGateFixture(t, rigsPath, expand.Replace(workHolderRigs))
+				binDir, logPath := fakeGCBin(t, `if [ "$1" = bd ]; then
+  shift
+  while [ "$1" = --city ] || [ "$1" = --rig ]; do shift 2; done
+  set -- bd "$@"
+fi
+case "$1 $2" in
 "core scripts-dir") `+scriptsAnswer+` ;;
 "session list") cat '`+sessionsPath+`' ;;
+"rig list") cat '`+rigsPath+`' ;;
 "bd list") echo '[]' ;;
 "hook current") echo gc-step ;;
 "beads metadata-cas") echo '{"schema_version":"1","ok":true,"bead_id":"gc-w","store_ref":"rig:demo","key":"work_holder","outcome":"`+claim+`"}' ;;
@@ -633,7 +651,7 @@ WORK_BEAD_JSON=$(cat '`+beadPath+`')
 `+gate+`
 echo GATE-PASSED
 `)
-				out, err := runPackScript(t, gatePath, binDir, workHolderEnvKeys, append(env,
+				out, err := runPackScript(t, gatePath, binDir, workHolderEnvKeys, append(append(env,
 					"GC_DIR="+filepath.Join(root, "repo"),
 					"GC_RIG=demo",
 					"GC_RIG_ROOT="+filepath.Join(root, "repo"),
@@ -641,7 +659,7 @@ echo GATE-PASSED
 					"GC_SESSION_NAME=pool__worker-s-me",
 					"GC_AGENT=s-me",
 					"GC_ALIAS=",
-				))
+				), tc.env...))
 				logData, readErr := os.ReadFile(logPath)
 				if readErr != nil && !os.IsNotExist(readErr) {
 					t.Fatalf("reading the gc log: %v", readErr)
@@ -706,8 +724,7 @@ func TestWorktreeFormulasLetOneOfTwoRacingDispatchesThrough(t *testing.T) {
 			t.Parallel()
 			for round := range 4 {
 				root := t.TempDir()
-				writeGateFixture(t, filepath.Join(root, "sessions.json"),
-					strings.ReplaceAll(`{"sessions":[`+holderSessionMe+`,`+holderSessionPeer+`]}`, "$ROOT", root))
+				writeWorkHolderClaimAnswers(t, root)
 				gatePath := filepath.Join(root, "gate.sh")
 				writeGateFixture(t, gatePath, `WORK_BEAD_ID=gc-w
 WORK_BEAD_JSON='[{"id":"gc-w","status":"open","assignee":"","metadata":{}}]'

@@ -219,15 +219,20 @@ paths so the holder's work can be salvaged, and says what clears it.
 Judging the work and taking it are one step. When no live session holds the
 work, `work-holder.sh --claim` records this session as `metadata.work_holder`
 with one compare-and-set (`gc beads metadata-cas`) whose expected value is the
-holder this gate read, in the store of this session's rig (`$GC_RIG`), or in
-the city store without one. Of two dispatches that read the work free at the
-same moment, the second one's compare-and-set finds the first one's record and
-conflicts, so it parks on that live holder instead of passing. A holder a
-conflict finds that is gone, or that is this session, is claimed over once
-more. A store that cannot compare-and-set gets a read and a plain write
-instead, and the script says so, because a dispatch writing between the two
-can still pass beside this one. A claim the store refuses for any other reason
-parks the step.
+holder this gate read. The claim goes to the store that owns the work bead,
+the one holding the longest prefix in `gc rig list --json` that the bead's id
+begins with. The session's own rig plays no part, because a city-scoped
+session serves work in any rig's store. Of two dispatches that read the work
+free at the same moment, the second one's compare-and-set finds the first
+one's record and conflicts, so it parks on that live holder instead of
+passing. The holder a conflict finds is read back from the same store and
+judged against a session list read after it, so a dispatch that started after
+the list was first read still counts as live. A holder a conflict finds that
+is gone, or that is this session, is claimed over once more. A store that
+cannot compare-and-set gets a read and a plain write instead, and the script
+says so, because a dispatch writing between the two can still pass beside
+this one. A rig list that names no owner for the bead, or a claim the store
+refuses for any other reason, parks the step.
 
 Owner liveness, not staleness, is the gate: an idle pool worker between claims
 looks identical to an abandoned one. Only a session absent from
