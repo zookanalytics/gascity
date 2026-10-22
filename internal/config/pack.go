@@ -1150,6 +1150,7 @@ func parsePackConfigWithMetadata(data []byte, source string) (PackConfig, toml.M
 		return PackConfig{}, md, nil, err
 	}
 	normalizePackAgentDefaultsAlias(&cfg, md)
+	declareAgentTables(cfg.Agents, source)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return cfg, md, warnings, nil

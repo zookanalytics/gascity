@@ -434,12 +434,13 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	// rig-scoped implicit agents (e.g., "hello-world/claude").
 	resolveRigPaths(cityPath, cfg.Rigs)
 
-	a, ok := resolveAgentIdentity(cfg, target, currentRigContext(cfg))
+	a, ok, matches := lookupAgentIdentity(cfg, target, currentRigContext(cfg))
 	if !ok {
+		msg := agentUnresolvedMsg("gc sling", target, cfg, matches)
 		if jsonOutput {
-			return writeJSONError(stdout, stderr, "target_resolve_failed", agentNotFoundMsg("gc sling", target, cfg), 1)
+			return writeJSONError(stdout, stderr, "target_resolve_failed", msg, 1)
 		}
-		fmt.Fprintln(stderr, agentNotFoundMsg("gc sling", target, cfg)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 

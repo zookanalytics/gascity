@@ -3702,6 +3702,17 @@ type Agent struct {
 	// Set during pack/fragment loading; empty for inline agents.
 	// Runtime-only — not persisted to TOML or JSON.
 	SourceDir string `toml:"-" json:"-"`
+	// Declaration identifies the declaration this agent was composed from:
+	// the config file and position of an [[agent]] table, or the
+	// agents/<name> directory of a convention-discovered agent. Every copy
+	// that composition makes of a declaration keeps it, such as a pack
+	// agent's copy in each rig that imports the pack and its copy under each
+	// binding name the pack is imported with. Two declarations never share
+	// one, even when they set the same fields. The config loaders set it as
+	// they read each declaration; Parse, InjectImplicitAgents and code that
+	// builds an Agent leave it empty.
+	// Runtime-only — not persisted to TOML or JSON.
+	Declaration string `toml:"-" json:"-"`
 	// SharedSkills holds legacy derived attachment-list state for this agent.
 	// Runtime-only compatibility data — not persisted to TOML or JSON, and
 	// not consumed by the active skill materializer.
