@@ -1836,7 +1836,16 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	declareAgentTables(cfg.Agents, source)
 	return &cfg, md, warnings, nil
+}
+
+// declareAgentTables sets the Declaration of each agent parsed from the
+// [[agent]] tables of file: the file and the table's position in it.
+func declareAgentTables(agents []Agent, file string) {
+	for i := range agents {
+		agents[i].Declaration = fmt.Sprintf("%s ([[agent]] %d)", file, i+1)
+	}
 }
 
 // LoadRootPackDefaultRigImports loads the canonical city.toml
