@@ -35,6 +35,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"MinActiveSessions":            "cap field, inherits from rig/workspace — not a patch concern",
 		"ScaleCheck":                   "agent-specific scaling, derived from pool config — not a patch concern",
 		"SourceDir":                    "runtime-only, set during pack/fragment loading",
+		"Declaration":                  "runtime-only provenance, stamped when config loading reads the agent's declaration",
 		"InheritedProvider":            "runtime-only, derived from imported pack [agent_defaults]",
 		"InheritedDefaultSlingFormula": "runtime-only, derived from imported pack [agent_defaults]",
 		"InheritedAppendFragments":     "runtime-only, derived from imported pack [agent_defaults]",

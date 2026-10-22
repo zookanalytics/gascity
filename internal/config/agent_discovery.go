@@ -64,6 +64,7 @@ func DiscoverPackAgents(fs fsys.FS, packDir, _ string, skipNames map[string]bool
 		applyAgentConventionDefaults(fs, packDir, &agent)
 		agent.source = sourcePack
 		agent.layout = layoutV2Convention
+		agent.Declaration = agentDir
 
 		discovered = append(discovered, agent)
 	}
