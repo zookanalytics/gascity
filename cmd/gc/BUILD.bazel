@@ -1269,6 +1269,7 @@ go_test(
         "cmd_supervisor_portcollision_test.go",
         "cmd_supervisor_prefork_warning_test.go",
         "cmd_supervisor_processgroup_test.go",
+        "cmd_supervisor_require_service_manager_test.go",
         "cmd_supervisor_runtime_test.go",
         "cmd_supervisor_sdnotify_test.go",
         "cmd_supervisor_stale_services_test.go",
