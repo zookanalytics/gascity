@@ -45,8 +45,14 @@ func carriedPoolRoute(b beads.Bead) string {
 		return ""
 	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
-	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
+	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule
+	// — and only while the root is unexpanded. An expanded root is neither
+	// demanded nor claimable (#5900); restoring its run_target into
+	// gc.routed_to would make it both (NEW-5).
 	if route := legacyWorkflowRunTarget(b); route != "" {
+		if !workflowRunTargetFallbackEligible(b) {
+			return ""
+		}
 		return route
 	}
 	// Broaden beyond workflow roots to plain standalone work beads. Any non-empty
@@ -116,7 +122,15 @@ func liveGraphWorkflowDrivesBead(store, graphStore beads.Store, b beads.Bead) (b
 			return true, nil
 		}
 	}
-	roots, err := sourceworkflow.ListLiveInputConvoyRootsForItem(store, rootStore, b.ID, "")
+	// The walk crosses a store boundary: membership edges live with the work
+	// bead (store) while workflow roots live in the graph store (rootStore). A
+	// read error is returned rather than swallowed: an empty list would read as
+	// "no live workflow".
+	convoys, err := convoycore.TrackingConvoysForItem(store, b.ID)
+	if err != nil {
+		return false, fmt.Errorf("listing tracking convoys for %s: %w", b.ID, err)
+	}
+	roots, err := sourceworkflow.ListLiveInputConvoyRootsForConvoys(rootStore, convoys, "")
 	if err != nil {
 		return false, err
 	}

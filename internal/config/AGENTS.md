@@ -6,6 +6,15 @@ the machinery beneath the **Pack** primitive and the universal activation
 mechanism (capabilities activate from section presence — no capability
 flags). Architecture: `engdocs/architecture/config.md`.
 
+## Workflow topology is not fresh worker demand
+
+Pool demand counts, controller demand, and hook claims must all exclude
+expanded workflow roots, scopes, and specs even when they retain a route.
+Keep never-expanded root-only workflows executable for compatibility, and
+keep already-owned workflow anchors available for continuation. Update the
+shell count and Go predicates together; otherwise an unclaimable latch can
+continually wake replacement workers.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and
@@ -31,3 +40,26 @@ When adding a field to `config.Rig`, also add the corresponding optional
 field to `RigPatch` and wire the merge into `applyRigPatch` so layered
 configs (fragments, patches) can override it. No field-sync test exists for
 Rig today; the patch path must be checked manually.
+
+## Checks on deployment fields
+
+`LoadDeployment` composes the deployment layer (city.toml, its fragments, the
+rig and GitHub PR monitor patches, the site binding) for callers that must
+not walk packs, and the full load composes everything. A check that reads only
+deployment fields goes in `validateDeploymentLayer`, which both loaders call,
+so neither accepts a deployment config the other refuses. A check placed
+directly in `LoadWithIncludesOptions` leaves the deployment layer accepting
+what every full load refuses. `TestLoadDeploymentChecksWhatTheFullLoadChecks`
+runs an invalid config for each check through both loaders; add a case with
+a new check.
+
+## Adding `.gc/site.toml` fields
+
+`.gc/site.toml` holds machine-local bindings and may carry tables this binary
+does not model, so writers never re-encode `SiteBinding` wholesale. Each
+writer passes `persistSiteBinding` a patch that touches only the keys it owns
+(`setSiteWorkspaceIdentity`, `setSiteRigBindings`); everything else
+round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
+its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
+only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
+unregistered field.

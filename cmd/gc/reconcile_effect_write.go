@@ -1,24 +1,16 @@
 package main
 
 import (
-	"context"
-	"errors"
 	"maps"
-	"time"
 
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The row-write effect (CONTRACT v5 R2, D-9): an admitted row write commits
-// only what decideRow decides again on the fresh row. Under the process-wide
-// row lock, with its context checked inside the lock (an effect abandoned at
-// its deadline never writes), it re-reads the row through the cache, re-runs
-// decideRow on that read with the pass's World and allocation, and writes the
-// re-decided intent's patch with a CAS at that read's revision, but only when
-// the re-decided intent has the admitted kind and basis (the incarnation the
-// pass saw, as legacy's authorized checks). It writes through the fenced
-// writer of the row's own census leg. A lost CAS writes nothing: the
-// store evicts the row, and the next pass decides again.
+// only what decideRow decides again, with the pass's World and allocation,
+// on the row the transaction (runTx) reads from the backing, and only when
+// that decides the admitted kind.
 
 // Row-write refusal causes. A refusal backs the row off (P4).
 const (
@@ -28,70 +20,61 @@ const (
 	causeWrite     = "write-error"
 )
 
-// rowWrite is one admitted row write.
-type rowWrite struct {
-	pass *effectPass
-	it   intent
-	// decide is decideRow; a test supplies its own arm table.
-	decide func(*World, *allocDecision, rowKey) (intent, time.Time)
+// rowWriteSections are the row write's one section.
+var rowWriteSections = []section{{Decide: redecideRow}}
+
+// redecideRow is the row write's Decide: decideRow on the fresh row, and on
+// the fresh runtime read whenever the effect made one, so a fresh kind's
+// arm decides on its own read whatever its intent records. A heal the fresh
+// decision composes with a start writes as the heal (intent.Heal).
+func redecideRow(v txView) txStep {
+	step, _ := redecideRowIntent(v)
+	return step
 }
 
-func rowWriteEffect(p *effectPass, it intent) func(context.Context) settlement {
-	return rowWrite{pass: p, it: it, decide: decideRow}.run
-}
-
-func (e rowWrite) run(ctx context.Context) settlement {
-	writer, ok := e.pass.Writers[e.it.Key.Leg]
-	if !ok {
-		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: errNoConditionalWriter}
+// redecideRowIntent is redecideRow with the fresh decision it wrote from.
+func redecideRowIntent(v txView) (txStep, intent) {
+	w := v.World.withRow(v.It.Key, v.Row, v.Meta)
+	if v.RT != nil {
+		w = w.withRuntime(v.It.Key, v.RT)
 	}
-	var fresh intent
-	decided := false
-	var wrote bool
-	err := session.WithSessionMutationLock(e.it.Key.ID, func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		var err error
-		wrote, err = writer.updateMetadataFenced(e.it.Key.ID, 1, func(row session.Info, _ session.PersistedResponse) session.MetadataPatch {
-			w := e.pass.World.withRow(e.it.Key, row)
-			fresh, _ = e.decide(&w, e.pass.Alloc, e.it.Key)
-			decided = fresh.Kind == e.it.Kind && fresh.Basis == e.it.Basis && len(fresh.Patch) > 0
-			if !decided || ctx.Err() != nil { // the last check before the CAS
-				return nil
-			}
-			return fresh.Patch
-		})
-		return err
-	})
-	switch {
-	case errors.Is(err, errNoConditionalWriter):
-		return settlement{Outcome: settledRefused, Cause: causeNoWriter, Err: err}
-	case err != nil:
-		return settlement{Outcome: settledFailed, Cause: causeWrite, Err: err}
-	case wrote: // a landing keeps its event, even past the deadline
-		return settlement{Outcome: settledLanded, Event: fresh.Event}
-	case ctx.Err() != nil:
-		return settlement{Outcome: settledFailed, Cause: causeDeadline, Err: ctx.Err()}
-	case decided:
-		return settlement{Outcome: settledRefused, Cause: causeCAS}
+	fresh, _ := decideRow(&w, v.Alloc, v.It.Key)
+	if fresh.Heal != nil {
+		fresh = *fresh.Heal
 	}
-	return settlement{Outcome: settledRefused, Cause: causeRedecided}
+	if fresh.Kind != v.It.Kind || len(fresh.Patch) == 0 && fresh.Class.Len() == 0 {
+		return txStep{Refuse: causeRedecided}, fresh
+	}
+	step := txStep{Write: fresh.Patch, Class: fresh.Class}
+	if fresh.Event != nil {
+		step.Facts.Events = []events.Event{*fresh.Event}
+	}
+	return step, fresh
 }
 
-// withRow is w with k's census row read again as row: removed when the row
-// closed, otherwise rebuilt from row on its leg.
-func (w World) withRow(k rowKey, row session.Info) World {
+// freshRow is row k's fresh runtime read.
+type freshRow struct {
+	k  rowKey
+	rt *txRuntime
+}
+
+// withRuntime is w with k's runtime read fresh as rt, which the fresh
+// accessors read in the pass's stead.
+func (w World) withRuntime(k rowKey, rt *txRuntime) World {
+	w.fresh = &freshRow{k: k, rt: rt}
+	return w
+}
+
+// withRow is w with k's census row read again as row, with its persisted
+// metadata meta: removed when the row closed, otherwise rebuilt from row on
+// its leg.
+func (w World) withRow(k rowKey, row session.Info, meta map[string]string) World {
 	c := *w.Census
 	c.Rows = maps.Clone(c.Rows)
 	if row.Closed {
 		delete(c.Rows, k)
 	} else {
-		r := newCensusRow(k, row)
-		if r.DuplicateOf = c.Rows[k].DuplicateOf; r.DuplicateOf != "" {
-			r.PendingCreate = false
-		}
-		c.Rows[k] = r
+		c.Rows[k] = w.Census.reread(k, row, meta)
 	}
 	w.Census = &c
 	return w

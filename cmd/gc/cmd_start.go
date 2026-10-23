@@ -37,10 +37,14 @@ func startupSessionName(cityName, agentName, sessionTemplate string) string {
 	return agent.SessionNameFor(cityName, agentName, sessionTemplate)
 }
 
+// standaloneBuildAgentsFnWithSessionBeads returns the standalone controller's
+// BuildFnWithSessionBeads. closedNamed carries the closed named-session index
+// from one build to the next; nil reads it afresh on every build.
 func standaloneBuildAgentsFnWithSessionBeads(
 	cityName, cityPath string,
 	beaconTime time.Time,
 	stderr io.Writer,
+	closedNamed *closedNamedIndexCache,
 ) func(*config.City, runtime.Provider, beads.Store, map[string]beads.Store, *sessionBeadSnapshot, *sessionReconcilerTraceCycle) DesiredStateResult {
 	return func(
 		c *config.City,
@@ -50,7 +54,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 		sessionBeads *sessionBeadSnapshot,
 		trace *sessionReconcilerTraceCycle,
 	) DesiredStateResult {
-		return buildDesiredStateWithSessionBeadsAt(
+		return buildDesiredStateWithClosedNamedIndexAt(
 			cityName,
 			cityPath,
 			beaconTime,
@@ -62,6 +66,7 @@ func standaloneBuildAgentsFnWithSessionBeads(
 			sessionBeads,
 			trace,
 			stderr,
+			closedNamed,
 		)
 	}
 }
@@ -793,9 +798,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
-	// The two cannot disagree: both read only cfg's session_reconciler, which
-	// nothing below rewrites, and reconcilerModeLookupEnv's override, which no
-	// gc code sets.
+	// The two cannot disagree: both read only cfg, which nothing below
+	// rewrites, and reconcilerModeLookupEnv's GC_SESSION, which no gc code
+	// sets.
 	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -977,7 +982,10 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	buildAgents := func(c *config.City, currentSP runtime.Provider, store beads.Store) DesiredStateResult {
 		return buildDesiredState(cityName, cityPath, beaconTime, c, currentSP, store, stderr)
 	}
-	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr)
+	// One closed named-session index cache serves the controller: its builds
+	// here and, through runController, the runtime's other readers.
+	closedNamed := newClosedNamedIndexCache()
+	buildAgentsWithSessionBeads := standaloneBuildAgentsFnWithSessionBeads(cityName, cityPath, beaconTime, stderr, closedNamed)
 
 	recorder := events.Discard
 	var eventProv events.Provider // nil when events disabled or FileRecorder fails
@@ -1006,7 +1014,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDeathHandlers := computePoolDeathHandlers(cfg, cityName, cityPath, sp, stderr)
 		watchTargets := config.WatchTargets(prov, cfg, cityPath)
 		configRev := config.Revision(fsys.OSFS{}, prov, cfg, cityPath)
-		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, sp,
+		return runController(cityPath, controllerLock, tomlPath, cfg, configRev, buildAgents, buildAgentsWithSessionBeads, closedNamed, sp,
 			newDrainOps(sp), poolSessions, poolDeathHandlers, watchTargets, defaultConfigDebounce, recorder, eventProv, stdout, stderr)
 	}
 
@@ -1058,6 +1066,17 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// both: oneShotStore as the work-class owner fallback and sessStore for its lone
 	// liveOpenSessionAssignmentExists session read (ga-g3pf0).
 	sessStore := cliSessionStore(oneShotStore, cfg, cityPath)
+	// The one-shot pass reads work through the same legs a controller does: the
+	// work store it opened, not the sessions store it leads with (censusWorkLeg,
+	// mc-3ixn3.16). It registers them for its own run, as a controller does.
+	if _, served := registeredResidencyEntry(cityPath); !served && cityPath != "" {
+		routes := cliStorageRoutes(cityPath)
+		registerResidencyRoutes(cityPath, routes, func() beads.Store { return oneShotStore })
+		defer unregisterResidencyRoutes(cityPath, routes)
+	}
+	// Each pass below reads the work legs afresh, as a controller tick does:
+	// a later pass must not decide on an earlier pass's read.
+	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: oneShotStore}), rigStores)
 
 	// One-shot bead reconciliation: same code path as the daemon.
 	sessionQueryPartial := false
@@ -1084,13 +1103,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds := dsResult.State
 	cfgNames := configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
+		cityPath, beads.SessionStore{Store: sessStore}, newSeatWork(legs), ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 	)
 
 	// Same protection as the daemon tick: wake candidates computed before the
 	// release, so the one-shot path cannot reopen work this run is about to wake.
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, sessionBeads.OpenInfos(), dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
-	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil); len(released) > 0 {
+	if released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(oneShotStore, beads.SessionStore{Store: sessStore}, cfg, cityPath, sessionBeads.OpenInfos(), dsResult, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), nil, nil); len(released) > 0 {
 		for _, r := range released {
 			fmt.Fprintf(stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
 		}
@@ -1113,7 +1132,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		ds = dsResult.State
 		cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 		_, sessionBeads = syncSessionBeadsWithSnapshotAndRigStores(
-			cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
+			cityPath, beads.SessionStore{Store: sessStore}, newSeatWork(legs), ds, sp, cfgNames, cfg, clock.Real{}, stderr, true, sessionBeads, nil,
 		)
 	}
 
@@ -1134,7 +1153,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
 	awakeAssignedWorkBeads, awakeAssignedStoreRefs, awakeAssignedStores := filterAssignedWorkBeadsForSessionWakeWithStores(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs, dsResult.AssignedWorkStores)
 	reconcileSessionBeadsAtPathWithNamedDemand(
-		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
+		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore, newSeatWork(legs),
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,
 		dsResult.NamedSessionDemand,
 		dsResult.NamedSessionRoutedDemand,
@@ -1168,7 +1187,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	ds = dsResult.State
 	cfgNames = configuredSessionNamesWithSnapshot(cfg, cityName, sessionBeads)
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: sessStore}, rigStores, ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads, nil,
+		cityPath, beads.SessionStore{Store: sessStore}, newSeatWork(legs), ds, sp, cfgNames, cfg, clock.Real{}, stderr, false, sessionBeads, nil,
 	)
 
 	fmt.Fprintln(stdout, "City started.") //nolint:errcheck // best-effort stdout
@@ -1514,7 +1533,7 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
 func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, true)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, workdirutil.ValidateAncestorWorktreesNotStale)
 }
 
 // resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
@@ -1522,10 +1541,13 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 // pure path computation for a plan whose effect runs the check before it
 // writes the path.
 func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, false)
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, nil)
 }
 
-func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate bool) (string, error) {
+// configuredWorkDirPath resolves the work dir path, checking it with
+// validate when set: only resolveConfiguredWorkDirPath names the check, so a
+// pure caller never reaches it.
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate func(string) error) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
@@ -1541,8 +1563,8 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 	// so the operator sees the broken ancestor instead of a structurally
 	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
 	// returns through ResolveDirPath), so no further resolution is needed.
-	if validate {
-		if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+	if validate != nil {
+		if err := validate(workDir); err != nil {
 			return "", err
 		}
 	}

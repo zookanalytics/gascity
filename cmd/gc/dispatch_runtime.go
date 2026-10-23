@@ -322,6 +322,13 @@ func runWorkflowServe(agentName string, follow bool, _ io.Writer, stderr io.Writ
 	if agentCfg.WorkQuery == "" && isWorkflowServeControlDispatcherAgent(agentCfg) {
 		workQuery = workflowServeControlReadyQueryForBeads(agentCfg, cfg.Beads, config.NamedSessionRuntimeName(cityName, cfg.Workspace, agentCfg.QualifiedName()))
 	}
+	if isWorkflowServeControlDispatcherAgent(agentCfg) {
+		if err := validateDispatchSessionProviderConfig(cfg, cityPath); err != nil {
+			workflowTracef("serve start-error agent=%s err=%v", agentCfg.QualifiedName(), err)
+			fmt.Fprintf(stderr, "gc convoy control --serve: %v\n", err) //nolint:errcheck // the returned error is the outcome
+			return err
+		}
+	}
 	workflowTracef("serve start agent=%s city=%s dir=%s", agentCfg.QualifiedName(), cityPath, workDir)
 	if !follow {
 		_, err := drainWorkflowServeWork(agentCfg, cityPath, workDir, workQuery, workEnv, stderr)
@@ -429,9 +436,16 @@ type workflowServeDrainResult struct {
 func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuery string, workEnv map[string]string, stderr io.Writer) (workflowServeDrainResult, error) {
 	result := workflowServeDrainResult{}
 	idlePolls := 0
+	emits := newExecutionEmitDeferral(cityPath, storePath, stderr)
+	defer emits.flush()
 	for {
 		serveQuery := workflowServeWorkQuery(agentCfg, workQuery)
 		queue, err := workflowServeList(serveQuery, storePath, workEnv)
+		if err == nil {
+			// Project every processed root whose controls have stopped
+			// arriving; a root with a control in this queue waits for it.
+			emits.flushSettled(queue)
+		}
 		if err != nil {
 			workflowTracef("serve query-error agent=%s err=%v", agentCfg.QualifiedName(), err)
 			// Surface a killed/timed-out control work query on the event
@@ -467,7 +481,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 			// control ga-fw2fm. The silent no-op now emits a separate
 			// `process-control ... skip reason=bead_not_open` line inside
 			// ProcessControl itself; see runtime.go.
-			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr); err != nil {
+			callsBefore, started := snapshotControlBdCalls(), time.Now()
+			if err := controlDispatcherServe(cityPath, storePath, beadID, io.Discard, stderr, emits); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					pendingCount++
 					// Same rule as the transient arm below: a pending bead
@@ -507,7 +522,8 @@ func drainWorkflowServeWork(agentCfg config.Agent, cityPath, storePath, workQuer
 				}
 				return result, fmt.Errorf("processing control bead %s: %w", beadID, err)
 			}
-			workflowTracef("serve processed bead=%s kind=%s", beadID, kind)
+			calls := snapshotControlBdCalls().since(callsBefore)
+			workflowTracef("serve processed bead=%s kind=%s bd_reads=%d bd_writes=%d dur=%s", beadID, kind, calls.reads, calls.writes, time.Since(started).Round(time.Millisecond))
 			result.processedAny = true
 			processedThisCycle = true
 		}
@@ -543,7 +559,7 @@ func runWorkflowServeFollow(agentCfg config.Agent, cityPath, storePath, workQuer
 	defer close(done)
 
 	eventCh := make(chan workflowWatchResult, 1)
-	go pumpWorkflowEvents(done, watcher, eventCh)
+	go pumpWorkflowEvents(done, watcher, eventCh, workflowServeUnreadStoreFilter(agentCfg, cityPath, storePath, workQuery))
 
 	idleSweeps := 0
 	var pendingWakeErr error
@@ -612,9 +628,22 @@ type workflowWatchResult struct {
 	err error
 }
 
-func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult) {
+// pumpWorkflowEvents forwards the watcher's events and its terminal error to
+// eventCh until done closes. It drops each event skip reports true for, so that
+// event neither wakes the serve loop nor joins a coalesced wake. A nil skip
+// drops nothing.
+func pumpWorkflowEvents(done <-chan struct{}, watcher events.Watcher, eventCh chan<- workflowWatchResult, skip func(events.Event) bool) {
 	for {
 		evt, err := watcher.Next()
+		if err == nil && skip != nil && skip(evt) {
+			workflowTracef("serve ignore-unread-store-event type=%s subject=%s", evt.Type, evt.Subject)
+			select {
+			case <-done:
+				return
+			default:
+			}
+			continue
+		}
 		select {
 		case eventCh <- workflowWatchResult{evt: evt, err: err}:
 		case <-done:
@@ -940,7 +969,7 @@ func nextWorkflowServeBeads(workQuery, dir string, env map[string]string) ([]hoo
 	if workQuery == "" {
 		return nil, nil
 	}
-	if queue, handled, err := tryControlReadyFromCacheOrFallback(workQuery, dir, env); handled {
+	if queue, handled, err := tryControlReadyScan(workQuery, dir, env); handled {
 		return queue, err
 	}
 	output, err := shellWorkQueryWithEnv(workQuery, dir, mergeRuntimeEnv(os.Environ(), env))
@@ -969,14 +998,23 @@ func dispatchWakeFile(cityPath string) string {
 	return filepath.Join(cityPath, ".gc", "dispatch-wake")
 }
 
-// writeDispatchWakeFile updates the mtime of the dispatch-wake sentinel file.
-// Best-effort: if the write fails the dispatch cycle continues normally;
-// workers fall back to their standard poll interval.
+// writeDispatchWakeFile creates the dispatch-wake sentinel file if needed and
+// sets its mtime to now, so every wake is observable to a worker comparing
+// mtimes (opening an existing file does not change its mtime).
+// Best-effort: if the write fails the dispatch cycle continues normally and
+// workers fall back to their standard poll interval; the failure is traced.
 func writeDispatchWakeFile(cityPath string) {
 	path := dispatchWakeFile(cityPath)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		workflowTracef("dispatch-wake create path=%s err=%v", path, err)
 		return
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		workflowTracef("dispatch-wake close path=%s err=%v", path, err)
+	}
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		workflowTracef("dispatch-wake touch path=%s err=%v", path, err)
+	}
 }

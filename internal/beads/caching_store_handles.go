@@ -225,7 +225,7 @@ func (c *CachingStore) cachedListOnly(query ListQuery) ([]Bead, error) {
 	if query.Limit > 0 && len(rows) > query.Limit {
 		rows = rows[:query.Limit]
 	}
-	return rows, nil
+	return query.Fields.project(rows), nil
 }
 
 func (c *CachingStore) cachedReadyOnly(query ReadyQuery) ([]Bead, error) {
@@ -366,7 +366,7 @@ func cachedReadyRows(
 			break
 		}
 	}
-	return result, nil
+	return query.Fields.project(result), nil
 }
 
 func (c *CachingStore) cachedDepListOnly(id, direction string) ([]Dep, error) {
