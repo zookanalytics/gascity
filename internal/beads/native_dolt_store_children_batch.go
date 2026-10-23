@@ -35,16 +35,19 @@ const nativeExactReadChunkSize = nativeServerEdgeAnchorCap
 // ChildrenOfAny reads the children of every parent: one Relations read per
 // parent for the inbound parent-child edges (the edge rows name the children,
 // so this never lists a tier), then the children's rows by exact id through
-// readExactRows. It answers what Children(id, opts...) answers per parent,
-// deduplicated, in created order. A parent this store holds no row for has no
-// children here, as Children reports; a failed read is an error.
+// readExactRows. It answers what Children(id, IncludeClosed, opts...) answers
+// per parent, as ChildrenBatchLister promises: closed children included,
+// deduplicated, in created order. molecule.ListSubtree passes no
+// IncludeClosed and still reaches an open descendant through a closed
+// intermediate. A parent this store holds no row for has no children here, as
+// Children reports; a failed read is an error.
 func (s *NativeDoltStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
 	parents := distinctNonEmpty(parentIDs)
 	if len(parents) == 0 {
 		return nil, nil
 	}
 	query := ListQuery{
-		IncludeClosed: HasOpt(opts, IncludeClosed),
+		IncludeClosed: true,
 		TierMode:      TierModeFromOpts(opts),
 		Sort:          SortCreatedAsc,
 	}
