@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,6 +151,29 @@ const BDAllowRemoteMigrateEnvKey = "BD_ALLOW_REMOTE_MIGRATE"
 // BDAllowRemoteMigrateEnvKey. It stays out of nativeDoltOpenEnvKeys, which
 // lists the BEADS_ keys a direct open decides.
 var bdRemoteMigrateOpenEnvKeys = []string{BDAllowRemoteMigrateEnvKey}
+
+// NativeDoltOpenEnvDigest names what OpenNativeDoltStoreAt projects from env
+// for the linked beads library: the value of each key in nativeDoltOpenEnvKeys
+// and of BDAllowRemoteMigrateEnvKey. A blank value counts as unset, because
+// the projection unsets a key whose value is blank. Two envs with equal
+// digests project the same values into an open, so they name the same server,
+// credentials and open options, and a key the projection does not decide
+// never changes the digest. The digest carries no value in the clear, so a
+// caller can keep and compare it without holding a password.
+func NativeDoltOpenEnvDigest(env map[string]string) string {
+	var b strings.Builder
+	for _, keys := range [][]string{nativeDoltOpenEnvKeys, bdRemoteMigrateOpenEnvKeys} {
+		for _, key := range keys {
+			value, ok := env[key]
+			if !ok || strings.TrimSpace(value) == "" {
+				fmt.Fprintf(&b, "%s unset\n", key)
+				continue
+			}
+			fmt.Fprintf(&b, "%s=%q\n", key, value)
+		}
+	}
+	return fmt.Sprintf("sha256=%x", sha256.Sum256([]byte(b.String())))
+}
 
 // withProjectedOpenEnvLocked is the projection itself, parameterised by the key
 // list it decides.

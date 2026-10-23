@@ -3269,6 +3269,50 @@ func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	}
 }
 
+// TestNativeDoltOpenEnvDigestNamesWhatTheOpenProjects pins the digest a caller
+// keeps to tell whether a native store it opened still matches the env it
+// would open with now. Every key the direct open projects changes the digest,
+// so a move to another server, port, database or credential is never mistaken
+// for the same binding. A key the open leaves alone, and a blank value the
+// open unsets, change nothing, so an env that differs only there keeps its
+// store. The password never appears in the digest.
+func TestNativeDoltOpenEnvDigestNamesWhatTheOpenProjects(t *testing.T) {
+	const password = "s3cret-dolt-password"
+	base := func() map[string]string {
+		return map[string]string{
+			"BEADS_DOLT_SERVER_HOST":     "db-one.example.com",
+			"BEADS_DOLT_SERVER_PORT":     "3307",
+			"BEADS_DOLT_SERVER_DATABASE": "one",
+			"BEADS_DOLT_PASSWORD":        password,
+			"GC_RIG":                     "repo",
+		}
+	}
+	want := NativeDoltOpenEnvDigest(base())
+	if strings.Contains(want, password) {
+		t.Fatalf("digest %q carries the password in the clear", want)
+	}
+
+	for _, key := range append(append([]string(nil), nativeDoltOpenEnvKeys...), BDAllowRemoteMigrateEnvKey) {
+		env := base()
+		env[key] = "changed"
+		if got := NativeDoltOpenEnvDigest(env); got == want {
+			t.Errorf("setting projected key %s left the digest unchanged", key)
+		}
+	}
+
+	for name, edit := range map[string]func(map[string]string){
+		"a key outside the projection":           func(env map[string]string) { env["GC_RIG"] = "other" },
+		"the credential command it does not set": func(env map[string]string) { env["BEADS_DOLT_CREDENTIAL_COMMAND"] = "/bin/creds" },
+		"a blank projected key":                  func(env map[string]string) { env["BEADS_DOLT_SERVER_SOCKET"] = "  " },
+	} {
+		env := base()
+		edit(env)
+		if got := NativeDoltOpenEnvDigest(env); got != want {
+			t.Errorf("changing %s changed the digest", name)
+		}
+	}
+}
+
 // nativeOpenLane is one way a process opens native storage through an env
 // window: an open or a reopen, on the direct, hosted or proxied lane.
 type nativeOpenLane struct {

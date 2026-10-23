@@ -443,9 +443,12 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 // One Ready read per leg is the whole cost of a scan (ga-vnycm2.19). A bd leg
 // answers it with one `bd ready` call, and a second when that call's page of
 // brief rows comes back full; file, SQLite and native legs answer it in
-// process. Each read is TierBoth, the tier the dispatcher's queue has always
-// been drawn from (the primed snapshot this replaces held ephemeral rows too),
-// and it applies the same work-outcome veto the snapshot applied.
+// process. A scope that passes the native-store preflight is a native leg,
+// opened once and kept while the scope's binding holds
+// (openControlBdStoreThroughFactory). Each read is TierBoth, the tier the
+// dispatcher's queue has always been drawn from (the primed snapshot this
+// replaces held ephemeral rows too), and it applies the same work-outcome veto
+// the snapshot applied.
 //
 // The legs are the SAME ledgers runControlDispatcherWithStoreAndConfig
 // dispatches against -- controlReadyLegSources applies the routing rule
@@ -464,10 +467,11 @@ func controlReadyLegsReady(dir, cityPath string, cfg *config.City) (ready []bead
 	// Release the scoped backing handles as soon as the read returns, on the
 	// success and the error path alike, so no read mark on a shared WAL outlives
 	// the scan (#6255). Only owned legs are closed; the graph binding is
-	// process-shared (see controlReadyLegSources).
+	// process-shared (see controlReadyLegSources), and so is a native scoped leg
+	// the control path keeps, which closeControlStoreHandle leaves open.
 	defer func() {
 		for _, s := range owned {
-			if err := closeBeadStoreHandle(s); err != nil {
+			if err := closeControlStoreHandle(s); err != nil {
 				log.Printf("control-ready scan: closing scope store for %s: %v", dir, err)
 			}
 		}
@@ -500,8 +504,10 @@ func controlReadyLegsReady(dir, cityPath string, cfg *config.City) (ready []bead
 // by closeCLIStorageRoutes at process exit; CloseStore is a one-way latch, so
 // closing a binding leg here would poison every later graph-class read and write
 // in the process with ErrStoreClosed. Only the scoped leg
-// (openControlStoreAtForCity) is freshly constructed per call, so only it is
-// returned as owned.
+// (openControlStoreAtForCity) is opened per call, so only it is returned as
+// owned. When that leg is the native store the control path keeps for the
+// scope (nativeControlStores), the closing defer leaves it open through
+// closeControlStoreHandle.
 //
 // An error return must not hand back opened stores. controlReadyLegsReady
 // registers its closing defer only after this call succeeds, so a store opened
