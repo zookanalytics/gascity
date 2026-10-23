@@ -538,6 +538,73 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreRealBackendListSkipsCountsKeepsRows runs the seat-work
+// read shape (assignee, status, both tiers, live) against a real backend. The
+// listing skips the count aggregates Bead does not carry; every field Bead does
+// carry, labels, parent and edges among them, still arrives as Get reads it.
+func TestNativeDoltStoreRealBackendListSkipsCountsKeepsRows(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-skip-counts", "gc")
+
+	parent, err := store.Create(Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	blocker, err := store.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	work, err := store.Create(Bead{
+		Title:    "seat work",
+		Assignee: "worker",
+		ParentID: parent.ID,
+		Labels:   []string{"gc:work", "pool:a"},
+		Metadata: map[string]string{"k": "v"},
+		Needs:    []string{"blocks:" + blocker.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+	if _, err := store.Create(Bead{Title: "other seat", Assignee: "someone-else", Status: "in_progress"}); err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	rows, err := store.List(ListQuery{Assignee: "worker", Status: "in_progress", TierMode: TierBoth, Live: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != work.ID {
+		t.Fatalf("List = %+v, want only %s", rows, work.ID)
+	}
+	got := rows[0]
+	if got.ParentID != parent.ID {
+		t.Errorf("ParentID = %q, want %q", got.ParentID, parent.ID)
+	}
+	if !reflect.DeepEqual(got.Labels, []string{"gc:work", "pool:a"}) {
+		t.Errorf("Labels = %v, want [gc:work pool:a]", got.Labels)
+	}
+	if got.Metadata["k"] != "v" {
+		t.Errorf("Metadata = %v, want k=v", got.Metadata)
+	}
+	assertNativeDependency(t, got.Dependencies, work.ID, blocker.ID, "blocks")
+}
+
 // TestNativeDoltStoreDepMetadata pins the payload read a Dolt-backed source
 // needs to satisfy beadsGraphEdgeMetadataReader.
 //
