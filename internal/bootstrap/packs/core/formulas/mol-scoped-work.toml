@@ -94,14 +94,16 @@ case "$WORK_OWNER" in
     fi ;;
 esac
 # A session running this workflow never claims the work bead, so the assignee
-# cannot show it. workspace-setup records the run beside the work's tree
-# instead, as metadata.work_holder, and the core pack's work-holder.sh judges
-# each tree this run could adopt by every holder recorded beside it.
+# cannot show it. The run records itself as metadata.work_holder instead. The
+# core pack's work-holder.sh judges each tree this run could adopt by every
+# holder recorded beside it and, finding none live, claims the work: one
+# compare-and-set records this session as the holder only while the bead still
+# records the holder read here, so a second dispatch's claim conflicts and parks.
 TREE_RC=0
 TREE_FINDING=""
 if [ "$OWNER_LIVE" = "0" ]; then
   if CORE_SCRIPTS=$(gc core scripts-dir) && [ -x "$CORE_SCRIPTS/work-holder.sh" ]; then
-    TREE_FINDING=$("$CORE_SCRIPTS/work-holder.sh" --bead "$WORK_BEAD_ID" \
+    TREE_FINDING=$("$CORE_SCRIPTS/work-holder.sh" --claim --bead "$WORK_BEAD_ID" \
       --work-dir "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.work_dir // empty')" \
       --holder "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.work_holder // empty')" \
       --branch "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.branch // empty')") || TREE_RC=$?
@@ -165,12 +167,12 @@ loop.
 
 The assignee is one owner signal and the work's recorded holder is the other.
 A session running this workflow leaves the work bead unassigned for its whole
-run, so `workspace-setup` records the run instead: `metadata.work_dir` names
-the tree it entered and `metadata.work_holder` the session that entered it,
-and `cleanup-worktree` clears both. The core pack's `work-holder.sh`, found
-through `gc core scripts-dir`, judges that record, never where the tree sits
-on disk. A holder that is this session is a resume. A holder present in the
-session list parks this step the way a live assignee does. A holder absent
+run, so the run records itself instead: `metadata.work_holder` names the
+session holding the work, `metadata.work_dir` the tree `workspace-setup`
+entered, and `cleanup-worktree` clears both. The core pack's `work-holder.sh`,
+found through `gc core scripts-dir`, judges that record, never where the tree
+sits on disk. A holder that is this session is a resume. A holder present in
+the session list parks this step the way a live assignee does. A holder absent
 from it is gone. The trees this run could adopt are this bead's `work_dir`
 and the worktree with `metadata.branch` checked out, listed in the rig
 repository (`$GC_RIG_ROOT`, or `$GC_DIR` without one). Each is judged by
@@ -181,6 +183,24 @@ no unclosed bead records, a session list, bead listing or worktree listing
 that cannot be read, and a script that cannot be run park the step too. Each
 finding names the tree, counts its uncommitted paths so the holder's work can
 be salvaged, and says what clears it.
+
+Judging the work and taking it are one step. When no live session holds the
+work, `work-holder.sh --claim` records this session as `metadata.work_holder`
+with one compare-and-set (`gc beads metadata-cas`) whose expected value is the
+holder this gate read. The claim goes to the store that owns the work bead,
+the one holding the longest prefix in `gc rig list --json` that the bead's id
+begins with. The session's own rig plays no part, because a city-scoped
+session serves work in any rig's store. Of two dispatches that read the work
+free at the same moment, the second one's compare-and-set finds the first
+one's record and conflicts, so it parks on that live holder instead of
+passing. The holder a conflict finds is read back from the same store and
+judged against a session list read after it, so a dispatch that started after
+the list was first read still counts as live. A holder a conflict finds that
+is gone, or that is this session, is claimed over once more. A store that
+cannot compare-and-set gets a read and a plain write instead, and the script
+says so, because a dispatch writing between the two can still pass beside
+this one. A rig list that names no owner for the bead, or a claim the store
+refuses for any other reason, parks the step.
 
 Liveness is the gate, not staleness: an idle worker between claims is
 indistinguishable from an abandoned one, so only a session absent from
@@ -230,10 +250,12 @@ gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE" --set-metadata 
 {{setup_command}}
 ```
 
-The tree and its holder are recorded on every entry, a resumed or adopted tree
-included, because load-context's duplicate-dispatch gate reads the holder to
-tell this run from a tree left behind. A holder that is not recorded leaves the
-run invisible to that gate, so the step fails rather than continue.
+load-context's claim records the session that took the work as its holder. The
+tree and its holder are recorded on every entry, a resumed or adopted tree
+included, so a run resumed in another session names that session, and
+load-context's duplicate-dispatch gate reads that record to tell this run from
+a tree left behind. A record that does not land can leave the run under an
+earlier session's name, so the step fails rather than continue.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -483,9 +484,13 @@ func TestWorktreeFormulasHoldOnALiveOwnerBeforeWorkspaceSetup(t *testing.T) {
 // assignee check passes a second dispatch while the first is mid-flight. The
 // gate then asks the core pack's work-holder.sh whether a live session holds
 // the work's tree, reaching it through `gc core scripts-dir`, the one path a
-// formula step has to core's scripts. A finding parks the step the way a live
-// assignee does, and the note and the escalation carry the finding, which
-// names the holder and the tree and says what clears it. A script the gate
+// formula step has to core's scripts, and has it claim the work when none
+// does. A gate that passes has claimed the work for this session with a
+// compare-and-set on the holder it read, in the store that owns the work bead
+// whether or not a rig scopes the session. A finding parks the step the way a
+// live assignee does, and the note and the escalation carry the finding, which
+// names the holder and the tree and says what clears it; a claim another
+// dispatch made after the gate's read is such a finding. A script the gate
 // cannot reach fails closed. A live assignee parks before the tree is
 // consulted, and its release names that assignee.
 func TestWorktreeFormulasParkOnTheWorkHolderFinding(t *testing.T) {
@@ -511,12 +516,18 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 		bead string
 		// scriptsDir is the `gc core scripts-dir` answer; empty means it fails.
 		scriptsDir string
-		wantHold   bool
+		// claim is the outcome `gc beads metadata-cas` answers, swapped when
+		// empty, and reread the work bead `gc bd show gc-w` returns after it.
+		claim, reread string
+		wantHold      bool
 		// wantInMail must appear in the escalation, and its first entry in the
 		// note on the work bead too.
 		wantInMail []string
-		// wantNotInLog must appear nowhere in the gc log.
+		// wantInLog must appear in the gc log, and wantNotInLog nowhere in it.
+		wantInLog    string
 		wantNotInLog string
+		// env overrides the defaults: this session is s-me, in rig demo.
+		env []string
 	}{
 		{
 			name:       "a live recorded holder parks the step, and the escalation carries the finding",
@@ -528,11 +539,34 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 				"gc bd update gc-w --unset-metadata work_holder",
 				"Once each finding above is resolved: gc bd update gc-step --status=open",
 			},
+			wantNotInLog: "gc beads metadata-cas",
 		},
 		{
-			name:       "a gone recorded holder leaves the tree to adopt",
+			name:       "a gone recorded holder leaves the tree to adopt, and the gate claims it for this session",
 			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-old"}}]`,
 			scriptsDir: scriptsDir,
+			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected=s-old --next=s-me --json",
+		},
+		{
+			name:       "a session no rig scopes claims rig work in the store that owns it",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w"}}]`,
+			scriptsDir: scriptsDir,
+			env:        []string{"GC_RIG="},
+			wantInLog:  "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json",
+		},
+		{
+			name:       "a dispatch that claimed the work after the gate's read parks the step on that holder",
+			bead:       `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w"}}]`,
+			scriptsDir: scriptsDir,
+			claim:      "conflict",
+			reread:     `[{"id":"gc-w","status":"open","assignee":"","metadata":{"work_dir":"$ROOT/repo/worktrees/gc-w","work_holder":"s-peer"}}]`,
+			wantHold:   true,
+			wantInMail: []string{
+				"gc-w records live pool__worker-s-peer as the holder of worktree",
+				"gc bd update gc-w --unset-metadata work_holder",
+				"Once each finding above is resolved: gc bd update gc-step --status=open",
+			},
+			wantInLog: "gc beads metadata-cas gc-w --store-ref=rig:demo --key=work_holder --expected= --next=s-me --json",
 		},
 		{
 			name:     "a work-holder.sh the gate cannot reach fails closed",
@@ -577,37 +611,64 @@ git -C "$ROOT/repo" worktree add -q --detach "$ROOT/repo/worktrees/gc-w"
 				if tc.scriptsDir != "" {
 					scriptsAnswer = "echo '" + tc.scriptsDir + "'"
 				}
-				binDir, logPath := fakeGCBin(t, `case "$1 $2" in
+				claim := tc.claim
+				if claim == "" {
+					claim = "swapped"
+				}
+				beadPath := filepath.Join(root, "bead.json")
+				writeGateFixture(t, beadPath, expand.Replace(tc.bead))
+				rereadPath := filepath.Join(root, "reread.json")
+				reread := tc.reread
+				if reread == "" {
+					reread = tc.bead
+				}
+				writeGateFixture(t, rereadPath, expand.Replace(reread))
+				rigsPath := filepath.Join(root, "rigs.json")
+				writeGateFixture(t, rigsPath, expand.Replace(workHolderRigs))
+				binDir, logPath := fakeGCBin(t, `if [ "$1" = bd ]; then
+  shift
+  while [ "$1" = --city ] || [ "$1" = --rig ]; do shift 2; done
+  set -- bd "$@"
+fi
+case "$1 $2" in
 "core scripts-dir") `+scriptsAnswer+` ;;
 "session list") cat '`+sessionsPath+`' ;;
+"rig list") cat '`+rigsPath+`' ;;
 "bd list") echo '[]' ;;
 "hook current") echo gc-step ;;
-"bd show") echo '[{"id":"gc-step","metadata":{"gc.root_bead_id":"gc-root"}}]' ;;
+"beads metadata-cas") echo '{"schema_version":"1","ok":true,"bead_id":"gc-w","store_ref":"rig:demo","key":"work_holder","outcome":"`+claim+`"}' ;;
+"bd show")
+  case "$3" in
+  gc-w) cat '`+rereadPath+`' ;;
+  *) echo '[{"id":"gc-step","metadata":{"gc.root_bead_id":"gc-root"}}]' ;;
+  esac ;;
 esac
 exit 0
 `)
-				beadPath := filepath.Join(root, "bead.json")
-				writeGateFixture(t, beadPath, expand.Replace(tc.bead))
 				gatePath := filepath.Join(root, "gate.sh")
 				writeGateFixture(t, gatePath, `WORK_BEAD_ID=gc-w
 WORK_BEAD_JSON=$(cat '`+beadPath+`')
 `+gate+`
 echo GATE-PASSED
 `)
-				out, err := runPackScript(t, gatePath, binDir, workHolderEnvKeys, append(env,
+				out, err := runPackScript(t, gatePath, binDir, workHolderEnvKeys, append(append(env,
 					"GC_DIR="+filepath.Join(root, "repo"),
+					"GC_RIG=demo",
 					"GC_RIG_ROOT="+filepath.Join(root, "repo"),
 					"GC_SESSION_ID=s-me",
 					"GC_SESSION_NAME=pool__worker-s-me",
 					"GC_AGENT=s-me",
 					"GC_ALIAS=",
-				))
+				), tc.env...))
 				logData, readErr := os.ReadFile(logPath)
 				if readErr != nil && !os.IsNotExist(readErr) {
 					t.Fatalf("reading the gc log: %v", readErr)
 				}
 				gcLog := string(logData)
 				parked := strings.Contains(gcLog, "gc bd update gc-step --status=blocked")
+				if tc.wantInLog != "" && !strings.Contains(gcLog, tc.wantInLog) {
+					t.Errorf("the gate did not run %q\ngc log:\n%s", tc.wantInLog, gcLog)
+				}
 				if tc.wantNotInLog != "" && strings.Contains(gcLog, tc.wantNotInLog) {
 					t.Errorf("the gate ran %q\ngc log:\n%s", tc.wantNotInLog, gcLog)
 				}
@@ -638,6 +699,69 @@ echo GATE-PASSED
 				}
 			})
 		}
+	}
+}
+
+// TestWorktreeFormulasLetOneOfTwoRacingDispatchesThrough runs the race the
+// load-context gate's claim closes. Two dispatches of one work bead both read
+// it before either has claimed it, so both judge it free, and both reach the
+// claim at once. The store lands one compare-and-set at a time, so exactly one
+// gate passes, holding the work, and the other parks its own step on the
+// holder that won.
+func TestWorktreeFormulasLetOneOfTwoRacingDispatchesThrough(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the load-context gate requires it")
+	}
+	scriptsDir, err := filepath.Abs("assets/scripts")
+	if err != nil {
+		t.Fatalf("resolving the core scripts directory: %v", err)
+	}
+	vars := strings.NewReplacer("{{convoy_id}}", "gc-convoy", "{{escalation_target}}", "human")
+	ids := []string{"s-me", "s-peer"}
+	for _, file := range []string{"mol-polecat-base.toml", "mol-scoped-work.toml"} {
+		gate := vars.Replace(bashFenceContaining(t, formulaStep(t, readFormula(t, file), "load-context"), "OWNER_LIVE=0"))
+		t.Run(file, func(t *testing.T) {
+			t.Parallel()
+			for round := range 4 {
+				root := t.TempDir()
+				writeWorkHolderClaimAnswers(t, root)
+				gatePath := filepath.Join(root, "gate.sh")
+				writeGateFixture(t, gatePath, `WORK_BEAD_ID=gc-w
+WORK_BEAD_JSON='[{"id":"gc-w","status":"open","assignee":"","metadata":{}}]'
+`+gate+`
+echo GATE-PASSED
+`)
+				binDir, logPath := fakeGCBin(t, workHolderClaimFakeGC)
+				outs := make([]string, len(ids))
+				errs := make([]error, len(ids))
+				var wg sync.WaitGroup
+				for i, id := range ids {
+					wg.Go(func() {
+						outs[i], errs[i] = runPackScript(t, gatePath, binDir, workHolderEnvKeys,
+							append(workHolderClaimEnv(root, id), "FAKE_SCRIPTS_DIR="+scriptsDir))
+					})
+				}
+				wg.Wait()
+				gcLog, _ := os.ReadFile(logPath)
+				var passed []string
+				for i, id := range ids {
+					parked := strings.Contains(string(gcLog), "gc bd update gc-step-"+id+" --status=blocked")
+					switch {
+					case errs[i] == nil && strings.Contains(outs[i], "GATE-PASSED") && !parked:
+						passed = append(passed, id)
+					case errs[i] != nil && !strings.Contains(outs[i], "GATE-PASSED") && parked:
+					default:
+						t.Errorf("round %d: %s's gate neither passed nor parked its own step (err=%v)\noutput:\n%s", round, id, errs[i], outs[i])
+					}
+				}
+				if len(passed) != 1 {
+					t.Fatalf("round %d: %d gates passed (%v), want exactly one\ngc log:\n%s", round, len(passed), passed, gcLog)
+				}
+				if stored, _ := os.ReadFile(filepath.Join(root, "holder")); string(stored) != passed[0] {
+					t.Errorf("round %d: the store holds work_holder=%q, want the gate that passed, %q", round, stored, passed[0])
+				}
+			}
+		})
 	}
 }
 
