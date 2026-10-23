@@ -4578,6 +4578,7 @@ func TestPackagedOrderTrackingSweepKeepsALongRunsGate(t *testing.T) {
 		expiredID  = "lt-expired"   // 30m into a 5m run
 		untimedID  = "lt-untimed"   // records no timeout
 	)
+	orderOf := map[string]string{inFlightID: "long-pass", expiredID: "short-pass", untimedID: "legacy-pass"}
 	tests := []struct {
 		name       string
 		args       []string
@@ -4640,9 +4641,9 @@ prefix = "ct"
 				}
 			}
 			seedBeads := []beads.Bead{
-				tracking(inFlightID, "long-pass", recordedTimeout(t, 9000*time.Second)),
-				tracking(expiredID, "short-pass", recordedTimeout(t, 5*time.Minute)),
-				tracking(untimedID, "legacy-pass", nil),
+				tracking(inFlightID, orderOf[inFlightID], recordedTimeout(t, 9000*time.Second)),
+				tracking(expiredID, orderOf[expiredID], recordedTimeout(t, 5*time.Minute)),
+				tracking(untimedID, orderOf[untimedID], nil),
 			}
 			seedData, err := json.Marshal(struct {
 				Seq   int          `json:"seq"`
@@ -4679,6 +4680,29 @@ prefix = "ct"
 					}
 					if got.Status != want {
 						t.Errorf("%s status after gc order sweep-tracking %s = %q, want %q", id, strings.Join(tt.args, " "), got.Status, want)
+					}
+				}
+			}
+
+			// A kept bead holds its order's single-flight gate only while the
+			// dispatcher counts it as a run (orders.IsRunRecord), in its
+			// order-run index and in the strict read it falls back to.
+			entries, err := newOrderDispatchTrackingIndex(io.Discard).entriesForStore(reopened, "city")
+			if err != nil {
+				t.Fatalf("order-run index: %v", err)
+			}
+			for shut, ids := range map[bool][]string{true: tt.wantOpen, false: tt.wantClosed} {
+				for _, id := range ids {
+					order := orderOf[id]
+					if got := entries[order].openWorkTracking; got != shut {
+						t.Errorf("%s gate shut in the order-run index after gc order sweep-tracking %s = %t, want %t", order, strings.Join(tt.args, " "), got, shut)
+					}
+					got, err := (&memoryOrderDispatcher{}).hasOpenWorkStrict(reopened, order)
+					if err != nil {
+						t.Fatalf("hasOpenWorkStrict(%s): %v", order, err)
+					}
+					if got != shut {
+						t.Errorf("%s gate shut by hasOpenWorkStrict after gc order sweep-tracking %s = %t, want %t", order, strings.Join(tt.args, " "), got, shut)
 					}
 				}
 			}
