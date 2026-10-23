@@ -551,7 +551,7 @@ func TestPrintDriftReport(t *testing.T) {
 }
 
 // TestSpawnDetachedSupervisorScrubsSessionIdentity pins the sibling of #6316:
-// a `gc start` drift respawn run from an agent shell forks a Setpgid
+// a `gc start` drift respawn run from an agent shell forks a Setsid
 // supervisor that outlives it and reparents to init. Carrying the agent's
 // GC_SESSION_ID would make that supervisor the session's orphan-sweep target
 // once the session closes. The child here is /bin/sh, not the test binary, so
