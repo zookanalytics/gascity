@@ -651,8 +651,8 @@ func terminateDrainAckRuntimeByProcessTable(
 //     agent's environment verbatim; its SIGTERM handler kills the city's SHARED
 //     dolt sql-server, i.e. the beads store for the controller and every other
 //     agent in that city;
-//   - a detached supervisor from `gc start` / `gc supervisor start`, likewise
-//     Setpgid and env-inheriting, whose process group spans every city on the box.
+//   - a detached supervisor from `gc start` / `gc supervisor start`, Setsid
+//     and env-inheriting, whose process group spans every city on the box.
 //
 // And TerminateRuntime signals the process GROUP (kill(-pid, ...)), so hitting
 // one of those does not cost one process, it costs the group.
