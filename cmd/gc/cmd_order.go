@@ -878,18 +878,18 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	// The run's evidence rides the root's create, the same stamp the
-	// controller's dispatch makes, in whichever store materializes the
-	// molecule. cachedOrderStoresResolver reads that binding back, so
-	// `gc order check` still finds this run.
+	// The root is created carrying the run's evidence, as the controller's
+	// dispatch creates it, in whichever store materializes the molecule.
+	// cachedOrderStoresResolver reads that binding back, so `gc order check`
+	// still finds this run.
 	var cursor *orders.EventCursor
 	if a.Trigger == "event" && ep != nil {
 		c := orders.EventCursor(headSeq)
 		cursor = &c
 	}
-	stampOrderRunEvidence(recipe, scoped, cursor, pool)
+	stampOrderRunRoute(recipe, pool)
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars, RootLabels: orderRunRootLabels(scoped, cursor)})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

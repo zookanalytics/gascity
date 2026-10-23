@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -2261,38 +2260,41 @@ func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
 	}
 }
 
-// stampOrderRunEvidence puts a run's evidence on the recipe's root step, so the
-// root is created carrying it: the order-run label, the event cursor of an
-// event-triggered run (nil for every other trigger), and the pool route (empty
-// for an order with no pool).
+// orderRunRootLabels returns the labels an order run's root is created
+// carrying: the order-run label, and the event cursor of an event-triggered
+// run (cursor is nil for every other trigger).
 //
 // Every reader that keeps an order single-flight finds a run by the order-run
 // label on its root: the open-work gate, the cooldown clock's last-run
 // fallback, the stale-wisp sweep and `gc order history`. A root that gets the
 // label from a write after its create is, until that write lands, a running
 // molecule none of them can attribute to its order, and it stays one for good
-// if the write fails, so a non-idempotent order fires again over it. Stamped
-// here, the root exists with its evidence or not at all.
-func stampOrderRunEvidence(recipe *formula.Recipe, scoped string, cursor *orders.EventCursor, pool string) {
-	if recipe == nil || len(recipe.Steps) == 0 {
-		return
-	}
-	root := &recipe.Steps[0]
+// if the write fails, so a non-idempotent order fires again over it. Created
+// carrying the labels, the root exists with its evidence or not at all.
+//
+// The labels go to molecule.Options.RootLabels, not onto the recipe:
+// molecule.Instantiate refuses a recipe step that carries an order-run label,
+// a label only the order's own dispatch writes.
+func orderRunRootLabels(scoped string, cursor *orders.EventCursor) []string {
 	labels := []string{orders.RunLabel(scoped)}
 	if cursor != nil {
 		labels = append(labels, "order:"+scoped, fmt.Sprintf("seq:%d", uint64(*cursor)))
 	}
-	for _, label := range labels {
-		if !slices.Contains(root.Labels, label) {
-			root.Labels = append(root.Labels, label)
-		}
+	return labels
+}
+
+// stampOrderRunRoute puts the pool route on the recipe's root step, so an
+// order run's root is created routed to its pool. An order with no pool passes
+// an empty pool, and the recipe is left as it is.
+func stampOrderRunRoute(recipe *formula.Recipe, pool string) {
+	if pool == "" || recipe == nil || len(recipe.Steps) == 0 {
+		return
 	}
-	if pool != "" {
-		if root.Metadata == nil {
-			root.Metadata = make(map[string]string)
-		}
-		root.Metadata[beadmeta.RoutedToMetadataKey] = pool
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
 	}
+	root.Metadata[beadmeta.RoutedToMetadataKey] = pool
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2669,9 +2671,9 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		c := orders.EventCursor(headSeq)
 		cursor = &c
 	}
-	stampOrderRunEvidence(recipe, scoped, cursor, pool)
+	stampOrderRunRoute(recipe, pool)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars, RootLabels: orderRunRootLabels(scoped, cursor)})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,

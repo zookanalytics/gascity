@@ -251,12 +251,12 @@ the tick never waits on order gates.
    - **Exec**: `dispatchExec()` runs the shell command via `ExecRunner`,
      labels the tracking bead with `exec` (or `exec-failed`), and
      records `order.completed` or `order.failed`.
-   - **Formula**: `dispatchWisp()` compiles the formula, stamps the run's
-     evidence onto the recipe's root step (`order-run:<scopedName>`, the
-     `order:`/`seq:` event cursor for an event trigger, and the
-     `gc.routed_to` pool route), instantiates it with
-     `molecule.Instantiate()`, and records `order.completed` or
-     `order.failed`.
+   - **Formula**: `dispatchWisp()` compiles the formula, puts the
+     `gc.routed_to` pool route on the recipe's root step, instantiates it
+     with `molecule.Instantiate()`, passing the run's labels
+     (`order-run:<scopedName>`, and the `order:`/`seq:` event cursor for an
+     event trigger) as `molecule.Options.RootLabels`, and records
+     `order.completed` or `order.failed`.
 
 **Scanning (`orders.Scan()`):**
 
@@ -334,11 +334,14 @@ Violations indicate bugs.
   open-work gate, the cooldown clock's last-run fallback, the stale-wisp
   sweep and `gc order history` find a formula order's run by the
   `order-run:<scopedName>` label on its molecule root. Both writers of
-  that root, `dispatchWisp()` and `gc order run`, stamp the label (with the
-  event cursor and the pool route) onto the recipe before instantiation,
-  so the root exists with its evidence or not at all. A root labeled by a
-  later write is a running molecule those readers cannot attribute to its
-  order, and a non-idempotent order fires again over it.
+  that root, `dispatchWisp()` and `gc order run`, create it carrying the
+  label and the event cursor (`molecule.Options.RootLabels`) and the pool
+  route (on the recipe's root step), so the root exists with its evidence
+  or not at all. A root labeled by a later write is a running molecule
+  those readers cannot attribute to its order, and a non-idempotent order
+  fires again over it. The labels never ride the recipe:
+  `molecule.Instantiate` refuses a recipe step that carries an
+  `order-run:` label, a label only the order's own dispatch writes.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
