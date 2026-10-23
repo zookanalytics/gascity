@@ -85,6 +85,9 @@ func nativeListReadRequest() issueops.ListRequest {
 		IncludeGates:     true,
 		IncludeInfra:     true,
 		IncludeEphemeral: true,
+		// Bead has no dependency or comment counts, so skipping them makes
+		// every listing cheaper.
+		SkipCounts: true,
 	}
 }
 
