@@ -36,6 +36,7 @@ import (
 
 var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
+	supervisorInstallHook                    = doSupervisorInstall
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
 	unloadSupervisorServiceHook              = unloadSupervisorService
@@ -719,11 +720,21 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		fmt.Fprintf(stderr, "gc supervisor start: finding executable: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	requireManager, err := supervisorRequiresServiceManager()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if supervisorRuntimeGOOS == "darwin" {
-		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, stdout, stderr, jsonOut); handled {
+		// With requireManager set, every outcome on macOS is handled here.
+		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, requireManager, stdout, stderr, jsonOut); handled {
 			return code
 		}
+	}
+	if requireManager {
+		fmt.Fprintf(stderr, "gc supervisor start: %s\n", supervisorUnmanagedStartRefusal()) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	logPath := supervisorLogPath()
@@ -750,7 +761,7 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		fmt.Fprintln(stderr, warning) //nolint:errcheck // best-effort stderr
 	}
 
-	if err := child.Start(); err != nil {
+	if err := startSupervisorChild(child); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -765,6 +776,11 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 // start too.
 var supervisorStartLaunchdPlistPath = func() string { return supervisorLaunchdPlistPath() }
 
+// startSupervisorChild starts the `gc supervisor run` child that
+// startBareSupervisor forks. A variable so tests can see whether a start forks
+// without running a supervisor.
+var startSupervisorChild = (*exec.Cmd).Start
+
 // startSupervisorViaInstalledLaunchd starts the installed launchd job
 // instead of forking a detached supervisor (#6966). A forked supervisor runs
 // outside launchd's KeepAlive and inherits the caller's whole shell
@@ -778,10 +794,22 @@ var supervisorStartLaunchdPlistPath = func() string { return supervisorLaunchdPl
 // installation; and when launchctl cannot start the job (no GUI session over
 // SSH or in CI), matching ensureSupervisorRunning's fork fallback. Each
 // fallback except the first prints a warning naming the fix.
-func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr io.Writer, jsonOut bool) (handled bool, code int) {
+//
+// requireLaunchd is supervisor.toml's require_service_manager. With it set,
+// each of those cases fails the start instead (handled=true, code 1) and
+// names why launchd cannot run this gc and what to do, so the caller never
+// forks.
+func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, requireLaunchd bool, stdout, stderr io.Writer, jsonOut bool) (handled bool, code int) {
 	content, err := os.ReadFile(plistPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		switch {
+		case requireLaunchd && os.IsNotExist(err):
+			fmt.Fprintf(stderr, "gc supervisor start: no launchd service is installed at %s, and %s forbids starting the supervisor outside launchd. Run 'gc supervisor install' to install and start it.\n", plistPath, supervisorRequireServiceManagerSetting()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		case requireLaunchd:
+			fmt.Fprintf(stderr, "gc supervisor start: reading launchd plist %s: %v, and %s forbids starting the supervisor outside launchd. Make the plist readable, then rerun the command.\n", plistPath, err, supervisorRequireServiceManagerSetting()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		case !os.IsNotExist(err):
 			fmt.Fprintf(stderr, "gc supervisor start: warning: reading launchd plist %s: %v; starting the supervisor outside launchd\n", plistPath, err) //nolint:errcheck // best-effort stderr
 		}
 		return false, 0
@@ -789,6 +817,10 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 	label := supervisorLaunchdLabel()
 	plistBinary := supervisorLaunchdPlistBinary(string(content))
 	if !supervisorSameBinary(plistBinary, gcPath) {
+		if requireLaunchd {
+			fmt.Fprintf(stderr, "gc supervisor start: launchd service %q runs %s, not this gc (%s), and %s forbids starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, supervisorRequireServiceManagerSetting(), shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: warning: launchd service %q runs %s, not this gc (%s); starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
@@ -796,10 +828,85 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 	// but stopped job can be unloaded safely before a clean load+kickstart.
 	_ = supervisorLaunchctlRun("unload", plistPath)
 	if err := loadAndStartSupervisorLaunchd(plistPath, label); err != nil {
+		if requireLaunchd {
+			fmt.Fprintf(stderr, "gc supervisor start: launchd could not start service %q (%v), and %s forbids starting the supervisor outside launchd. %s\n", label, err, supervisorRequireServiceManagerSetting(), supervisorLaunchdStartRemedy(label)) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: warning: could not start launchd service %q (%v); starting the supervisor outside launchd instead. It will not be restarted by launchd and inherits this shell's environment, including provider credentials unless %s=1 is set.\n", label, err, supervisorOmitProviderCredsEnv) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
 	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath(), nil)
+}
+
+// supervisorRequiresServiceManager reports whether supervisor.toml sets
+// [supervisor] require_service_manager, which forbids every start that would
+// fork a supervisor outside the platform service manager.
+func supervisorRequiresServiceManager() (bool, error) {
+	path := supervisor.ConfigPath()
+	cfg, err := supervisorLoadConfig(path)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return cfg.Supervisor.RequireServiceManager, nil
+}
+
+// supervisorRequireServiceManagerSetting names the setting a refused fork
+// cites, and the file that holds it.
+func supervisorRequireServiceManagerSetting() string {
+	return "[supervisor] require_service_manager in " + supervisor.ConfigPath()
+}
+
+// supervisorLaunchdStartRemedy says how to start the installed launchd job
+// when launchctl could not. The job runs in the user's desktop login session
+// (launchd's gui domain), which an SSH login does not create, so the command
+// has to run in a terminal in that session. A job that `gc supervisor stop`
+// disabled does not start at that login by itself: rerunning the command
+// enables it before starting it, and `launchctl enable` clears the override
+// too. launchctl cannot read the override while the gui domain is absent, so
+// when it cannot say, the remedy covers the disabled case as a possibility.
+func supervisorLaunchdStartRemedy(label string) string {
+	remedy := fmt.Sprintf("launchd runs this service only inside your desktop login session (%s): if nobody is logged in to this Mac's desktop, log in to it and rerun the command in a terminal there.", supervisorLaunchdDomain())
+	enable := "launchctl enable " + supervisorLaunchdServiceTarget(label)
+	switch disabled, known := supervisorLaunchdDisabled(label); {
+	case !known:
+		remedy += fmt.Sprintf(" If 'gc supervisor stop' disabled the service, that login does not start it by itself: rerunning the command enables it, as does '%s'.", enable)
+	case disabled:
+		remedy += fmt.Sprintf(" The service is disabled, so that login does not start it by itself: rerunning the command enables it, as does '%s'.", enable)
+	}
+	return remedy
+}
+
+// supervisorUnmanagedStartRefusal is why `gc supervisor start` exits off macOS
+// instead of forking when supervisor.toml requires the service manager: on
+// Linux it starts no systemd unit, and elsewhere gc installs no service.
+func supervisorUnmanagedStartRefusal() string {
+	if supervisorRuntimeGOOS != "linux" {
+		return supervisorNoServiceManagerRefusal()
+	}
+	unit := supervisorSystemdServiceName()
+	return fmt.Sprintf("%s forbids starting the supervisor outside systemd, and gc supervisor start does not start systemd units. Run 'gc start', which installs and starts gc's systemd unit %s, or start the installed unit with 'systemctl --user start %s'.", supervisorRequireServiceManagerSetting(), unit, unit)
+}
+
+// supervisorInstallFailureRefusal is why ensureSupervisorRunning starts no
+// supervisor when installing or starting the platform service failed and
+// supervisor.toml requires the service manager. The install has already
+// printed its own error, which this points at.
+func supervisorInstallFailureRefusal() string {
+	setting := supervisorRequireServiceManagerSetting()
+	switch supervisorRuntimeGOOS {
+	case "darwin":
+		return fmt.Sprintf("the launchd service could not be installed or started (the error above), and %s forbids starting the supervisor outside launchd. %s", setting, supervisorLaunchdStartRemedy(supervisorLaunchdLabel()))
+	case "linux":
+		return fmt.Sprintf("gc's systemd unit could not be installed or started (the error above), and %s forbids starting the supervisor outside systemd. Fix that error and rerun the command.", setting)
+	default:
+		return supervisorNoServiceManagerRefusal()
+	}
+}
+
+// supervisorNoServiceManagerRefusal is why a start exits on a platform where
+// gc installs no service manager while supervisor.toml requires one.
+func supervisorNoServiceManagerRefusal() string {
+	return fmt.Sprintf("%s forbids starting the supervisor outside a service manager, and gc installs none on %s. Remove the setting to start the supervisor here.", supervisorRequireServiceManagerSetting(), supervisorRuntimeGOOS)
 }
 
 // waitForStartedSupervisor waits for a just-started supervisor to answer on
@@ -1130,9 +1237,18 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
-	if doSupervisorInstall(stdout, stderr) != 0 {
+	if supervisorInstallHook(stdout, stderr) != 0 {
 		if supervisorAlive() != 0 {
 			return 0
+		}
+		requireManager, err := supervisorRequiresServiceManager()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if requireManager {
+			fmt.Fprintf(stderr, "gc: %s\n", supervisorInstallFailureRefusal()) //nolint:errcheck // best-effort stderr
+			return 1
 		}
 		// Fall back to bare start if install fails (e.g., unsupported OS).
 		return startBareSupervisor(stdout, stderr, false, true)

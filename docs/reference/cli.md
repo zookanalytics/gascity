@@ -5383,7 +5383,19 @@ gc supervisor run
 
 Start the machine-wide supervisor in the background.
 
-This forks "gc supervisor run", verifies it became ready, and returns.
+On macOS, when the installed launchd service runs this gc, start loads
+and starts that service. Otherwise it forks "gc supervisor run",
+verifies it became ready, and returns.
+
+A forked supervisor runs outside the service manager and inherits this
+shell's environment. On a machine whose supervisor must run under its
+service manager, set require_service_manager = true in the [supervisor]
+table of $GC_HOME/supervisor.toml (~/.gc/supervisor.toml by default).
+Start then never forks. When launchd cannot start the service, for
+example from an SSH session while nobody is logged in to the desktop,
+start exits non-zero and says why and what to do. On Linux it exits
+non-zero instead of forking; 'gc start' or 'systemctl --user start'
+starts the supervisor under systemd.
 
 ```
 gc supervisor start [flags]
