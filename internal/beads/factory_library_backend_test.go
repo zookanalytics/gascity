@@ -320,3 +320,34 @@ func assertPreflightServesWithBdFallback(t *testing.T, scope, metadata, backend 
 		t.Fatalf("PreflightGate = %q, want %q", result.Diagnostic.PreflightGate, contract.PreflightCheckMetadataBackend)
 	}
 }
+
+// ScopeUsesLibraryExtensionBackend answers exactly for the scopes the factory
+// routes to its library-extension arm: a binding-free scope naming an
+// allowlisted registered backend. Everything else keeps the preflight and the
+// bd fallback, so a caller that pins NativeTransportOff on this answer pins it
+// only where a failed open would otherwise be an error.
+func TestScopeUsesLibraryExtensionBackendMatchesTheFactorysExtensionArm(t *testing.T) {
+	registerLibraryBackendForTest(t, "http")
+	registerLibraryBackendForTest(t, "gctest-ext")
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		want     bool
+	}{
+		{name: "binding-free extension backend", metadata: `{"database":"dolt","backend":"http","dolt_database":"gascity","project_id":"proj-1"}`, want: true},
+		{name: "extension backend with storage fields", metadata: `{"backend":"http","storage_endpoint":"https://beads.example.test","storage_database":"gascity"}`},
+		{name: "registered backend off the allowlist", metadata: `{"database":"dolt","backend":"gctest-ext","dolt_database":"gascity"}`},
+		{name: "local dolt", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gascity"}`},
+		{name: "no metadata"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			if tc.metadata != "" {
+				writeLibraryBackendScopeFiles(t, scope, tc.metadata)
+			}
+			if got := ScopeUsesLibraryExtensionBackend(scope); got != tc.want {
+				t.Fatalf("ScopeUsesLibraryExtensionBackend() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
