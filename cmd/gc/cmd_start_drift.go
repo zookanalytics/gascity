@@ -639,7 +639,7 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
+	// The supervisor is Setsid and outlives this `gc start`, so it reparents
 	// to init; inheriting an agent shell's session identity would make it that
 	// session's orphan-sweep target once the session closes (#6316).
 	child.Env = withoutSessionIdentityEnv(os.Environ())
