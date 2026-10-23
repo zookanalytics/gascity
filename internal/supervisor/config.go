@@ -67,6 +67,13 @@ type Section struct {
 	// but leaves the read-auth keys as they were.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
+	// RequireServiceManager declares that this machine's supervisor runs only
+	// under its installed platform service: launchd on macOS, systemd --user
+	// on Linux. gc then never forks a supervisor from the shell that ran it.
+	// A start the service manager cannot perform exits non-zero and says
+	// why, where it would otherwise fork a supervisor that inherits that
+	// shell's environment and terminal.
+	RequireServiceManager bool `toml:"require_service_manager,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace
