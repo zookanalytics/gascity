@@ -56,7 +56,7 @@ func TestStartSupervisorViaInstalledLaunchdStartsJob(t *testing.T) {
 	plistPath, calls := launchdStartFixture(t, gcPath, nil)
 
 	var stdout, stderr bytes.Buffer
-	handled, code := startSupervisorViaInstalledLaunchd(plistPath, gcPath, &stdout, &stderr, false)
+	handled, code := startSupervisorViaInstalledLaunchd(plistPath, gcPath, false, &stdout, &stderr, false)
 	if !handled || code != 0 {
 		t.Fatalf("handled=%v code=%d stderr=%s, want launchd start", handled, code, stderr.String())
 	}
@@ -75,7 +75,7 @@ func TestStartSupervisorViaInstalledLaunchdNoPlistFallsBack(t *testing.T) {
 	_, calls := launchdStartFixture(t, "/unused/gc", nil)
 
 	var stdout, stderr bytes.Buffer
-	handled, _ := startSupervisorViaInstalledLaunchd(filepath.Join(t.TempDir(), "missing.plist"), fakeGCBinary(t), &stdout, &stderr, false)
+	handled, _ := startSupervisorViaInstalledLaunchd(filepath.Join(t.TempDir(), "missing.plist"), fakeGCBinary(t), false, &stdout, &stderr, false)
 	if handled {
 		t.Fatal("handled = true with no plist installed, want fork fallback")
 	}
@@ -92,7 +92,7 @@ func TestStartSupervisorViaInstalledLaunchdForeignBinaryFallsBack(t *testing.T) 
 	gcPath := fakeGCBinary(t)
 
 	var stdout, stderr bytes.Buffer
-	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, gcPath, &stdout, &stderr, false)
+	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, gcPath, false, &stdout, &stderr, false)
 	if handled {
 		t.Fatal("handled = true for a plist that runs a different gc binary")
 	}
@@ -113,7 +113,7 @@ func TestStartSupervisorViaInstalledLaunchdFallsBackWhenLaunchctlFails(t *testin
 	plistPath, _ := launchdStartFixture(t, gcPath, errors.New("Load failed: 5: Input/output error"))
 
 	var stdout, stderr bytes.Buffer
-	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, gcPath, &stdout, &stderr, false)
+	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, gcPath, false, &stdout, &stderr, false)
 	if handled {
 		t.Fatal("handled = true after a launchctl failure, want the fork fallback")
 	}
@@ -132,7 +132,7 @@ func TestStartSupervisorViaInstalledLaunchdUnparseablePlistFallsBack(t *testing.
 	}
 
 	var stdout, stderr bytes.Buffer
-	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, fakeGCBinary(t), &stdout, &stderr, false)
+	handled, _ := startSupervisorViaInstalledLaunchd(plistPath, fakeGCBinary(t), false, &stdout, &stderr, false)
 	if handled || len(*calls) != 0 {
 		t.Fatalf("handled=%v calls=%v, want an unparseable plist treated as foreign", handled, *calls)
 	}

@@ -76,6 +76,39 @@ func TestDoltliteReadStoreHydratesParent(t *testing.T) {
 	}
 }
 
+// TestDoltliteReadStoreListsTheChildrenOfListedParents pins ParentIDs on the
+// DoltLite read path: the parent-child join answers it exactly, an empty entry
+// names no parent, and a limited read, which a two-table query would otherwise
+// answer through the bounded top-N selection that has no parent join, answers
+// too.
+func TestDoltliteReadStoreListsTheChildrenOfListedParents(t *testing.T) {
+	store, closeStore := newTestDoltliteReadStore(t)
+	defer closeStore()
+
+	for name, query := range map[string]ListQuery{
+		"listed beside a missing parent": {ParentIDs: []string{"gc-missing", "gc-parent"}},
+		"listed beside an empty entry":   {ParentIDs: []string{"", "gc-parent"}},
+		"limited":                        {ParentIDs: []string{"gc-parent"}, Limit: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := store.List(query)
+			if err != nil {
+				t.Fatalf("List(ParentIDs=%q): %v", query.ParentIDs, err)
+			}
+			if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-child"}) {
+				t.Fatalf("List(ParentIDs=%q) = %v, want [gc-child]", query.ParentIDs, ids)
+			}
+		})
+	}
+	got, err := store.List(ListQuery{ParentIDs: []string{""}})
+	if err != nil {
+		t.Fatalf("List(ParentIDs=[\"\"]): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("List(ParentIDs=[\"\"]) = %v, want no bead", beadIDsOf(got))
+	}
+}
+
 func TestDoltliteReadStoreTypeFallbackCanSkipLabels(t *testing.T) {
 	store, closeStore := newTestDoltliteReadStore(t)
 	defer closeStore()
@@ -456,6 +489,87 @@ func TestDoltliteReadStoreHandlesNullDescription(t *testing.T) {
 	if len(ready) != 1 || ready[0].Description != "" {
 		t.Fatalf("Ready null description rows = %#v, want one row with empty description", ready)
 	}
+}
+
+// TestDoltliteReadStoreCoreFieldSetOmitsOnlyTheText pins the FieldsCore contract
+// on the DoltLite read store, which RunStoreTests cannot seed: List, Ready and
+// ReadyGraphOnly return the rows a whole read returns, each with an empty
+// Description and every other field as the whole read returns it. Ready's
+// per-commit cache keeps whole rows, so a core read that fills it leaves the
+// text for the whole reads the cache serves after it.
+func TestDoltliteReadStoreCoreFieldSetOmitsOnlyTheText(t *testing.T) {
+	now := time.Now().UTC()
+	store := newDoltliteStoreWithRows(t,
+		[]testDoltliteIssue{{
+			ID: "gc-text", Title: "issue with text", Status: "open", IssueType: "task", CreatedAt: now,
+			Assignee: "rig/worker", Description: "issue text", Labels: []string{"core-read"},
+			Metadata: map[string]string{"gc.routed_to": "rig/pool"},
+		}},
+		[]testDoltliteIssue{{
+			ID: "gc-wisp-text", Title: "wisp with text", Status: "open", IssueType: "molecule",
+			CreatedAt: now.Add(time.Second), Description: "wisp text", Ephemeral: true,
+		}},
+	)
+	sameRows := func(t *testing.T, what string, full, core []Bead) {
+		t.Helper()
+		if len(full) == 0 || len(core) != len(full) {
+			t.Fatalf("%s: core read returned %v, full read %v", what, testBeadIDs(core), testBeadIDs(full))
+		}
+		for i := range full {
+			if full[i].Description == "" {
+				t.Fatalf("%s: full row %s has no description, but the fixture gave it one", what, full[i].ID)
+			}
+			want := full[i]
+			want.Description = ""
+			if !reflect.DeepEqual(core[i], want) {
+				t.Errorf("%s: core row = %+v, want the full row without its description %+v", what, core[i], want)
+			}
+		}
+	}
+
+	listQuery := ListQuery{AllowScan: true, TierMode: TierBoth, Sort: SortCreatedAsc}
+	full, err := store.List(listQuery)
+	if err != nil {
+		t.Fatalf("List full: %v", err)
+	}
+	listQuery.Fields = FieldsCore
+	core, err := store.List(listQuery)
+	if err != nil {
+		t.Fatalf("List core: %v", err)
+	}
+	sameRows(t, "List", full, core)
+
+	coreReady, err := store.Ready(ReadyQuery{Fields: FieldsCore})
+	if err != nil {
+		t.Fatalf("Ready core: %v", err)
+	}
+	if store.readyHash == "" || len(store.readyCache) == 0 {
+		t.Fatal("the core Ready left the ready cache empty; the cached reads below would prove nothing")
+	}
+	fullReady, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready full: %v", err)
+	}
+	sameRows(t, "Ready", fullReady, coreReady)
+	cachedCore, err := store.Ready(ReadyQuery{Fields: FieldsCore})
+	if err != nil {
+		t.Fatalf("Ready core from cache: %v", err)
+	}
+	sameRows(t, "cached Ready", fullReady, cachedCore)
+
+	graphOnly, ok := GraphOnlyReadyFor(store)
+	if !ok {
+		t.Fatal("DoltliteReadStore is not a GraphOnlyReadyStore")
+	}
+	fullGraph, err := graphOnly.ReadyGraphOnly()
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly full: %v", err)
+	}
+	coreGraph, err := graphOnly.ReadyGraphOnly(ReadyQuery{Fields: FieldsCore})
+	if err != nil {
+		t.Fatalf("ReadyGraphOnly core: %v", err)
+	}
+	sameRows(t, "ReadyGraphOnly", fullGraph, coreGraph)
 }
 
 // TestDoltliteReadStoreBeforeFiltersRespectCutoff verifies that the CreatedBefore

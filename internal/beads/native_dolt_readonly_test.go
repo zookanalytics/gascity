@@ -49,11 +49,15 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SetLocalString":   nativeStoreMutation,
 	"Tx":               nativeStoreMutation,
 	"Delete":           nativeStoreMutation,
+	"DeleteBatch":      nativeStoreMutation,
 	"DepAdd":           nativeStoreMutation,
 	"DepRemove":        nativeStoreMutation,
 
 	// beads.Store, reads.
 	"Get":            nativeStoreRead,
+	"DepListBatch":   nativeStoreRead,
+	"ChildrenOfAny":  nativeStoreRead,
+	"GetExactBatch":  nativeStoreRead,
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,
@@ -77,17 +81,23 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"CompareAndSetMetadataKey":    nativeStoreMutation,
 	"DeleteIfMatch":               nativeStoreMutation,
 	"ReleaseIfCurrent":            nativeStoreMutation,
+	"TransferIfCurrent":           nativeStoreMutation,
+	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
+	"ApplyGuarded":                nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
+	"ReadEventsJournalPage":       nativeStoreRead,
+	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
-	"GetExactBatch":               nativeStoreRead,
 	"SawRows":                     nativeStoreRead,
 	"IDPrefix":                    nativeStoreLifecycle,
 	"AtomicTx":                    nativeStoreLifecycle,
 	"SupportsEphemeralGraphApply": nativeStoreLifecycle,
 	"CloseStore":                  nativeStoreLifecycle,
 	"ReadOnly":                    nativeStoreLifecycle,
+	// Reports the capability; answers false on a read-only handle.
+	"GuardedBatcherHandle": nativeStoreLifecycle,
 }
 
 // countingStorageSpy fails the test if the store reaches storage at all.
