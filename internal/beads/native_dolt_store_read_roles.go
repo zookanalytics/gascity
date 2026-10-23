@@ -75,6 +75,14 @@ import (
 // the two are separate promises: one keeps message/agent/role rows, the other
 // keeps the plane, and a future change to either upstream must not silently
 // take the other with it.
+//
+// SkipCounts is stated because Bead carries no dependency, dependent or
+// comment count, so the three cardinalities are hydration nobody reads. Each
+// is an aggregate over a whole side table that the row filter does not
+// narrow, and the reverse-blocker one joins on an expression the server cannot
+// index: on a large ledger they are most of the cost of a keyed listing. It
+// chooses what is hydrated, never which rows match, and leaves labels, the
+// parent and the edges hydrated.
 func nativeListReadRequest() issueops.ListRequest {
 	return issueops.ListRequest{
 		AllFlag:          true,
@@ -82,6 +90,7 @@ func nativeListReadRequest() issueops.ListRequest {
 		IncludeGates:     true,
 		IncludeInfra:     true,
 		IncludeEphemeral: true,
+		SkipCounts:       true,
 	}
 }
 
