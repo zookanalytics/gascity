@@ -1609,24 +1609,24 @@ func TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence(t *testing.T)
 	}
 }
 
-// readCountingStore counts the reads the usage lane makes for one session: Gets
-// by its id, and the closed-inclusive Lists that transcript discovery issues
-// while the session is closed.
-type readCountingStore struct {
+// sessionReadCountingStore counts the reads the usage lane makes for one
+// session: Gets by its id, and the closed-inclusive Lists that transcript
+// discovery issues while the session is closed.
+type sessionReadCountingStore struct {
 	beads.Store
 	id          string
 	gets        int
 	closedLists int
 }
 
-func (s *readCountingStore) Get(id string) (beads.Bead, error) {
+func (s *sessionReadCountingStore) Get(id string) (beads.Bead, error) {
 	if id == s.id {
 		s.gets++
 	}
 	return s.Store.Get(id)
 }
 
-func (s *readCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+func (s *sessionReadCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	if query.IncludesClosed() {
 		s.closedLists++
 	}
@@ -1721,7 +1721,7 @@ func (h liveSweepHarness) setVanishedRetry(t *testing.T, retry owedIntervalRetry
 func TestEmitDueComputeFactsRetriesUnsettledClosedSessionOnFloor(t *testing.T) {
 	h := newUnsettledClaudeHarness(t)
 	h.closeDrained(t, time.Now())
-	reads := &readCountingStore{Store: h.store, id: h.beadID}
+	reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
 	h.cr.cs.cityBeadStore = reads
 
 	// The first pass after the close reaches it through the vanished lane. The
@@ -1777,7 +1777,7 @@ func TestEmitDueComputeFactsStopsRetryingClosedSessionAfterWindow(t *testing.T) 
 		}
 
 		h.setVanishedRetry(t, owedIntervalRetry{until: time.Now().Add(-time.Second)})
-		reads := &readCountingStore{Store: h.store, id: h.beadID}
+		reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
 		h.cr.cs.cityBeadStore = reads
 		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
 		if reads.gets == 0 {

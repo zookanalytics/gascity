@@ -4879,7 +4879,7 @@ func TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions(t *testing.T) {
 		for i, workDir := range []string{t.TempDir(), t.TempDir(), t.TempDir()} {
 			other := create(t, mgr, fmt.Sprintf("elsewhere-%d", i), workDir)
 			if i < 2 {
-				if err := mgr.Close(other.ID); err != nil {
+				if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), other.ID); err != nil {
 					t.Fatalf("Close elsewhere-%d: %v", i, err)
 				}
 			}
@@ -4906,11 +4906,11 @@ func TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions(t *testing.T) {
 
 	t.Run("closed sole session", func(t *testing.T) {
 		rec := &listReadRecorder{Store: beads.NewMemStore()}
-		mgr := NewManagerWithOptions(rec, runtime.NewFake())
+		mgr := newTestManager(t, rec, runtime.NewFake())
 		seedOtherHistory(t, mgr)
 		workDir := t.TempDir()
 		target := create(t, mgr, "target", workDir)
-		if err := mgr.Close(target.ID); err != nil {
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), target.ID); err != nil {
 			t.Fatalf("Close target: %v", err)
 		}
 
@@ -4927,15 +4927,15 @@ func TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions(t *testing.T) {
 
 	t.Run("closed history in the same workdir", func(t *testing.T) {
 		rec := &listReadRecorder{Store: beads.NewMemStore()}
-		mgr := NewManagerWithOptions(rec, runtime.NewFake())
+		mgr := newTestManager(t, rec, runtime.NewFake())
 		seedOtherHistory(t, mgr)
 		workDir := t.TempDir()
 		earlier := create(t, mgr, "earlier", workDir)
-		if err := mgr.Close(earlier.ID); err != nil {
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), earlier.ID); err != nil {
 			t.Fatalf("Close earlier: %v", err)
 		}
 		target := create(t, mgr, "target", workDir)
-		if err := mgr.Close(target.ID); err != nil {
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), target.ID); err != nil {
 			t.Fatalf("Close target: %v", err)
 		}
 
@@ -4954,11 +4954,11 @@ func TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions(t *testing.T) {
 
 	t.Run("open target", func(t *testing.T) {
 		rec := &listReadRecorder{Store: beads.NewMemStore()}
-		mgr := NewManagerWithOptions(rec, runtime.NewFake())
+		mgr := newTestManager(t, rec, runtime.NewFake())
 		seedOtherHistory(t, mgr)
 		workDir := t.TempDir()
 		earlier := create(t, mgr, "earlier", workDir)
-		if err := mgr.Close(earlier.ID); err != nil {
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), earlier.ID); err != nil {
 			t.Fatalf("Close earlier: %v", err)
 		}
 		target := create(t, mgr, "target", workDir)
