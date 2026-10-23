@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -219,6 +220,12 @@ var restartHelpersHook = defaultRestartHelpers
 // readSupervisorExePathHook lets tests avoid platform-specific /proc lookups.
 var readSupervisorExePathHook = readSupervisorExePath
 
+// readProcExeLinkHook reads the raw /proc/<pid>/exe link target.
+// Overridable for tests.
+var readProcExeLinkHook = func(pid int) (string, error) {
+	return os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+}
+
 // driftRestartLoopMax / driftRestartLoopWindow define the loop-guard
 // budget: at most 3 supervisor auto-restarts may occur within any
 // 60-second window. Persistence is via driftRestartHistoryPath so the
@@ -334,6 +341,19 @@ func runStartDriftCheck(cityPath string, stdout, stderr io.Writer) (int, bool) {
 		systemdManaged := !delegated && supervisorSystemctlActive(serviceName)
 		launchdLabel := supervisorLaunchdLabel()
 		launchdManaged := !delegated && supervisorRuntimeGOOS == "darwin" && supervisorLaunchdActive(launchdLabel)
+		if !delegated && !systemdManaged && !launchdManaged {
+			// The direct restart kills this supervisor and forks its
+			// replacement from this shell, which supervisor.toml can forbid.
+			requireManager, err := supervisorRequiresServiceManager()
+			if err != nil {
+				fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1, false
+			}
+			if requireManager {
+				fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: %s\n", supervisorDirectRestartRefusal(pid)) //nolint:errcheck // best-effort stderr
+				return 1, false
+			}
+		}
 		if exeErr != nil && !delegated && !systemdManaged && !launchdManaged {
 			// We can't safely auto-restart a supervisor whose
 			// /proc/<pid>/exe we can't read — the kernel readlink is
@@ -493,6 +513,22 @@ func pollDelegatedRestartVerified(baseURL string, oldPID int, oldBuildID, localB
 	}
 }
 
+// supervisorDirectRestartRefusal is why a drift restart leaves in place a
+// supervisor that no service manager runs, when supervisor.toml requires the
+// service manager: the direct restart would kill it and fork its replacement
+// from this shell.
+func supervisorDirectRestartRefusal(pid int) string {
+	setting := supervisorRequireServiceManagerSetting()
+	switch supervisorRuntimeGOOS {
+	case "darwin":
+		return fmt.Sprintf("PID %d runs outside launchd, and %s forbids replacing it with a forked supervisor. Stop it with 'gc supervisor stop --wait', then rerun 'gc start' in a terminal in your desktop login session, where launchd can start the supervisor.", pid, setting)
+	case "linux":
+		return fmt.Sprintf("PID %d runs outside systemd, and %s forbids replacing it with a forked supervisor. Stop it with 'gc supervisor stop --wait', then rerun 'gc start' to start the supervisor under systemd.", pid, setting)
+	default:
+		return fmt.Sprintf("PID %d runs outside a service manager, and %s forbids replacing it with a forked supervisor. gc installs no service manager on %s; remove the setting to restart the supervisor here.", pid, setting, supervisorRuntimeGOOS)
+	}
+}
+
 func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr error) {
 	if supervisorRuntimeGOOS == "darwin" {
 		fmt.Fprintf(stderr, "error: cannot auto-restart supervisor: macOS cannot resolve the executable path for a direct supervisor (%v). If the supervisor is launchd-managed, rerun 'gc supervisor install' and then 'gc start'; otherwise stop the supervisor manually and rerun 'gc start', or pass --no-auto-restart to skip the restart and surface the drift as an error.\n", exeErr) //nolint:errcheck // best-effort stderr
@@ -512,11 +548,20 @@ func printUnreadableSupervisorRestartError(stderr io.Writer, pid int, exeErr err
 // suffix because the on-disk path is what the auto-restart needs to
 // spawn — the new bytes already live at the un-suffixed path.
 func readSupervisorExePath(pid int) (string, error) {
-	target, err := readSupervisorExeLink(pid)
+	path, _, err := readSupervisorExeLink(pid)
+	return path, err
+}
+
+// readSupervisorExeLink is readSupervisorExePath plus whether the kernel
+// marked the link target " (deleted)": the file the process was started
+// from has since been unlinked or replaced.
+func readSupervisorExeLink(pid int) (string, bool, error) {
+	target, err := readProcExeLinkHook(pid)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return strings.TrimSuffix(target, supervisorDeletedExeSuffix), nil
+	path, deleted := strings.CutSuffix(target, " (deleted)")
+	return path, deleted, nil
 }
 
 // readDaemonAutoRestart loads city.toml's [daemon].auto_restart_on_drift
@@ -623,7 +668,7 @@ func spawnDetachedSupervisor(exe string, argv ...string) error {
 	child.Stdin = nil
 	child.Stdout = logFile
 	child.Stderr = logFile
-	// The supervisor is Setpgid and outlives this `gc start`, so it reparents
+	// The supervisor is Setsid and outlives this `gc start`, so it reparents
 	// to init; inheriting an agent shell's session identity would make it that
 	// session's orphan-sweep target once the session closes (#6316).
 	child.Env = withoutSessionIdentityEnv(os.Environ())

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/processenv"
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
@@ -34,6 +36,7 @@ import (
 
 var (
 	ensureSupervisorRunningHook              = ensureSupervisorRunning
+	supervisorInstallHook                    = doSupervisorInstall
 	reloadSupervisorHook                     = reloadSupervisor
 	supervisorAliveHook                      = supervisorAlive
 	unloadSupervisorServiceHook              = unloadSupervisorService
@@ -68,6 +71,19 @@ var (
 	supervisorLaunchdActive = func(label string) bool {
 		out, err := exec.Command("launchctl", "print", supervisorLaunchdServiceTarget(label)).Output()
 		return err == nil && launchdPrintReportsRunning(out)
+	}
+	// supervisorLaunchdDisabled reports whether launchd holds a persistent
+	// disable override for the label. `gc supervisor stop` writes one with
+	// `launchctl disable`, and it survives logout and reboot until
+	// `launchctl enable` clears it, so a supervisor that answers its socket
+	// is not proof the machine stays supervised. Tri-state like
+	// supervisorLaunchdLoaded: known is false when launchd cannot be asked.
+	supervisorLaunchdDisabled = func(label string) (disabled bool, known bool) {
+		out, err := exec.Command("launchctl", "print-disabled", supervisorLaunchdDomain()).Output()
+		if err != nil {
+			return false, false
+		}
+		return launchdPrintDisabledReportsDisabled(string(out), label)
 	}
 	// supervisorLaunchctlGetenv reads a value from `launchctl getenv` on
 	// macOS so users can set per-domain env (e.g. GC_DOLT_LOGLEVEL) and
@@ -139,6 +155,7 @@ var (
 	supervisorProcRoot                                  = "/proc"
 	supervisorProcReadDir                               = os.ReadDir
 	supervisorProcReadFile                              = os.ReadFile
+	supervisorParentPID                                 = pidutil.ParentPID
 	supervisorGetpgid                                   = syscall.Getpgid
 	supervisorGetpgrp                                   = syscall.Getpgrp
 	supervisorKill                                      = syscall.Kill
@@ -256,6 +273,97 @@ func launchdPrintReportsRunning(out []byte) bool {
 		}
 	}
 	return false
+}
+
+// launchdPrintDisabledReportsDisabled reads one label's entry out of
+// `launchctl print-disabled`. The value spelling changed across macOS
+// releases ("=> true" on older systems, "=> disabled" on newer ones), so
+// accept both. A label with no entry carries no override, which is a known
+// answer, not an unknown one.
+func launchdPrintDisabledReportsDisabled(out, label string) (disabled bool, known bool) {
+	quoted := `"` + label + `"`
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		name, value, ok := strings.Cut(line, "=>")
+		if !ok || strings.TrimSpace(name) != quoted {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		return value == "true" || value == "disabled", true
+	}
+	return false, true
+}
+
+// supervisorLaunchdSupervisionWarning returns why launchd is not supervising
+// this machine. Process liveness alone hides the failure the stop path
+// creates: a foreground supervisor answers every probe while the launchd
+// agent stays disabled, so the next logout leaves the city unrun.
+//
+// It returns "" when launchd is supervising, and also when the host is not
+// macOS, when no agent plist is installed, when the plist cannot be read, and
+// when launchd cannot be asked: status reports only a problem it found, and
+// does not guess about an agent it cannot inspect. socketAlive reports
+// whether a supervisor answers the control socket; together with the plist
+// it decides the remedy the warning names.
+func supervisorLaunchdSupervisionWarning(socketAlive bool) string {
+	if supervisorRuntimeGOOS != "darwin" {
+		return ""
+	}
+	plist, err := os.ReadFile(supervisorLaunchdPlistPath())
+	if err != nil {
+		return ""
+	}
+	label := supervisorLaunchdLabel()
+	if disabled, known := supervisorLaunchdDisabled(label); known && disabled {
+		return fmt.Sprintf("launchd agent %s is disabled; it will not start after logout or reboot. %s",
+			label, supervisorLaunchdRemedy(string(plist), socketAlive, "Run 'gc supervisor start' to clear the override"))
+	}
+	if _, absent, _ := supervisorLaunchdLoaded(label); absent {
+		return fmt.Sprintf("launchd agent %s is not loaded; it will not restart if the supervisor exits. %s",
+			label, supervisorLaunchdRemedy(string(plist), socketAlive, "Run 'gc supervisor start' to load it"))
+	}
+	return ""
+}
+
+// supervisorLaunchdRemedy names the commands that put the agent back under
+// launchd. Only `gc supervisor start` enables, loads, and kickstarts the
+// installed job, and only when no supervisor answers the control socket (it
+// refuses while one does) and the plist runs this gc (otherwise it starts
+// this gc outside launchd). So a live supervisor is stopped first, with
+// --wait because a plain stop returns before the supervisor has exited, and
+// a plist that runs another gc is rewritten by `install --force`, which
+// enables, loads, and kickstarts the job itself. A plain
+// `gc supervisor install` is never the remedy: with the plist unchanged and
+// a supervisor alive it returns before enabling the job. When this gc's own
+// path cannot be resolved, start fails and says why, so the start remedy
+// stands.
+func supervisorLaunchdRemedy(plist string, socketAlive bool, startRemedy string) string {
+	stopFirst := ""
+	if socketAlive {
+		stopFirst = "'gc supervisor stop --wait' then "
+	}
+	if gcPath, err := os.Executable(); err == nil {
+		if binary := supervisorLaunchdPlistBinary(plist); !supervisorSameBinary(binary, gcPath) {
+			return fmt.Sprintf("It runs %s, not this gc; run %s'%s supervisor install --force' to make it run this gc and put it back under launchd",
+				binary, stopFirst, shellQuotePath(gcPath))
+		}
+	}
+	if socketAlive {
+		return "Run " + stopFirst + "'gc supervisor start' to put it back under launchd"
+	}
+	return startRemedy
+}
+
+// supervisorLaunchdPlistBinary is the gc binary a launchd plist runs, or a
+// placeholder naming the problem when its ProgramArguments cannot be read.
+// The placeholder never matches a real binary, so callers comparing it
+// against this gc treat an unreadable plist as another gc's.
+func supervisorLaunchdPlistBinary(plist string) string {
+	if binary := supervisorLaunchdPlistGCPath(plist); binary != "" {
+		return binary
+	}
+	return "(unreadable ProgramArguments)"
 }
 
 func cleanupSupervisorWorkspaceServicesForWarmRefresh(gcHome string) error {
@@ -547,11 +655,23 @@ func defaultSupervisorBeadsActor() {
 	}
 }
 
+// doSupervisorStart is `gc supervisor start` without JSON output.
 func doSupervisorStart(stdout, stderr io.Writer) int {
 	return doSupervisorStartJSON(stdout, stderr, false)
 }
 
+// doSupervisorStartJSON is `gc supervisor start`: a supervisor that is
+// already running is reported, with exit status 1.
 func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
+	return startBareSupervisor(stdout, stderr, jsonOut, false)
+}
+
+// startBareSupervisor forks `gc supervisor run` and waits for it to answer
+// on its control socket. joinRunning says what a supervisor that is already
+// running — found at once, or once an instance holding the lock finished
+// starting — means: success for a caller that only needs one running, or the
+// operator-facing "already running" failure.
+func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) int {
 	delegation, delegated, err := supervisorSystemdDelegation()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -564,29 +684,49 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintf(stderr, "gc supervisor start: %s\n", msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if pid := supervisorAlive(); pid != 0 {
+	alreadyRunning := func(pid int) int {
+		if joinRunning {
+			return 0
+		}
 		state, exePath := classifySupervisorHolder(pid)
 		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor start", pid, state, exePath)) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	lock, err := acquireSupervisorLock()
+	// The real probe, not supervisorAliveHook: tests stub the hook to model
+	// the supervisor this start forks, and this check must still see one
+	// that is really running.
+	if pid := supervisorAlive(); pid != 0 {
+		return alreadyRunning(pid)
+	}
+	pid, err := awaitSupervisorLockOrInstance()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	lock.Close() //nolint:errcheck // release probe lock
+	if pid != 0 {
+		return alreadyRunning(pid)
+	}
 
 	gcPath, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: finding executable: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	requireManager, err := supervisorRequiresServiceManager()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if supervisorRuntimeGOOS == "darwin" {
-		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, stdout, stderr, jsonOut); handled {
+		// With requireManager set, every outcome on macOS is handled here.
+		if handled, code := startSupervisorViaInstalledLaunchd(supervisorStartLaunchdPlistPath(), gcPath, requireManager, stdout, stderr, jsonOut); handled {
 			return code
 		}
+	}
+	if requireManager {
+		fmt.Fprintf(stderr, "gc supervisor start: %s\n", supervisorUnmanagedStartRefusal()) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	logPath := supervisorLogPath()
@@ -613,16 +753,25 @@ func doSupervisorStartJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stderr, warning) //nolint:errcheck // best-effort stderr
 	}
 
-	if err := child.Start(); err != nil {
+	if err := startSupervisorChild(child); err != nil {
 		fmt.Fprintf(stderr, "gc supervisor start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return waitForStartedSupervisor(stdout, stderr, jsonOut, "see "+logPath)
+	exited := make(chan error, 1)
+	go func() { exited <- child.Wait() }()
+	return waitForStartedSupervisor(stdout, stderr, jsonOut, "see "+logPath, exited)
 }
 
 // supervisorStartLaunchdPlistPath locates the installed launchd plist for
-// gc supervisor start. Overridable for tests.
-var supervisorStartLaunchdPlistPath = supervisorLaunchdPlistPath
+// gc supervisor start. Overridable for tests. It resolves through
+// supervisorLaunchdPlistPath at call time, so redirecting that seam covers
+// start too.
+var supervisorStartLaunchdPlistPath = func() string { return supervisorLaunchdPlistPath() }
+
+// startSupervisorChild starts the `gc supervisor run` child that
+// startBareSupervisor forks. A variable so tests can see whether a start forks
+// without running a supervisor.
+var startSupervisorChild = (*exec.Cmd).Start
 
 // startSupervisorViaInstalledLaunchd starts the installed launchd job
 // instead of forking a detached supervisor (#6966). A forked supervisor runs
@@ -637,20 +786,33 @@ var supervisorStartLaunchdPlistPath = supervisorLaunchdPlistPath
 // installation; and when launchctl cannot start the job (no GUI session over
 // SSH or in CI), matching ensureSupervisorRunning's fork fallback. Each
 // fallback except the first prints a warning naming the fix.
-func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr io.Writer, jsonOut bool) (handled bool, code int) {
+//
+// requireLaunchd is supervisor.toml's require_service_manager. With it set,
+// each of those cases fails the start instead (handled=true, code 1) and
+// names why launchd cannot run this gc and what to do, so the caller never
+// forks.
+func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, requireLaunchd bool, stdout, stderr io.Writer, jsonOut bool) (handled bool, code int) {
 	content, err := os.ReadFile(plistPath)
 	if err != nil {
-		if !os.IsNotExist(err) {
+		switch {
+		case requireLaunchd && os.IsNotExist(err):
+			fmt.Fprintf(stderr, "gc supervisor start: no launchd service is installed at %s, and %s forbids starting the supervisor outside launchd. Run 'gc supervisor install' to install and start it.\n", plistPath, supervisorRequireServiceManagerSetting()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		case requireLaunchd:
+			fmt.Fprintf(stderr, "gc supervisor start: reading launchd plist %s: %v, and %s forbids starting the supervisor outside launchd. Make the plist readable, then rerun the command.\n", plistPath, err, supervisorRequireServiceManagerSetting()) //nolint:errcheck // best-effort stderr
+			return true, 1
+		case !os.IsNotExist(err):
 			fmt.Fprintf(stderr, "gc supervisor start: warning: reading launchd plist %s: %v; starting the supervisor outside launchd\n", plistPath, err) //nolint:errcheck // best-effort stderr
 		}
 		return false, 0
 	}
 	label := supervisorLaunchdLabel()
-	plistBinary := supervisorLaunchdPlistGCPath(string(content))
-	if plistBinary == "" {
-		plistBinary = "(unreadable ProgramArguments)"
-	}
+	plistBinary := supervisorLaunchdPlistBinary(string(content))
 	if !supervisorSameBinary(plistBinary, gcPath) {
+		if requireLaunchd {
+			fmt.Fprintf(stderr, "gc supervisor start: launchd service %q runs %s, not this gc (%s), and %s forbids starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, supervisorRequireServiceManagerSetting(), shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: warning: launchd service %q runs %s, not this gc (%s); starting this gc outside launchd. Run '%s supervisor install --force' to make the service run this gc.\n", label, plistBinary, gcPath, shellQuotePath(gcPath)) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
@@ -658,18 +820,98 @@ func startSupervisorViaInstalledLaunchd(plistPath, gcPath string, stdout, stderr
 	// but stopped job can be unloaded safely before a clean load+kickstart.
 	_ = supervisorLaunchctlRun("unload", plistPath)
 	if err := loadAndStartSupervisorLaunchd(plistPath, label); err != nil {
+		if requireLaunchd {
+			fmt.Fprintf(stderr, "gc supervisor start: launchd could not start service %q (%v), and %s forbids starting the supervisor outside launchd. %s\n", label, err, supervisorRequireServiceManagerSetting(), supervisorLaunchdStartRemedy(label)) //nolint:errcheck // best-effort stderr
+			return true, 1
+		}
 		fmt.Fprintf(stderr, "gc supervisor start: warning: could not start launchd service %q (%v); starting the supervisor outside launchd instead. It will not be restarted by launchd and inherits this shell's environment, including provider credentials unless %s=1 is set.\n", label, err, supervisorOmitProviderCredsEnv) //nolint:errcheck // best-effort stderr
 		return false, 0
 	}
-	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath())
+	return true, waitForStartedSupervisor(stdout, stderr, jsonOut, "check 'launchctl print "+supervisorLaunchdServiceTarget(label)+"' and "+supervisorLogPath(), nil)
+}
+
+// supervisorRequiresServiceManager reports whether supervisor.toml sets
+// [supervisor] require_service_manager, which forbids every start that would
+// fork a supervisor outside the platform service manager.
+func supervisorRequiresServiceManager() (bool, error) {
+	path := supervisor.ConfigPath()
+	cfg, err := supervisorLoadConfig(path)
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return cfg.Supervisor.RequireServiceManager, nil
+}
+
+// supervisorRequireServiceManagerSetting names the setting a refused fork
+// cites, and the file that holds it.
+func supervisorRequireServiceManagerSetting() string {
+	return "[supervisor] require_service_manager in " + supervisor.ConfigPath()
+}
+
+// supervisorLaunchdStartRemedy says how to start the installed launchd job
+// when launchctl could not. The job runs in the user's desktop login session
+// (launchd's gui domain), which an SSH login does not create, so the command
+// has to run in a terminal in that session. A job that `gc supervisor stop`
+// disabled does not start at that login by itself: rerunning the command
+// enables it before starting it, and `launchctl enable` clears the override
+// too. launchctl cannot read the override while the gui domain is absent, so
+// when it cannot say, the remedy covers the disabled case as a possibility.
+func supervisorLaunchdStartRemedy(label string) string {
+	remedy := fmt.Sprintf("launchd runs this service only inside your desktop login session (%s): if nobody is logged in to this Mac's desktop, log in to it and rerun the command in a terminal there.", supervisorLaunchdDomain())
+	enable := "launchctl enable " + supervisorLaunchdServiceTarget(label)
+	switch disabled, known := supervisorLaunchdDisabled(label); {
+	case !known:
+		remedy += fmt.Sprintf(" If 'gc supervisor stop' disabled the service, that login does not start it by itself: rerunning the command enables it, as does '%s'.", enable)
+	case disabled:
+		remedy += fmt.Sprintf(" The service is disabled, so that login does not start it by itself: rerunning the command enables it, as does '%s'.", enable)
+	}
+	return remedy
+}
+
+// supervisorUnmanagedStartRefusal is why `gc supervisor start` exits off macOS
+// instead of forking when supervisor.toml requires the service manager: on
+// Linux it starts no systemd unit, and elsewhere gc installs no service.
+func supervisorUnmanagedStartRefusal() string {
+	if supervisorRuntimeGOOS != "linux" {
+		return supervisorNoServiceManagerRefusal()
+	}
+	unit := supervisorSystemdServiceName()
+	return fmt.Sprintf("%s forbids starting the supervisor outside systemd, and gc supervisor start does not start systemd units. Run 'gc start', which installs and starts gc's systemd unit %s, or start the installed unit with 'systemctl --user start %s'.", supervisorRequireServiceManagerSetting(), unit, unit)
+}
+
+// supervisorInstallFailureRefusal is why ensureSupervisorRunning starts no
+// supervisor when installing or starting the platform service failed and
+// supervisor.toml requires the service manager. The install has already
+// printed its own error, which this points at.
+func supervisorInstallFailureRefusal() string {
+	setting := supervisorRequireServiceManagerSetting()
+	switch supervisorRuntimeGOOS {
+	case "darwin":
+		return fmt.Sprintf("the launchd service could not be installed or started (the error above), and %s forbids starting the supervisor outside launchd. %s", setting, supervisorLaunchdStartRemedy(supervisorLaunchdLabel()))
+	case "linux":
+		return fmt.Sprintf("gc's systemd unit could not be installed or started (the error above), and %s forbids starting the supervisor outside systemd. Fix that error and rerun the command.", setting)
+	default:
+		return supervisorNoServiceManagerRefusal()
+	}
+}
+
+// supervisorNoServiceManagerRefusal is why a start exits on a platform where
+// gc installs no service manager while supervisor.toml requires one.
+func supervisorNoServiceManagerRefusal() string {
+	return fmt.Sprintf("%s forbids starting the supervisor outside a service manager, and gc installs none on %s. Remove the setting to start the supervisor here.", supervisorRequireServiceManagerSetting(), supervisorRuntimeGOOS)
 }
 
 // waitForStartedSupervisor waits for a just-started supervisor to answer on
 // its control socket and reports the result. failureHint tells the operator
-// where to look when it never becomes ready.
-func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHint string) int {
-	deadline := time.Now().Add(supervisorReadyTimeout)
-	for time.Now().Before(deadline) {
+// where to look when it never becomes ready. exited, when non-nil, delivers
+// the forked supervisor's exit: a supervisor that exits during startup (its
+// API port in use, a config error) fails the start at once with the exit and
+// the tail of supervisor.log, rather than after supervisorReadyTimeout spent
+// polling the socket of a process that is gone.
+func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHint string, exited <-chan error) int {
+	deadline := time.NewTimer(supervisorReadyTimeout)
+	defer deadline.Stop()
+	for {
 		if pid := supervisorAliveHook(); pid != 0 {
 			if jsonOut {
 				return writeLifecycleActionJSONOrExit(stdout, stderr, "gc supervisor start", lifecycleActionJSON{
@@ -683,17 +925,119 @@ func waitForStartedSupervisor(stdout, stderr io.Writer, jsonOut bool, failureHin
 			printDashboardStartHint(stdout)
 			return 0
 		}
+		select {
+		case err := <-exited:
+			if supervisorInstanceLockHeld() {
+				// Another instance holds the single-instance lock — a
+				// concurrent start won the race and this child stood down.
+				// Its readiness is what this start waits for now.
+				exited = nil
+				continue
+			}
+			status := "exit status 0"
+			if err != nil {
+				status = err.Error()
+			}
+			fmt.Fprintf(stderr, "gc supervisor start: supervisor exited before it became ready (%s); %s\n", status, failureHint) //nolint:errcheck // best-effort stderr
+			if tail := supervisorLogTail(supervisorLogPath(), supervisorStartFailureLogLines); tail != "" {
+				fmt.Fprintf(stderr, "last lines of %s:\n%s", supervisorLogPath(), tail) //nolint:errcheck // best-effort stderr
+			}
+			return 1
+		case <-deadline.C:
+			fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; %s\n", failureHint) //nolint:errcheck // best-effort stderr
+			return 1
+		case <-time.After(supervisorReadyPollInterval):
+		}
+	}
+}
+
+// supervisorInstanceLockHeld reports whether some supervisor instance holds
+// the single-instance lock. A variable so tests can model a concurrent start.
+var supervisorInstanceLockHeld = func() bool {
+	free, err := tryAcquireSupervisorLock()
+	return err != nil || !free
+}
+
+// tryAcquireSupervisorLock probes the single-instance lock: free reports
+// whether it could be taken (and was released again at once). err is a
+// failure to open or lock the file other than another holder. A variable so
+// tests can model a holder.
+var tryAcquireSupervisorLock = func() (free bool, err error) {
+	lock, err := acquireSupervisorLock()
+	if errors.Is(err, errSupervisorLockHeld) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	lock.Close() //nolint:errcheck // release probe lock
+	return true, nil
+}
+
+// awaitSupervisorLockOrInstance resolves a start that found no supervisor
+// answering on the control socket. A held single-instance lock then means an
+// instance is between taking the lock and binding its socket — starting up,
+// or shutting down after it closed the socket — so rather than fail, it waits
+// up to supervisorReadyTimeout for that instance to either answer (its PID
+// is returned) or let go of the lock (0 is returned, and the caller starts
+// its own).
+func awaitSupervisorLockOrInstance() (int, error) {
+	deadline := time.Now().Add(supervisorReadyTimeout)
+	for {
+		free, err := tryAcquireSupervisorLock()
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return 0, nil
+		}
+		if pid := supervisorAliveHook(); pid != 0 {
+			return pid, nil
+		}
+		if !time.Now().Before(deadline) {
+			return 0, fmt.Errorf("supervisor already running: another instance holds the supervisor lock but its control socket did not answer within %s; see %s", supervisorReadyTimeout, supervisorLogPath())
+		}
 		time.Sleep(supervisorReadyPollInterval)
 	}
+}
 
-	fmt.Fprintf(stderr, "gc supervisor start: supervisor did not become ready; %s\n", failureHint) //nolint:errcheck // best-effort stderr
-	return 1
+// supervisorStartFailureLogLines is how much of supervisor.log a failed start
+// echoes: the startup lines of the instance that just exited.
+const supervisorStartFailureLogLines = 20
+
+// supervisorLogTailBytes bounds how much of the log supervisorLogTail reads.
+const supervisorLogTailBytes = 64 << 10
+
+// supervisorLogTail returns the last n lines of the log at path, each ending
+// in a newline, or "" when it cannot be read. It reads at most the last
+// supervisorLogTailBytes of the file.
+func supervisorLogTail(path string, n int) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	if info, err := f.Stat(); err == nil && info.Size() > supervisorLogTailBytes {
+		if _, err := f.Seek(-supervisorLogTailBytes, io.SeekEnd); err != nil {
+			return ""
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(f, supervisorLogTailBytes))
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	lines := strings.SplitAfter(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "") + "\n"
 }
 
 // supervisorForkEnv derives the environment for a forked `gc supervisor run`
 // child from the parent's own environment (typically an agent's tmux pane).
 //
-// The child must not inherit GC_SESSION_ID: once the launcher exits, the
+// The child must not inherit GC_SESSION_ID, nor a hook's GC_HOOK_DEADLINE,
+// which would be stale for every hook it later runs. GC_SESSION_ID: once the launcher exits, the
 // forked supervisor is reparented and proctable's orphan scan classifies any
 // reparented process carrying an agent's GC_SESSION_ID as that agent's own
 // runtime (ga-s434i0) — a bare `gc supervisor run` with no session of its own
@@ -718,7 +1062,7 @@ func supervisorForkEnv(parent []string) []string {
 		}
 	}
 	for _, kv := range parent {
-		if strings.HasPrefix(kv, "GC_SESSION_ID=") {
+		if strings.HasPrefix(kv, "GC_SESSION_ID=") || strings.HasPrefix(kv, hookDeadlineEnv+"=") {
 			continue
 		}
 		if key, _, ok := strings.Cut(kv, "="); ok && omitProviderCreds && isProviderCredentialEnv(key) {
@@ -764,18 +1108,27 @@ func supervisorPreForkOwnershipWarning() string {
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
 // gc's own systemd user unit, for `gc supervisor status` and the doctor
 // check. Status is one of:
-//   - "owned": the unit is installed and active, and its MainPID equals the
-//     live supervisor PID — systemd's Restart=always is protecting it.
-//   - "outside_unit": the unit is installed but does not own the live PID
-//     (inactive, or a MainPID mismatch) — the ga-s434i0 defect shape.
+//   - "owned": the unit is installed and active, and the live supervisor PID
+//     is its MainPID or a descendant of it (a wrapper such as sg can be
+//     MainPID with gc as its child) — systemd's Restart=always is protecting
+//     it.
+//   - "outside_unit": the unit is installed but the live PID is neither its
+//     MainPID nor a descendant of it: the unit is inactive, the supervisor was
+//     forked from a tmux pane, or its parent exited and it was reparented —
+//     the ga-s434i0 defect shape. Sitting in the unit's cgroup does not count,
+//     because KillMode=process leaves such processes behind in it.
 //   - "no_unit": no unit is installed; the supervisor is intentionally
 //     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
 //     `gc supervisor install`).
+//
+// ProbeErr is set when the live PID's ancestry could not be read, so an
+// "outside_unit" result is unverified rather than proven.
 type supervisorUnitOwnershipStatus struct {
 	Status     string
 	Unit       string
 	UnitActive bool
 	UnitPID    int
+	ProbeErr   error
 }
 
 func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
@@ -790,10 +1143,42 @@ func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus
 	if !ok {
 		pid = 0
 	}
-	if ok && pid != 0 && pid == livePID {
+	owned, err := supervisorProcessDescendsFrom(livePID, pid)
+	if owned {
 		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
 	}
-	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid}
+	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: err}
+}
+
+// supervisorUnitAncestryMaxHops bounds the parent walk in
+// supervisorProcessDescendsFrom. A wrapper ExecStart puts gc one or two hops
+// below MainPID; the bound only guards against malformed /proc data.
+const supervisorUnitAncestryMaxHops = 8
+
+// supervisorProcessDescendsFrom reports whether pid is the ancestor itself or
+// descends from it within supervisorUnitAncestryMaxHops parent hops. A
+// process whose parent exited was reparented to init or to a subreaper such
+// as systemd --user, so it no longer descends from the MainPID that started
+// it. The walk stops at PID 1, and an ancestor of 1 or less never matches
+// because it cannot be a unit's MainPID. A failed parent read ends the walk
+// and is returned, because the answer is then unknown rather than false.
+func supervisorProcessDescendsFrom(pid, ancestor int) (bool, error) {
+	if pid <= 0 || ancestor <= 1 {
+		return false, nil
+	}
+	for hops := 0; ; hops++ {
+		if pid == ancestor {
+			return true, nil
+		}
+		if pid <= 1 || hops == supervisorUnitAncestryMaxHops {
+			return false, nil
+		}
+		parent, err := supervisorParentPID(pid)
+		if err != nil {
+			return false, fmt.Errorf("reading the parent of PID %d: %w", pid, err)
+		}
+		pid = parent
+	}
 }
 
 func ensureSupervisorRunning(stdout, stderr io.Writer) int {
@@ -840,16 +1225,25 @@ func ensureSupervisorRunning(stdout, stderr io.Writer) int {
 		if supervisorAliveHook() != 0 {
 			return 0
 		}
-		return doSupervisorStart(stdout, stderr)
+		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	// Always regenerate the service file so upgrades pick up template
 	// changes (e.g. PATH captured from the user's shell).
-	if doSupervisorInstall(stdout, stderr) != 0 {
+	if supervisorInstallHook(stdout, stderr) != 0 {
 		if supervisorAlive() != 0 {
 			return 0
 		}
+		requireManager, err := supervisorRequiresServiceManager()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		if requireManager {
+			fmt.Fprintf(stderr, "gc: %s\n", supervisorInstallFailureRefusal()) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		// Fall back to bare start if install fails (e.g., unsupported OS).
-		return doSupervisorStart(stdout, stderr)
+		return startBareSupervisor(stdout, stderr, false, true)
 	}
 	if supervisorAliveHook() != 0 {
 		return 0
@@ -1001,6 +1395,57 @@ func supervisorSameBinary(a, b string) bool {
 		return os.SameFile(infoA, infoB)
 	}
 	return false
+}
+
+// supervisorInstallBinaryGuardResult classifies the gc binary an existing
+// service file references relative to the binary running the install.
+type supervisorInstallBinaryGuardResult int
+
+const (
+	// supervisorInstallBinaryAllowed: no binary recorded, or the same binary.
+	supervisorInstallBinaryAllowed supervisorInstallBinaryGuardResult = iota
+	// supervisorInstallBinaryDifferent: a different gc binary that still
+	// exists on disk; overwriting it requires --force.
+	supervisorInstallBinaryDifferent
+	// supervisorInstallBinaryMissing: a gc binary that no longer exists
+	// (uninstalled, unlinked, or upgraded away). The service manager can no
+	// longer start it, so the file is replaceable without --force.
+	supervisorInstallBinaryMissing
+)
+
+// supervisorInstallBinaryGuard classifies existingBinary, the gc path an
+// installed service file launches, against currentBinary. A dangling symlink
+// counts as missing because the service manager cannot exec it either.
+func supervisorInstallBinaryGuard(existingBinary, currentBinary string) supervisorInstallBinaryGuardResult {
+	if existingBinary == "" || supervisorSameBinary(existingBinary, currentBinary) {
+		return supervisorInstallBinaryAllowed
+	}
+	if _, err := os.Stat(existingBinary); errors.Is(err, fs.ErrNotExist) {
+		return supervisorInstallBinaryMissing
+	}
+	return supervisorInstallBinaryDifferent
+}
+
+// checkSupervisorInstallBinaryGuard applies supervisorInstallBinaryGuard for
+// a non-forced install of the service file at path (kind is "plist" or
+// "unit"). It reports false after explaining the refusal on stderr, and
+// notes on stdout when a file pointing at a removed binary is being replaced.
+func checkSupervisorInstallBinaryGuard(kind, path, existingBinary, currentBinary string, stdout, stderr io.Writer) bool {
+	switch supervisorInstallBinaryGuard(existingBinary, currentBinary) {
+	case supervisorInstallBinaryDifferent:
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: existing %s %q references binary %q but the current gc binary resolves to %q; "+
+				"refusing to overwrite a %s installed from a different binary. "+
+				"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
+				"To override, pass --force.\n",
+			kind, path, existingBinary, currentBinary, kind)
+		return false
+	case supervisorInstallBinaryMissing:
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort stdout
+			"gc supervisor install: existing %s %q references binary %q, which no longer exists; replacing it with %q.\n",
+			kind, path, existingBinary, currentBinary)
+	}
+	return true
 }
 
 func waitForSupervisorPID() int {
@@ -1465,6 +1910,20 @@ var supervisorServiceEnvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // every spawned agent session — one list, not two that have to be kept in
 // sync by hand.
 var supervisorServiceEnvKeys = map[string]bool{
+	// beads' pooled per-I/O deadline overrides (#1861 rationale, like the
+	// GC_DOLT_* keys). The supervisor's in-process store opens honor ONLY the
+	// env rung — the config.yaml rung reads a viper only cmd/bd initializes,
+	// .beads/.env is bd-main-only — so on a shared/hub-bound Dolt store where
+	// the 10s default is too tight these must survive plist regeneration.
+	// Scope: two opens withhold the BEADS_ namespace by design and keep the
+	// defaults either way — the storebinding workspace open, and the opt-in
+	// proxied-native read lane (GC_BEADS_PROXIED_NATIVE), whose own knob
+	// GC_BEADS_PROXIED_READ_BUDGET is a wall-clock cap on a whole read's
+	// retry chain, not a per-I/O deadline. Keep these keys out of
+	// nativeDoltOpenEnvKeys: that projection unsets a listed key whenever
+	// the open's env map omits it, as it omits these.
+	"BEADS_DOLT_POOL_READ_TIMEOUT":             true,
+	"BEADS_DOLT_POOL_WRITE_TIMEOUT":            true,
 	"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
 	"CLAUDE_CODE_EFFORT_LEVEL":                 true,
 	"CLAUDE_CODE_OAUTH_TOKEN":                  true,
@@ -1812,16 +2271,26 @@ func writeSupervisorServiceFile(path string, content []byte) error {
 	return os.Chmod(path, supervisorServiceFileMode)
 }
 
-func supervisorLaunchdPlistPath() string {
+// supervisorLaunchdPlistPath is a var so tests can point the launchd
+// probes at a temporary plist without overriding HOME, which
+// platformSupervisorHomeOverrideError rejects.
+var supervisorLaunchdPlistPath = func() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "LaunchAgents", supervisorLaunchdLabel()+".plist")
+}
+
+// supervisorLaunchdDomain is the launchd domain the agent runs in, the
+// logged-in user's GUI session. Commands that act on the job and probes that
+// read its overrides both address it, so they cannot drift apart.
+func supervisorLaunchdDomain() string {
+	return "gui/" + strconv.Itoa(os.Getuid())
 }
 
 func supervisorLaunchdServiceTarget(label string) string {
 	if label == "" {
 		label = supervisorLaunchdLabel()
 	}
-	return "gui/" + strconv.Itoa(os.Getuid()) + "/" + label
+	return supervisorLaunchdDomain() + "/" + label
 }
 
 func loadAndStartSupervisorLaunchd(path, label string) error {
@@ -2142,16 +2611,9 @@ func installSupervisorLaunchd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing plist: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorLaunchdPlistGCPath(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing plist %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a plist installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("plist", path, supervisorLaunchdPlistGCPath(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 	if contentUnchanged && supervisorAliveHook() != 0 {
 		fmt.Fprintf(stdout, "Installed launchd service: %s\n", path) //nolint:errcheck // best-effort stdout
@@ -2285,16 +2747,9 @@ func installSupervisorSystemd(data *supervisorServiceData, stdout, stderr io.Wri
 		fmt.Fprintf(stderr, "gc supervisor install: reading existing unit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if hadCurrent && !supervisorInstallForce {
-		if existingBinary := supervisorSystemdExecStartBinary(string(existing)); existingBinary != "" && !supervisorSameBinary(existingBinary, data.GCPath) {
-			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-				"gc supervisor install: existing unit %q references binary %q but the current gc binary resolves to %q; "+
-					"refusing to overwrite a unit installed from a different binary. "+
-					"Install gc to a stable location first (e.g. 'make install'), then rerun 'gc supervisor install'. "+
-					"To override, pass --force.\n",
-				path, existingBinary, data.GCPath)
-			return 1
-		}
+	if hadCurrent && !supervisorInstallForce &&
+		!checkSupervisorInstallBinaryGuard("unit", path, supervisorSystemdExecStartBinary(string(existing)), data.GCPath, stdout, stderr) {
+		return 1
 	}
 
 	// Bail out before we touch the unit file when there is no per-user

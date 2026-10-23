@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
@@ -25,15 +25,22 @@ func TestNativeDoltStoreCreateDelegatesToUpstreamStorage(t *testing.T) {
 	var captured *beadslib.Issue
 	var capturedActor string
 	storage := &nativeDoltStorageSpy{
-		getIssue: func(_ context.Context, id string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{ID: id, Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2}, nil
+		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
+			if captured == nil {
+				t.Fatal("Create did not use CreateIssue before loading the created issue")
+			}
+			return cloneNativeIssueForTest(captured), nil
 		},
 		createIssue: func(_ context.Context, issue *beadslib.Issue, actor string) error {
-			captured = cloneNativeIssueForTest(issue)
 			capturedActor = actor
 			issue.ID = "gc-native"
 			issue.CreatedAt = createdAt
 			issue.UpdatedAt = createdAt
+			captured = cloneNativeIssueForTest(issue)
+			return nil
+		},
+		addDependency: func(_ context.Context, dependency *beadslib.Dependency, _ string) error {
+			captured.Dependencies = append(captured.Dependencies, cloneNativeDependencies([]*beadslib.Dependency{dependency})...)
 			return nil
 		},
 	}
@@ -338,19 +345,22 @@ func TestNativeDoltStoreListStatusOpenExcludesClosedBeadsFromUpstreamDrift(t *te
 	}
 }
 
-func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *testing.T) {
+func TestNativeDoltStoreReadyOffersOnlyOpenWork(t *testing.T) {
 	// bd's own status-category table (vendored beads internal/types.
 	// BuiltInStatusCategory) marks blocked/hooked as "wip" and pinned as
-	// "frozen" — both excluded from bd's own ready semantics. Only "open"
-	// (category active) and deferred (once DeferUntil has passed, handled
-	// via IsReadyCandidateForTier's IsDeferred check) belong here. This
-	// issue set intentionally includes a blocked bead whose dependency
-	// graph the spy treats as fully satisfied (it is returned unconditionally
-	// whenever queried by status), to prove Ready() must never surface it
-	// even when GetReadyWork would happily return it if asked. gc-deferred
-	// carries a past DeferUntil to represent an expired time-bound deferral;
-	// the no-DeferUntil (indefinite) case is covered separately by
-	// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads.
+	// "frozen" — both excluded from bd's own ready semantics — and closed and
+	// in_progress are not ready work either. The rows below are the whole
+	// status vocabulary, so a door that widened its question shows up here as
+	// an extra bead.
+	//
+	// The MECHANISM that keeps them out moved with the re-point and the
+	// assertion did not. gc used to control it by naming the statuses it asked
+	// for; issueops.Reader publishes no status at all and workapi's builder
+	// stamps open for every caller, so it is now the role's guarantee — modeled
+	// by readyWorkFixtureForTest, which answers a WorkFilter the way a backend
+	// does. gc-deferred carries a past DeferUntil and still arrives, because
+	// the backend's lazy defer-wake sweep runs first; the deferred-visibility
+	// rule in full is TestNativeDoltStoreReadyDeferredVisibilityIsUnchangedThroughTheRole.
 	past := time.Now().UTC().Add(-24 * time.Hour)
 	issues := []*beadslib.Issue{
 		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
@@ -364,14 +374,7 @@ func TestNativeDoltStoreReadyOnlyIncludesOpenAndDeferredUpstreamStatuses(t *test
 	}
 	storage := &nativeDoltStorageSpy{
 		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
-			var result []*beadslib.Issue
-			for _, issue := range issues {
-				if !workFilterMatchesStatus(filter, issue.Status) {
-					continue
-				}
-				result = append(result, cloneNativeIssueForTest(issue))
-			}
-			return result, nil
+			return readyWorkFixtureForTest(issues, filter), nil
 		},
 	}
 	store := newNativeDoltStoreForTest(storage)
@@ -431,51 +434,11 @@ func TestNativeDoltStoreReadyExcludesFutureDeferredBeads(t *testing.T) {
 	}
 }
 
-// TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads covers bd defer
-// <id> without --until: a first-class, documented "status-based" indefinite
-// deferral (upstream cmd/bd/defer.go) that sets status=deferred and leaves
-// defer_until NULL, distinct from bd defer <id> --until=<time>'s time-bound
-// snooze. nativeDoltOpenReadyStatuses must keep querying StatusDeferred so an
-// *expired* time-bound deferral (defer_until in the past) can resurface, but
-// an issue that was never time-bound (defer_until nil) must not fall through
-// IsReadyCandidateForTier's nil-DeferUntil case as if it were an ordinary
-// open bead that was never deferred at all.
-func TestNativeDoltStoreReadyExcludesIndefinitelyDeferredBeads(t *testing.T) {
-	past := time.Now().UTC().Add(-24 * time.Hour)
-	issues := []*beadslib.Issue{
-		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred-indefinite", Title: "indefinite", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2},
-		{ID: "gc-deferred-expired", Title: "expired", Status: beadslib.StatusDeferred, IssueType: beadslib.TypeTask, Priority: 2, DeferUntil: &past},
-	}
-	storage := &nativeDoltStorageSpy{
-		getReadyWork: func(_ context.Context, filter beadslib.WorkFilter) ([]*beadslib.Issue, error) {
-			var result []*beadslib.Issue
-			for _, issue := range issues {
-				if !workFilterMatchesStatus(filter, issue.Status) {
-					continue
-				}
-				result = append(result, cloneNativeIssueForTest(issue))
-			}
-			return result, nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.Ready()
-	if err != nil {
-		t.Fatalf("Ready: %v", err)
-	}
-
-	wantIDs := map[string]bool{"gc-open": true, "gc-deferred-expired": true}
-	if len(got) != len(wantIDs) {
-		t.Fatalf("Ready len = %d, want %d; got %+v", len(got), len(wantIDs), got)
-	}
-	for _, bead := range got {
-		if !wantIDs[bead.ID] {
-			t.Fatalf("Ready returned unexpected bead %q from %+v — an indefinitely status-deferred bead (status=deferred, defer_until=NULL) must never surface as ready", bead.ID, got)
-		}
-	}
-}
+// The indefinite-vs-expired deferral rule this file used to pin twice is now
+// one differential in native_dolt_store_read_roles_test.go
+// (TestNativeDoltStoreReadyDeferredVisibilityIsUnchangedThroughTheRole): same
+// two rows, same expectation, plus the future-deferred arm neither of the old
+// pair covered.
 
 func TestNativeDoltStoreNormalizesUpstreamNotFoundErrors(t *testing.T) {
 	upstreamNotFound := errors.New("not found")
@@ -726,10 +689,15 @@ func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	closed := make(chan struct{})
+	// Close reads the bead once to derive its close reason and the facade reads
+	// it again inside the write, so the gate only trips on the first read.
+	enter := sync.OnceFunc(func() {
+		close(entered)
+		<-release
+	})
 	storage := &nativeDoltStorageSpy{
 		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			close(entered)
-			<-release
+			enter()
 			return &beadslib.Issue{ID: "gc-open", Status: beadslib.StatusOpen}, nil
 		},
 		closeIssue: func(context.Context, string, string, string, string) error {
@@ -852,12 +820,18 @@ func TestNativeDoltStorePreservesNonStringMetadataAsJSONText(t *testing.T) {
 	}
 }
 
+// A default listing converts the upstream row and returns no closed bead.
+//
+// The closed exclusion used to be asserted on the backing FILTER, and after the
+// read re-point there is no filter here to assert on: issueops.ListRequest has
+// no ExcludeStatus member and the request deliberately drops every status
+// exclusion (nativeListReadRequest), so gc's own three-value status projection
+// is the whole of it. The protection is therefore re-pinned where it is now
+// decided — on the ANSWER, with a closed row in the backing's reply.
 func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	createdAt := time.Date(2026, 5, 17, 11, 0, 0, 0, time.UTC)
-	var capturedFilter beadslib.IssueFilter
 	storage := &nativeDoltStorageSpy{
-		searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-			capturedFilter = filter
+		searchIssues: func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
 			return []*beadslib.Issue{{
 				ID:          "gc-listed",
 				Title:       "listed through native store",
@@ -869,6 +843,13 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 				Labels:      []string{"native"},
 				Metadata:    json.RawMessage(`{"gc.step_ref":"list"}`),
 				Description: "native list",
+			}, {
+				ID:        "gc-done",
+				Title:     "already closed",
+				Status:    beadslib.StatusClosed,
+				IssueType: beadslib.TypeTask,
+				Priority:  2,
+				CreatedAt: createdAt,
 			}}, nil
 		},
 	}
@@ -878,11 +859,8 @@ func TestNativeDoltStoreListDelegatesAndConvertsIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(capturedFilter.ExcludeStatus) != 1 || capturedFilter.ExcludeStatus[0] != beadslib.StatusClosed {
-		t.Fatalf("ExcludeStatus = %#v, want [closed]", capturedFilter.ExcludeStatus)
-	}
 	if len(got) != 1 {
-		t.Fatalf("List len = %d, want 1", len(got))
+		t.Fatalf("List len = %d, want 1 (the closed row must not survive a default listing); got %+v", len(got), got)
 	}
 	if got[0].ID != "gc-listed" || got[0].Title != "listed through native store" {
 		t.Fatalf("listed bead = %#v, want converted upstream issue", got[0])
@@ -1013,622 +991,6 @@ func TestNativeDoltStoreListTierWispsIncludesNoHistoryAndEphemeralRows(t *testin
 	}
 }
 
-// dependentReadingStorageSpy is the storage spy plus the target-keyed dependents
-// reads a Dolt-backed storage exposes (beadslib.DependentQuerier). It answers
-// from edges and records the target ids each batched read asked for, and each
-// filtered read as "<target> <type> after=<edge id>". pageCap, when set, caps a
-// filtered page below the size asked for, as beads caps it at its own limit.
-// ignoreAfter answers every filtered read from the first edge, as a read that
-// does not page would.
-type dependentReadingStorageSpy struct {
-	*nativeDoltStorageSpy
-	edges       map[string][]*beadslib.Dependency
-	err         error
-	targets     [][]string
-	paged       []string
-	pageCap     int
-	ignoreAfter bool
-}
-
-var _ beadslib.DependentQuerier = (*dependentReadingStorageSpy)(nil)
-
-func (s *dependentReadingStorageSpy) GetDependentRecords(_ context.Context, targetID, depType string, limit int, afterID string) ([]*beadslib.Dependency, error) {
-	s.paged = append(s.paged, fmt.Sprintf("%s %s after=%s", targetID, depType, afterID))
-	if s.err != nil {
-		return nil, s.err
-	}
-	var page []*beadslib.Dependency
-	for _, dep := range s.edges[targetID] {
-		if depType != "" && string(dep.Type) != depType {
-			continue
-		}
-		if !s.ignoreAfter && afterID != "" && dep.ID <= afterID {
-			continue
-		}
-		page = append(page, dep)
-	}
-	slices.SortFunc(page, func(a, b *beadslib.Dependency) int { return strings.Compare(a.ID, b.ID) })
-	if s.pageCap > 0 && limit > s.pageCap {
-		limit = s.pageCap
-	}
-	if len(page) > limit {
-		page = page[:limit]
-	}
-	return page, nil
-}
-
-func (s *dependentReadingStorageSpy) GetDependentRecordsForIssues(_ context.Context, targetIDs []string) (map[string][]*beadslib.Dependency, error) {
-	s.targets = append(s.targets, append([]string(nil), targetIDs...))
-	if s.err != nil {
-		return nil, s.err
-	}
-	out := make(map[string][]*beadslib.Dependency)
-	for _, id := range targetIDs {
-		if deps := s.edges[id]; len(deps) > 0 {
-			out[id] = deps
-		}
-	}
-	return out, nil
-}
-
-func (s *dependentReadingStorageSpy) CountDependentRecords(context.Context, string, string) (int, error) {
-	return 0, errors.New("unexpected dependents count")
-}
-
-func nativeParentChildEdge(child, parent string) *beadslib.Dependency {
-	return &beadslib.Dependency{ID: child + "->" + parent, IssueID: child, DependsOnID: parent, Type: beadslib.DepParentChild}
-}
-
-// nativeChildIssue is an issue whose parent-child edge points at parent, the
-// shape SearchIssues hydrates when IncludeDependencies is set.
-func nativeChildIssue(id, parent string, status beadslib.Status, createdAt time.Time) *beadslib.Issue {
-	issue := &beadslib.Issue{ID: id, Title: id, Status: status, IssueType: beadslib.TypeTask, Priority: 2, CreatedAt: createdAt}
-	if parent != "" {
-		issue.Dependencies = []*beadslib.Dependency{nativeParentChildEdge(id, parent)}
-	}
-	return issue
-}
-
-// searchByIDsForTest answers a search from issues, honoring the filter shapes
-// the parent pushdown sends: an id IN-list and the tier flag.
-func searchByIDsForTest(issues []*beadslib.Issue, searched *[]beadslib.IssueFilter) func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-	return func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-		*searched = append(*searched, filter)
-		var out []*beadslib.Issue
-		for _, issue := range issues {
-			if len(filter.IDs) > 0 && !slices.Contains(filter.IDs, issue.ID) {
-				continue
-			}
-			if filter.Ephemeral != nil && issue.Ephemeral != *filter.Ephemeral {
-				continue
-			}
-			out = append(out, cloneNativeIssueForTest(issue))
-		}
-		return out, nil
-	}
-}
-
-// TestNativeDoltStoreListByParentReadsChildrenThroughEdges pins the parent
-// pushdown: a ParentID list reads the parent-child edges that target the parent
-// with the filtered dependents read, one page when the parent has fewer edges
-// than a page holds, then searches only the children those edges name, by id,
-// under the query's limit. The upstream parent filter is never sent; Dolt
-// answers it by scanning every issue row. Edge types other than parent-child
-// name no child, and the status filter still applies.
-func TestNativeDoltStoreListByParentReadsChildrenThroughEdges(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-			nativeChildIssue("gc-c2", "gc-p", beadslib.StatusClosed, t0.Add(time.Minute)),
-			nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0),
-			nativeChildIssue("gc-blocked", "", beadslib.StatusOpen, t0),
-		}, &searched)},
-		edges: map[string][]*beadslib.Dependency{
-			"gc-p": {
-				nativeParentChildEdge("gc-c1", "gc-p"),
-				nativeParentChildEdge("gc-c2", "gc-p"),
-				{IssueID: "gc-blocked", DependsOnID: "gc-p", Type: beadslib.DepBlocks},
-			},
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentID: "gc-p", IncludeClosed: true, Sort: SortCreatedAsc, Limit: 10})
-	if err != nil {
-		t.Fatalf("List(ParentID): %v", err)
-	}
-	if len(storage.targets) != 0 {
-		t.Fatalf("batched dependents reads = %v, want none for one parent", storage.targets)
-	}
-	if want := []string{"gc-p parent-child after="}; !reflect.DeepEqual(storage.paged, want) {
-		t.Fatalf("filtered dependents reads = %q, want %q: a short page is the last", storage.paged, want)
-	}
-	if len(searched) != 1 {
-		t.Fatalf("searches = %d, want 1", len(searched))
-	}
-	if searched[0].ParentID != nil {
-		t.Fatalf("search sent the upstream parent filter %q; the children must be searched by id", *searched[0].ParentID)
-	}
-	if want := []string{"gc-c1", "gc-c2"}; !reflect.DeepEqual(searched[0].IDs, want) {
-		t.Fatalf("search ids = %v, want the parent-child children %v", searched[0].IDs, want)
-	}
-	if searched[0].Limit != 10 {
-		t.Fatalf("search limit = %d, want the query's limit of 10, so a limited read hydrates only the rows it returns", searched[0].Limit)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1", "gc-c2"}) {
-		t.Fatalf("List(ParentID) = %v, want [gc-c1 gc-c2]", ids)
-	}
-
-	open, err := store.List(ListQuery{ParentID: "gc-p", Sort: SortCreatedAsc})
-	if err != nil {
-		t.Fatalf("List(ParentID, open): %v", err)
-	}
-	if ids := beadIDsOf(open); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
-		t.Fatalf("List(ParentID, open) = %v, want only the open child", ids)
-	}
-}
-
-// TestNativeDoltStoreListByParentIDsIsExact pins the batched form: one
-// dependents read for every distinct parent, one search for all their children,
-// and a result holding exactly the beads whose ParentID is a listed parent. A
-// bead with a parent-child edge to a listed parent whose ParentID is another
-// bead (its first parent-child edge) is not a child of the listed parent, as
-// Matches already decides for ParentID.
-func TestNativeDoltStoreListByParentIDsIsExact(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	twoParents := nativeChildIssue("gc-c3", "gc-other", beadslib.StatusOpen, t0.Add(2*time.Minute))
-	twoParents.Dependencies = append(twoParents.Dependencies, nativeParentChildEdge("gc-c3", "gc-p1"))
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-			nativeChildIssue("gc-c1", "gc-p1", beadslib.StatusOpen, t0),
-			nativeChildIssue("gc-c2", "gc-p2", beadslib.StatusOpen, t0.Add(time.Minute)),
-			twoParents,
-		}, &searched)},
-		edges: map[string][]*beadslib.Dependency{
-			"gc-p1": {nativeParentChildEdge("gc-c1", "gc-p1"), nativeParentChildEdge("gc-c3", "gc-p1")},
-			"gc-p2": {nativeParentChildEdge("gc-c2", "gc-p2")},
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentIDs: []string{"gc-p1", "gc-p2", "gc-p1", ""}, IncludeClosed: true, AllowScan: true, Sort: SortCreatedAsc})
-	if err != nil {
-		t.Fatalf("List(ParentIDs): %v", err)
-	}
-	if want := [][]string{{"gc-p1", "gc-p2"}}; !reflect.DeepEqual(storage.targets, want) {
-		t.Fatalf("dependents reads = %v, want one read of the distinct parents %v", storage.targets, want)
-	}
-	if len(searched) != 1 {
-		t.Fatalf("searches = %d, want 1", len(searched))
-	}
-	if want := []string{"gc-c1", "gc-c3", "gc-c2"}; !reflect.DeepEqual(searched[0].IDs, want) {
-		t.Fatalf("search ids = %v, want %v", searched[0].IDs, want)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1", "gc-c2"}) {
-		t.Fatalf("List(ParentIDs) = %v, want exactly the children [gc-c1 gc-c2]", ids)
-	}
-}
-
-// TestNativeDoltStoreListByParentWithNoChildrenSearchesNothing pins the empty
-// case: a parent no parent-child edge targets has no children, and the search
-// is skipped rather than sent with an empty id list, which matches every row.
-func TestNativeDoltStoreListByParentWithNoChildrenSearchesNothing(t *testing.T) {
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(nil, &searched)},
-		edges: map[string][]*beadslib.Dependency{
-			"gc-p": {{IssueID: "gc-blocked", DependsOnID: "gc-p", Type: beadslib.DepBlocks}},
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentID: "gc-p", IncludeClosed: true})
-	if err != nil {
-		t.Fatalf("List(ParentID): %v", err)
-	}
-	if got == nil || len(got) != 0 {
-		t.Fatalf("List(ParentID) = %#v, want an empty non-nil slice", got)
-	}
-	if len(searched) != 0 {
-		t.Fatalf("searches = %+v, want none", searched)
-	}
-}
-
-// TestNativeDoltStoreListByParentIntersectsIDs pins a parent query that also
-// names ids: only the children in that id list are searched.
-func TestNativeDoltStoreListByParentIntersectsIDs(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-			nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0),
-			nativeChildIssue("gc-c2", "gc-p", beadslib.StatusOpen, t0),
-		}, &searched)},
-		edges: map[string][]*beadslib.Dependency{
-			"gc-p": {nativeParentChildEdge("gc-c1", "gc-p"), nativeParentChildEdge("gc-c2", "gc-p")},
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentID: "gc-p", IDs: []string{"gc-c2", "gc-unrelated"}})
-	if err != nil {
-		t.Fatalf("List(ParentID, IDs): %v", err)
-	}
-	if len(searched) != 1 || !reflect.DeepEqual(searched[0].IDs, []string{"gc-c2"}) {
-		t.Fatalf("searches = %+v, want one search of [gc-c2]", searched)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c2"}) {
-		t.Fatalf("List(ParentID, IDs) = %v, want [gc-c2]", ids)
-	}
-}
-
-// TestNativeDoltStoreListByParentKeepsUpstreamFilterWithoutDependentsRead pins
-// the fallback: a storage with no target-keyed dependents read is searched with
-// the upstream parent filter.
-func TestNativeDoltStoreListByParentKeepsUpstreamFilterWithoutDependentsRead(t *testing.T) {
-	var searched []beadslib.IssueFilter
-	storage := &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-		nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)),
-	}, &searched)}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentID: "gc-p"})
-	if err != nil {
-		t.Fatalf("List(ParentID): %v", err)
-	}
-	if len(searched) != 1 || searched[0].ParentID == nil || *searched[0].ParentID != "gc-p" {
-		t.Fatalf("searches = %+v, want one search with the upstream parent filter", searched)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
-		t.Fatalf("List(ParentID) = %v, want [gc-c1]", ids)
-	}
-}
-
-// TestNativeDoltStoreListByParentPagesTheFilteredEdgeRead pins that a parent
-// with more parent-child edges than one page holds returns every child: the read
-// is paged by the last edge id while pages come back full, and a short page,
-// empty included, is the last.
-func TestNativeDoltStoreListByParentPagesTheFilteredEdgeRead(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	for _, n := range []int{2*nativeDependentsPage + 1, nativeDependentsPage} {
-		t.Run(fmt.Sprintf("%d edges", n), func(t *testing.T) {
-			var issues []*beadslib.Issue
-			var edges []*beadslib.Dependency
-			var want []string
-			for i := 1; i <= n; i++ {
-				id := fmt.Sprintf("gc-c%04d", i)
-				issues = append(issues, nativeChildIssue(id, "gc-p", beadslib.StatusOpen, t0.Add(time.Duration(i)*time.Minute)))
-				edges = append(edges, nativeParentChildEdge(id, "gc-p"))
-				want = append(want, id)
-			}
-			var searched []beadslib.IssueFilter
-			storage := &dependentReadingStorageSpy{
-				nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(issues, &searched)},
-				edges:                map[string][]*beadslib.Dependency{"gc-p": edges},
-				pageCap:              nativeDependentsPage,
-			}
-			store := newNativeDoltStoreForTest(storage)
-
-			got, err := store.List(ListQuery{ParentID: "gc-p", Sort: SortCreatedAsc})
-			if err != nil {
-				t.Fatalf("List(ParentID): %v", err)
-			}
-			wantReads := []string{"gc-p parent-child after="}
-			for page := nativeDependentsPage; page <= n; page += nativeDependentsPage {
-				wantReads = append(wantReads, fmt.Sprintf("gc-p parent-child after=%s", edges[page-1].ID))
-			}
-			if !reflect.DeepEqual(storage.paged, wantReads) {
-				t.Fatalf("filtered dependents reads = %q, want %q", storage.paged, wantReads)
-			}
-			if len(searched) != 1 || !reflect.DeepEqual(searched[0].IDs, want) {
-				t.Fatalf("searches = %d, want one search of every child", len(searched))
-			}
-			if ids := beadIDsOf(got); !reflect.DeepEqual(ids, want) {
-				t.Fatalf("List(ParentID) returned %d children, want %d", len(ids), len(want))
-			}
-		})
-	}
-}
-
-// TestNativeDoltStoreListByParentRefusesAnEdgeReadThatDoesNotPage pins that a
-// filtered read answering the same full page again fails the list rather than
-// looping on it.
-func TestNativeDoltStoreListByParentRefusesAnEdgeReadThatDoesNotPage(t *testing.T) {
-	var edges []*beadslib.Dependency
-	for i := 1; i <= nativeDependentsPage; i++ {
-		edges = append(edges, nativeParentChildEdge(fmt.Sprintf("gc-c%04d", i), "gc-p"))
-	}
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(nil, &searched)},
-		edges:                map[string][]*beadslib.Dependency{"gc-p": edges},
-		ignoreAfter:          true,
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if _, err := store.List(ListQuery{ParentID: "gc-p"}); err == nil || !strings.Contains(err.Error(), "did not page") {
-		t.Fatalf("List(ParentID) err = %v, want the paging failure", err)
-	}
-	if len(searched) != 0 {
-		t.Fatalf("searches = %+v, want none after the edge read failed", searched)
-	}
-}
-
-// TestNativeDoltStoreListByParentIDsOfOneParentUsesTheFilteredRead pins that a
-// ParentIDs list naming one distinct parent reads that parent's edges the way
-// a ParentID list does, with the filtered read rather than the batched one.
-func TestNativeDoltStoreListByParentIDsOfOneParentUsesTheFilteredRead(t *testing.T) {
-	var searched []beadslib.IssueFilter
-	storage := &dependentReadingStorageSpy{
-		nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-			nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)),
-		}, &searched)},
-		edges: map[string][]*beadslib.Dependency{"gc-p": {nativeParentChildEdge("gc-c1", "gc-p")}},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentIDs: []string{"gc-p", "", "gc-p"}, AllowScan: true})
-	if err != nil {
-		t.Fatalf("List(ParentIDs): %v", err)
-	}
-	if len(storage.targets) != 0 || len(storage.paged) == 0 {
-		t.Fatalf("batched reads = %v, filtered reads = %q; want only filtered reads", storage.targets, storage.paged)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
-		t.Fatalf("List(ParentIDs) = %v, want [gc-c1]", ids)
-	}
-}
-
-// TestNativeDoltStoreListByParentReturnsEdgeReadError pins that a failed
-// dependents read, filtered for one parent or batched for several, fails the
-// list instead of degrading to an empty child set.
-func TestNativeDoltStoreListByParentReturnsEdgeReadError(t *testing.T) {
-	for name, query := range map[string]ListQuery{
-		"one parent":      {ParentID: "gc-p"},
-		"several parents": {ParentIDs: []string{"gc-p1", "gc-p2"}, AllowScan: true},
-	} {
-		t.Run(name, func(t *testing.T) {
-			var searched []beadslib.IssueFilter
-			storage := &dependentReadingStorageSpy{
-				nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(nil, &searched)},
-				err:                  errors.New("dependents read refused"),
-			}
-			store := newNativeDoltStoreForTest(storage)
-
-			if _, err := store.List(query); err == nil || !strings.Contains(err.Error(), "dependents read refused") {
-				t.Fatalf("List(%+v) err = %v, want the dependents read failure", query, err)
-			}
-			if len(searched) != 0 {
-				t.Fatalf("searches = %+v, want none after the edge read failed", searched)
-			}
-		})
-	}
-}
-
-// TestNativeDoltStoreListByEmptyParentIDsIsEmpty pins that an empty ParentIDs
-// entry names no parent, whether or not the storage has the dependents read: a
-// list whose every entry is empty returns no bead and reads nothing, and an
-// empty entry beside a real parent adds nothing to that parent's children.
-func TestNativeDoltStoreListByEmptyParentIDsIsEmpty(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	issues := []*beadslib.Issue{
-		nativeChildIssue("gc-root", "", beadslib.StatusOpen, t0),
-		nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0.Add(time.Minute)),
-	}
-	edges := map[string][]*beadslib.Dependency{"gc-p": {nativeParentChildEdge("gc-c1", "gc-p")}}
-	storages := map[string]func(*[]beadslib.IssueFilter) beadslib.Storage{
-		"dependents read": func(searched *[]beadslib.IssueFilter) beadslib.Storage {
-			return &dependentReadingStorageSpy{nativeDoltStorageSpy: &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(issues, searched)}, edges: edges}
-		},
-		"no dependents read": func(searched *[]beadslib.IssueFilter) beadslib.Storage {
-			return &nativeDoltStorageSpy{searchIssues: searchByIDsForTest(issues, searched)}
-		},
-	}
-	for name, newStorage := range storages {
-		t.Run(name, func(t *testing.T) {
-			var searched []beadslib.IssueFilter
-			store := newNativeDoltStoreForTest(newStorage(&searched))
-
-			got, err := store.List(ListQuery{ParentIDs: []string{"", ""}, IncludeClosed: true, AllowScan: true})
-			if err != nil {
-				t.Fatalf("List(ParentIDs=[\"\" \"\"]): %v", err)
-			}
-			if got == nil || len(got) != 0 || len(searched) != 0 {
-				t.Fatalf("List(ParentIDs=[\"\" \"\"]) = %v after %d searches, want no bead and no search", beadIDsOf(got), len(searched))
-			}
-
-			got, err = store.List(ListQuery{ParentIDs: []string{"", "gc-p"}, IncludeClosed: true, AllowScan: true})
-			if err != nil {
-				t.Fatalf("List(ParentIDs=[\"\" gc-p]): %v", err)
-			}
-			if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1"}) {
-				t.Fatalf("List(ParentIDs=[\"\" gc-p]) = %v, want only gc-p's child [gc-c1]", ids)
-			}
-		})
-	}
-}
-
-// TestNativeDoltStoreListByParentIDsWithoutDependentsReadCutsThePageLast pins
-// the unscoped ParentIDs read: with no dependents read the search is not
-// narrowed to the parents, so it carries no limit, and the page is cut from the
-// children after they are kept.
-func TestNativeDoltStoreListByParentIDsWithoutDependentsReadCutsThePageLast(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	var searched []beadslib.IssueFilter
-	storage := &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-		nativeChildIssue("gc-old-root", "", beadslib.StatusOpen, t0),
-		nativeChildIssue("gc-other", "gc-q", beadslib.StatusOpen, t0.Add(time.Minute)),
-		nativeChildIssue("gc-c1", "gc-p", beadslib.StatusOpen, t0.Add(2*time.Minute)),
-		nativeChildIssue("gc-c2", "gc-p", beadslib.StatusOpen, t0.Add(3*time.Minute)),
-		nativeChildIssue("gc-c3", "gc-p", beadslib.StatusOpen, t0.Add(4*time.Minute)),
-	}, &searched)}
-	store := newNativeDoltStoreForTest(storage)
-
-	got, err := store.List(ListQuery{ParentIDs: []string{"gc-p"}, Sort: SortCreatedAsc, Limit: 2, AllowScan: true})
-	if err != nil {
-		t.Fatalf("List(ParentIDs, Limit): %v", err)
-	}
-	if len(searched) != 1 || searched[0].Limit != 0 {
-		t.Fatalf("searches = %+v, want one search with no limit", searched)
-	}
-	if ids := beadIDsOf(got); !reflect.DeepEqual(ids, []string{"gc-c1", "gc-c2"}) {
-		t.Fatalf("List(ParentIDs, Limit 2) = %v, want the two oldest children [gc-c1 gc-c2]", ids)
-	}
-}
-
-// TestNativeDoltStoreGetExactBatchAnswersAsGetDoes pins the exact batch read:
-// one search of the distinct ids over every status and both tiers, the read Get
-// makes for one id. It answers each id Get answers, and leaves unresolved an
-// absent id and one whose metadata does not project, which Get reports as
-// ErrMetadataParse.
-func TestNativeDoltStoreGetExactBatchAnswersAsGetDoes(t *testing.T) {
-	t0 := time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)
-	bad := nativeChildIssue("gc-bad", "", beadslib.StatusOpen, t0)
-	bad.Metadata = json.RawMessage(`{not json`)
-	wisp := nativeChildIssue("gc-wisp", "", beadslib.StatusOpen, t0)
-	wisp.Ephemeral = true
-	var searched []beadslib.IssueFilter
-	storage := &nativeDoltStorageSpy{searchIssues: searchByIDsForTest([]*beadslib.Issue{
-		nativeChildIssue("gc-1", "gc-p", beadslib.StatusOpen, t0),
-		nativeChildIssue("gc-2", "", beadslib.StatusClosed, t0),
-		wisp,
-		bad,
-	}, &searched)}
-	store := newNativeDoltStoreForTest(storage)
-
-	found, unresolved, err := store.GetExactBatch([]string{"gc-1", "gc-bad", "gc-404", "gc-2", "gc-wisp", "gc-1"})
-	if err != nil {
-		t.Fatalf("GetExactBatch: %v", err)
-	}
-	if len(searched) != 1 {
-		t.Fatalf("searches = %d, want one", len(searched))
-	}
-	filter := searched[0]
-	if want := []string{"gc-1", "gc-bad", "gc-404", "gc-2", "gc-wisp"}; !reflect.DeepEqual(filter.IDs, want) {
-		t.Fatalf("search ids = %v, want the distinct ids %v", filter.IDs, want)
-	}
-	if !filter.IncludeDependencies || filter.Ephemeral != nil || filter.Status != nil || len(filter.ExcludeStatus) != 0 {
-		t.Fatalf("search filter = %+v, want Get's read: dependencies, every status, both tiers", filter)
-	}
-	if got := sortedIDs(slices.Collect(maps.Values(found))); !reflect.DeepEqual(got, []string{"gc-1", "gc-2", "gc-wisp"}) {
-		t.Fatalf("found = %v, want [gc-1 gc-2 gc-wisp]", got)
-	}
-	if want := []string{"gc-bad", "gc-404"}; !reflect.DeepEqual(unresolved, want) {
-		t.Fatalf("unresolved = %v, want %v", unresolved, want)
-	}
-	for id, b := range found {
-		single, err := store.Get(id)
-		if err != nil || !reflect.DeepEqual(single, b) {
-			t.Fatalf("Get(%s) = %+v, %v; want the bead the batch returned %+v", id, single, err, b)
-		}
-	}
-	if _, err := store.Get("gc-bad"); !errors.Is(err, ErrMetadataParse) {
-		t.Fatalf("Get(gc-bad) err = %v, want ErrMetadataParse for the id the batch left unresolved", err)
-	}
-
-	storage.searchIssues = func(context.Context, string, beadslib.IssueFilter) ([]*beadslib.Issue, error) {
-		return nil, errors.New("search refused")
-	}
-	if _, _, err := store.GetExactBatch([]string{"gc-1", "gc-2"}); err == nil || !strings.Contains(err.Error(), "search refused") {
-		t.Fatalf("GetExactBatch err = %v, want the search failure", err)
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchRejectsInvalidExistingMetadata(t *testing.T) {
-	updateCalled := false
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{
-				ID:        "gc-corrupt",
-				Title:     "corrupt metadata",
-				Status:    beadslib.StatusOpen,
-				IssueType: beadslib.TypeTask,
-				Priority:  2,
-				Metadata:  json.RawMessage(`{"existing":`),
-			}, nil
-		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
-			updateCalled = true
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-corrupt", map[string]string{"gc.step_ref": "build"}); err == nil {
-		t.Fatal("SetMetadataBatch error = nil, want invalid metadata error")
-	} else if !strings.Contains(err.Error(), `parsing metadata for bead "gc-corrupt"`) {
-		t.Fatalf("SetMetadataBatch error = %v, want bead metadata context", err)
-	}
-	if updateCalled {
-		t.Fatal("UpdateIssueChecked was called after invalid metadata")
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflictFromFreshState(t *testing.T) {
-	getCalls := 0
-	updateCalls := 0
-	var expectedVersions []int64
-	var writtenMetadata json.RawMessage
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			metadata := json.RawMessage(`{"existing":"before-conflict"}`)
-			if getCalls > 1 {
-				metadata = json.RawMessage(`{"concurrent":"preserved"}`)
-			}
-			return &beadslib.Issue{
-				ID:         "gc-conflict",
-				Title:      "metadata conflict",
-				Status:     beadslib.StatusOpen,
-				IssueType:  beadslib.TypeTask,
-				Priority:   2,
-				Metadata:   metadata,
-				RowVersion: int64(getCalls),
-			}, nil
-		},
-		updateIssueChecked: func(_ context.Context, _ string, updates map[string]interface{}, _ string, opts beadslib.UpdateIssueOptions) error {
-			updateCalls++
-			if opts.ExpectedVersion == nil {
-				t.Fatal("metadata write carried no expected version")
-			}
-			expectedVersions = append(expectedVersions, *opts.ExpectedVersion)
-			if updateCalls == 1 {
-				return errors.New("dolt commit: Error 1213 (40001): serialization failure: this transaction conflicts with a committed transaction, try restarting transaction")
-			}
-			raw, ok := updates["metadata"].(json.RawMessage)
-			if !ok {
-				t.Fatalf("metadata update type = %T, want json.RawMessage", updates["metadata"])
-			}
-			writtenMetadata = slices.Clone(raw)
-			return nil
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	if err := store.SetMetadataBatch("gc-conflict", map[string]string{"requested": "written"}); err != nil {
-		t.Fatalf("SetMetadataBatch: %v", err)
-	}
-	if getCalls != 2 {
-		t.Fatalf("GetIssue calls = %d, want 2 so retry re-reads current metadata", getCalls)
-	}
-	if updateCalls != 2 {
-		t.Fatalf("UpdateIssueChecked calls = %d, want 2", updateCalls)
-	}
-	if !slices.Equal(expectedVersions, []int64{1, 2}) {
-		t.Fatalf("expected versions = %v, want [1 2]: each attempt must swap against the version its own read returned", expectedVersions)
-	}
-	var got map[string]string
-	if err := json.Unmarshal(writtenMetadata, &got); err != nil {
-		t.Fatalf("unmarshal written metadata: %v", err)
-	}
-	want := map[string]string{"concurrent": "preserved", "requested": "written"}
-	if !maps.Equal(got, want) {
-		t.Fatalf("written metadata = %#v, want %#v", got, want)
-	}
-}
-
 func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testing.T) {
 	wantErr := errors.New("metadata write denied")
 	getCalls := 0
@@ -1638,7 +1000,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 			getCalls++
 			return &beadslib.Issue{ID: "gc-permanent", Metadata: json.RawMessage(`{"existing":"kept"}`)}, nil
 		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+		updateIssue: func(context.Context, string, map[string]interface{}, string) error {
 			updateCalls++
 			return wantErr
 		},
@@ -1650,32 +1012,7 @@ func TestNativeDoltStoreSetMetadataBatchDoesNotRetryPermanentWriteError(t *testi
 		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
 	}
 	if getCalls != 1 || updateCalls != 1 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 1 each", getCalls, updateCalls)
-	}
-}
-
-func TestNativeDoltStoreSetMetadataBatchStopsAfterThreeSerializationConflicts(t *testing.T) {
-	wantErr := errors.New("commit failed (SQLSTATE 40001): serialization failure")
-	getCalls := 0
-	updateCalls := 0
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			getCalls++
-			return &beadslib.Issue{ID: "gc-persistent-conflict"}, nil
-		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
-			updateCalls++
-			return wantErr
-		},
-	}
-	store := newNativeDoltStoreForTest(storage)
-
-	err := store.SetMetadataBatch("gc-persistent-conflict", map[string]string{"requested": "written"})
-	if !errors.Is(err, wantErr) {
-		t.Fatalf("SetMetadataBatch error = %v, want %v", err, wantErr)
-	}
-	if getCalls != 3 || updateCalls != 3 {
-		t.Fatalf("calls = GetIssue:%d UpdateIssueChecked:%d, want 3 each", getCalls, updateCalls)
+		t.Fatalf("calls = GetIssue:%d UpdateIssue:%d, want 1 each", getCalls, updateCalls)
 	}
 }
 
@@ -1699,173 +1036,6 @@ func TestNativeDoltSerializationConflictClassification(t *testing.T) {
 				t.Fatalf("isNativeDoltSerializationConflict(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetriesWholeTransaction(t *testing.T) {
-	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
-	} {
-		t.Run(conflict.Error(), func(t *testing.T) {
-			storage := &retryingNativeDoltStorage{
-				nativeDoltMemStorage: newNativeDoltMemStorage(),
-				txErrors:             []error{conflict},
-			}
-			store := newNativeDoltStoreForTest(storage)
-			created, err := store.Create(Bead{Title: "retry whole transaction"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-			if err != nil {
-				t.Fatalf("CloseWithMetadataIfMatch: %v", err)
-			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-			}
-			if closed.Status != "closed" || closed.Metadata["state"] != "drained" {
-				t.Fatalf("returned bead = %#v, want closed row from replay", closed)
-			}
-		})
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchRetryRereadsFence(t *testing.T) {
-	storage := &retryingNativeDoltStorage{nativeDoltMemStorage: newNativeDoltMemStorage()}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "retry stale fence"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	storage.txErrors = []error{errors.New("Error 1213 (40001): deadlock")}
-	storage.afterConflict = func() {
-		if err := storage.store.SetMetadata(created.ID, "intervening", "write"); err != nil {
-			t.Fatalf("intervening write: %v", err)
-		}
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, map[string]string{"state": "drained"})
-	if !IsPreconditionFailed(err) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want precondition failure", err)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("failed replay returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != 2 {
-		t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-	}
-	fresh, err := store.Get(created.ID)
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	if fresh.Status != "open" || fresh.Metadata["state"] != "" || fresh.Metadata["intervening"] != "write" {
-		t.Fatalf("replay fence result = %#v, want later open row without close", fresh)
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
-	sentinel := errors.New("connection reset by peer")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{sentinel},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "ambiguous close"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, nil)
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want %v", err, sentinel)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("ambiguous failure returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != 1 {
-		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
-	}
-}
-
-func TestNativeDoltStoreCloseWithMetadataIfMatchReturnsZeroAfterRetryExhaustion(t *testing.T) {
-	conflict := errors.New("Error 1213 (40001): deadlock")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{conflict, conflict, conflict},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "exhaust close retries"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	closed, err := store.CloseWithMetadataIfMatch(created.ID, created.Revision, nil)
-	if !errors.Is(err, conflict) {
-		t.Fatalf("CloseWithMetadataIfMatch error = %v, want %v", err, conflict)
-	}
-	if !reflect.DeepEqual(closed, Bead{}) {
-		t.Fatalf("exhausted retry returned %#v, want zero bead", closed)
-	}
-	if storage.txCalls != nativeWriteAttempts {
-		t.Fatalf("RunInTransaction calls = %d, want %d", storage.txCalls, nativeWriteAttempts)
-	}
-}
-
-// DeleteIfMatch runs its fence check and delete inside one transaction, so a
-// serialization conflict must replay the WHOLE transaction — re-reading the row
-// version each attempt — exactly like the close path. Retrying only the delete
-// would fence against a RowVersion the rolled-back read already invalidated.
-func TestNativeDoltStoreDeleteIfMatchRetriesWholeTransaction(t *testing.T) {
-	for _, conflict := range []error{
-		errors.New("Error 1213 (40001): deadlock"),
-		errors.New("Error 1205 (HY000): lock wait timeout exceeded"),
-	} {
-		t.Run(conflict.Error(), func(t *testing.T) {
-			storage := &retryingNativeDoltStorage{
-				nativeDoltMemStorage: newNativeDoltMemStorage(),
-				txErrors:             []error{conflict},
-			}
-			store := newNativeDoltStoreForTest(storage)
-			created, err := store.Create(Bead{Title: "retry whole delete transaction"})
-			if err != nil {
-				t.Fatalf("Create: %v", err)
-			}
-
-			if err := store.DeleteIfMatch(created.ID, created.Revision); err != nil {
-				t.Fatalf("DeleteIfMatch: %v", err)
-			}
-			if storage.txCalls != 2 {
-				t.Fatalf("RunInTransaction calls = %d, want 2", storage.txCalls)
-			}
-			if _, err := store.Get(created.ID); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("Get after replayed delete = %v, want ErrNotFound", err)
-			}
-		})
-	}
-}
-
-// An ambiguous failure — one that may have committed — must NOT replay a delete,
-// or a delete that already applied would run again against a moved fence. This
-// pins the same transient/ambiguous split the close path draws.
-func TestNativeDoltStoreDeleteIfMatchDoesNotRetryAmbiguousFailure(t *testing.T) {
-	sentinel := errors.New("connection reset by peer")
-	storage := &retryingNativeDoltStorage{
-		nativeDoltMemStorage: newNativeDoltMemStorage(),
-		txErrors:             []error{sentinel},
-	}
-	store := newNativeDoltStoreForTest(storage)
-	created, err := store.Create(Bead{Title: "ambiguous delete"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-
-	if err := store.DeleteIfMatch(created.ID, created.Revision); !errors.Is(err, sentinel) {
-		t.Fatalf("DeleteIfMatch error = %v, want %v", err, sentinel)
-	}
-	if storage.txCalls != 1 {
-		t.Fatalf("RunInTransaction calls = %d, want 1", storage.txCalls)
 	}
 }
 
@@ -1945,6 +1115,16 @@ type commitCountingMemStorage struct {
 func (s *commitCountingMemStorage) RunInTransaction(ctx context.Context, msg string, fn func(beadslib.Transaction) error) error {
 	s.commits++
 	return s.nativeDoltMemStorage.RunInTransaction(ctx, msg, fn)
+}
+
+// BatchApplier gets its own override for the same reason
+// nativeDoltCloseCapturingStorage's does: the promoted accessor would build
+// rawBatchApplier from the EMBEDDED mem storage, whose lifecycle reaches the
+// inner, uncounted RunInTransaction rather than this double's counting
+// override. CloseWithMetadataIfMatch's fenced close only ever crosses ONE
+// commit boundary through THIS lifecycle.
+func (s *commitCountingMemStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return rawBatchApplier{storage: s}, nil
 }
 
 func TestNativeDoltStoreTxCoalescesWritesIntoSingleCommit(t *testing.T) {
@@ -2202,12 +1382,23 @@ func TestNativeDoltStoreCloseWithMetadataIfMatchRejectsUnclosedResult(t *testing
 	if !reflect.DeepEqual(closed, Bead{}) {
 		t.Fatalf("unclosed transaction returned %#v, want zero bead", closed)
 	}
+	// The injected CloseIssue reports success (nil error) without actually
+	// transitioning the row to closed -- modeling a backend whose ApplyBatch
+	// request commits (neither item returns an error) despite the close
+	// item's postcondition not holding. Unlike
+	// RollsBackMetadataWhenCloseFails above, there is no failed write here for
+	// a real backend's transaction to roll back: the request committed. gc's
+	// own postcondition check (comparing the re-read status to closed) is the
+	// last line of defense against trusting that inconsistent commit -- which
+	// is exactly what the error assertion above pins -- but it cannot
+	// retroactively undo an already-committed transaction, so the update
+	// item's metadata merge is expected to have persisted.
 	fresh, getErr := store.Get(created.ID)
 	if getErr != nil {
 		t.Fatalf("Get after refused close: %v", getErr)
 	}
-	if fresh.Status != "open" || fresh.Metadata["state"] != "" {
-		t.Fatalf("refused close left a partial mutation: %#v", fresh)
+	if fresh.Status != "open" {
+		t.Fatalf("refused close incorrectly reported a closed status: %#v", fresh)
 	}
 }
 
@@ -2309,6 +1500,7 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	child, err := store.Create(Bead{
 		Title:    "create child",
 		ParentID: parent.ID,
+		Labels:   []string{"created", "hydrated"},
 		Dependencies: []Dep{{
 			DependsOnID: blocker.ID,
 			Type:        "blocks",
@@ -2320,6 +1512,9 @@ func TestNativeDoltStoreCreatePersistsDependenciesAfterUpstreamCreate(t *testing
 	}
 	if child.ParentID != parent.ID {
 		t.Fatalf("created ParentID = %q, want %q", child.ParentID, parent.ID)
+	}
+	if !slices.Equal(child.Labels, []string{"created", "hydrated"}) {
+		t.Fatalf("created labels = %v, want hydrated labels", child.Labels)
 	}
 
 	got, err := store.Get(child.ID)
@@ -2574,7 +1769,7 @@ func TestNativeDoltStoreCreateDependencyFailureDeletesPartialIssue(t *testing.T)
 	}
 }
 
-func TestNativeDoltStoreCreateDependencyTimeoutCleansUpWithFreshContext(t *testing.T) {
+func TestNativeDoltStoreCreateDependencyTimeoutRollsBackFacadeTransaction(t *testing.T) {
 	oldTimeout := bdCommandTimeout
 	bdCommandTimeout = time.Millisecond
 	t.Cleanup(func() {
@@ -3131,6 +2326,17 @@ func (tx nativeDoltTransactionForTest) RemoveLabel(ctx context.Context, issueID,
 	return tx.storage.RemoveLabel(ctx, issueID, label, actor)
 }
 
+// GetConfig forwards to the storage when it declares configuration, and
+// otherwise reports none, so a double without config reads as undeclared.
+func (tx nativeDoltTransactionForTest) GetConfig(ctx context.Context, key string) (string, error) {
+	if configured, ok := tx.storage.(interface {
+		GetConfig(context.Context, string) (string, error)
+	}); ok {
+		return configured.GetConfig(ctx, key)
+	}
+	return "", nil
+}
+
 func (tx nativeDoltTransactionForTest) AddDependency(ctx context.Context, dep *beadslib.Dependency, actor string) error {
 	return tx.storage.AddDependency(ctx, dep, actor)
 }
@@ -3166,6 +2372,7 @@ type nativeDoltStorageSpy struct {
 	getDependenciesWithMetadata func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getDependentsWithMetadata   func(context.Context, string) ([]*beadslib.IssueWithDependencyMetadata, error)
 	getConfig                   func(context.Context, string) (string, error)
+	issueLifecycle              func() (issueops.Lifecycle, error)
 	close                       func() error
 }
 
@@ -3340,10 +2547,17 @@ type nativeDoltMemStorage struct {
 	beadslib.Storage
 	store *MemStore
 	txMu  sync.Mutex
+	// issuePrefix is the namespace this storage declares, the one whose absent
+	// rows it can see; empty means nativeDoltMemIssuePrefixForTest.
+	issuePrefix string
+	// batchMu admits one batch request at a time; see BatchApplier.
+	batchMu sync.Mutex
 }
 
 func newNativeDoltMemStorage() *nativeDoltMemStorage {
-	return &nativeDoltMemStorage{store: NewMemStore()}
+	store := NewMemStore()
+	store.storageOnly = true // the native store above it reports each write
+	return &nativeDoltMemStorage{store: store}
 }
 
 func (s *nativeDoltMemStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
@@ -3398,7 +2612,7 @@ func (s *nativeDoltMemStorage) GetIssue(_ context.Context, id string) (*beadslib
 	if err != nil {
 		return nil, err
 	}
-	return nativeIssueFromBead(bead)
+	return s.nativeIssueWithStoredDependencies(bead)
 }
 
 func (s *nativeDoltMemStorage) UpdateIssue(_ context.Context, id string, updates map[string]interface{}, _ string) error {
@@ -3563,6 +2777,20 @@ func (s *nativeDoltMemStorage) editLabelsKeepingRevision(id string, opts UpdateO
 }
 
 func (s *nativeDoltMemStorage) AddDependency(_ context.Context, dep *beadslib.Dependency, _ string) error {
+	// The facade refuses an edge whose endpoints do not resolve, so the double
+	// has to as well or a missing-target create looks like a success here. A
+	// target in another ledger's namespace is the exception, as it is for the
+	// facade: this database cannot see that row, so it records the edge as
+	// external instead of refusing it.
+	if _, err := s.store.Get(dep.IssueID); err != nil {
+		return err
+	}
+	namespace, _ := s.GetConfig(context.Background(), "issue_prefix")
+	if !nativeDoltTargetIsExternalForTest(namespace, dep.DependsOnID) {
+		if _, err := s.store.Get(dep.DependsOnID); err != nil {
+			return err
+		}
+	}
 	return s.store.DepAdd(dep.IssueID, dep.DependsOnID, string(dep.Type))
 }
 
@@ -3624,9 +2852,27 @@ func (s *nativeDoltMemStorage) GetDependentsWithMetadata(_ context.Context, issu
 // the fixture is to pin which key the create-path prefix read asks for.
 func (s *nativeDoltMemStorage) GetConfig(_ context.Context, key string) (string, error) {
 	if key == "issue_prefix" {
-		return "gc", nil
+		if s.issuePrefix != "" {
+			return s.issuePrefix, nil
+		}
+		return nativeDoltMemIssuePrefixForTest, nil
 	}
 	return "", nil
+}
+
+// nativeDoltMemIssuePrefixForTest is the namespace nativeDoltMemStorage
+// declares by default, the one whose absent rows it can see.
+const nativeDoltMemIssuePrefixForTest = "gc"
+
+// nativeDoltTargetIsExternalForTest reports whether a dependency target names a
+// row outside the declared namespace, which the facade accepts as an external
+// reference rather than resolving.
+func nativeDoltTargetIsExternalForTest(namespace, targetID string) bool {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(targetID)), "external:") {
+		return true
+	}
+	prefix := beadIDPrefix(targetID)
+	return prefix != "" && prefix != normalizeIDPrefix(namespace)
 }
 
 func (s *nativeDoltMemStorage) AddComment(context.Context, string, string, string) error {
@@ -3651,32 +2897,6 @@ type nativeDoltFailingCloseStorage struct {
 	closeIssue func(context.Context, string, string, string, string) error
 }
 
-type retryingNativeDoltStorage struct {
-	*nativeDoltMemStorage
-	txCalls       int
-	txErrors      []error
-	afterConflict func()
-}
-
-func (s *retryingNativeDoltStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
-	s.txCalls++
-	var txErr error
-	if len(s.txErrors) > 0 {
-		txErr = s.txErrors[0]
-		s.txErrors = s.txErrors[1:]
-	}
-	err := runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
-		if err := fn(nativeDoltTransactionForTest{storage: s}); err != nil {
-			return err
-		}
-		return txErr
-	})
-	if txErr != nil && s.afterConflict != nil {
-		s.afterConflict()
-	}
-	return err
-}
-
 func (s *nativeDoltFailingCloseStorage) RunInTransaction(_ context.Context, _ string, fn func(beadslib.Transaction) error) error {
 	return runNativeDoltMemStorageTransactionForTest(s.nativeDoltMemStorage, func() error {
 		return fn(nativeDoltTransactionForTest{storage: s})
@@ -3690,9 +2910,69 @@ func (s *nativeDoltFailingCloseStorage) CloseIssue(ctx context.Context, id, reas
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
 }
 
+// IssueLifecycle and BatchApplier get their own overrides for the reason
+// nativeDoltCloseCapturingStorage's BatchApplier comment names: the promoted
+// accessors would build their role fakes from the EMBEDDED mem storage, whose
+// Close reaches the inner, un-injected CloseIssue rather than this double's
+// failing override. CloseWithMetadataIfMatch's two-item batch (update then
+// close) only ever observes the injected failure through THIS lifecycle.
+func (s *nativeDoltFailingCloseStorage) IssueLifecycle() (issueops.Lifecycle, error) {
+	return newNativeDoltLifecycleForTest(s)
+}
+
+// BatchApplier wraps the generic rawBatchApplier in a snapshot/restore of the
+// mem store, rather than returning rawBatchApplier directly. rawBatchApplier
+// is deliberately non-atomic (see its own doc comment): it applies a 2-item
+// CloseWithMetadataIfMatch batch's update item, THEN its close item, with no
+// rollback across items, because the doubles it normally serves have no
+// transaction of their own to roll back into. This double is the exception:
+// it injects a failing CloseIssue specifically to prove the production
+// code's single ApplyBatch request is all-or-nothing against a real backend,
+// so it needs to actually model that rollback. It cannot reuse
+// runNativeDoltMemStorageTransactionForTest/this storage's own
+// RunInTransaction for the OUTER snapshot, though: the update item's own
+// lifecycle.Update call takes that same path (IssueLifecycle above passes
+// this storage to nativeDoltLifecycleForTest, whose Update wraps itself in
+// storage.RunInTransaction), and nesting two locks of the same non-reentrant
+// txMu from one goroutine would deadlock. So the snapshot/restore here is
+// taken directly against the store, one level further out than txMu.
+func (s *nativeDoltFailingCloseStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return nativeDoltFailingCloseBatchApplierForTest{storage: s}, nil
+}
+
+type nativeDoltFailingCloseBatchApplierForTest struct {
+	storage *nativeDoltFailingCloseStorage
+}
+
+var _ issueops.BatchApplier = nativeDoltFailingCloseBatchApplierForTest{}
+
+func (a nativeDoltFailingCloseBatchApplierForTest) ApplyBatch(ctx context.Context, req issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	store := a.storage.store
+	store.mu.Lock()
+	seq, beads, deps := store.snapshot()
+	store.mu.Unlock()
+	result, err := rawBatchApplier{storage: a.storage}.ApplyBatch(ctx, req)
+	if err != nil {
+		store.restoreFrom(seq, beads, deps)
+		return issueops.ApplyBatchResult{}, err
+	}
+	return result, nil
+}
+
 func (s *nativeDoltCloseCapturingStorage) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	s.closeReasons = append(s.closeReasons, reason)
 	return s.nativeDoltMemStorage.CloseIssue(ctx, id, reason, actor, session)
+}
+
+// The capturing double gets its own batch applier for the reason embedding
+// exists to make awkward, the same one nativeDoltFailingLabelStorage names: the
+// promoted BatchApplier would build rawBatchApplier from the EMBEDDED mem
+// storage, whose lifecycle reaches the inner CloseIssue rather than this
+// double's capturing override — turning a test of the forwarded reason into a
+// test of nothing. CloseAll routes through the batch applier, so this is the
+// door its closes now come out of.
+func (s *nativeDoltCloseCapturingStorage) BatchApplier() (issueops.BatchApplier, error) {
+	return rawBatchApplier{storage: s}, nil
 }
 
 func (s *nativeDoltMemStorage) issueForDependency(id string) *beadslib.Issue {
@@ -3815,6 +3095,23 @@ func nativeDoltMemUpdateOpts(updates map[string]interface{}) (UpdateOpts, error)
 				return UpdateOpts{}, err
 			}
 			opts.Metadata = metadata
+		case nativeDoltMergeMetadataOp:
+			raw, ok := value.(json.RawMessage)
+			if !ok {
+				return UpdateOpts{}, fmt.Errorf("metadata merge has type %T, want json.RawMessage", value)
+			}
+			var rawMetadata map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawMetadata); err != nil {
+				return UpdateOpts{}, err
+			}
+			opts.Metadata = make(map[string]string, len(rawMetadata))
+			for metadataKey, metadataValue := range rawMetadata {
+				var text string
+				if err := json.Unmarshal(metadataValue, &text); err != nil {
+					return UpdateOpts{}, fmt.Errorf("metadata %q: %w", metadataKey, err)
+				}
+				opts.Metadata[metadataKey] = text
+			}
 		default:
 			return UpdateOpts{}, fmt.Errorf("unsupported native update field %q", key)
 		}
@@ -3969,6 +3266,337 @@ func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	}
 }
 
+// TestNativeDoltOpenEnvDigestNamesWhatTheOpenProjects pins the digest a caller
+// keeps to tell whether a native store it opened still matches the env it
+// would open with now. Every key the direct open projects changes the digest,
+// so a move to another server, port, database or credential is never mistaken
+// for the same binding. A key the open leaves alone, and a blank value the
+// open unsets, change nothing, so an env that differs only there keeps its
+// store. The password never appears in the digest.
+func TestNativeDoltOpenEnvDigestNamesWhatTheOpenProjects(t *testing.T) {
+	const password = "s3cret-dolt-password"
+	base := func() map[string]string {
+		return map[string]string{
+			"BEADS_DOLT_SERVER_HOST":     "db-one.example.com",
+			"BEADS_DOLT_SERVER_PORT":     "3307",
+			"BEADS_DOLT_SERVER_DATABASE": "one",
+			"BEADS_DOLT_PASSWORD":        password,
+			"GC_RIG":                     "repo",
+		}
+	}
+	want := NativeDoltOpenEnvDigest(base())
+	if strings.Contains(want, password) {
+		t.Fatalf("digest %q carries the password in the clear", want)
+	}
+
+	for _, key := range append(append([]string(nil), nativeDoltOpenEnvKeys...), BDAllowRemoteMigrateEnvKey) {
+		env := base()
+		env[key] = "changed"
+		if got := NativeDoltOpenEnvDigest(env); got == want {
+			t.Errorf("setting projected key %s left the digest unchanged", key)
+		}
+	}
+
+	for name, edit := range map[string]func(map[string]string){
+		"a key outside the projection":           func(env map[string]string) { env["GC_RIG"] = "other" },
+		"the credential command it does not set": func(env map[string]string) { env["BEADS_DOLT_CREDENTIAL_COMMAND"] = "/bin/creds" },
+		"a blank projected key":                  func(env map[string]string) { env["BEADS_DOLT_SERVER_SOCKET"] = "  " },
+	} {
+		env := base()
+		edit(env)
+		if got := NativeDoltOpenEnvDigest(env); got != want {
+			t.Errorf("changing %s changed the digest", name)
+		}
+	}
+}
+
+// nativeOpenLane is one way a process opens native storage through an env
+// window: an open or a reopen, on the direct, hosted or proxied lane.
+type nativeOpenLane struct {
+	name string
+	// key and value are one entry the window sets, which the library must
+	// see during the open, so a test can tell that the window ran.
+	key, value string
+	open       func() error
+}
+
+// nativeOpenLanes returns every lane a supervisor meets, an open and a reopen
+// on each of the direct, hosted and proxied paths, each opening scopeRoot and
+// closing what it opened. direct and proxied are the projected maps of those
+// lanes; the hosted lanes project credentialCommand.
+func nativeOpenLanes(ctx context.Context, scopeRoot string, direct, proxied map[string]string, credentialCommand string) []nativeOpenLane {
+	closeStore := func(store *NativeDoltStore, err error) error {
+		if err != nil {
+			return err
+		}
+		return store.CloseStore()
+	}
+	closeStorage := func(storage NativeStorage, err error) error {
+		if err != nil {
+			return err
+		}
+		return storage.Close()
+	}
+	const directKey, hostedKey, proxiedKey = "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_CREDENTIAL_COMMAND", "GIT_AUTHOR_NAME"
+	return []nativeOpenLane{
+		{"direct open", directKey, direct[directKey], func() error { return closeStore(OpenNativeDoltStoreAt(ctx, scopeRoot, direct)) }},
+		{"direct reopen", directKey, direct[directKey], func() error { return closeStorage(OpenNativeStorage(ctx, scopeRoot, direct)) }},
+		{"hosted open", hostedKey, credentialCommand, func() error {
+			return closeStore(OpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand))
+		}},
+		{"hosted reopen", hostedKey, credentialCommand, func() error {
+			return closeStorage(OpenNativeStorageAtWithoutAmbientEnvWithCredentialCommand(ctx, scopeRoot, credentialCommand))
+		}},
+		{"proxied open", proxiedKey, proxied[proxiedKey], func() error { return closeStore(OpenNativeDoltStoreAtProxied(ctx, scopeRoot, proxied)) }},
+		{"proxied reopen", proxiedKey, proxied[proxiedKey], func() error { return closeStorage(OpenNativeStorageAtProxied(ctx, scopeRoot, proxied)) }},
+	}
+}
+
+// stubNativeOpenRecording replaces the library open with a spy for the test
+// and records, for each key, what the library would read during the latest
+// open.
+func stubNativeOpenRecording(t *testing.T, keys ...string) map[string]string {
+	t.Helper()
+	seen := map[string]string{}
+	oldOpen := nativeDoltOpenBestAvailable
+	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
+	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		for _, key := range keys {
+			seen[key] = os.Getenv(key)
+		}
+		return &nativeDoltStorageSpy{
+			getConfig: func(context.Context, string) (string, error) { return "gc", nil },
+		}, nil
+	}
+	return seen
+}
+
+// nativeOpenTestEndpoint is the endpoint the lane tests project.
+func nativeOpenTestEndpoint() map[string]string {
+	return map[string]string{
+		"BEADS_DOLT_AUTO_START":      "0",
+		"BEADS_DOLT_MAX_CONNS":       "1",
+		"BEADS_DOLT_SERVER_DATABASE": "hq",
+		"BEADS_DOLT_SERVER_HOST":     "127.0.0.1",
+		"BEADS_DOLT_SERVER_PORT":     "4407",
+		"BEADS_DOLT_SERVER_TLS":      "true",
+		"BEADS_DOLT_SERVER_USER":     "root",
+	}
+}
+
+// TestNativeOpenWindowsLeaveTheProcessEnvironmentAsTheyFoundIt pins that every
+// native open lane hands the process environment back exactly as it found it.
+//
+// Each lane opens the way a supervisor meets it: the keys the windows set
+// start absent, and BEADS_ACTOR is ambient, so the hosted and proxied windows
+// withhold it. A key a window set must be absent again afterwards, not merely
+// empty. Every child the process starts inherits the environment, and bd's
+// .beads/.env loader leaves alone a key that is present, even with an empty
+// value (TestNativeOpenLeavesTheWorkspaceDotenvToTheNextBdChild).
+func TestNativeOpenWindowsLeaveTheProcessEnvironmentAsTheyFoundIt(t *testing.T) {
+	const credentialCommand = "/selected/gc internal beads-credential"
+	direct := nativeOpenTestEndpoint()
+	direct[BDAllowRemoteMigrateEnvKey] = "1"
+	proxied := nativeOpenTestEndpoint()
+	proxied["GIT_AUTHOR_NAME"] = "gc"
+	proxied["GIT_AUTHOR_EMAIL"] = "gc@demo-city"
+	for _, projected := range []map[string]string{direct, proxied} {
+		for key := range projected {
+			unsetForTest(t, key)
+		}
+	}
+	unsetForTest(t, "BEADS_DOLT_CREDENTIAL_COMMAND")
+	t.Setenv("BEADS_ACTOR", "controller")
+	seen := stubNativeOpenRecording(t, "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_CREDENTIAL_COMMAND", "GIT_AUTHOR_NAME")
+
+	for _, lane := range nativeOpenLanes(context.Background(), filepath.Join(t.TempDir(), "scope"), direct, proxied, credentialCommand) {
+		clear(seen)
+		before := slices.Sorted(slices.Values(os.Environ()))
+		if err := lane.open(); err != nil {
+			t.Fatalf("%s: %v", lane.name, err)
+		}
+		if got := seen[lane.key]; got != lane.value {
+			t.Fatalf("%s: %s = %q during the open, want %q", lane.name, lane.key, got, lane.value)
+		}
+		after := slices.Sorted(slices.Values(os.Environ()))
+		if gained, lost := envEntriesOnlyIn(after, before), envEntriesOnlyIn(before, after); len(gained) > 0 || len(lost) > 0 {
+			t.Errorf("%s: process environment gained %q and lost %q, want it exactly as the open found it", lane.name, gained, lost)
+		}
+	}
+}
+
+// TestNativeOpenWindowsKeepTheSlotsOfKeysTheProcessHas pins that a window
+// reuses the environment-table slot of every key the process already has.
+//
+// Go's environment table never reuses the slot of a removed key: Unsetenv
+// blanks the slot, and the next Setenv of that key appends a new one.
+// os.Environ, which every child process started without an explicit Env also
+// runs, walks the whole table and returns a slice sized by it, so the copy's
+// capacity is the table's size. Here the process has every key the windows
+// touch. The direct window sets part of its list and clears the rest, the
+// hosted and proxied windows withhold every BEADS_ key, and the proxied window
+// every BD_ key, before they project. A window that removed such a key and set
+// it back would add a slot per key per open.
+func TestNativeOpenWindowsKeepTheSlotsOfKeysTheProcessHas(t *testing.T) {
+	const credentialCommand = "/selected/gc internal beads-credential"
+	ambient := map[string]string{
+		"BEADS_ACTOR":                   "controller",
+		"BEADS_DB":                      "/ambient/db",
+		"BEADS_DOLT_CREDENTIAL_COMMAND": "/ambient/credential",
+		"GIT_AUTHOR_EMAIL":              "op@laptop",
+		"GIT_AUTHOR_NAME":               "op",
+	}
+	for _, key := range proxiedNativeOpenEnvKeys {
+		if _, set := ambient[key]; !set {
+			ambient[key] = "ambient"
+		}
+	}
+	for key, value := range ambient {
+		t.Setenv(key, value)
+	}
+	direct := nativeOpenTestEndpoint()
+	direct[BDAllowRemoteMigrateEnvKey] = "1"
+	proxied := nativeOpenTestEndpoint()
+	proxied["GIT_AUTHOR_NAME"] = "gc"
+	proxied["GIT_AUTHOR_EMAIL"] = "gc@demo-city"
+	stubNativeOpenRecording(t)
+	lanes := nativeOpenLanes(context.Background(), filepath.Join(t.TempDir(), "scope"), direct, proxied, credentialCommand)
+	openEveryLane := func() {
+		t.Helper()
+		for _, lane := range lanes {
+			if err := lane.open(); err != nil {
+				t.Fatalf("%s: %v", lane.name, err)
+			}
+		}
+	}
+
+	openEveryLane()
+	slots, entries := cap(os.Environ()), len(os.Environ())
+	const rounds = 50
+	for range rounds {
+		openEveryLane()
+	}
+	if got := cap(os.Environ()); got != slots {
+		t.Errorf("process environment table = %d slots after %d more rounds of native opens, want %d: a window must reuse the slot of each key the process has", got, rounds, slots)
+	}
+	if got := len(os.Environ()); got != entries {
+		t.Errorf("process environment = %d entries after %d more rounds of native opens, want %d", got, rounds, entries)
+	}
+	for key, want := range ambient {
+		if got := os.Getenv(key); got != want {
+			t.Errorf("%s = %q after the opens, want the ambient %q restored", key, got, want)
+		}
+	}
+}
+
+// TestNativeOpenLeavesTheWorkspaceDotenvToTheNextBdChild pins what a native
+// open owes the bd children the process starts after it. bd loads a
+// workspace's .beads/.env with gotenv, which leaves a key alone when the
+// environment already has it, even with an empty value, so a key an open
+// projected must be absent again from what the next bd child inherits, or the
+// workspace's value for it never loads. The stand-in bd applies gotenv's
+// rule: it exports a .env entry only when ${KEY+set} reports the key unset.
+func TestNativeOpenLeavesTheWorkspaceDotenvToTheNextBdChild(t *testing.T) {
+	unsetForTest(t, "BEADS_DOLT_SERVER_DATABASE")
+	unsetForTest(t, "BEADS_DOLT_SERVER_TLS")
+	seen := stubNativeOpenRecording(t, "BEADS_DOLT_SERVER_DATABASE", "BEADS_DOLT_SERVER_TLS")
+	store, err := OpenNativeDoltStoreAt(context.Background(), filepath.Join(t.TempDir(), "scope"), map[string]string{
+		"BEADS_DOLT_SERVER_DATABASE": "hq",
+		"BEADS_DOLT_SERVER_TLS":      "true",
+	})
+	if err != nil {
+		t.Fatalf("OpenNativeDoltStoreAt: %v", err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	if seen["BEADS_DOLT_SERVER_DATABASE"] != "hq" || seen["BEADS_DOLT_SERVER_TLS"] != "true" {
+		t.Fatalf("database and TLS during the open = %q, want hq and true projected", seen)
+	}
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dotenv := "BEADS_DOLT_SERVER_DATABASE=target-db\nBEADS_DOLT_SERVER_TLS=1\n"
+	if err := os.WriteFile(filepath.Join(workspace, ".beads", ".env"), []byte(dotenv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bd := filepath.Join(t.TempDir(), "bd")
+	script := `#!/bin/sh
+while IFS='=' read -r key value; do
+	eval "inherited=\${$key+set}"
+	[ -n "$inherited" ] || export "$key=$value"
+done < .beads/.env
+printf '%s|%s\n' "$BEADS_DOLT_SERVER_DATABASE" "$BEADS_DOLT_SERVER_TLS"
+`
+	if err := os.WriteFile(bd, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := ExecCommandRunnerWithEnv(map[string]string{"BD_BIN": bd})(workspace, "bd")
+	if err != nil {
+		t.Fatalf("run the stand-in bd: %v", err)
+	}
+	if got, want := string(out), "target-db|1\n"; got != want {
+		t.Fatalf("bd child after a native open read database|tls = %q, want the workspace .env's %q: a key the open projected must be absent again from what the child inherits, not empty", got, want)
+	}
+}
+
+// TestUnsetOpenEnvEmptiesOnlyTheBeadsAndBdNamespaces pins how a window clears
+// a key the process has. A BEADS_ or BD_ key keeps its slot and takes the
+// empty value, which configures nothing there. Any other key is removed,
+// because git refuses to commit under an empty GIT_AUTHOR_NAME. A key the
+// process lacks is left absent.
+func TestUnsetOpenEnvEmptiesOnlyTheBeadsAndBdNamespaces(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example")
+	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
+	t.Setenv("GIT_AUTHOR_NAME", "op")
+	unsetForTest(t, "BEADS_DOLT_SERVER_SOCKET")
+	for key, wantPresent := range map[string]bool{
+		"BEADS_DOLT_SERVER_HOST":   true,
+		"BD_ALLOW_REMOTE_MIGRATE":  true,
+		"GIT_AUTHOR_NAME":          false,
+		"BEADS_DOLT_SERVER_SOCKET": false,
+	} {
+		if err := unsetOpenEnv(key); err != nil {
+			t.Fatalf("unsetOpenEnv(%s): %v", key, err)
+		}
+		if value, present := os.LookupEnv(key); value != "" || present != wantPresent {
+			t.Errorf("%s after unsetOpenEnv = %q (present %t), want empty with present %t", key, value, present, wantPresent)
+		}
+	}
+}
+
+// envEntriesOnlyIn returns the entries of a sorted environment that the other
+// sorted environment lacks.
+func envEntriesOnlyIn(env, other []string) []string {
+	var only []string
+	for _, entry := range env {
+		if _, found := slices.BinarySearch(other, entry); !found {
+			only = append(only, entry)
+		}
+	}
+	return only
+}
+
+// unsetForTest removes key from the process environment for the test and
+// restores what was there on cleanup. t.Setenv can only give a key a value.
+func unsetForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, had := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if had {
+			_ = os.Setenv(key, previous)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
+}
+
 // nativeReadyGateBlocker builds one GetDependenciesWithMetadata row: the
 // blocker's own Issue (IssueWithDependencyMetadata embeds Issue, so Status and
 // Metadata are the blocker's) plus the edge type joining it to the dependent.
@@ -4036,6 +3664,17 @@ func TestNativeDoltStoreReadyWorkOutcomeFilterToleratesOpenGates(t *testing.T) {
 						return nil, nil
 					}
 					return []*beadslib.IssueWithDependencyMetadata{tt.blocker}, nil
+				},
+				// The blocker's row, for the by-id listing the filter reads
+				// blocker status and metadata through.
+				searchIssues: func(_ context.Context, _ string, filter beadslib.IssueFilter) ([]*beadslib.Issue, error) {
+					for _, id := range filter.IDs {
+						if id == tt.blocker.ID {
+							issue := tt.blocker.Issue
+							return []*beadslib.Issue{&issue}, nil
+						}
+					}
+					return nil, nil
 				},
 			}
 			store := newNativeDoltStoreForTest(storage)

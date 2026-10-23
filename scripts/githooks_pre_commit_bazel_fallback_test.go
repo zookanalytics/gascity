@@ -8,16 +8,17 @@ import (
 )
 
 // The pre-commit hook lints the staged Go packages with nogo (make
-// lint-changed) and runs the docs sync test (make check-docs) under Bazel,
-// as CI does. Where the command the Makefile would run for a step (NOGO_BAZEL
-// or BAZEL, default bazel) is not on PATH, the step runs its plain-Go twin
-// (make lint-changed-go, make check-docs-go) and says loudly that the twin is
-// not what CI gates on.
+// lint-changed) under Bazel, as CI does. Where the command the Makefile would
+// run for nogo (NOGO_BAZEL, default bazel) is not on PATH, auto runs the
+// plain-Go twin (make lint-changed-go) and says loudly that the twin is not
+// what CI enforces. GC_PRECOMMIT_LINT=auto|bazel|go picks the engine. The
+// docs step's own fallback (GC_PRECOMMIT_DOCS) is pinned by
+// githooks_precommit_local_runtime_test.go.
 
-const preCommitTwinBanner = "CI gates on."
+const preCommitLintTwinBanner = "NOT the nogo lint and vet CI enforces."
 
 // preCommitFixture is a scratch repository carrying the real pre-commit hook
-// and beads chain, with one Go file and one Markdown file staged. make and go
+// and beads chain, with one Go file staged. make and go
 // are stubs that record their argv (go also its CGO_ENABLED), so a run
 // exercises the hook's control flow and nothing else.
 type preCommitFixture struct {
@@ -25,7 +26,7 @@ type preCommitFixture struct {
 	makeLog string
 	goLog   string
 	// stubBazel is the path of an executable bazel stub outside PATH, for
-	// NOGO_BAZEL and BAZEL to name.
+	// NOGO_BAZEL to name.
 	stubBazel string
 }
 
@@ -71,8 +72,7 @@ func newPreCommitFixture(t *testing.T) *preCommitFixture {
 	f.git(t, "commit", "-q", "--no-verify", "-m", "init")
 
 	writeTestFile(t, filepath.Join(f.repo, "main.go"), "package main\n\nfunc main() { println(1) }\n")
-	writeTestFile(t, filepath.Join(f.repo, "README.md"), "fixture, changed\n")
-	f.git(t, "add", "main.go", "README.md")
+	f.git(t, "add", "main.go")
 	return f
 }
 
@@ -123,41 +123,60 @@ func (f *preCommitFixture) logLines(t *testing.T, path string) []string {
 	return strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
 }
 
-func TestPreCommitRunsGoTwinsWhenBazelIsMissing(t *testing.T) {
+func TestPreCommitRunsLintGoTwinWhenBazelIsMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		withBazel bool
 		env       func(f *preCommitFixture) []string
 		wantMake  []string
-		// wantWhy lists the reason line of each banner, in order; none when
-		// every step ran under bazel.
-		wantWhy []string
+		// wantWhy is the reason line of the go-twin banner; empty when nogo
+		// ran under bazel.
+		wantWhy string
+		// wantFix is the fix line of the banner, checked when set.
+		wantFix string
 	}{
 		{
-			name:      "bazel on PATH runs nogo and the bazel docs test",
+			name:      "bazel on PATH runs nogo",
 			withBazel: true,
-			wantMake:  []string{"lint-changed LINT_CHANGED_SCOPE=staged", "check-docs"},
+			wantMake:  []string{"lint-changed LINT_CHANGED_SCOPE=staged"},
 		},
 		{
-			name:     "no bazel runs the go twins and says so",
-			wantMake: []string{"lint-changed-go LINT_CHANGED_SCOPE=staged", "check-docs-go"},
-			wantWhy:  []string{"why: bazel is not on PATH", "why: bazel is not on PATH"},
+			name:     "no bazel runs the go twin and says so",
+			wantMake: []string{"lint-changed-go LINT_CHANGED_SCOPE=staged"},
+			wantWhy:  "why: bazel is not on PATH",
+			wantFix:  "fix: install bazelisk (engdocs/bazel-quickstart.md)",
 		},
 		{
-			name: "NOGO_BAZEL and BAZEL name a bazel off PATH",
+			name: "NOGO_BAZEL names a bazel off PATH",
 			env: func(f *preCommitFixture) []string {
-				return []string{"NOGO_BAZEL=" + f.stubBazel, "BAZEL=" + f.stubBazel}
+				return []string{"NOGO_BAZEL=" + f.stubBazel}
 			},
-			wantMake: []string{"lint-changed LINT_CHANGED_SCOPE=staged", "check-docs"},
+			wantMake: []string{"lint-changed LINT_CHANGED_SCOPE=staged"},
 		},
 		{
-			name:      "a missing NOGO_BAZEL falls back for lint alone",
+			name:      "a missing NOGO_BAZEL falls back",
 			withBazel: true,
 			env: func(*preCommitFixture) []string {
 				return []string{"NOGO_BAZEL=/nonexistent/bazel"}
 			},
-			wantMake: []string{"lint-changed-go LINT_CHANGED_SCOPE=staged", "check-docs"},
-			wantWhy:  []string{"why: /nonexistent/bazel is not on PATH"},
+			wantMake: []string{"lint-changed-go LINT_CHANGED_SCOPE=staged"},
+			wantWhy:  "why: /nonexistent/bazel is not on PATH",
+		},
+		{
+			name:      "GC_PRECOMMIT_LINT=go runs the twin with bazel present",
+			withBazel: true,
+			env: func(*preCommitFixture) []string {
+				return []string{"GC_PRECOMMIT_LINT=go"}
+			},
+			wantMake: []string{"lint-changed-go LINT_CHANGED_SCOPE=staged"},
+			wantWhy:  "why: GC_PRECOMMIT_LINT=go",
+		},
+		{
+			name: "GC_PRECOMMIT_LINT=bazel is never replaced",
+			env: func(*preCommitFixture) []string {
+				return []string{"GC_PRECOMMIT_LINT=bazel"}
+			},
+			wantMake: []string{"lint-changed LINT_CHANGED_SCOPE=staged"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -173,26 +192,35 @@ func TestPreCommitRunsGoTwinsWhenBazelIsMissing(t *testing.T) {
 			if got := f.logLines(t, f.makeLog); strings.Join(got, "\n") != strings.Join(tc.wantMake, "\n") {
 				t.Errorf("make ran %q, want %q\n%s", got, tc.wantMake, out)
 			}
-			if got := strings.Count(out, preCommitTwinBanner); got != len(tc.wantWhy) {
-				t.Errorf("printed %d go-twin banners, want %d:\n%s", got, len(tc.wantWhy), out)
+			wantBanners := 0
+			if tc.wantWhy != "" {
+				wantBanners = 1
 			}
-			rest := out
-			for _, why := range tc.wantWhy {
-				i := strings.Index(rest, why)
-				if i < 0 {
-					t.Errorf("output lacks %q in order:\n%s", why, out)
-					break
-				}
-				rest = rest[i+len(why):]
+			if got := strings.Count(out, preCommitLintTwinBanner); got != wantBanners {
+				t.Errorf("printed %d go-twin banners, want %d:\n%s", got, wantBanners, out)
 			}
-			if len(tc.wantWhy) > 0 {
-				for _, want := range []string{"CI runs bazel test //...", "fix: install bazelisk (engdocs/bazel-quickstart.md)"} {
-					if !strings.Contains(out, want) {
-						t.Errorf("go-twin banner lacks %q:\n%s", want, out)
-					}
+			for _, want := range []string{tc.wantWhy, tc.wantFix} {
+				if want != "" && !strings.Contains(out, want) {
+					t.Errorf("go-twin banner lacks %q:\n%s", want, out)
 				}
 			}
 		})
+	}
+}
+
+// TestPreCommitRejectsUnknownLintMode: an unknown GC_PRECOMMIT_LINT fails the
+// commit rather than silently picking an engine.
+func TestPreCommitRejectsUnknownLintMode(t *testing.T) {
+	f := newPreCommitFixture(t)
+	out, err := f.run(t, true, "GC_PRECOMMIT_LINT=skip")
+	if err == nil {
+		t.Fatalf("pre-commit accepted GC_PRECOMMIT_LINT=skip:\n%s", out)
+	}
+	if !strings.Contains(out, "GC_PRECOMMIT_LINT=skip is not one of auto, bazel, go") {
+		t.Errorf("output lacks the unknown-mode error:\n%s", out)
+	}
+	if got := f.logLines(t, f.makeLog); len(got) != 0 {
+		t.Errorf("make ran %q, want nothing", got)
 	}
 }
 

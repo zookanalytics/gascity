@@ -2,7 +2,6 @@ package supervisor
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/loopbackport"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -63,6 +63,13 @@ type Section struct {
 	// open. See config.APIConfig for the key format and full semantics.
 	ReadAuthVerifyKey string `toml:"read_auth_verify_key,omitempty"`
 	ReadAuthRequired  bool   `toml:"read_auth_required,omitempty"`
+	// RequireServiceManager declares that this machine's supervisor runs only
+	// under its installed platform service: launchd on macOS, systemd --user
+	// on Linux. gc then never forks a supervisor from the shell that ran it.
+	// A start the service manager cannot perform exits non-zero and says
+	// why, where it would otherwise fork a supervisor that inherits that
+	// shell's environment and terminal.
+	RequireServiceManager bool `toml:"require_service_manager,omitempty"`
 }
 
 // PublicationConfig holds machine-wide publication policy for workspace
@@ -149,7 +156,10 @@ func (s Section) PortOrDefault() int {
 }
 
 // PatrolIntervalDuration returns the patrol interval as a time.Duration.
-// Defaults to 10s on empty or unparseable values.
+// Defaults to 10s on empty or unparseable values. Unlike the city's
+// config.DaemonConfig.PatrolIntervalDuration it is never divided by
+// clock.BackstopSpeedupEnv: the knob shortens city controller backstops
+// only.
 func (s Section) PatrolIntervalDuration() time.Duration {
 	if s.PatrolInterval == "" {
 		return 10 * time.Second
@@ -299,6 +309,11 @@ func PublicationsPath(cityPath string) string {
 	return filepath.Join(DefaultHome(), "supervisor", "publications.json")
 }
 
+// seedIsolatedSupervisorConfig writes a private supervisor.toml for an
+// isolated GC_HOME (a test binary, or GC_ISOLATED=1). Its API port comes from
+// loopbackport.Reserve: outside the kernel's ephemeral range where a band is
+// free above 10000 and, on Linux, leased netns-wide, so concurrent isolated
+// homes are not seeded the same port (ga-96smfk.87).
 func seedIsolatedSupervisorConfig(path string) (bool, error) {
 	if !shouldSeedIsolatedSupervisorConfig(path) {
 		return false, nil
@@ -306,7 +321,7 @@ func seedIsolatedSupervisorConfig(path string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, err
 	}
-	port, err := reserveLoopbackPort()
+	port, err := loopbackport.Reserve()
 	if err != nil {
 		return false, err
 	}
@@ -338,17 +353,4 @@ func shouldSeedIsolatedSupervisorConfig(path string) bool {
 		return false
 	}
 	return pathutil.SamePath(path, ConfigPath())
-}
-
-func reserveLoopbackPort() (int, error) {
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, err
-	}
-	defer lis.Close() //nolint:errcheck // best-effort cleanup
-	addr, ok := lis.Addr().(*net.TCPAddr)
-	if !ok || addr.Port <= 0 {
-		return 0, fmt.Errorf("unexpected supervisor listener address %T", lis.Addr())
-	}
-	return addr.Port, nil
 }

@@ -33,77 +33,27 @@ func IsSessionSetupTimeoutAdvisory(warning string) bool {
 // catches typos like "5mins" (should be "5m") at config load time rather than
 // silently defaulting to zero at runtime.
 func ValidateDurations(cfg *City, source string) []string {
-	var warnings []string
-	check := func(context, field, value string) {
-		if value == "" {
-			return
-		}
-		if _, err := time.ParseDuration(value); err != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration: %v",
-				source, context, field, value, err))
-		}
-	}
-	checkPositiveWithDays := func(context, field, value string) {
-		if value == "" {
-			return
-		}
-		dur, err := parseConfigDurationWithDays(value)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration: %v",
-				source, context, field, value, err))
-			return
-		}
-		if dur <= 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q must be a positive duration",
-				source, context, field, value))
-		}
-	}
-	checkSleep := func(context, field, value string) {
-		if value == "" {
-			return
-		}
-		if _, _, err := ParseSleepAfterIdle(value); err != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration or %q: %v",
-				source, context, field, value, SessionSleepOff, err))
-		}
-	}
-	// checkPositive warns on both unparseable and non-positive values. Used for
-	// knobs where a zero or negative duration silently reverts to a default at
-	// runtime instead of failing loudly (e.g. an order override's
-	// check_timeout).
-	checkPositive := func(context, field, value string) {
-		if value == "" {
-			return
-		}
-		dur, err := time.ParseDuration(value)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q is not a valid duration: %v",
-				source, context, field, value, err))
-			return
-		}
-		if dur <= 0 {
-			warnings = append(warnings, fmt.Sprintf(
-				"%s: %s %s = %q must be a positive duration",
-				source, context, field, value))
-		}
-	}
+	return append(validateDeploymentDurations(cfg, source), validateAgentDurations(cfg, source)...)
+}
+
+// validateDeploymentDurations is ValidateDurations for every field outside the
+// agents, which are the fields the deployment layer composes
+// (validateDeploymentLayer).
+func validateDeploymentDurations(cfg *City, source string) []string {
+	d := &durationWarnings{source: source}
 
 	// Session config durations.
-	check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
-	check("[session]", "setup_max_timeout", cfg.Session.SetupMaxTimeout)
-	check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
-	check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
-	check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)
-	check("[session]", "nudge_lock_timeout", cfg.Session.NudgeLockTimeout)
-	check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
-	check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
-	check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
-	checkPositive("[session.acp]", "stop_grace", cfg.Session.ACP.StopGrace)
+	d.check("[session]", "setup_timeout", cfg.Session.SetupTimeout)
+	d.check("[session]", "setup_max_timeout", cfg.Session.SetupMaxTimeout)
+	d.check("[session]", "nudge_ready_timeout", cfg.Session.NudgeReadyTimeout)
+	d.check("[session]", "nudge_retry_interval", cfg.Session.NudgeRetryInterval)
+	d.check("[session]", "nudge_poll_interval", cfg.Session.NudgePollInterval)
+	d.check("[session]", "nudge_lock_timeout", cfg.Session.NudgeLockTimeout)
+	d.check("[session]", "startup_timeout", cfg.Session.StartupTimeout)
+	d.check("[session]", "progress_stall_timeout", cfg.Session.ProgressStallTimeout)
+	d.check("[session]", "claim_holder_stall_timeout", cfg.Session.ClaimHolderStallTimeout)
+	d.checkPositive("[session.acp]", "stop_grace", cfg.Session.ACP.StopGrace)
+	d.checkPositive("[session.acp]", "cancel_timeout", cfg.Session.ACP.CancelTimeout)
 
 	// Cross-field: startup_timeout wraps the whole Start() call (pre_start and
 	// setup included), so a setup_timeout that is >= startup_timeout can never
@@ -111,7 +61,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	// effective (defaulted) durations so an unset field that inherits a
 	// conflicting default is still caught (gastownhall/gascity#5279).
 	if setupDur, startupDur := cfg.Session.SetupTimeoutDuration(), cfg.Session.StartupTimeoutDuration(); setupDur >= startupDur {
-		warnings = append(warnings, fmt.Sprintf(
+		d.warnings = append(d.warnings, fmt.Sprintf(
 			"%s: [session] setup_timeout (%s) >= startup_timeout (%s): %s",
 			source, setupDur, startupDur, setupTimeoutMaskedByStartupWarningFragment))
 	}
@@ -121,88 +71,165 @@ func ValidateDurations(cfg *City, source string) []string {
 	// internal/runtime/tmux/adapter.go) — easy to miss when only setup_timeout
 	// is being tuned (gastownhall/gascity#5279).
 	if maxDur := cfg.Session.SetupMaxTimeoutDuration(); maxDur > 0 {
-		warnings = append(warnings, fmt.Sprintf(
+		d.warnings = append(d.warnings, fmt.Sprintf(
 			"%s: [session] setup_max_timeout (%s) is set: %s",
 			source, maxDur, setupTimeoutBecomesIdleBudgetWarningFragment))
 	}
 
 	// Daemon config durations.
-	check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
-	check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
-	check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
-	check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)
-	check("[daemon]", "shutdown_timeout", cfg.Daemon.ShutdownTimeout)
-	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
-	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
-	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
-	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
-	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
-	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
-	check("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout)
+	d.check("[daemon]", "patrol_interval", cfg.Daemon.PatrolInterval)
+	d.check("[daemon]", "restart_window", cfg.Daemon.RestartWindow)
+	d.check("[daemon]", "session_circuit_breaker_window", cfg.Daemon.SessionCircuitBreakerWindow)
+	d.check("[daemon]", "session_circuit_breaker_reset_after", cfg.Daemon.SessionCircuitBreakerResetAfter)
+	d.check("[daemon]", "shutdown_timeout", cfg.Daemon.ShutdownTimeout)
+	d.check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
+	d.check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
+	d.check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	d.check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
+	d.check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
+	d.check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)
+	d.check("[dolt]", "dolt_lock_release_timeout", cfg.Dolt.DoltLockReleaseTimeout)
 
 	// Orders config durations.
-	check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
+	d.check("[orders]", "max_timeout", cfg.Orders.MaxTimeout)
 	for i := range cfg.Orders.Overrides {
 		ov := cfg.Orders.Overrides[i]
 		if ov.CheckTimeout != nil {
 			// A non-positive check_timeout override parses cleanly but reverts
 			// the condition probe to the 10s default at dispatch, so surface it
 			// at config load like an unparseable typo.
-			checkPositive(
+			d.checkPositive(
 				fmt.Sprintf("[[orders.overrides]] %q", ov.Name),
 				"check_timeout", *ov.CheckTimeout)
 		}
 	}
 
 	// Mail config durations.
-	check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+	d.check("[mail]", "retention_ttl", cfg.Mail.RetentionTTL)
+	d.check("[mail]", "unread_retention_ttl", cfg.Mail.UnreadRetentionTTL)
 
 	// Events config durations.
-	check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
+	d.check("[events.rotation]", "archive_retain_age", cfg.Events.Rotation.ArchiveRetainAge)
 
 	for name, policy := range cfg.Beads.Policies {
-		checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose)
+		d.checkPositiveWithDays(fmt.Sprintf("[beads.policies.%s]", name), "delete_after_close", policy.DeleteAfterClose)
 		if !ValidBeadPolicyStorage(policy.Storage) {
-			warnings = append(warnings, fmt.Sprintf(
+			d.warnings = append(d.warnings, fmt.Sprintf(
 				"%s: [beads.policies.%s] storage = %q is not valid: must be one of %q, %q, or %q",
 				source, name, policy.Storage, BeadStorageHistory, BeadStorageNoHistory, BeadStorageEphemeral))
 		}
 	}
 
 	// Chat sessions config durations.
-	check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
-	check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
+	d.check("[chat_sessions]", "idle_timeout", cfg.ChatSessions.IdleTimeout)
+	d.check("[chat_sessions]", "grace_period", cfg.ChatSessions.GracePeriod)
 
 	// Maintenance (dolt) config durations.
-	check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)
-	check("[maintenance.dolt]", "gc_timeout", cfg.Maintenance.Dolt.GCTimeout)
+	d.check("[maintenance.dolt]", "interval", cfg.Maintenance.Dolt.Interval)
+	d.check("[maintenance.dolt]", "gc_timeout", cfg.Maintenance.Dolt.GCTimeout)
 
 	// Session sleep config durations.
-	checkSleep("[session_sleep]", "interactive_resume", cfg.SessionSleep.InteractiveResume)
-	checkSleep("[session_sleep]", "interactive_fresh", cfg.SessionSleep.InteractiveFresh)
-	checkSleep("[session_sleep]", "noninteractive", cfg.SessionSleep.NonInteractive)
+	d.checkSleep("[session_sleep]", "interactive_resume", cfg.SessionSleep.InteractiveResume)
+	d.checkSleep("[session_sleep]", "interactive_fresh", cfg.SessionSleep.InteractiveFresh)
+	d.checkSleep("[session_sleep]", "noninteractive", cfg.SessionSleep.NonInteractive)
 
 	for _, r := range cfg.Rigs {
 		ctx := fmt.Sprintf("rig %q [session_sleep]", r.Name)
-		checkSleep(ctx, "interactive_resume", r.SessionSleep.InteractiveResume)
-		checkSleep(ctx, "interactive_fresh", r.SessionSleep.InteractiveFresh)
-		checkSleep(ctx, "noninteractive", r.SessionSleep.NonInteractive)
+		d.checkSleep(ctx, "interactive_resume", r.SessionSleep.InteractiveResume)
+		d.checkSleep(ctx, "interactive_fresh", r.SessionSleep.InteractiveFresh)
+		d.checkSleep(ctx, "noninteractive", r.SessionSleep.NonInteractive)
 	}
 
 	for _, monitor := range cfg.GitHub.PRMonitors {
 		ctx := fmt.Sprintf("github.pr_monitor %q", monitor.Name)
-		check(ctx, "poll_interval", monitor.PollInterval)
+		d.check(ctx, "poll_interval", monitor.PollInterval)
 	}
 
-	// Per-agent durations.
+	return d.warnings
+}
+
+// validateAgentDurations is ValidateDurations for the agents' own durations.
+func validateAgentDurations(cfg *City, source string) []string {
+	d := &durationWarnings{source: source}
 	for _, a := range cfg.Agents {
 		ctx := fmt.Sprintf("agent %q", a.QualifiedName())
-		check(ctx, "idle_timeout", a.IdleTimeout)
-		checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
-		check(ctx, "drain_timeout", a.DrainTimeout)
+		d.check(ctx, "idle_timeout", a.IdleTimeout)
+		d.checkSleep(ctx, "sleep_after_idle", a.SleepAfterIdle)
+		d.check(ctx, "drain_timeout", a.DrainTimeout)
 	}
+	return d.warnings
+}
 
-	return warnings
+// durationWarnings collects ValidateDurations' warnings, each prefixed with
+// the config source.
+type durationWarnings struct {
+	source   string
+	warnings []string
+}
+
+// check warns on a value that does not parse as a duration.
+func (d *durationWarnings) check(context, field, value string) {
+	if value == "" {
+		return
+	}
+	if _, err := time.ParseDuration(value); err != nil {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q is not a valid duration: %v",
+			d.source, context, field, value, err))
+	}
+}
+
+// checkPositive warns on both unparseable and non-positive values. Used for
+// knobs where a zero or negative duration silently reverts to a default at
+// runtime instead of failing loudly (e.g. an order override's check_timeout).
+func (d *durationWarnings) checkPositive(context, field, value string) {
+	if value == "" {
+		return
+	}
+	dur, err := time.ParseDuration(value)
+	if err != nil {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q is not a valid duration: %v",
+			d.source, context, field, value, err))
+		return
+	}
+	if dur <= 0 {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q must be a positive duration",
+			d.source, context, field, value))
+	}
+}
+
+// checkPositiveWithDays is checkPositive for a duration that may be written in
+// days.
+func (d *durationWarnings) checkPositiveWithDays(context, field, value string) {
+	if value == "" {
+		return
+	}
+	dur, err := parseConfigDurationWithDays(value)
+	if err != nil {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q is not a valid duration: %v",
+			d.source, context, field, value, err))
+		return
+	}
+	if dur <= 0 {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q must be a positive duration",
+			d.source, context, field, value))
+	}
+}
+
+// checkSleep warns on a value that is neither a duration nor SessionSleepOff.
+func (d *durationWarnings) checkSleep(context, field, value string) {
+	if value == "" {
+		return
+	}
+	if _, _, err := ParseSleepAfterIdle(value); err != nil {
+		d.warnings = append(d.warnings, fmt.Sprintf(
+			"%s: %s %s = %q is not a valid duration or %q: %v",
+			d.source, context, field, value, SessionSleepOff, err))
+	}
 }
 
 // ValidateNonNegativeDurations checks duration fields that must not be negative
