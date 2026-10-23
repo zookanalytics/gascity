@@ -167,6 +167,33 @@ policy_ref = "platform-sso"
 	}
 }
 
+func TestLoadConfigRequireServiceManager(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		want     bool
+	}{
+		{name: "absent", contents: "[supervisor]\nport = 9090\n", want: false},
+		{name: "true", contents: "[supervisor]\nrequire_service_manager = true\n", want: true},
+		{name: "false", contents: "[supervisor]\nrequire_service_manager = false\n", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "supervisor.toml")
+			if err := os.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Supervisor.RequireServiceManager; got != tt.want {
+				t.Errorf("Supervisor.RequireServiceManager = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoadConfigEventExportCities(t *testing.T) {
 	tests := []struct {
 		name     string
