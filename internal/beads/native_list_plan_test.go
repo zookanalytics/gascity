@@ -96,7 +96,8 @@ func nativeListRequestsEqual(a, b issueops.ListRequest) bool {
 	if a.Status != b.Status || a.IssueType != b.IssueType || a.Assignee != b.Assignee ||
 		a.ParentID != b.ParentID || a.SortBy != b.SortBy || a.Reverse != b.Reverse ||
 		a.AllFlag != b.AllFlag || a.IncludeEphemeral != b.IncludeEphemeral || a.IncludeInfra != b.IncludeInfra ||
-		a.IncludeGates != b.IncludeGates || a.IncludeTemplates != b.IncludeTemplates {
+		a.IncludeGates != b.IncludeGates || a.IncludeTemplates != b.IncludeTemplates ||
+		a.SkipCounts != b.SkipCounts || a.SkipLabels != b.SkipLabels || a.Brief != b.Brief {
 		return false
 	}
 	if (a.Limit == nil) != (b.Limit == nil) || (a.Limit != nil && *a.Limit != *b.Limit) {
@@ -131,4 +132,25 @@ func listRequestStatsForTest(t *testing.T, store Store) ListRequestStats {
 		t.Fatalf("ListRequestStatsOf(%T) reports no counts", store)
 	}
 	return stats
+}
+
+// Bead carries no dependency, dependent or comment count, so no listing asks
+// the library to hydrate them: each is an aggregate over a whole side table,
+// and the reverse-blocker one is the cost of a keyed read on a large ledger.
+func TestNativeListRequestsSkipTheCountsBeadDoesNotCarry(t *testing.T) {
+	for _, query := range []ListQuery{
+		{Assignee: "worker", Status: "in_progress", TierMode: TierBoth, Live: true},
+		{Assignee: "worker", Status: "open", TierMode: TierBoth, Live: true, Fields: FieldsCore},
+		{Type: "message", Assignees: []string{"worker", "gc-1"}},
+		{AllowScan: true},
+	} {
+		for i, req := range NativeListPlan(query) {
+			if !req.SkipCounts {
+				t.Errorf("NativeListPlan(%+v)[%d].SkipCounts = false, want true", query, i)
+			}
+		}
+	}
+	if !nativeListReadRequest().SkipCounts {
+		t.Error("nativeListReadRequest().SkipCounts = false, want true")
+	}
 }
