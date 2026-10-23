@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -374,14 +375,19 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 // ownerlessRuntimeFindings lists the runtimes sp lists for cityPath that no
 // row owns: no readable GC_SESSION_ID, or one no session store holds
 // (owners), each with why the tick leaves it (or that it reaps it). The
-// doctor's finding.
-func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
+// doctor's finding. Once the doctor runner abandons the check (ctx), it stops
+// before the next runtime, so it looks up no further owner, and returns what
+// it found with doctor.ErrCheckAbandoned.
+func ownerlessRuntimeFindings(ctx *doctor.CheckContext, owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
 	names, err := sp.ListRunning("")
 	if err != nil && !runtime.IsPartialListError(err) {
 		return nil, err
 	}
 	var findings []string
 	for _, name := range slices.Sorted(slices.Values(names)) {
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
+		}
 		id, idErr := sp.GetMeta(name, "GC_SESSION_ID")
 		id = strings.TrimSpace(id)
 		switch {
