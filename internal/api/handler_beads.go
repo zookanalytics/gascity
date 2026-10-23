@@ -390,37 +390,30 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 	}
 
 	// Discover parent-linked descendants and their parent-child edges by walking
-	// the tree one BFS level at a time, fetching each level's children with a
-	// single batched store.List(ParentIDs=...) call. This replaces the former
-	// per-bead store.List(ParentID=...) fan-out — an N+1 (one round-trip per bead)
-	// that serialized on a single read connection and dominated graph-read latency
-	// under load. The returned beads are filtered in memory against the level's
-	// parent set, so the result is correct even on a backend that does not honor
-	// ParentIDs (such a backend returns a superset, which the filter narrows).
+	// the tree one BFS level at a time, fetching each level's children with one
+	// batched children read (beads.ChildrenOfAny: the bd store's two-call edge
+	// read, the native store's keyed read; one exact Children per parent on a
+	// store without the batch). This replaces the former per-bead
+	// store.List(ParentID=...) fan-out — an N+1 (one round-trip per bead) that
+	// serialized on a single read connection and dominated graph-read latency
+	// under load. Every returned bead is a child of the level; they are put in
+	// created order so the graph reads the same whichever store served it. On a
+	// bd-backed store the batch ignores the tier option and returns durable
+	// children only (`bd list` never surfaces wisps), so an ephemeral child
+	// that the former List(ParentIDs, TierBoth) read through its wisp leg is
+	// not walked here; no class stores its steps in the ephemeral tier today.
 	frontier := make([]string, 0, len(graphBeads))
 	for _, b := range graphBeads {
 		frontier = append(frontier, b.ID)
 	}
 	for len(frontier) > 0 {
-		frontierSet := make(map[string]bool, len(frontier))
-		for _, id := range frontier {
-			frontierSet[id] = true
-		}
-		children, err := store.List(beads.ListQuery{
-			ParentIDs:     frontier,
-			IncludeClosed: true,
-			AllowScan:     true,
-			Sort:          beads.SortCreatedAsc,
-			TierMode:      beads.TierBoth,
-		})
+		children, err := beads.ChildrenOfAny(store, frontier, beads.IncludeClosed, beads.WithBothTiers)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("listing child beads for graph %q: %w", root.ID, err)
 		}
+		beads.SortBeads(children, beads.SortCreatedAsc)
 		var next []string
 		for _, child := range children {
-			if !frontierSet[child.ParentID] {
-				continue
-			}
 			addParentEdge(child.ParentID, child.ID)
 			if _, seen := beadIndex[child.ID]; !seen {
 				upsert(child)

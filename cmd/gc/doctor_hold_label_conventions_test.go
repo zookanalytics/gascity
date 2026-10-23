@@ -188,20 +188,30 @@ func TestHoldLabelConventionsCheckStoreErrorIsGraceful(t *testing.T) {
 	}
 }
 
-// TestHoldLabelConventionsCheckStopsOnceAbandoned: abandoned while its first
-// retired-label query is in flight, the check queries no other label.
-func TestHoldLabelConventionsCheckStopsOnceAbandoned(t *testing.T) {
-	dir := t.TempDir()
-
-	full := newDoctorAbandonProbe()
-	newHoldLabelConventionsCheck(dir, "city", full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
-	if got := full.reads.Load(); got != int32(len(retiredHoldLabels)) {
-		t.Fatalf("unabandoned run made %d reads, want one query per retired label (%d)", got, len(retiredHoldLabels))
+// TestHoldLabelConventionsCheckListsTheStoreOnce: the check reads the store
+// once and matches the retired labels in memory, and a failed listing is an
+// advisory warning naming the error.
+func TestHoldLabelConventionsCheckListsTheStoreOnce(t *testing.T) {
+	store := &routeQuerySpyStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "GA-1", Title: "two", Type: "task", Status: "open", Labels: []string{"on-hold", "blocked"}},
+		{ID: "GA-2", Title: "closed", Type: "task", Status: "closed", Labels: []string{"on-hold"}},
+	}, nil)}
+	res := newHoldLabelConventionsCheck("/city", "city", func(string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+	want := []string{`retired label "blocked" on GA-1 "two"`, `retired label "on-hold" on GA-1 "two"`}
+	if res.Status != doctor.StatusError || strings.Join(res.Details, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("result = %+v, want error with %v", res, want)
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("store listed %d times, want 1: %+v", len(store.queries), store.queries)
 	}
 
-	probe := newDoctorAbandonProbe()
-	newHoldLabelConventionsCheck(dir, "city", probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
-	if got := probe.reads.Load(); got != 1 {
-		t.Fatalf("abandoned run made %d reads, want only the first label query", got)
+	res = newHoldLabelConventionsCheck("/city", "city", func(string) (beads.Store, error) {
+		return routeListErrorStore{err: fmt.Errorf("store unreachable")}, nil
+	}).Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning || res.Severity != doctor.SeverityAdvisory ||
+		res.Message != "hold-label conventions unknown for city: listing beads: store unreachable" {
+		t.Fatalf("result = %+v, want an advisory warning naming the listing error", res)
 	}
 }

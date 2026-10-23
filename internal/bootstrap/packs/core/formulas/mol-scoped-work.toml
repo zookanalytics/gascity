@@ -93,7 +93,26 @@ case "$WORK_OWNER" in
       [ -z "$OWNER_LIVE" ] && OWNER_LIVE=1
     fi ;;
 esac
-if [ "$OWNER_LIVE" != "0" ]; then
+# A session running this workflow never claims the work bead, so the assignee
+# cannot show it. The run records itself as metadata.work_holder instead. The
+# core pack's work-holder.sh judges each tree this run could adopt by every
+# holder recorded beside it and, finding none live, claims the work: one
+# compare-and-set records this session as the holder only while the bead still
+# records the holder read here, so a second dispatch's claim conflicts and parks.
+TREE_RC=0
+TREE_FINDING=""
+if [ "$OWNER_LIVE" = "0" ]; then
+  if CORE_SCRIPTS=$(gc core scripts-dir) && [ -x "$CORE_SCRIPTS/work-holder.sh" ]; then
+    TREE_FINDING=$("$CORE_SCRIPTS/work-holder.sh" --claim --bead "$WORK_BEAD_ID" \
+      --work-dir "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.work_dir // empty')" \
+      --holder "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.work_holder // empty')" \
+      --branch "$(printf '%s' "$WORK_BEAD_JSON" | jq -r '.[0].metadata.branch // empty')") || TREE_RC=$?
+  else
+    TREE_RC=2
+    TREE_FINDING="The core pack's work-holder.sh could not be run, because gc core scripts-dir did not name a directory holding it, so a session holding the work's tree cannot be ruled out. gc registers that command under the binding the city imports the core pack as, so it answers only where pack.toml imports core as [imports.core]. Retry once gc core scripts-dir names the directory."
+  fi
+fi
+if [ "$OWNER_LIVE" != "0" ] || [ "$TREE_RC" != "0" ]; then
   # Park THIS step before anything else. status=blocked is the one state that
   # holds the workflow here: dependency resolution never satisfies it (it is
   # not closed, so workspace-setup never becomes ready), `gc hook` never serves
@@ -103,14 +122,25 @@ if [ "$OWNER_LIVE" != "0" ]; then
   STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
   gc bd update "$STEP_BEAD_ID" --status=blocked || exit 1
   ROOT_BEAD_ID=$(gc bd show "$STEP_BEAD_ID" --json | jq -r '(if type == "array" then .[0] else . end) | .metadata["gc.root_bead_id"] // empty')
-  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID already $WORK_STATUS under live $WORK_OWNER (convoy {{convoy_id}}). Workflow ${ROOT_BEAD_ID:-unknown} parked at step $STEP_BEAD_ID (status=blocked); no workspace touched."
-  gc mail send human -s "ESCALATION: duplicate dispatch on $WORK_BEAD_ID [HIGH]" -m "Work bead: $WORK_BEAD_ID
+  # Who holds the work and what releases it stay apart, so a release names a
+  # session only where a session holds the work.
+  if [ "$OWNER_LIVE" != "0" ]; then
+    HELD="assigned to $WORK_OWNER, which is live or not provably gone"
+    RELEASE="Only if $WORK_OWNER is truly gone"
+  else
+    HELD="possibly in flight elsewhere:
+$TREE_FINDING"
+    RELEASE="Once each finding above is resolved"
+  fi
+  gc bd update "$WORK_BEAD_ID" --append-notes "Duplicate dispatch refused: $GC_SESSION_NAME found $WORK_BEAD_ID ($WORK_STATUS, convoy {{convoy_id}}) $HELD
+Workflow ${ROOT_BEAD_ID:-unknown} parked at step $STEP_BEAD_ID (status=blocked); no workspace touched."
+  gc mail send human -s "ESCALATION: duplicate dispatch on $WORK_BEAD_ID [HIGH]" -m "Work bead: $WORK_BEAD_ID ($WORK_STATUS)
 Convoy: {{convoy_id}}
-Already held by: $WORK_OWNER (session still live), status=$WORK_STATUS
+Held: $HELD
 This session: $GC_SESSION_NAME
 Duplicate workflow: ${ROOT_BEAD_ID:-unknown}, parked at step $STEP_BEAD_ID (status=blocked). No workspace was touched.
 Resolve by cancelling the duplicate run (POST /runs/${ROOT_BEAD_ID:-<root>}/cancel via the API or dashboard).
-Only if $WORK_OWNER is truly gone: gc bd update $STEP_BEAD_ID --status=open, and this gate re-checks."
+$RELEASE: gc bd update $STEP_BEAD_ID --status=open, and this gate re-checks."
   # Nothing else in this workflow is yours to run. Leave through the claim
   # loop: the parked step is filtered out of the claim, so this either picks
   # up unrelated work or acknowledges drain and ends the session, instead of
@@ -134,6 +164,43 @@ acknowledgement hands every in_progress claim the session holds back to the
 pool, where a fresh session would run this step again. Park first — the
 `|| exit 1` above refuses to go on otherwise — then leave through the claim
 loop.
+
+The assignee is one owner signal and the work's recorded holder is the other.
+A session running this workflow leaves the work bead unassigned for its whole
+run, so the run records itself instead: `metadata.work_holder` names the
+session holding the work, `metadata.work_dir` the tree `workspace-setup`
+entered, and `cleanup-worktree` clears both. The core pack's `work-holder.sh`,
+found through `gc core scripts-dir`, judges that record, never where the tree
+sits on disk. A holder that is this session is a resume. A holder present in
+the session list parks this step the way a live assignee does. A holder absent
+from it is gone. The trees this run could adopt are this bead's `work_dir`
+and the worktree with `metadata.branch` checked out, listed in the rig
+repository (`$GC_RIG_ROOT`, or `$GC_DIR` without one). Each is judged by
+every holder recorded beside it, on this bead and on each other unclosed bead
+on that branch whose `work_dir` it is, so a tree is yours to adopt only when
+none of those records names a live holder other than you. A branch tree that
+no unclosed bead records, a session list, bead listing or worktree listing
+that cannot be read, and a script that cannot be run park the step too. Each
+finding names the tree, counts its uncommitted paths so the holder's work can
+be salvaged, and says what clears it.
+
+Judging the work and taking it are one step. When no live session holds the
+work, `work-holder.sh --claim` records this session as `metadata.work_holder`
+with one compare-and-set (`gc beads metadata-cas`) whose expected value is the
+holder this gate read. The claim goes to the store that owns the work bead,
+the one holding the longest prefix in `gc rig list --json` that the bead's id
+begins with. The session's own rig plays no part, because a city-scoped
+session serves work in any rig's store. Of two dispatches that read the work
+free at the same moment, the second one's compare-and-set finds the first
+one's record and conflicts, so it parks on that live holder instead of
+passing. The holder a conflict finds is read back from the same store and
+judged against a session list read after it, so a dispatch that started after
+the list was first read still counts as live. A holder a conflict finds that
+is gone, or that is this session, is claimed over once more. A store that
+cannot compare-and-set gets a read and a plain write instead, and the script
+says so, because a dispatch writing between the two can still pass beside
+this one. A rig list that names no owner for the bead, or a claim the store
+refuses for any other reason, parks the step.
 
 Liveness is the gate, not staleness: an idle worker between claims is
 indistinguishable from an abandoned one, so only a session absent from
@@ -175,14 +242,20 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
-  WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
-  git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
-  gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
-  WORKTREE="$WORKTREE_PATH"
+  WORKTREE=$(pwd)/worktrees/"$WORK_BEAD_ID"
+  git worktree add "$WORKTREE" --detach origin/{{base_branch}}
 fi
-cd "$WORKTREE"
+cd "$WORKTREE" || exit 1
+gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE" --set-metadata work_holder="${GC_SESSION_ID:-}" || exit 1
 {{setup_command}}
 ```
+
+load-context's claim records the session that took the work as its holder. The
+tree and its holder are recorded on every entry, a resumed or adopted tree
+included, so a run resumed in another session names that session, and
+load-context's duplicate-dispatch gate reads that record to tell this run from
+a tree left behind. A record that does not land can leave the run under an
+earlier session's name, so the step fails rather than continue.
 """
 metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope", "gc.continuation_group" = "main", "gc.session_affinity" = "require" }
 
@@ -295,7 +368,7 @@ if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     fi
   fi
 fi
-gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir --unset-metadata work_holder
 ```
 """
 metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
