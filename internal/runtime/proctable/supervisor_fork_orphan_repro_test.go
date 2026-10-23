@@ -153,8 +153,8 @@ func TestScrubbedForkedSupervisorIsNotSelected(t *testing.T) {
 //     kill(-pid, SIGTERM) and *falls back to kill(pid, SIGTERM)*. A private
 //     session/group does not make the process unaddressable by its own PID.
 //
-// The child below is setsid'd — a strictly stronger detachment than the
-// Setpgid the real fork path uses — and is still selected.
+// The child below is setsid'd, the same detachment the real fork path uses,
+// and is still selected.
 //
 // ga-961qe1 / ga-cfr67u: the target is identified by capturing the spawning
 // shell's own $! directly, never by scanning for it after the fact — the
