@@ -1,6 +1,6 @@
 ---
-name: Who reads the whole session history on the city store, and what gc-k0n2xi changed
-description: Attributes the closed-inclusive session-bead enumeration on the city store to its callers, using the controller's own trace and read-only processlist sampling on 2026-10-10. The supervisor's per-pass issuer is the demand pass's closed named-session index, not mail recipient resolution. The stream re-issued at the read deadline came from the hourly doctor sweep. A third, label-only stream is not attributed. Records the evidence, the changes, and the open work with the beads filed for it.
+name: Who reads the whole session history on the city store, and what gc-k0n2xi and gc-oh4e2p changed
+description: Attributes the closed-inclusive session-bead enumeration on the city store to its callers, using the controller's own trace, read-only processlist sampling and the usage sink on 2026-10-10 and 2026-10-11. The supervisor's per-pass issuer is the demand pass's closed named-session index, not mail recipient resolution. The stream re-issued at the read deadline came from the hourly doctor sweep. The third, label-only stream is the supervisor's usage lane retrying closed sessions whose model-usage sweep never settles (gc-oh4e2p). Records the evidence, the changes, and the open work with the beads filed for it.
 ---
 
 # gc-k0n2xi: who reads the whole session history
@@ -33,9 +33,17 @@ and the mail path does not appear in the data.
    `beadmail:` line appears in the 120 MB supervisor log. Of 5,316 mail API
    requests in that log, 3 took two seconds or more, and a cache-miss
    enumeration takes several seconds.
-4. **A label-only, default-sort, closed-inclusive stream is not attributed.** It
-   ran through every sampling window, both while the doctor ran and after it
-   exited, on connections that changed every one or two scans. It is gc-oh4e2p.
+4. **The label-only, default-sort, closed-inclusive stream is the supervisor's
+   usage lane.** It ran through every sampling window, both while the doctor
+   ran and after it exited, on connections that changed every one or two
+   scans. The lane's catch-up for sessions that closed between passes kept a
+   closed session whose model-usage sweep had not settled and retried it on
+   every pass. Each retry ran transcript discovery. A Claude discovery that
+   missed its keyed path checked whether another session shared the
+   directory, and for a closed session that check listed every session bead
+   by label, closed ones included. When the supervisor restarted at 04:08Z on
+   2026-10-11, it was retrying 18 such sessions. gc-oh4e2p keys that check on
+   the session's `work_dir` and bounds the retries.
 
 ## Evidence
 
@@ -85,7 +93,7 @@ callers' query shapes apart.
   from 02:04:12 to 02:22:45Z, and its payload reports
   `pool-idle-routed-work: timed out after 1m0s and was abandoned (outcome
   unknown)`.
-- **The unattributed stream** shows as default-sort label scans with no type
+- **The label-only stream** shows as default-sort label scans with no type
   leg, 5 to 8 s on issues and about 1 s on wisps. It ran 25 times on 16
   connections from 02:12 to 02:19Z. From 02:20:02 to 02:27:38Z it gave 38
   samples before the doctor exited and 33 after. It continued in bursts at
@@ -93,6 +101,57 @@ callers' query shapes apart.
   seconds within a burst. Short-lived `gc mail check --inject`,
   `gc nudge drain --inject`, `gc session peek` and `gc session logs` processes
   held connections over the same period, next to the supervisor.
+
+### The label-only stream's caller (gc-oh4e2p)
+
+The usage lane (`emitDueComputeFacts`, `cmd/gc/usage_compute.go`) runs inside
+the controller's `bead_reconcile_tick`. Its catch-up for sessions that close
+between passes (`accountVanishedIntervals`) kept, in memory, each closed
+session whose accounting had not settled, and retried it on every pass. A
+retry runs the terminal model-usage sweep, and for a Claude session the sweep
+resolves the transcript through `TranscriptPathClassified`
+(`internal/session/chat.go`). When the keyed lookup missed, the same-workdir
+check (`sameWorkDirSessionBeads`) listed session beads by label with the
+default sort, and included closed rows when the session was closed. That is
+the sampled shape: label only, default sort, no status filter and no type
+leg. An open session's check excludes closed rows, so only a closed session
+produces this shape. `gc session logs` and the API's transcript handlers run
+the same check for a closed session on demand; only the usage lane repeats it
+on every pass.
+
+- **The usage sink holds a copy per retry.** A retry whose model sweep does
+  not settle records the interval's compute fact again, and the sink keeps
+  every copy (`usage.ReadFacts` keeps the first). Between the supervisor's
+  start at 05:31Z on 2026-10-08 and its restart at 04:08Z on 2026-10-11, 18
+  closed sessions gathered 202 to 1,649 copies each, 16,323 in all. For the 17
+  that record a `closed_at`, the first copy lands 25 s to 4 minutes after it.
+  Every session's copies end between 04:04 and 04:07Z on 2026-10-11, at the
+  restart that emptied the lane's retry set.
+- **All 18 are closed Claude sessions that carry a `session_key` and still owe
+  their interval.** Seventeen have their `<session_key>.jsonl` under a
+  different folder of `/Users/gc/.claude/projects` from the one their
+  `work_dir` names, most under the folder of a per-bead worktree, so the keyed
+  lookup misses them. That miss is gc-ysf8tb. The eighteenth, lx-wisp-e9yi1,
+  has no transcript under that root at all, and no `closed_at`. The sweep
+  treats a keyed miss as transient and never settles it, so all 18 were
+  retried on every pass.
+- **The controller tick paid for it.** The usage lane has no trace phase of
+  its own, so the part of `bead_reconcile_tick` that its traced sub-phases do
+  not cover contains it, along with an asynchronous start that returns at once
+  after its first call, an open-session snapshot load and in-memory
+  bookkeeping. On 2026-10-10 that untraced part had a median of 43.8 s per
+  tick (90th percentile 132.0 s), against a median of 62.0 s for the whole
+  phase. From 00:00 to 04:08Z on 2026-10-11 its median was 41.0 s. After the
+  restart, with the retry set empty, it fell to a median of 0.1 s (90th
+  percentile 0.5 s), and the whole phase to 9.9 s. The restart also changed
+  the binary, from 1a3bda7a6 to 254144dec, and none of the 19 commits between
+  them touches the usage lane or the transcript lookup. Both builds report
+  uncommitted changes, so that comparison does not cover everything the
+  binaries differ by.
+- **The stream is absent after the restart.** Samples from 05:21 to 05:33Z on
+  2026-10-11 caught no default-sort label scan. The session-label scans they
+  caught were created-desc, the shape of the closed named-session index
+  build, which the running binary does not yet cache.
 
 ### What the analysis observed at 17:05Z
 
@@ -103,6 +162,8 @@ index build ending at 17:05:38Z. Which of the two the analysis sampled cannot be
 recovered from what was kept.
 
 ## What changed
+
+### gc-k0n2xi
 
 - **The controller keeps the closed named-session index between passes.**
   One `closedNamedIndexCache` (`cmd/gc/allocator_demand_reads.go`) serves each
@@ -138,6 +199,32 @@ recovered from what was kept.
   and alias-history routes keep using the last enumeration that succeeded; the
   failure reaches the lookup only while no enumeration has succeeded.
 
+### gc-oh4e2p
+
+- **The same-workdir check reads only the sessions that share the
+  directory.** `sameWorkDirSessionBeads` puts a `work_dir` metadata filter
+  beside the session label, so the store returns the sessions that share the
+  target's directory, closed ones included for a closed target, and no others.
+  The classification is unchanged. No index covers `work_dir`, so the server
+  still reads each session-labeled row to test the filter, but the rows that
+  fail it are no longer sorted, sent or hydrated with their labels and
+  dependencies. Every path that resolves a transcript through the session
+  manager reads less, among them the usage lane's sweeps, `gc session logs`
+  and the API's transcript, stream and history handlers.
+- **The usage lane retries a closed session whose accounting has not settled
+  at most once every 10 minutes, and drops it 24 hours after its close**
+  (`closedUsageRetryInterval`, `closedUsageRetryWindow`). The 24 hours run from
+  `closed_at`, else from the bead's update time, else from the first retry that
+  found the session unsettled. The city store's beads carry no update time, so
+  lx-wisp-e9yi1 would take the last of these. Each attempt writes the compute
+  fact whether or not the model sweep settles, so a drop gives up the
+  model-usage tail of a transcript that never resolved, and the compute fact
+  too only when the sink refused every write. The cadence and the horizon are
+  those of the closed-session backstop in upstream gastownhall/gascity#6908,
+  which reaches unsettled closed sessions through a periodic list of closed
+  session beads rather than an in-memory set. Upstream main carries neither
+  lane.
+
 ## What this does not change
 
 - **The stateless beadmail provider** still enumerates on every alias-history
@@ -147,7 +234,14 @@ recovered from what was kept.
 - **The hourly detached-orphan route index, the doctor's executor-identity
   residue check and the startup name-claim sweep** still read closed sessions.
   The first two need them, and none runs per pass.
-- **The unattributed label-only stream** is gc-oh4e2p.
+- **The keyed Claude lookup still misses a transcript written outside the
+  `work_dir` folder.** gc-ysf8tb fixes that lookup; its pull request, #215,
+  was open on 2026-10-11. Until it lands, such a session's model-usage tail
+  goes unbilled, and its retries stop after 24 hours.
+- **An open session in a compute-terminal state whose sweep does not settle**
+  is still retried on every pass by the lane's open-snapshot scan. Its check
+  reads only open sessions that share its `work_dir`, and the retries end when
+  the session wakes or closes.
 - **A doctor check abandoned at its timeout keeps running** and keeps reading
   the store until the doctor exits. That is gc-hvk4ub.
 
@@ -164,3 +258,13 @@ recovered from what was kept.
 - Mail latency: the supervisor's own `api:` request lines in
   `/Users/gc/.gc/supervisor.log`.
 - Store sizes: `COUNT(*)` by status and tier on the city database.
+- Retry copies: Python over `.gc/usage.jsonl`, counting compute facts per
+  `idempotency_key` with the first and last `at` of each.
+- Retried sessions: `gc bd show` on each session the sink names, and
+  `ls /Users/gc/.claude/projects/*/<session_key>.jsonl` for its transcript.
+- Untraced tick time: per `tick_id`, the `bead_reconcile_tick` duration minus
+  the summed durations of its `bead_reconcile.*` sub-phases, over every
+  2026-10-10 and 2026-10-11 segment file.
+- Samples after the restart: the processlist sampler above, keeping the last
+  700 characters of each session-label query so the `WHERE` and `ORDER BY`
+  clauses survive.

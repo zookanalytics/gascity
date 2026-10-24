@@ -44,6 +44,22 @@ const usageModelSweptAtKey = "usage_model_swept_at"
 // cursor-guarded sweep bills the whole batch pending at the moment it next runs.
 const liveModelSweepMinInterval = 30 * time.Second
 
+// closedUsageRetryWindow is how long after its close the vanished lane keeps
+// retrying a closed session whose accounting has not settled. Each attempt
+// writes the compute fact whether or not the model sweep settles, so a drop at
+// the window's end gives up the model-usage tail of a transcript that never
+// resolved. It gives up the compute fact too only when the sink refused every
+// write.
+const closedUsageRetryWindow = 24 * time.Hour
+
+// closedUsageRetryInterval floors how often the vanished lane retries a closed
+// session whose accounting has not settled. Each retry re-runs transcript
+// discovery, and a Claude discovery that misses its keyed path reads every
+// session bead that shared the session's work_dir, closed ones included. A
+// transcript that never resolves is therefore retried on this floor rather
+// than on every pass.
+const closedUsageRetryInterval = 10 * time.Minute
+
 // isComputeTerminalState reports whether a session state marks the end of an
 // awake interval, at which a compute fact should be emitted. It covers every
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
@@ -384,7 +400,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 	}
 	// Sessions still owing an interval at the end of this pass. The next pass diffs
 	// against it to find the ones that ended in between (see takeVanishedIntervalSessions).
-	owing := make(map[string]struct{}, len(sessions))
+	owing := make(map[string]owedIntervalRetry, len(sessions))
 	for _, info := range sessions {
 		// A canceled tick (controller shutdown, reconcile deadline) stops here
 		// rather than working through the rest of the fleet: every remaining
@@ -395,7 +411,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			return
 		}
 		if unaccountedInterval(info) {
-			owing[info.ID] = struct{}{}
+			owing[info.ID] = owedIntervalRetry{}
 		}
 		liveCandidate := liveLane && liveModelSweepCandidate(info)
 		if !computeFactGetCandidate(info) && !liveCandidate {
@@ -408,7 +424,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		}
 		processSessionBead(b)
 	}
-	cr.accountVanishedIntervals(ctx, store, owing, processSessionBead, logf)
+	cr.accountVanishedIntervals(ctx, store, owing, now, processSessionBead, logf)
 }
 
 // accountVanishedIntervals accounts the intervals of sessions that were owing one
@@ -428,29 +444,42 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 // The decision is then made on that FRESH bead by the same processSessionBead the open
 // lane uses, so a session that merely dropped out of a partial snapshot — rather than
 // closing — is re-read and routed by its real state instead of being mis-billed.
-// A session whose accounting does not settle stays in the set and is retried next pass.
-// "Does not settle" covers the session that merely dropped out of a partial snapshot:
-// it is still open and still owes its interval, so it stays tracked until it really
-// ends — otherwise the pass that tolerated the partial snapshot would also be the pass
-// that forgot it. Retention stops at the bead's own close: a closed bead that never
-// reached a compute-terminal state can never tell a later pass anything more, and is
-// dropped rather than re-Got forever. A bead the store reports ABSENT is dropped for
-// the same reason; a bead that merely failed to read is retained, because that failure
-// can clear and the Get is the last reference the interval has left.
+// A session whose accounting does not settle stays in the set. While its bead is
+// still open it is retried next pass. "Does not settle" covers the session that
+// merely dropped out of a partial snapshot: it is still open and still owes its
+// interval, so it stays tracked until it really ends — otherwise the pass that
+// tolerated the partial snapshot would also be the pass that forgot it.
+//
+// A CLOSED session that does not settle is retried at most once per
+// closedUsageRetryInterval, and is dropped once closedUsageRetryWindow has passed
+// since its close. A miss that persists, such as a transcript discovery that never
+// resolves, would otherwise repeat on every pass for as long as the process lives.
+// Retention also stops at the close of a bead that never reached a compute-terminal
+// state: it can never tell a later pass anything more, and is dropped rather than
+// re-Got forever. A bead the store reports ABSENT is dropped for the same reason; a
+// bead that merely failed to read is retained for the next pass, because that
+// failure can clear and the Get is the last reference the interval has left.
 func (cr *CityRuntime) accountVanishedIntervals(
 	ctx context.Context,
 	store beads.Store,
-	owing map[string]struct{},
+	owing map[string]owedIntervalRetry,
+	now time.Time,
 	processSessionBead func(beads.Bead) bool,
 	logf func(string, ...any),
 ) {
-	for _, id := range cr.takeVanishedIntervalSessions(owing) {
+	for _, v := range cr.takeVanishedIntervalSessions(owing) {
 		if ctx.Err() != nil {
 			// Hand the rest back so a canceled tick defers them instead of dropping them.
-			cr.retainVanishedIntervalSession(id)
+			cr.retainVanishedIntervalSession(v.id, v.retry)
 			continue
 		}
-		b, err := store.Get(id)
+		if now.Before(v.retry.next) {
+			// A closed session whose accounting did not settle waits out its retry
+			// floor without a read.
+			cr.retainVanishedIntervalSession(v.id, v.retry)
+			continue
+		}
+		b, err := store.Get(v.id)
 		if err != nil {
 			// This Get holds the LAST reference to the owed interval: the pass has
 			// already replaced the tracked set with the current open snapshot, and a
@@ -459,48 +488,105 @@ func (cr *CityRuntime) accountVanishedIntervals(
 			// other error is a read that may succeed next pass, so retaining it is what
 			// keeps a transient backend failure from losing the interval permanently.
 			if !errors.Is(err, beads.ErrNotFound) {
-				cr.retainVanishedIntervalSession(id)
-				logf("usage: loading closed session %s for usage facts failed; retrying next pass: %v", id, err)
+				cr.retainVanishedIntervalSession(v.id, owedIntervalRetry{until: v.retry.until})
+				logf("usage: loading closed session %s for usage facts failed; retrying next pass: %v", v.id, err)
 				continue
 			}
-			logf("usage: closed session %s is absent from the store; its interval cannot be accounted: %v", id, err)
+			logf("usage: closed session %s is absent from the store; its interval cannot be accounted: %v", v.id, err)
 			continue
 		}
-		if !processSessionBead(b) {
-			cr.retainVanishedIntervalSession(id)
+		if processSessionBead(b) {
+			continue
 		}
+		if b.Status != "closed" {
+			cr.retainVanishedIntervalSession(v.id, owedIntervalRetry{})
+			continue
+		}
+		retry := v.retry
+		if retry.until.IsZero() {
+			retry.until = closedUsageRetryDeadline(b, now)
+		}
+		if !now.Before(retry.until) {
+			logf("usage: closed session %s is past its %s retry window with its usage unsettled; no longer retrying it", v.id, closedUsageRetryWindow)
+			continue
+		}
+		retry.next = now.Add(closedUsageRetryInterval)
+		cr.retainVanishedIntervalSession(v.id, retry)
 	}
 }
 
-// takeVanishedIntervalSessions replaces the tracked owing-interval set with owing
-// and returns the ids that were tracked before this pass but are absent from it —
-// the sessions whose interval ended since the last pass. Ids are returned in a
-// stable order so a tick's work is reproducible.
-func (cr *CityRuntime) takeVanishedIntervalSessions(owing map[string]struct{}) []string {
-	cr.owingIntervalsMu.Lock()
-	defer cr.owingIntervalsMu.Unlock()
-	var vanished []string
-	for id := range cr.owingIntervals {
-		if _, stillOpen := owing[id]; !stillOpen {
-			vanished = append(vanished, id)
+// owedIntervalRetry is the vanished lane's retry schedule for one tracked session.
+// The zero value retries on the next pass with no deadline, which is what an open
+// session gets.
+type owedIntervalRetry struct {
+	// next is the earliest time the vanished lane may read the session again.
+	next time.Time
+	// until is when the lane stops retrying a closed session whose accounting has
+	// not settled. It is set on the first attempt that finds the session closed
+	// and unsettled.
+	until time.Time
+}
+
+// vanishedIntervalSession is a tracked session that has left the open snapshot,
+// with the retry schedule it carried there.
+type vanishedIntervalSession struct {
+	id    string
+	retry owedIntervalRetry
+}
+
+// closedUsageRetryDeadline is when the vanished lane stops retrying a closed
+// session: closedUsageRetryWindow after its recorded close, or after now when
+// the bead records no close time.
+func closedUsageRetryDeadline(b beads.Bead, now time.Time) time.Time {
+	if closedAt, ok := sessionBeadClosedAt(b); ok {
+		return closedAt.Add(closedUsageRetryWindow)
+	}
+	return now.Add(closedUsageRetryWindow)
+}
+
+// sessionBeadClosedAt is when a closed session bead was closed: the closed_at
+// stamped by session.ClosePatch, else the bead's UpdatedAt.
+func sessionBeadClosedAt(b beads.Bead) (time.Time, bool) {
+	if raw := strings.TrimSpace(b.Metadata["closed_at"]); raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			return t, true
 		}
 	}
-	sort.Strings(vanished)
+	if !b.UpdatedAt.IsZero() {
+		return b.UpdatedAt.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// takeVanishedIntervalSessions replaces the tracked owing-interval set with owing
+// and returns the sessions that were tracked before this pass but are absent from
+// it — the sessions whose interval ended since the last pass. They are returned in
+// a stable id order so a tick's work is reproducible.
+func (cr *CityRuntime) takeVanishedIntervalSessions(owing map[string]owedIntervalRetry) []vanishedIntervalSession {
+	cr.owingIntervalsMu.Lock()
+	defer cr.owingIntervalsMu.Unlock()
+	var vanished []vanishedIntervalSession
+	for id, retry := range cr.owingIntervals {
+		if _, stillOpen := owing[id]; !stillOpen {
+			vanished = append(vanished, vanishedIntervalSession{id: id, retry: retry})
+		}
+	}
+	sort.Slice(vanished, func(i, j int) bool { return vanished[i].id < vanished[j].id })
 	cr.owingIntervals = owing
 	return vanished
 }
 
 // retainVanishedIntervalSession puts a vanished session back into the tracked set
-// so the next pass retries its accounting. Used when the interval did not settle
-// (a sink write failed, or a model sweep is still pending) or when the tick was
-// canceled before reaching it.
-func (cr *CityRuntime) retainVanishedIntervalSession(id string) {
+// with the schedule on which a later pass retries its accounting. Used when the
+// interval did not settle (a sink write failed, or a model sweep is still pending),
+// when a read failed, or when the tick was canceled before reaching it.
+func (cr *CityRuntime) retainVanishedIntervalSession(id string, retry owedIntervalRetry) {
 	cr.owingIntervalsMu.Lock()
 	defer cr.owingIntervalsMu.Unlock()
 	if cr.owingIntervals == nil {
-		cr.owingIntervals = make(map[string]struct{}, 1)
+		cr.owingIntervals = make(map[string]owedIntervalRetry, 1)
 	}
-	cr.owingIntervals[id] = struct{}{}
+	cr.owingIntervals[id] = retry
 }
 
 // liveSweepMemo is one awake session's live model-usage sweep state, held for

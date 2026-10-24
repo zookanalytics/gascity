@@ -1448,7 +1448,9 @@ func TestEmitDueComputeFactsRetriesUnaccountedVanishedInterval(t *testing.T) {
 		t.Fatalf("usage_compute_emitted_at = %q, want unset after a failed sink write", got)
 	}
 
-	// Pass 3 with a working sink must retry it rather than having dropped it.
+	// Pass 3 with a working sink must retry it rather than having dropped it. The
+	// session is closed, so the retry waits out closedUsageRetryInterval first.
+	h.setVanishedRetry(t, owedIntervalRetry{until: h.vanishedRetry(t).until})
 	h.cr.cs.usageSink = usage.NewLocalSink(h.sinkPath)
 	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
 	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
@@ -1605,4 +1607,216 @@ func TestEmitDueComputeFactsDropsVanishedSessionOnConfirmedAbsence(t *testing.T)
 	if _, retained := h.cr.owingIntervals[h.beadID]; retained {
 		t.Fatalf("absent session %s stayed in the owing set; it would be re-Got on every pass forever", h.beadID)
 	}
+}
+
+// sessionReadCountingStore counts the reads the usage lane makes for one
+// session: Gets by its id, and the closed-inclusive Lists that transcript
+// discovery issues while the session is closed.
+type sessionReadCountingStore struct {
+	beads.Store
+	id          string
+	gets        int
+	closedLists int
+}
+
+func (s *sessionReadCountingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.gets++
+	}
+	return s.Store.Get(id)
+}
+
+func (s *sessionReadCountingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.IncludesClosed() {
+		s.closedLists++
+	}
+	return s.Store.List(query)
+}
+
+// closeTimeHidingStore serves one bead with no UpdatedAt, standing in for a
+// backend that records no update time. With closed_at also unset, the bead
+// carries no close time at all.
+type closeTimeHidingStore struct {
+	beads.Store
+	id string
+}
+
+func (s *closeTimeHidingStore) Get(id string) (beads.Bead, error) {
+	b, err := s.Store.Get(id)
+	if err == nil && id == s.id {
+		b.UpdatedAt = time.Time{}
+	}
+	return b, err
+}
+
+// newUnsettledClaudeHarness builds a keyed Claude session whose transcript is
+// on disk nowhere, so every terminal model sweep misses its keyed path and does
+// not settle. The session starts awake and one pass tracks it.
+func newUnsettledClaudeHarness(t *testing.T) liveSweepHarness {
+	t.Helper()
+	// Discovery also searches $HOME/.claude/projects; an empty home keeps the
+	// miss independent of the machine running the test.
+	t.Setenv("HOME", t.TempDir())
+	h := newLiveSweepHarness(t, t.TempDir(), map[string]string{
+		"state":            string(session.StateAwake),
+		"session_name":     "claude-unsettled-1",
+		"awake_started_at": liveSweepStart().Format(time.RFC3339),
+		"provider":         "claude",
+		"session_key":      "6f1c0e0a-3b7d-4c8e-9a51-2d4f8b9c7e10",
+		"work_dir":         t.TempDir(),
+	})
+	h.tick()
+	if _, tracked := h.cr.owingIntervals[h.beadID]; !tracked {
+		t.Fatalf("session %s was not tracked after the pass that saw it awake", h.beadID)
+	}
+	return h
+}
+
+// closeDrained drains and closes the harness session in one step, as the
+// reconciler's drain path does. A non-zero closedAt is stamped as the closed_at
+// session.ClosePatch writes.
+func (h liveSweepHarness) closeDrained(t *testing.T, closedAt time.Time) {
+	t.Helper()
+	patch := map[string]string{"state": string(session.StateDrained)}
+	if !closedAt.IsZero() {
+		patch["closed_at"] = closedAt.UTC().Format(time.RFC3339)
+	}
+	if err := h.store.SetMetadataBatch(h.beadID, patch); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Close(h.beadID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// vanishedRetry returns the retry schedule the usage lane holds for the harness
+// session, failing the test when the session is not tracked.
+func (h liveSweepHarness) vanishedRetry(t *testing.T) owedIntervalRetry {
+	t.Helper()
+	h.cr.owingIntervalsMu.Lock()
+	defer h.cr.owingIntervalsMu.Unlock()
+	retry, tracked := h.cr.owingIntervals[h.beadID]
+	if !tracked {
+		t.Fatalf("session %s is not tracked by the usage lane", h.beadID)
+	}
+	return retry
+}
+
+// setVanishedRetry replaces the harness session's retry schedule, standing in
+// for time passing between usage passes.
+func (h liveSweepHarness) setVanishedRetry(t *testing.T, retry owedIntervalRetry) {
+	t.Helper()
+	h.vanishedRetry(t)
+	h.cr.owingIntervalsMu.Lock()
+	defer h.cr.owingIntervalsMu.Unlock()
+	h.cr.owingIntervals[h.beadID] = retry
+}
+
+// TestEmitDueComputeFactsRetriesUnsettledClosedSessionOnFloor pins the cost of a
+// closed session whose accounting never settles. Its transcript is found
+// nowhere, so every attempt re-runs transcript discovery, and a Claude discovery
+// that misses its keyed path lists the sessions that shared the work_dir, closed
+// ones included. The vanished lane retries such a session once per
+// closedUsageRetryInterval and reads nothing for it in between.
+func TestEmitDueComputeFactsRetriesUnsettledClosedSessionOnFloor(t *testing.T) {
+	h := newUnsettledClaudeHarness(t)
+	h.closeDrained(t, time.Now())
+	reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
+	h.cr.cs.cityBeadStore = reads
+
+	// The first pass after the close reaches it through the vanished lane. The
+	// sweep does not settle, and the compute fact bills anyway.
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if reads.gets == 0 || reads.closedLists == 0 {
+		t.Fatalf("first attempt reads: gets=%d closed lists=%d, want both: the vanished lane must reach transcript discovery", reads.gets, reads.closedLists)
+	}
+	if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+		t.Fatalf("compute facts = %d, want 1: an unsettled sweep must not hold back the compute fact", got)
+	}
+	retry := h.vanishedRetry(t)
+	if retry.next.IsZero() {
+		t.Fatalf("retry schedule %+v has no floor after an unsettled attempt", retry)
+	}
+
+	// Passes inside the retry floor read nothing for it.
+	gets, lists := reads.gets, reads.closedLists
+	for range 3 {
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	}
+	if reads.gets != gets || reads.closedLists != lists {
+		t.Fatalf("passes inside the retry floor read the session: gets %d -> %d, closed lists %d -> %d", gets, reads.gets, lists, reads.closedLists)
+	}
+	if got := h.vanishedRetry(t); got != retry {
+		t.Fatalf("retry schedule moved from %+v to %+v while the session waited out its floor", retry, got)
+	}
+
+	// Once the floor elapses, the next pass retries it.
+	h.setVanishedRetry(t, owedIntervalRetry{until: retry.until})
+	h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+	if reads.gets == gets || reads.closedLists == lists {
+		t.Fatalf("the pass after the retry floor did not retry the session: gets=%d closed lists=%d", reads.gets, reads.closedLists)
+	}
+	if got := h.vanishedRetry(t); got.next.IsZero() || got.until != retry.until {
+		t.Fatalf("retry schedule after the retry = %+v, want a new floor and the deadline %v", got, retry.until)
+	}
+}
+
+// TestEmitDueComputeFactsStopsRetryingClosedSessionAfterWindow bounds the
+// retries above. Once closedUsageRetryWindow has passed since its close, a closed
+// session whose accounting has not settled is dropped after one more attempt,
+// and no later pass reads it.
+func TestEmitDueComputeFactsStopsRetryingClosedSessionAfterWindow(t *testing.T) {
+	t.Run("window elapses while retained", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		closedAt := time.Now().UTC().Truncate(time.Second)
+		h.closeDrained(t, closedAt)
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		retry := h.vanishedRetry(t)
+		if want := closedAt.Add(closedUsageRetryWindow); !retry.until.Equal(want) {
+			t.Fatalf("retry deadline = %v, want %v: the window runs from the recorded close", retry.until, want)
+		}
+
+		h.setVanishedRetry(t, owedIntervalRetry{until: time.Now().Add(-time.Second)})
+		reads := &sessionReadCountingStore{Store: h.store, id: h.beadID}
+		h.cr.cs.cityBeadStore = reads
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if reads.gets == 0 {
+			t.Fatal("the pass after the window did not make its last attempt")
+		}
+		if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+			t.Fatalf("session %s is still tracked past its retry window", h.beadID)
+		}
+
+		gets, lists := reads.gets, reads.closedLists
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if reads.gets != gets || reads.closedLists != lists {
+			t.Fatalf("a pass after the drop read the session: gets %d -> %d, closed lists %d -> %d", gets, reads.gets, lists, reads.closedLists)
+		}
+	})
+
+	t.Run("closed longer ago than the window", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		h.closeDrained(t, time.Now().Add(-closedUsageRetryWindow-time.Minute))
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		if got := kindCount(mustReadFacts(t, h.sinkPath), usage.KindCompute); got != 1 {
+			t.Fatalf("compute facts = %d, want 1: the one attempt still bills the interval", got)
+		}
+		if _, retained := h.cr.owingIntervals[h.beadID]; retained {
+			t.Fatalf("session %s closed before the retry window was retained", h.beadID)
+		}
+	})
+
+	t.Run("no recorded close time", func(t *testing.T) {
+		h := newUnsettledClaudeHarness(t)
+		h.closeDrained(t, time.Time{})
+		h.cr.cs.cityBeadStore = &closeTimeHidingStore{Store: h.store, id: h.beadID}
+		before := time.Now()
+		h.cr.emitDueComputeFacts(context.Background(), []session.Info{}, false)
+		after := time.Now()
+		retry := h.vanishedRetry(t)
+		if retry.until.Before(before.Add(closedUsageRetryWindow)) || retry.until.After(after.Add(closedUsageRetryWindow)) {
+			t.Fatalf("retry deadline = %v, want closedUsageRetryWindow after the first attempt (%v to %v)",
+				retry.until, before.Add(closedUsageRetryWindow), after.Add(closedUsageRetryWindow))
+		}
+	})
 }

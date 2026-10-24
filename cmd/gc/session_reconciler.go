@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -7730,7 +7731,8 @@ func relaunchAgentForLaunchDrift(
 	// provider-independent — any concurrent live drift is re-applied idempotently by
 	// the live-drift clause on the next tick (a redundant SessionLive re-apply is
 	// harmless; a missed one self-heals).
-	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown)
+	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown,
+		sessionpkg.LaunchTaskWorkDirPatch(preparedInfo, prepared.launchTaskWorkDir))
 	if rebaseErr != nil {
 		// The agent is already relaunched; do not trigger a second restart. The
 		// stale Core baseline self-corrects on a later rebaseline tick. Fold the
@@ -7802,10 +7804,14 @@ func relaunchAbortResidueFold(info sessionpkg.Info, sessFront *sessionpkg.Store,
 // NOT fingerprint inputs, so the baseline must be the durable-config hashes the
 // next tick's sessionCoreConfigForHashInfo comparison will reproduce.
 //
+// launch records the task work_dir the relaunch respawned the agent in
+// (LaunchTaskWorkDirPatch), in the same write: the agent runs in the prepared
+// work dir from here on.
+//
 // Returns the mirrored patch on success so the caller can fold it onto the typed
 // snapshot via ApplyPatch. Returns (nil, nil) when there is nothing to do (empty
 // id / nil front-door), (nil, err) on any failure.
-func rebaselineLaunchDriftHashesWithBatch(id string, sessFront *sessionpkg.Store, coreHash, provisionHash, launchHash string, breakdown runtime.BreakdownV1) (map[string]string, error) {
+func rebaselineLaunchDriftHashesWithBatch(id string, sessFront *sessionpkg.Store, coreHash, provisionHash, launchHash string, breakdown runtime.BreakdownV1, launch sessionpkg.MetadataPatch) (map[string]string, error) {
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
@@ -7819,6 +7825,7 @@ func rebaselineLaunchDriftHashesWithBatch(id string, sessFront *sessionpkg.Store
 		"started_launch_hash":    launchHash,
 		"core_hash_breakdown":    string(breakdownJSON),
 	}
+	maps.Copy(patch, launch)
 	if err := sessFront.ApplyPatch(id, patch); err != nil {
 		return nil, fmt.Errorf("rebaselining launch-drift hashes: %w", err)
 	}

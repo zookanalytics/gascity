@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // setupLaunchDriftResumeEnv builds a reconciler env whose alive "worker" session
@@ -189,6 +190,29 @@ func TestReconcileSessionBeads_LaunchDriftRebaselineNoReDrift(t *testing.T) {
 	b2, _ := env.store.Get(session.ID)
 	if got := b2.Metadata["started_config_hash"]; got != wantCore {
 		t.Errorf("tick 2 started_config_hash = %q, want stable %q", got, wantCore)
+	}
+}
+
+// TestReconcileSessionBeads_LaunchDriftRelaunchRecordsItsLaunchWorkDir pins
+// that a launch-only drift relaunch records, with its baseline, the work dir
+// it respawns the agent in. The seat holds no work, so the relaunch runs the
+// agent in its own work dir and clears the task work_dir an earlier start
+// recorded.
+func TestReconcileSessionBeads_LaunchDriftRelaunchRecordsItsLaunchWorkDir(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	_, session := seedLaunchDriftResumeSession(t, env, forkClaude(), map[string]string{sessionpkg.LaunchTaskWorkDirMetadataKey: "/wt/earlier"})
+
+	env.reconcile([]beads.Bead{session})
+
+	if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+		t.Fatalf("Relaunch calls = %d, want 1 (launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+	}
+	b, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Metadata[sessionpkg.LaunchTaskWorkDirMetadataKey]; got != "" {
+		t.Fatalf("launch_task_work_dir after the relaunch = %q, want cleared: the agent now runs in its own work dir", got)
 	}
 }
 

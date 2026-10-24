@@ -65,10 +65,11 @@ func verbCall(ctx context.Context, c txCaps, in verbPass) (*startTicket, error) 
 
 // prepareAdoption is the verb section's Probe: legacy's prepare of the
 // expected row, read-only, when the fresh read may commit it (a creating
-// row whose runtime is alive and Current), for the commit's hashes, with the
-// row's transcript probed as legacy's adoption reads it (SESS-542: a launch
-// that already created its conversation is no first start); nothing
-// otherwise.
+// row whose runtime is alive and Current), for the commit's hashes, in the
+// work dir its start recorded launching the runtime in (recordedLaunchWorkDir)
+// with the row's transcript probed there, as legacy's adoption reads it
+// (SESS-542: a launch that already created its conversation is no first
+// start); nothing otherwise.
 func prepareAdoption(_ context.Context, r effectReads, v txView) (*preparedStart, error) {
 	if v.RT == nil || !v.RT.Alive() || !creating(v.Row) || compareIdentity(v.Row, v.RT.Identity) != identityCurrent {
 		return nil, nil
@@ -77,20 +78,16 @@ func prepareAdoption(_ context.Context, r effectReads, v txView) (*preparedStart
 	if !ok || res.Err != nil {
 		return nil, errTemplateUnresolved
 	}
-	repaired := foldInfo(v.Row, concretePoolWorkDirRepairPatch(startCandidate{info: v.Row, tp: res.TP}, v.World.CityPath, v.World.Env.Cfg)) // the dir prepare launches in
-	return prepareRow(r, v.World, v.Row, res.TP, transcriptOf(r, v.World, repaired, res.TP))
+	repaired := foldInfo(v.Row, concretePoolWorkDirRepairPatch(startCandidate{info: v.Row, tp: res.TP}, v.World.CityPath, v.World.Env.Cfg))
+	launch := recordedLaunchWorkDir(repaired, v.World.CityPath, res.TP.WorkDir)
+	return prepareRow(r, v.World, v.Row, res.TP, launch, transcriptIn(v.World, repaired, res.TP, launch.dir))
 }
 
-// transcriptOf is the state of row's session key's transcript in the work
-// dir its launch runs in (S-1), read-only: unknown with no key, no work dir
-// or no probe.
-func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) sessTranscriptState {
+// transcriptIn is the state of row's session key's transcript in dir,
+// read-only: unknown with no key, no dir or no probe.
+func transcriptIn(w *World, row session.Info, tp TemplateParams, dir string) sessTranscriptState {
 	sk := strings.TrimSpace(row.SessionKey)
-	if sk == "" {
-		return sessTranscriptUnknown
-	}
-	dir := launchWorkDir(r, w, row, tp)
-	if dir == "" {
+	if sk == "" || dir == "" {
 		return sessTranscriptUnknown
 	}
 	switch present, probeable := staleResumeKeyProbe(launchTranscriptRoots(w.Env.Cfg, tp), sessionTranscriptProvider(tp.ResolvedProvider, row), dir, sk); {
@@ -102,29 +99,27 @@ func transcriptOf(r effectReads, w *World, row session.Info, tp TemplateParams) 
 	return sessTranscriptAbsent
 }
 
-// launchWorkDir is the work dir prepare launches row in: the task's, the
-// row's, the template's.
-func launchWorkDir(r effectReads, w *World, row session.Info, tp TemplateParams) string {
-	if dir := resolvePreparedTaskWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w)); dir != "" {
-		return dir
-	}
-	if dir := preparedStartSessionWorkDir(row); dir != "" {
-		return resolveWorkDirAgainstCity(w.CityPath, dir)
-	}
-	return tp.WorkDir
+// launchWorkDirChoiceOf is the work dir a start launches row in
+// (preparedLaunchWorkDir): the task's unless it is refused, the row's, the
+// template's; errTaskWorkDirUnchecked defers the start. The effect chooses
+// once, probes the row's transcript there, and hands the choice to the
+// prepare that launches the row (prepareRow), so the probe and the launch
+// cannot disagree. That prepare logs a refusal; this read does not.
+func launchWorkDirChoiceOf(r effectReads, w *World, row session.Info, tp TemplateParams) (launchWorkDirChoice, error) {
+	return preparedLaunchWorkDir(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), tp.WorkDir)
 }
 
 // errTemplateUnresolved: the pass's memo holds no template for the row.
 var errTemplateUnresolved = errors.New("v2 start: the row's template is unresolved")
 
-// prepareRow is legacy's prepare of row as template tp with the effect's
-// transcript state (S-1) through the read-only stores, with legacy's task
-// work dir resolver over the pass's assigned work: it writes nothing.
-func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, transcript sessTranscriptState) (*preparedStart, error) {
+// prepareRow is legacy's prepare of row as template tp, launched in the work
+// dir the effect chose or read (launch), with the effect's transcript state
+// there (S-1), through the read-only stores: it writes nothing.
+func prepareRow(r effectReads, w *World, row session.Info, tp TemplateParams, launch launchWorkDirChoice, transcript sessTranscriptState) (*preparedStart, error) {
 	// The claimed-work probe reads the seat's work through the city work
 	// legs (NEW2-1), never the sessions store.
 	sources := dispatchOptionSources{claimedWork: reachableClaimedWorkProbe(seatWorkFor(r.legs, releaseScope(row, w.Env.Cfg)))}
-	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, taskWorkDirs(w), sources, &transcript)
+	prepared, _, err := buildPreparedStartWithTranscript(startCandidate{info: row, tp: tp}, w.CityPath, w.Env.Cfg, r.city, nil, sources, &launch, &transcript)
 	return prepared, err
 }
 

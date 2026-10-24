@@ -27,6 +27,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -1322,6 +1323,757 @@ func TestPrepareStartCandidate_UsesTriggerBeadWorkDirBeforeClaim(t *testing.T) {
 	}
 	if prepared.cfg.WorkDir != sourceWorkDir {
 		t.Fatalf("prepared.cfg.WorkDir = %q, want trigger source work dir %q", prepared.cfg.WorkDir, sourceWorkDir)
+	}
+}
+
+// foreignWorktreeFixture lays out the second-writer hazard. Another agent's
+// open session works in otherHome, and otherWorktree is one of that agent's
+// per-bead worktrees, created inside its own work dir the way the core pack's
+// workspace-setup step does ($(pwd)/worktrees/<bead>). The launching session
+// belongs to a pooled agent whose own work dir is ownHome. A bead keeps the
+// work_dir its creator stamped when it moves to another agent, so every route
+// that resolves a task work_dir can hand the launching session otherWorktree.
+type foreignWorktreeFixture struct {
+	store         *beads.MemStore
+	cityPath      string
+	ownHome       string
+	otherHome     string
+	otherWorktree string
+	session       beads.Bead
+	otherSession  beads.Bead
+}
+
+func newForeignWorktreeFixture(t *testing.T) *foreignWorktreeFixture {
+	t.Helper()
+	cityPath := t.TempDir()
+	worktrees := filepath.Join(cityPath, ".gc", "worktrees", "frontend")
+	f := &foreignWorktreeFixture{
+		store:     beads.NewMemStore(),
+		cityPath:  cityPath,
+		ownHome:   filepath.Join(worktrees, "worker", "worker-1"),
+		otherHome: filepath.Join(worktrees, "builder", "builder-2"),
+	}
+	f.otherWorktree = filepath.Join(f.otherHome, "worktrees", "fe-feature")
+	for _, dir := range []string{f.ownHome, f.otherWorktree} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var err error
+	f.session, err = f.store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":                        "worker",
+			"session_name":                    "custom-worker-1",
+			"pool_slot":                       "1",
+			beadmeta.WorkDirMetadataKey:       f.ownHome,
+			beadmeta.LegacyWorkDirMetadataKey: f.ownHome,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.otherSession, err = f.store.Create(beads.Bead{
+		Title:  "builder",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/builder-2"},
+		Metadata: map[string]string{
+			"template":                        "builder",
+			"session_name":                    "custom-builder-2",
+			"state":                           "active",
+			beadmeta.WorkDirMetadataKey:       f.otherHome,
+			beadmeta.LegacyWorkDirMetadataKey: f.otherHome,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+// createDrainItemRoot creates a drain source member whose work_dir is
+// memberWorkDir, and the drain item root naming it in gc.drain_member_id, as
+// stampDrainItemRecipe materializes it.
+func (f *foreignWorktreeFixture) createDrainItemRoot(t *testing.T, memberWorkDir string) beads.Bead {
+	t.Helper()
+	member, err := f.store.Create(beads.Bead{
+		Title:    "drain source member",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.LegacyWorkDirMetadataKey: memberWorkDir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := f.store.Create(beads.Bead{
+		Title:    "drain item workflow",
+		Type:     "task",
+		Metadata: map[string]string{beadmeta.DrainMemberIDMetadataKey: member.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// createInProgressBead creates a bead held in progress by assignee, the state
+// claimed work is in when its holder's session starts.
+func (f *foreignWorktreeFixture) createInProgressBead(t *testing.T, assignee string, metadata map[string]string) beads.Bead {
+	t.Helper()
+	bead, err := f.store.Create(beads.Bead{Title: "claimed work", Type: "task", Metadata: metadata})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	if err := f.store.Update(bead.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	bead, err = f.store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bead
+}
+
+// candidate is the launching session's start candidate, read from the store
+// when it is called, so it carries metadata a test set before the call.
+func (f *foreignWorktreeFixture) candidate(t *testing.T) startCandidate {
+	t.Helper()
+	session, err := f.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      f.ownHome,
+		},
+	}
+}
+
+// foreignWorktreeCity is the city both of the fixture's sessions belong to.
+func foreignWorktreeCity() *config.City {
+	return &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+			{Name: "builder", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}
+}
+
+// prepare runs start preparation for the launching session through
+// prepareStartCandidateForCity, the call executePlannedStartsTraced makes.
+func (f *foreignWorktreeFixture) prepare(t *testing.T, store beads.Store, workDirResolver taskWorkDirResolver) *preparedStart {
+	t.Helper()
+	prepared, err := prepareStartCandidateForCity(f.candidate(t), "", "", foreignWorktreeCity(), nil, store, &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}, io.Discard, workDirResolver, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	return prepared
+}
+
+func (f *foreignWorktreeFixture) requireOwnHome(t *testing.T, prepared *preparedStart) {
+	t.Helper()
+	if prepared.cfg.WorkDir != f.ownHome {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want the session's own work dir %q: %q is inside open session %s's work dir %q",
+			prepared.cfg.WorkDir, f.ownHome, f.otherWorktree, f.otherSession.ID, f.otherHome)
+	}
+}
+
+// createBuilderSession creates another builder session working in workDir, the
+// way a replacement worker for the builder's slot starts there.
+func (f *foreignWorktreeFixture) createBuilderSession(t *testing.T, sessionName, workDir string) beads.Bead {
+	t.Helper()
+	session, err := f.store.Create(beads.Bead{
+		Title:  "builder",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/" + sessionName},
+		Metadata: map[string]string{
+			"template":                        "builder",
+			"session_name":                    sessionName,
+			beadmeta.WorkDirMetadataKey:       workDir,
+			beadmeta.LegacyWorkDirMetadataKey: workDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+// prepareBuilder runs start preparation for a builder session created by
+// createBuilderSession, through prepareStartCandidateForCity.
+func (f *foreignWorktreeFixture) prepareBuilder(t *testing.T, session beads.Bead, workDir string) *preparedStart {
+	t.Helper()
+	current, err := f.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := startCandidate{
+		info: sessiontest.SeedBead(t, current),
+		tp: TemplateParams{
+			TemplateName: "frontend/builder",
+			SessionName:  current.Metadata["session_name"],
+			WorkDir:      workDir,
+		},
+	}
+	prepared, err := prepareStartCandidateForCity(candidate, "", "", foreignWorktreeCity(), nil, f.store, &clock.Fake{Time: time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	return prepared
+}
+
+// launchRecord is the task work_dir session id records it was launched in.
+func (f *foreignWorktreeFixture) launchRecord(t *testing.T, id string) string {
+	t.Helper()
+	session, err := f.store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session.Metadata[sessionpkg.LaunchTaskWorkDirMetadataKey]
+}
+
+// TestPrepareStartCandidate_RefusesForeignDrainSourceViaTrigger covers the
+// trigger-bead route: the session's trigger is a drain item step whose source
+// member carries another open session's per-bead worktree.
+func TestPrepareStartCandidate_RefusesForeignDrainSourceViaTrigger(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	root := f.createDrainItemRoot(t, f.otherWorktree)
+	trigger, err := f.store.Create(beads.Bead{
+		Title:    "unclaimed drain item step",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+		beadmeta.TriggerBeadStoreRefMetadataKey: "rig:frontend",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+}
+
+// TestPrepareStartCandidate_RefusesForeignDrainSourceViaRoleAssignment covers
+// the shared-template route: a drain item step held in progress under the role
+// name reaches every pooled session of the role through taskWorkDirAssignees,
+// and its source member carries another open session's per-bead worktree.
+func TestPrepareStartCandidate_RefusesForeignDrainSourceViaRoleAssignment(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	root := f.createDrainItemRoot(t, f.otherWorktree)
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID})
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+}
+
+// TestPrepareStartCandidate_RefusesForeignHandedOffWorkDirViaRoleAssignment
+// covers a work bead handed from the agent that built it to another role. It
+// keeps its creator's work_dir, so held in progress under the role it reaches
+// the role's pooled session as a task work_dir with no drain involved. The
+// refusal is logged with the directory and the session that owns it.
+func TestPrepareStartCandidate_RefusesForeignHandedOffWorkDirViaRoleAssignment(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	logged := captureStdLog(t)
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+	if got := logged.String(); !strings.Contains(got, f.otherWorktree) || !strings.Contains(got, f.otherSession.ID) {
+		t.Fatalf("log = %q, want the refused task work_dir %q and its owner session %s", got, f.otherWorktree, f.otherSession.ID)
+	}
+}
+
+// TestPrepareStartCandidate_RefusesForeignStampedDrainItemWorkDir covers the
+// work_dir stampDrainItemRecipe copies from the drain member onto every item
+// step, in both spellings. The reconciler's assigned-work snapshot resolver
+// reads that copy straight off the step, with no drain-source lookup.
+func TestPrepareStartCandidate_RefusesForeignStampedDrainItemWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	step := f.createInProgressBead(t, f.session.ID, map[string]string{
+		beadmeta.WorkDirMetadataKey:       f.otherWorktree,
+		beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree,
+	})
+
+	f.requireOwnHome(t, f.prepare(t, f.store, newAssignedTaskWorkDirResolver("", []beads.Bead{step})))
+}
+
+// TestPrepareStartCandidate_KeepsOwnWorktreeAlongsideOtherOpenSessions is the
+// control for the refusals above: a per-bead worktree inside the session's own
+// work dir stays the launch dir while other sessions are open.
+func TestPrepareStartCandidate_KeepsOwnWorktreeAlongsideOtherOpenSessions(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+	if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+
+	prepared := f.prepare(t, f.store, nil)
+	if prepared.cfg.WorkDir != ownWorktree {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want the session's own per-bead worktree %q", prepared.cfg.WorkDir, ownWorktree)
+	}
+}
+
+// TestPrepareStartCandidate_AllowsDrainSourceUnderSharedRoot keeps a prepared
+// drain worktree as the launch dir while a session sits at the city root. A
+// session whose work dir also contains the launching session's own work dir is
+// a shared root and owns nothing on that basis.
+func TestPrepareStartCandidate_AllowsDrainSourceUnderSharedRoot(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if _, err := f.store.Create(beads.Bead{
+		Title:  "city root session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:overseer"},
+		Metadata: map[string]string{
+			"template":                        "overseer",
+			"session_name":                    "overseer",
+			"state":                           "active",
+			beadmeta.WorkDirMetadataKey:       f.cityPath,
+			beadmeta.LegacyWorkDirMetadataKey: f.cityPath,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sourceWorktree := filepath.Join(f.cityPath, ".gc", "worktrees", "frontend", "fe-item")
+	if err := os.MkdirAll(sourceWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	root := f.createDrainItemRoot(t, sourceWorktree)
+	f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID})
+
+	prepared := f.prepare(t, f.store, nil)
+	if prepared.cfg.WorkDir != sourceWorktree {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want the prepared drain source worktree %q", prepared.cfg.WorkDir, sourceWorktree)
+	}
+}
+
+// TestPrepareStartCandidate_AllowsHandedOffWorkDirAfterOwnerSessionCloses pins
+// that ownership follows the owner's open session. A closed session writes
+// nothing, so its old per-bead worktree is a launch dir again.
+func TestPrepareStartCandidate_AllowsHandedOffWorkDirAfterOwnerSessionCloses(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared := f.prepare(t, f.store, nil)
+	if prepared.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want the handed-off work dir %q once its owner's session is closed", prepared.cfg.WorkDir, f.otherWorktree)
+	}
+}
+
+// sessionListFailingStore fails every list of session beads, so nothing can
+// show which session owns a directory.
+type sessionListFailingStore struct {
+	*beads.MemStore
+}
+
+func (s *sessionListFailingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	if query.Type == sessionBeadType || query.Label == sessionBeadLabel {
+		return nil, errors.New("session list unavailable")
+	}
+	return s.MemStore.List(query)
+}
+
+// TestPrepareStartCandidate_DefersTaskWorkDirStartWhenSessionsUnreadable
+// fails closed without moving the session. When the open sessions cannot be
+// read, nothing shows the task work_dir is clear of every other session's
+// checkout, and the session's own work dir is not where its task is, so
+// preparation returns errTaskWorkDirUnchecked and nothing launches until a
+// later pass reads them. That holds for a worker resuming its own per-bead
+// worktree too: a merge session may have been started in it.
+func TestPrepareStartCandidate_DefersTaskWorkDirStartWhenSessionsUnreadable(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+	if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+
+	prepared, err := prepareStartCandidateForCity(f.candidate(t), "", "", foreignWorktreeCity(), nil, &sessionListFailingStore{MemStore: f.store}, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+	if !errors.Is(err, errTaskWorkDirUnchecked) || prepared != nil {
+		t.Fatalf("prepareStartCandidateForCity = (%v, %v), want no start and errTaskWorkDirUnchecked", prepared, err)
+	}
+	if !strings.Contains(err.Error(), ownWorktree) || !strings.Contains(err.Error(), "session list unavailable") {
+		t.Fatalf("error %q, want the task work_dir %q and the session list error", err, ownWorktree)
+	}
+	if got := f.launchRecord(t, f.session.ID); got != "" {
+		t.Fatalf("launch_task_work_dir = %q, want nothing recorded for a start that launched nowhere", got)
+	}
+}
+
+// TestPrepareStartCandidate_RecordedDirsMakeNoSharedRoot pins that only the
+// candidate's configured work dir decides a shared root. Its worker_dir names
+// another session's per-bead worktree, as a launch into that worktree could
+// have left it, and that session's work dir contains the worktree. The
+// session's work dir is still its checkout, so the candidate is refused the
+// worktree.
+func TestPrepareStartCandidate_RecordedDirsMakeNoSharedRoot(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.SetMetadata(f.session.ID, beadmeta.WorkerDirMetadataKey, f.otherWorktree); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+}
+
+// TestPreparedTaskWorkDirRefusal_RefusesARelativeTaskWorkDir pins the guard
+// failing closed on a task work_dir no city path anchors: nothing compares it
+// with the sessions' directories, so the candidate is refused it. Anchored to
+// the city, the same work_dir is checked as usual.
+func TestPreparedTaskWorkDirRefusal_RefusesARelativeTaskWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	candidate := f.candidate(t)
+	rel, err := filepath.Rel(f.cityPath, f.otherWorktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusal, err := preparedTaskWorkDirRefusal(candidate, "", f.ownHome, rel, f.store); err != nil || !strings.Contains(refusal, "relative") {
+		t.Fatalf("with no city path: refusal %q (err %v), want %q refused as relative", refusal, err, rel)
+	}
+	if refusal, err := preparedTaskWorkDirRefusal(candidate, f.cityPath, f.ownHome, rel, f.store); err != nil || !strings.Contains(refusal, f.otherSession.ID) {
+		t.Fatalf("anchored to the city: refusal %q (err %v), want it refused as session %s's checkout", refusal, err, f.otherSession.ID)
+	}
+}
+
+// TestPreparedTaskWorkDirOwner covers which recorded session directories make
+// a task work_dir another session's checkout.
+func TestPreparedTaskWorkDirOwner(t *testing.T) {
+	root := t.TempDir()
+	own := filepath.Join(root, "worktrees", "worker-1")
+	other := filepath.Join(root, "worktrees", "builder-2")
+	session := func(id, workDir string) sessionpkg.Info {
+		return sessionpkg.Info{ID: id, WorkDir: workDir, WorkDirCanonical: workDir}
+	}
+	startedIn := func(id, workDir, taskWorkDir string) sessionpkg.Info {
+		info := session(id, workDir)
+		info.LaunchTaskWorkDir = taskWorkDir
+		return info
+	}
+	tests := []struct {
+		name      string
+		target    string
+		sessions  []sessionpkg.Info
+		wantOwner string
+		wantDir   string
+	}{
+		{
+			name:      "inside another session's work dir",
+			target:    filepath.Join(other, "worktrees", "fe-1"),
+			sessions:  []sessionpkg.Info{session("self", own), session("builder", other)},
+			wantOwner: "builder",
+			wantDir:   other,
+		},
+		{
+			name:      "another session's work dir itself",
+			target:    other,
+			sessions:  []sessionpkg.Info{session("builder", other)},
+			wantOwner: "builder",
+			wantDir:   other,
+		},
+		{
+			name:     "inside the candidate's own work dir",
+			target:   filepath.Join(own, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{session("self", own), session("builder", other)},
+		},
+		{
+			name:     "another session sharing the candidate's work dir",
+			target:   filepath.Join(own, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{session("previous", own)},
+		},
+		{
+			name:     "a session at a root that contains the candidate's work dir",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{session("city", root)},
+		},
+		{
+			name:      "a private session dir nested inside the candidate's work dir",
+			target:    filepath.Join(own, "nested", "worktrees", "fe-1"),
+			sessions:  []sessionpkg.Info{session("nested", filepath.Join(own, "nested"))},
+			wantOwner: "nested",
+			wantDir:   filepath.Join(own, "nested"),
+		},
+		{
+			name:     "a relative recorded dir with no city to anchor it",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{session("relative", "worktrees/builder-2")},
+		},
+		{
+			name:     "the candidate's own session record",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{session("self", other)},
+		},
+		{
+			name:      "the task work_dir another session was started in",
+			target:    filepath.Join(own, "worktrees", "fe-1"),
+			sessions:  []sessionpkg.Info{startedIn("merger", other, filepath.Join(own, "worktrees", "fe-1"))},
+			wantOwner: "merger",
+			wantDir:   filepath.Join(own, "worktrees", "fe-1"),
+		},
+		{
+			name:      "inside the task work_dir another session was started in",
+			target:    filepath.Join(own, "worktrees", "fe-1", "sub"),
+			sessions:  []sessionpkg.Info{startedIn("merger", other, filepath.Join(own, "worktrees", "fe-1"))},
+			wantOwner: "merger",
+			wantDir:   filepath.Join(own, "worktrees", "fe-1"),
+		},
+		{
+			name:     "a session started at a root that contains the candidate's work dir",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{startedIn("city", filepath.Join(root, "overseer"), root)},
+		},
+		{
+			name:     "a closed session",
+			target:   filepath.Join(other, "worktrees", "fe-1"),
+			sessions: []sessionpkg.Info{{ID: "builder", WorkDir: other, WorkDirCanonical: other, Closed: true}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			owner, dir, found := preparedTaskWorkDirOwner("", tt.target, "self", own, tt.sessions)
+			if tt.wantOwner == "" {
+				if found {
+					t.Fatalf("owner = %s (dir %q), want none", owner.ID, dir)
+				}
+				return
+			}
+			if !found || owner.ID != tt.wantOwner {
+				t.Fatalf("owner = %q (found %v), want %q", owner.ID, found, tt.wantOwner)
+			}
+			if !pathutil.SamePath(dir, tt.wantDir) {
+				t.Fatalf("owner dir = %q, want %q", dir, tt.wantDir)
+			}
+		})
+	}
+}
+
+// TestPrepareStartCandidate_RefusesTaskWorkDirAnotherSessionStartedIn covers
+// a handoff, its successful start, and a replacement. The builder that made
+// otherWorktree has closed, so the worker holding its handed-off bead starts
+// there, and the successful start's commit leaves that recorded. A
+// replacement builder, whose own work dir contains otherWorktree, then
+// resolves the same directory from the rework it holds. The worker is working
+// there, so the replacement is refused and starts in its own work dir.
+func TestPrepareStartCandidate_RefusesTaskWorkDirAnotherSessionStartedIn(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	started := f.prepare(t, f.store, nil)
+	if started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("handoff: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+	commit := startCommitPatch(started, started.candidate.info, time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC))
+	if err := f.store.SetMetadataBatch(f.session.ID, commit); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.launchRecord(t, f.session.ID); got != f.otherWorktree {
+		t.Fatalf("after the successful start, launch_task_work_dir = %q, want %q", got, f.otherWorktree)
+	}
+
+	replacement := f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	f.createInProgressBead(t, replacement.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	logged := captureStdLog(t)
+	prepared := f.prepareBuilder(t, replacement, f.otherHome)
+	if prepared.cfg.WorkDir != f.otherHome {
+		t.Fatalf("replacement: prepared.cfg.WorkDir = %q, want its own work dir %q: session %s was started in %q",
+			prepared.cfg.WorkDir, f.otherHome, f.session.ID, f.otherWorktree)
+	}
+	if got := logged.String(); !strings.Contains(got, f.otherWorktree) || !strings.Contains(got, f.session.ID) {
+		t.Fatalf("log = %q, want the refused task work_dir %q and session %s, which works there", got, f.otherWorktree, f.session.ID)
+	}
+}
+
+// TestPrepareStartCandidate_RefusesTaskWorkDirAnotherStartIsLaunchingIn covers
+// two starts into one handed-off worktree before either commits. Start
+// preparation records the task work_dir before the launch, so the second
+// preparation already finds the first session there.
+func TestPrepareStartCandidate_RefusesTaskWorkDirAnotherStartIsLaunchingIn(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if started := f.prepare(t, f.store, nil); started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("first start: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+
+	replacement := f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	f.createInProgressBead(t, replacement.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if prepared := f.prepareBuilder(t, replacement, f.otherHome); prepared.cfg.WorkDir != f.otherHome {
+		t.Fatalf("second start: prepared.cfg.WorkDir = %q, want its own work dir %q while session %s is launching in %q",
+			prepared.cfg.WorkDir, f.otherHome, f.session.ID, f.otherWorktree)
+	}
+}
+
+// TestPrepareStartCandidate_OwnLaunchRecordMakesNoSharedRoot pins that the
+// candidate's own recorded task work_dir is not one of its own dirs. The
+// candidate was started in otherWorktree before and still records it, and the
+// builder whose work dir contains that worktree is open. The builder's work
+// dir is its checkout, not a shared root, so the candidate is refused.
+func TestPrepareStartCandidate_OwnLaunchRecordMakesNoSharedRoot(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.SetMetadata(f.session.ID, sessionpkg.LaunchTaskWorkDirMetadataKey, f.otherWorktree); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+
+	f.requireOwnHome(t, f.prepare(t, f.store, nil))
+}
+
+// TestPrepareStartCandidate_RecordsTheTaskWorkDirItLaunchesIn pins the record
+// a start leaves: the task work_dir it launches the session in, cleared again
+// by a start in the session's own work dir.
+func TestPrepareStartCandidate_RecordsTheTaskWorkDirItLaunchesIn(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+	if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	task := f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+
+	if prepared := f.prepare(t, f.store, nil); prepared.cfg.WorkDir != ownWorktree || prepared.launchTaskWorkDir != ownWorktree {
+		t.Fatalf("prepared.cfg.WorkDir = %q, launchTaskWorkDir = %q; want the task work_dir %q for both", prepared.cfg.WorkDir, prepared.launchTaskWorkDir, ownWorktree)
+	}
+	if got := f.launchRecord(t, f.session.ID); got != ownWorktree {
+		t.Fatalf("launch_task_work_dir = %q, want %q", got, ownWorktree)
+	}
+
+	if err := f.store.Close(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if prepared := f.prepare(t, f.store, nil); prepared.cfg.WorkDir != f.ownHome || prepared.launchTaskWorkDir != "" {
+		t.Fatalf("with the task closed: prepared.cfg.WorkDir = %q, launchTaskWorkDir = %q; want the own work dir %q and no task work_dir", prepared.cfg.WorkDir, prepared.launchTaskWorkDir, f.ownHome)
+	}
+	if got := f.launchRecord(t, f.session.ID); got != "" {
+		t.Fatalf("after a start in the session's own work dir, launch_task_work_dir = %q, want cleared", got)
+	}
+}
+
+// TestRecoverRunningPendingCreate_KeepsTheLaunchRecordOfTheLiveRuntime covers
+// the heal of a start whose runtime came up in a handed-off worktree while its
+// commit left the claim set. A replacement builder, whose own work dir
+// contains that worktree, opened before the heal, so a start prepared now
+// would refuse the worktree. The heal launches nothing: the runtime still runs
+// where its start recorded, so the record stays, and the replacement is
+// refused the worktree.
+func TestRecoverRunningPendingCreate_KeepsTheLaunchRecordOfTheLiveRuntime(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if started := f.prepare(t, f.store, nil); started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("handoff: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{"state": "active", "pending_create_claim": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	replacement := f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	f.createInProgressBead(t, replacement.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+
+	healing := f.candidate(t)
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 18, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if got := f.launchRecord(t, f.session.ID); got != f.otherWorktree {
+		t.Fatalf("after the heal, launch_task_work_dir = %q, want %q, where the healed runtime runs", got, f.otherWorktree)
+	}
+	if prepared := f.prepareBuilder(t, replacement, f.otherHome); prepared.cfg.WorkDir != f.otherHome {
+		t.Fatalf("replacement: prepared.cfg.WorkDir = %q, want its own work dir %q: session %s runs in %q",
+			prepared.cfg.WorkDir, f.otherHome, f.session.ID, f.otherWorktree)
+	}
+}
+
+// healProbe stubs the transcript probe for a heal: it records each directory
+// probed and reports the keyed transcript present only in present.
+func healProbe(t *testing.T, present string) *[]string {
+	t.Helper()
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) {
+		probed = append(probed, dir)
+		return dir == present, true
+	}
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	return &probed
+}
+
+// TestRecoverRunningPendingCreate_PreparesWhereTheRuntimeWasLaunched covers
+// the heal's transcript probe. The worker's start launched it in a handed-off
+// worktree and recorded that, and then a replacement builder opened in the
+// directory holding the worktree, so a launch dir chosen now would be the
+// worker's own. The heal launches nothing: it prepares where the runtime runs,
+// as its start recorded, so the probe finds the conversation there and the
+// committed key is kept.
+func TestRecoverRunningPendingCreate_PreparesWhereTheRuntimeWasLaunched(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	if started := f.prepare(t, f.store, nil); started.cfg.WorkDir != f.otherWorktree {
+		t.Fatalf("handoff: prepared.cfg.WorkDir = %q, want the handed-off work dir %q", started.cfg.WorkDir, f.otherWorktree)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		"state": "active", "pending_create_claim": "true", "session_key": "k-1", "started_config_hash": "h-earlier",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	probed := healProbe(t, f.otherWorktree)
+
+	healing := f.candidate(t)
+	healing.tp.ResolvedProvider = claudeResumeProvider()
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if len(*probed) == 0 || (*probed)[0] != f.otherWorktree {
+		t.Fatalf("the heal probed %v, want the recorded launch dir %q", *probed, f.otherWorktree)
+	}
+	healed, err := f.store.Get(f.session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := healed.Metadata["session_key"]; got != "k-1" {
+		t.Fatalf("session_key = %q after the heal, want the running conversation's k-1 kept", got)
+	}
+}
+
+// TestRecoverRunningPendingCreate_AnchorsTheWorkDirToTheCity covers the heal's
+// city path: a session work dir recorded city-relative is prepared under the
+// city, never under the controller's working directory.
+func TestRecoverRunningPendingCreate_AnchorsTheWorkDirToTheCity(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	rel, err := filepath.Rel(f.cityPath, f.ownHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+		"state": "active", "pending_create_claim": "true", "session_key": "k-1",
+		beadmeta.WorkDirMetadataKey: rel, beadmeta.LegacyWorkDirMetadataKey: rel,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	probed := healProbe(t, f.ownHome)
+
+	healing := f.candidate(t)
+	healing.tp.ResolvedProvider = claudeResumeProvider()
+	if ok, _ := recoverRunningPendingCreate(f.cityPath, healing.info, healing.tp, foreignWorktreeCity(), f.store, nil, &clock.Fake{Time: time.Date(2026, 10, 19, 12, 0, 1, 0, time.UTC)}, io.Discard, nil); !ok {
+		t.Fatal("recoverRunningPendingCreate returned false, want the heal persisted")
+	}
+	if len(*probed) == 0 || (*probed)[0] != f.ownHome {
+		t.Fatalf("the heal probed %v, want %q, the recorded %q under the city", *probed, f.ownHome, rel)
 	}
 }
 
