@@ -206,6 +206,7 @@ func buildRecipeApplyPlan(recipe *formula.Recipe, opts Options) (*beads.GraphApp
 				}
 				node.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			node.Labels = appendMissingLabels(node.Labels, opts.RootLabels)
 			if len(vars) > 0 {
 				if node.Metadata == nil {
 					node.Metadata = make(map[string]string, len(vars))
