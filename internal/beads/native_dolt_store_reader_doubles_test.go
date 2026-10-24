@@ -72,7 +72,11 @@ func (r rawIssueReader) List(ctx context.Context, req issueops.ListRequest) (iss
 		CreatedAfter:        req.CreatedAfter,
 		IncludeDependencies: true,
 	}
-	if req.Status != "" {
+	if parts := strings.Split(req.Status, ","); len(parts) > 1 {
+		for _, part := range parts {
+			filter.Statuses = append(filter.Statuses, beadslib.Status(part))
+		}
+	} else if req.Status != "" {
 		status := beadslib.Status(req.Status)
 		filter.Status = &status
 	} else if !req.AllFlag {

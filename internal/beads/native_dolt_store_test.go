@@ -297,9 +297,11 @@ func TestNativeDoltStoreListStatusOpenMatchesOpenNormalizedUpstreamStatuses(t *t
 		t.Fatalf("List: %v", err)
 	}
 
+	// gc-review holds a custom status, which the pushed status set does not
+	// name (nativeListOpenStatuses), so the listing does not return it.
 	wantIDs := map[string]bool{
 		"gc-open": true, "gc-blocked": true, "gc-deferred": true,
-		"gc-pinned": true, "gc-hooked": true, "gc-review": true,
+		"gc-pinned": true, "gc-hooked": true,
 	}
 	if len(got) != len(wantIDs) {
 		t.Fatalf("List(Status: open) len = %d, want %d; got %+v", len(got), len(wantIDs), got)
