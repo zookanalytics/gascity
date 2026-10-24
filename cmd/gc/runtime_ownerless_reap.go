@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -270,15 +271,27 @@ type ownerLookup struct {
 // every one answers beads.ErrNotFound. A store that errors, a lookup missing
 // a store, or no store at all proves nothing, so the owner is not missing.
 func (l ownerLookup) notFound(ownerID string) bool {
+	missing, _ := l.notFoundUnlessAbandoned(nil, ownerID) // a nil context is never abandoned
+	return missing
+}
+
+// notFoundUnlessAbandoned is notFound for the doctor's check: it asks ctx
+// before each store's read, and once the doctor runner has abandoned the
+// check it reads no further store and returns doctor.ErrCheckAbandoned, so
+// only a read already in flight finishes.
+func (l ownerLookup) notFoundUnlessAbandoned(ctx *doctor.CheckContext, ownerID string) (bool, error) {
 	if l.err != nil || len(l.stores) == 0 {
-		return false
+		return false, nil
 	}
 	for _, store := range l.stores {
+		if ctx.Canceled() {
+			return false, doctor.ErrCheckAbandoned
+		}
 		if _, err := beads.HandlesFor(store).Live.Get(ownerID); !errors.Is(err, beads.ErrNotFound) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 // sessionOwnerLookup is the lookup over cityPath's session plan: sessions
@@ -374,14 +387,20 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 // ownerlessRuntimeFindings lists the runtimes sp lists for cityPath that no
 // row owns: no readable GC_SESSION_ID, or one no session store holds
 // (owners), each with why the tick leaves it (or that it reaps it). The
-// doctor's finding.
-func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
+// doctor's finding. Once the doctor runner abandons the check (ctx), it starts
+// no further runtime, owner store read or classification, so only the one
+// under way finishes, and it returns what it found with
+// doctor.ErrCheckAbandoned.
+func ownerlessRuntimeFindings(ctx *doctor.CheckContext, owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
 	names, err := sp.ListRunning("")
 	if err != nil && !runtime.IsPartialListError(err) {
 		return nil, err
 	}
 	var findings []string
 	for _, name := range slices.Sorted(slices.Values(names)) {
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
+		}
 		id, idErr := sp.GetMeta(name, "GC_SESSION_ID")
 		id = strings.TrimSpace(id)
 		switch {
@@ -391,8 +410,16 @@ func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath 
 		case id == "":
 			findings = append(findings, fmt.Sprintf("%s: no GC_SESSION_ID; no owner can be proven", name))
 			continue
-		case !owners.notFound(id):
+		}
+		missing, lookupErr := owners.notFoundUnlessAbandoned(ctx, id)
+		if lookupErr != nil {
+			return findings, lookupErr
+		}
+		if !missing {
 			continue
+		}
+		if ctx.Canceled() {
+			return findings, doctor.ErrCheckAbandoned
 		}
 		v := classifyOwnerlessRuntime(sp, cityPath, name, id, now, grace)
 		why := v.reason

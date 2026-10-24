@@ -63,8 +63,9 @@ func (c *v2SessionMigrationCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (c *v2SessionMigrationCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check.
-func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+// Run implements doctor.Check. It stops reading legs once the doctor runner
+// abandons the check, closing the ones it no longer reads.
+func (c *v2SessionMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	var rows []session.Info
 	var details []string
 	seen, notChecked, faulted := map[string]bool{}, 0, 0
@@ -77,6 +78,15 @@ func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 				cause = "open failed"
 			}
 			details = append(details, fmt.Sprintf("leg %s: not checked (%s): %s", leg.ref, cause, leg.notChecked))
+			continue
+		}
+		if ctx.Canceled() {
+			// An unread leg may hide a row v2 refuses, so it grades as a
+			// fault, the way a failed read does.
+			_ = closeBeadStoreHandle(leg.store)
+			notChecked++
+			faulted++
+			details = append(details, fmt.Sprintf("leg %s: not checked: %v", leg.ref, doctor.ErrCheckAbandoned))
 			continue
 		}
 		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})

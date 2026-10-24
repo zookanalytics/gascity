@@ -113,7 +113,7 @@ func TestDoctorDemandSweepReadsClosedNamedSessionsFromTheSessionsStore(t *testin
 				return openCityStoreAt(path)
 			})
 
-			sweep := c.sweep(false, io.Discard)
+			sweep := c.sweep(nil, false, io.Discard)
 			if len(sweep.problems) != 0 {
 				t.Fatalf("sweep problems = %q, want none", sweep.problems)
 			}
