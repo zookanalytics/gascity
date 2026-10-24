@@ -449,7 +449,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	activeTestRoots := opts.ActiveTestRoots
 	if activeTestRoots == nil {
-		activeTestRoots = discoverActiveTestRoots(opts.HomeDir, tempDir)
+		activeTestRoots = discoverActiveTestRoots(opts.HomeDir, tempDir, os.Getenv("GOTMPDIR"))
 	}
 	plan := planOrphanReap(procs, rigPorts, opts.HomeDir, tempDir, activeTestRoots)
 

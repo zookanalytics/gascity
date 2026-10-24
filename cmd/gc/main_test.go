@@ -279,7 +279,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	testTempRootAliveSentinel = sentinel
-	hostTmpRoot, err := adoptPerRunTMPDIR(testTempRoot)
+	hostRoots, err := adoptPerRunTMPDIR(testTempRoot)
 	if err != nil {
 		panic(err)
 	}
@@ -307,7 +307,7 @@ func TestMain(m *testing.M) {
 	if err := tmuxtest.ConfigureProcessEnv(tmuxSocketRoot); err != nil {
 		panic(err)
 	}
-	sweepLegacyCmdGCFixtureDirs(hostTmpRoot)
+	sweepLegacyCmdGCFixtureDirs(hostRoots.tmp)
 	initSharedSlingTestFixtures(testTempRoot)
 
 	gcHome, err := os.MkdirTemp("", pidPrefixedTempPattern(testGCHomeDirPrefix))
@@ -352,7 +352,7 @@ func TestMain(m *testing.M) {
 	// The tests run innermost, under every check below; splitStrictTestingM,
 	// outermost, reads their code apart from the checks' code.
 	tests := &splitStrictTestsM{m: m}
-	doltGuard := newDoltLeakGuardedTestingM(tests, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	doltGuard := newDoltLeakGuardedTestingM(tests, testTempRoot, hostRoots, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	testProcessTeardown = func() {
 		doltGuard.cleanupTemporaryPaths()
 		reapManagedDoltTestProcesses()

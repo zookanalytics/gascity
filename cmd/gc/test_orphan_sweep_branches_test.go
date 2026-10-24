@@ -660,27 +660,29 @@ func TestSweepOrphanAgeFenceBySentinelState(t *testing.T) {
 	}
 }
 
-// TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride is a focused
+// TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride is a focused
 // regression test for the main_test.go TMPDIR bug (ga-lygcyb): os.TempDir()
-// re-reads TMPDIR on every call, so the host root used to find legacy
-// fixture dirs from prior runs must be captured before TMPDIR is overridden
-// to the fresh, empty per-run root — capturing it afterward silently
-// returns the per-run root instead, and every legacy-dir sweep keyed off it
+// re-reads TMPDIR on every call, so the host roots used to find what prior
+// runs left behind must be captured before TMPDIR and GOTMPDIR are overridden
+// to the fresh, empty per-run root — capturing them afterward silently
+// returns the per-run root instead, and every startup sweep keyed off them
 // finds nothing.
-func TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride(t *testing.T) {
+func TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride(t *testing.T) {
 	hostRoot := t.TempDir()
+	hostGoTmp := t.TempDir()
+	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from both host roots
 	t.Setenv("TMPDIR", hostRoot)
-	// adoptPerRunTMPDIR also rewrites GOTMPDIR; restore it when the test ends.
-	t.Setenv("GOTMPDIR", os.Getenv("GOTMPDIR"))
-
-	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from hostRoot
+	t.Setenv("GOTMPDIR", hostGoTmp)
 
 	got, err := adoptPerRunTMPDIR(newRoot)
 	if err != nil {
 		t.Fatalf("adoptPerRunTMPDIR: %v", err)
 	}
-	if got != hostRoot {
-		t.Errorf("adoptPerRunTMPDIR(%q) host root = %q, want %q (TMPDIR in effect before the override)", newRoot, got, hostRoot)
+	if got.tmp != hostRoot {
+		t.Errorf("adoptPerRunTMPDIR(%q) host temp root = %q, want %q (TMPDIR in effect before the override)", newRoot, got.tmp, hostRoot)
+	}
+	if got.goTmp != hostGoTmp {
+		t.Errorf("adoptPerRunTMPDIR(%q) host GOTMPDIR = %q, want %q (GOTMPDIR in effect before the override)", newRoot, got.goTmp, hostGoTmp)
 	}
 	if gotEnv := os.Getenv("TMPDIR"); gotEnv != newRoot {
 		t.Errorf("TMPDIR after adoptPerRunTMPDIR = %q, want %q", gotEnv, newRoot)
