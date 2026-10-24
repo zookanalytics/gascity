@@ -255,9 +255,15 @@ go_deps.module_override(
     patches = ["//third_party/patches:dolt_go_serial.patch"],
     path = "github.com/dolthub/dolt/go",
 )
+# Every third_party/patches/beads_*.patch, in name order: the loomington
+# build-optimized.sh applies the same set to the beads tree it builds bd and gc
+# from, so the city's binaries link the beads that CI tests.
 go_deps.module_override(
     patch_strip = 1,
-    patches = ["//third_party/patches:beads_migrations.patch"],
+    patches = [
+        "//third_party/patches:beads_list_two_phase_hydration.patch",
+        "//third_party/patches:beads_migrations.patch",
+    ],
     path = "github.com/steveyegge/beads",
 )
 
