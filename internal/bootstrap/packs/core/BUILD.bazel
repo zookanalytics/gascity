@@ -82,6 +82,7 @@ go_library(
 go_test(
     name = "core_test",
     srcs = [
+        "cascade_nudge_partial_unblock_test.go",
         "cascade_nudge_script_test.go",
         "cross_rig_deps_script_test.go",
         "escalate_script_test.go",
@@ -103,6 +104,7 @@ go_test(
         "//examples/bd",
         "//internal/orders",
         "//internal/testenv",
+        "//internal/testpolicy/shellpipeline",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
