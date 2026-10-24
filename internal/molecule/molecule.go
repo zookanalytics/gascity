@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +47,13 @@ type Options struct {
 	// creation. Used by the convergence loop to prevent duplicate wisps
 	// on crash-retry.
 	IdempotencyKey string
+
+	// RootLabels are added to the root bead's labels atomically with its
+	// creation, after the recipe's own. They carry a label that only the
+	// route instantiating the recipe may write, such as an order dispatch's
+	// order-run label: refuseSessionSteps refuses such a label on any recipe
+	// step, so the owning route passes it here instead.
+	RootLabels []string
 
 	// PriorityOverride forces every created bead to use the given priority.
 	// When nil, each step's compiled priority is used.
@@ -979,6 +987,7 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			if opts.IdempotencyKey != "" {
 				b.Metadata["idempotency_key"] = opts.IdempotencyKey
 			}
+			b.Labels = appendMissingLabels(b.Labels, opts.RootLabels)
 			if graphWorkflow && !recipe.RootOnly {
 				b.Metadata[beadmeta.WorkflowExpandedMetadataKey] = "true"
 			}
@@ -1647,6 +1656,17 @@ func substituteLabels(labels []string, vars map[string]string) []string {
 		out[i] = formula.Substitute(l, vars)
 	}
 	return out
+}
+
+// appendMissingLabels returns labels with each label of extra that it lacks
+// appended, in extra's order.
+func appendMissingLabels(labels, extra []string) []string {
+	for _, label := range extra {
+		if !slices.Contains(labels, label) {
+			labels = append(labels, label)
+		}
+	}
+	return labels
 }
 
 func resolveStepPriority(step formula.RecipeStep, priorityOverride *int) *int {

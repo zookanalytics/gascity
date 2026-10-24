@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3857,6 +3858,60 @@ func TestInstantiateRefusesASessionStep(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), c.want) || len(all) != 0 {
 				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused (%s) with nothing created", graph, c.name, err, len(all), c.want)
 			}
+		}
+	}
+}
+
+// TestInstantiateCreatesTheRootCarryingRootLabels pins Options.RootLabels on
+// the sequential path and the graph-apply path: the root is created carrying
+// them after its own labels, a label the root step already carries is not
+// repeated, no other step gets them, and the recipe is left as it was. An
+// order-run label passes here, although refuseSessionSteps refuses it on a
+// recipe step, because the route instantiating the recipe owns it.
+func TestInstantiateCreatesTheRootCarryingRootLabels(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		prev := IsGraphApplyEnabled()
+		SetGraphApplyEnabled(graph)
+		store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+		recipe := &formula.Recipe{
+			Name: "f",
+			Steps: []formula.RecipeStep{
+				{ID: "f", Title: "F", Type: "task", IsRoot: true, Labels: []string{"own", "seq:7"}},
+				{ID: "f.s", Title: "S", Type: "task"},
+			},
+			Deps: []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
+		}
+		result, err := Instantiate(context.Background(), store, recipe, Options{RootLabels: []string{"order-run:digest", "order:digest", "seq:7"}})
+		SetGraphApplyEnabled(prev)
+		if err != nil {
+			t.Fatalf("graph %v: Instantiate: %v", graph, err)
+		}
+
+		created := make(map[string][]string, 2)
+		if graph {
+			if store.plan == nil {
+				t.Fatalf("graph %v: ApplyGraphPlan was not called", graph)
+			}
+			for _, node := range store.plan.Nodes {
+				created[node.Key] = node.Labels
+			}
+		} else {
+			for step, id := range result.IDMapping {
+				b, err := store.Get(id)
+				if err != nil {
+					t.Fatalf("graph %v: Get(%s): %v", graph, id, err)
+				}
+				created[step] = b.Labels
+			}
+		}
+		if want := []string{"own", "seq:7", "order-run:digest", "order:digest"}; !slices.Equal(created["f"], want) {
+			t.Errorf("graph %v: root labels = %v, want %v", graph, created["f"], want)
+		}
+		if got := created["f.s"]; len(got) != 0 {
+			t.Errorf("graph %v: step labels = %v, want none", graph, got)
+		}
+		if got := recipe.Steps[0].Labels; !slices.Equal(got, []string{"own", "seq:7"}) {
+			t.Errorf("graph %v: recipe root labels = %v after Instantiate, want them unchanged", graph, got)
 		}
 	}
 }
