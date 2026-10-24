@@ -398,6 +398,43 @@ func TestOwnerlessRuntimesDoctorCheckStopsOnceAbandoned(t *testing.T) {
 	}
 }
 
+// TestOwnerlessRuntimeFindingsStopsBetweenOwnerStores: abandoned while it
+// reads the first of three stores for a runtime's owner, the finding reads
+// no other store and leaves the runtime unclassified, so only the read in
+// flight finishes. Unabandoned, it reads every store and classifies it.
+func TestOwnerlessRuntimeFindingsStopsBetweenOwnerStores(t *testing.T) {
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) (*ownerlessCase, []string, error) {
+		c := newOwnerlessCase(t)
+		owners := ownerLookup{stores: []beads.Store{probe.wrap(c.store), probe.wrap(beads.NewMemStore()), probe.wrap(beads.NewMemStore())}}
+		findings, err := ownerlessRuntimeFindings(ctx, owners, c.sp, c.city, ownerlessT0, time.Minute)
+		return c, findings, err
+	}
+
+	full := newDoctorAbandonProbe()
+	c, findings, err := run(full, &doctor.CheckContext{})
+	if err != nil || len(findings) != 1 || !strings.Contains(findings[0], "named-1: session bead gc-gone not found (dead") {
+		t.Fatalf("unabandoned findings %q, err %v; want named-1 named dead", findings, err)
+	}
+	if got := full.reads.Load(); got != 3 {
+		t.Fatalf("unabandoned run made %d owner reads, want one in each of the 3 stores", got)
+	}
+	if c.sp.attachReads != 1 {
+		t.Fatalf("unabandoned run read named-1's attachment %d time(s), want it classified once", c.sp.attachReads)
+	}
+
+	probe := newDoctorAbandonProbe()
+	c, findings, err = run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != 1 {
+		t.Errorf("abandoned run made %d owner reads, want only the read in flight", got)
+	}
+	if c.sp.attachReads != 0 {
+		t.Errorf("abandoned run read named-1's attachment %d time(s), want it left unclassified", c.sp.attachReads)
+	}
+	if !errors.Is(err, doctor.ErrCheckAbandoned) || len(findings) != 0 {
+		t.Errorf("abandoned findings %q, err %v; want none, with doctor.ErrCheckAbandoned", findings, err)
+	}
+}
+
 // TestOwnerlessReapReadsEveryOwnerStore (the #7811 review, CONTRACT
 // v5.10j item 2): the owner is missing only when every store a session row
 // can live in answers not found. A row in another store (a rig's, a moved
