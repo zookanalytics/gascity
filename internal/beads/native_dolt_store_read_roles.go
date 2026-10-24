@@ -60,14 +60,12 @@ import (
 // is a substitute. AllFlag is stated because it says what it does in the member
 // name rather than in a magic status value.
 //
-// There is no ExcludeStatus member to spell "everything but closed"
-// with, so gc's "open" and its not-closed default cannot be pushed down; gc's
-// three-value projection (mapBdStatus, ListQuery.Matches) is the only
-// definition of them and runs Go-side. The two statuses that map one-to-one
-// onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
-// which keeps the pinned-flag default lifted under a named status. One
-// exception: a Live "open" is pushed as bd's raw "open" (nativeListPushesRawOpen).
-// That is the backing's own answer, and Live callers are owed it.
+// A pushed status rides beside AllFlag (nativeListStatusPushdown), which keeps
+// the pinned-flag default lifted under a named status. gc's "open" and its
+// not-closed default push the built-in statuses they fold (mapBdStatus,
+// ListQuery.Matches). One exception: a Live "open" is pushed as bd's raw
+// "open" (nativeListPushesRawOpen). That is the backing's own answer, and
+// Live callers are owed it.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -741,18 +739,11 @@ func filterReadyByWorkOutcomeFetchBlockers(ctx context.Context, reader issueops.
 // nativeListRequestFromListQuery projects a ListQuery onto the role's request.
 //
 // Only the predicates that push down EXACTLY travel: a parent, an assignee, one
-// label, the metadata equality map, the created-before bound, the two statuses
-// that map one-to-one onto a bd status, and a type from the
-// store's pushable set. The plural assignee set is fanned out by NativeListPlan.
+// label, the metadata equality map, the created-before bound, the statuses
+// nativeListStatusPushdown names, and a type from the store's pushable set. The plural assignee set is fanned out by NativeListPlan.
 // Everything else stays Go-side, and each has a reason the role's own contract
 // supplies:
 //
-//   - STATUS "open" and the not-closed default, because the request has no
-//     ExcludeStatus and gc's "open" is every bd status but closed and
-//     in_progress. "in_progress" and "closed" are exact: mapBdStatus maps them
-//     one-to-one, and AllFlag keeps the pinned-flag default lifted under a
-//     named status. See nativeListReadRequest. The exception is a Live
-//     "open", which travels as bd's raw "open" (nativeListPushesRawOpen).
 //   - TYPE outside the store's pushable set (nativeListPushableTypesFor),
 //     because BuildListFilter VALIDATES it against the workspace vocabulary
 //     and fails a request naming an unknown one, where the raw filter answered
@@ -789,9 +780,7 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
 	}
-	if nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query) {
-		req.Status = query.Status
-	}
+	req.Status = nativeListStatusPushdown(query)
 	if pushableTypes[query.Type] {
 		req.IssueType = query.Type
 	}
