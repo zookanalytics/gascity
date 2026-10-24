@@ -892,6 +892,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if started || converged {
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
+	// The Manager launches in cfg.WorkDir, the session's own work dir and
+	// never a task work_dir, so a start it made clears a recorded one.
+	if started {
+		if record := LaunchTaskWorkDirPatch(infoFromPersistedBead(b), ""); len(record) > 0 {
+			if binding == nil {
+				binding = MetadataPatch{}
+			}
+			maps.Copy(binding, record)
+		}
+	}
 	if consumes {
 		clears := MetadataPatch{}
 		if started {
