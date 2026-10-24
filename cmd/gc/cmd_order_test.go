@@ -1490,7 +1490,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1556,7 +1556,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1620,7 +1620,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1694,7 +1694,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, false, false, false, false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1777,7 +1777,7 @@ delete_after_close = "1ns"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Hour, true, false, false, false, false, nil, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure")
 	}
@@ -1841,7 +1841,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTracking = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1901,7 +1901,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, []string{"cleanup"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, true, false, false, false, []string{"cleanup"}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -1955,7 +1955,7 @@ prefix = "fe"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, []string{"rig-digest:rig:frontend"}, &stdout, &stderr)
 	if code == 0 {
 		t.Fatalf("cmdOrderSweepTracking = 0, want failure; stdout: %s stderr: %s", stdout.String(), stderr.String())
 	}
@@ -4435,7 +4435,7 @@ prefix = "ct"
 
 	var stdout, stderr bytes.Buffer
 	// confirm=false: should return 1 and print descriptive message.
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (no confirm) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -4498,7 +4498,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, false, false, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (count error) = %d, want 1; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
@@ -4533,6 +4533,180 @@ func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
 	// The flag the exec line passes must still exist on the command.
 	if flag := newOrderSweepTrackingCmd(io.Discard, io.Discard).Flags().Lookup("confirm"); flag == nil {
 		t.Fatal("gc order sweep-tracking has no --confirm flag, but the packaged order passes one")
+	}
+}
+
+// TestPackagedOrderTrackingSweepKeepsALongRunsGate runs the packaged core
+// sweep order's own arguments against a run whose recorded timeout outlasts
+// the order's --stale-after window. The open tracking bead is that order's
+// single-flight gate, so it must stay open for the whole run while the sweep
+// still closes the beads past their window.
+func TestPackagedOrderTrackingSweepKeepsALongRunsGate(t *testing.T) {
+	chdirToRealPackageDir(t)
+	const packOrderPath = "../../internal/bootstrap/packs/core/orders/order-tracking-sweep.toml"
+	var packed struct {
+		Order struct {
+			Exec string `toml:"exec"`
+		} `toml:"order"`
+	}
+	if _, err := toml.DecodeFile(packOrderPath, &packed); err != nil {
+		t.Fatalf("decode %s: %v", packOrderPath, err)
+	}
+	packagedArgs, ok := strings.CutPrefix(packed.Order.Exec, "gc order sweep-tracking ")
+	if !ok {
+		t.Fatalf("exec = %q, want a gc order sweep-tracking invocation", packed.Order.Exec)
+	}
+
+	// The metadata a launched run's tracking bead carries, from the codec
+	// that writes it.
+	recordedTimeout := func(t *testing.T, timeout time.Duration) map[string]string {
+		t.Helper()
+		scratch := beads.NewMemStore()
+		run, err := orders.NewStore(beads.OrdersStore{Store: scratch}).CreateRun("probe", orders.RunOpts{Timeout: timeout})
+		if err != nil {
+			t.Fatalf("CreateRun: %v", err)
+		}
+		b, err := scratch.Get(run.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", run.ID, err)
+		}
+		return b.Metadata
+	}
+
+	const (
+		inFlightID = "lt-in-flight" // 30m into a 9000s run
+		expiredID  = "lt-expired"   // 30m into a 5m run
+		untimedID  = "lt-untimed"   // records no timeout
+	)
+	orderOf := map[string]string{inFlightID: "long-pass", expiredID: "short-pass", untimedID: "legacy-pass"}
+	tests := []struct {
+		name       string
+		args       []string
+		wantOpen   []string
+		wantClosed []string
+		wantStdout string
+	}{
+		{
+			name:       "packaged order",
+			args:       strings.Fields(packagedArgs),
+			wantOpen:   []string{inFlightID},
+			wantClosed: []string{expiredID, untimedID},
+		},
+		{
+			name:       "dry run",
+			args:       []string{"--stale-after", "10m", "--dry-run"},
+			wantOpen:   []string{inFlightID, expiredID, untimedID},
+			wantStdout: "would close 2 stale order-tracking bead(s)",
+		},
+		{
+			name:       "ignoring run timeouts",
+			args:       append(strings.Fields(packagedArgs), "--ignore-run-timeouts"),
+			wantClosed: []string{inFlightID, expiredID, untimedID},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+			cityDir := t.TempDir()
+			t.Setenv("GC_CITY", cityDir)
+			t.Setenv("GC_CITY_PATH", cityDir)
+			t.Setenv("GC_CITY_ROOT", cityDir)
+			t.Setenv("GC_RIG", "")
+			t.Setenv("GC_RIG_ROOT", "")
+			t.Chdir(cityDir)
+
+			writeFile(t, filepath.Join(cityDir, "city.toml"), `[workspace]
+name = "test-city"
+prefix = "ct"
+`)
+			if err := ensureScopedFileStoreLayout(cityDir); err != nil {
+				t.Fatal(err)
+			}
+
+			// Seed directly as JSON: store.Create stamps CreatedAt=time.Now(),
+			// and every run here started 30m ago, past the 10m window.
+			started := time.Now().Add(-30 * time.Minute)
+			tracking := func(id, order string, metadata map[string]string) beads.Bead {
+				return beads.Bead{
+					ID:        id,
+					Title:     "order:" + order,
+					Status:    "open",
+					Type:      "task",
+					CreatedAt: started,
+					Labels:    []string{"order-run:" + order, labelOrderTracking},
+					Metadata:  metadata,
+					Ephemeral: true,
+				}
+			}
+			seedBeads := []beads.Bead{
+				tracking(inFlightID, orderOf[inFlightID], recordedTimeout(t, 9000*time.Second)),
+				tracking(expiredID, orderOf[expiredID], recordedTimeout(t, 5*time.Minute)),
+				tracking(untimedID, orderOf[untimedID], nil),
+			}
+			seedData, err := json.Marshal(struct {
+				Seq   int          `json:"seq"`
+				Beads []beads.Bead `json:"beads"`
+			}{Seq: len(seedBeads), Beads: seedBeads})
+			if err != nil {
+				t.Fatalf("marshal seed beads: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, ".gc", "beads.json"), seedData, 0o644); err != nil {
+				t.Fatalf("write seed beads.json: %v", err)
+			}
+
+			var stdout, stderr bytes.Buffer
+			cmd := newOrderSweepTrackingCmd(&stdout, &stderr)
+			cmd.SetOut(&stdout)
+			cmd.SetErr(&stderr)
+			cmd.SetArgs(tt.args)
+			if err := cmd.Execute(); err != nil {
+				t.Fatalf("gc order sweep-tracking %s: %v; stderr: %s", strings.Join(tt.args, " "), err, stderr.String())
+			}
+			if tt.wantStdout != "" && !strings.Contains(stdout.String(), tt.wantStdout) {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.wantStdout)
+			}
+
+			reopened, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("openStoreAtForCity: %v", err)
+			}
+			for want, ids := range map[string][]string{"open": tt.wantOpen, "closed": tt.wantClosed} {
+				for _, id := range ids {
+					got, err := reopened.Get(id)
+					if err != nil {
+						t.Fatalf("Get(%s): %v", id, err)
+					}
+					if got.Status != want {
+						t.Errorf("%s status after gc order sweep-tracking %s = %q, want %q", id, strings.Join(tt.args, " "), got.Status, want)
+					}
+				}
+			}
+
+			// A kept bead holds its order's single-flight gate only while the
+			// dispatcher counts it as a run (orders.IsRunRecord), in its
+			// order-run index and in the strict read it falls back to.
+			entries, err := newOrderDispatchTrackingIndex(io.Discard).entriesForStore(reopened, "city")
+			if err != nil {
+				t.Fatalf("order-run index: %v", err)
+			}
+			for shut, ids := range map[bool][]string{true: tt.wantOpen, false: tt.wantClosed} {
+				for _, id := range ids {
+					order := orderOf[id]
+					if got := entries[order].openWorkTracking; got != shut {
+						t.Errorf("%s gate shut in the order-run index after gc order sweep-tracking %s = %t, want %t", order, strings.Join(tt.args, " "), got, shut)
+					}
+					got, err := (&memoryOrderDispatcher{}).hasOpenWorkStrict(reopened, order)
+					if err != nil {
+						t.Fatalf("hasOpenWorkStrict(%s): %v", order, err)
+					}
+					if got != shut {
+						t.Errorf("%s gate shut by hasOpenWorkStrict after gc order sweep-tracking %s = %t, want %t", order, strings.Join(tt.args, " "), got, shut)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -4603,7 +4777,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, true, nil, &stdout, &stderr)
+	code := cmdOrderSweepTrackingWithOptions(time.Nanosecond, false, false, false, true, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepTrackingWithOptions (confirm) = %d, want 0; stderr: %s stdout: %s", code, stderr.String(), stdout.String())
 	}
