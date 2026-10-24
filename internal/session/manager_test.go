@@ -4837,6 +4837,159 @@ func TestTranscriptPathClassifiedDistinguishesAbsentFromAmbiguous(t *testing.T) 
 	})
 }
 
+// listReadRecorder wraps a Store and records the ids of the beads every List
+// returns, so a test can assert what a lookup read and not only what it
+// concluded.
+type listReadRecorder struct {
+	beads.Store
+	mu    sync.Mutex
+	reads [][]string
+}
+
+func (s *listReadRecorder) List(query beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.Store.List(query)
+	ids := make([]string, 0, len(items))
+	for _, b := range items {
+		ids = append(ids, b.ID)
+	}
+	s.mu.Lock()
+	s.reads = append(s.reads, ids)
+	s.mu.Unlock()
+	return items, err
+}
+
+func (s *listReadRecorder) reset() {
+	s.mu.Lock()
+	s.reads = nil
+	s.mu.Unlock()
+}
+
+func (s *listReadRecorder) readIDs() [][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([][]string(nil), s.reads...)
+}
+
+// TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions pins the cost of the
+// same-workdir ambiguity check that runs when the keyed and scoped transcript
+// lookups miss. For a closed target the check counts closed sessions too, so a
+// read keyed only on the session label returns the whole session history on
+// every miss. The read is keyed on the target's work_dir: it returns only the
+// sessions that share the directory, and the classification is unchanged.
+func TestTranscriptPathClassifiedReadsOnlySameWorkDirSessions(t *testing.T) {
+	create := func(t *testing.T, mgr *Manager, title, workDir string) Info {
+		t.Helper()
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: title, Command: "claude", WorkDir: workDir, Provider: "claude", Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("Create %s: %v", title, err)
+		}
+		return info
+	}
+	// Every case shares this history in other directories: closed and open
+	// sessions the target's lookup must never read.
+	seedOtherHistory := func(t *testing.T, mgr *Manager) {
+		t.Helper()
+		for i, workDir := range []string{t.TempDir(), t.TempDir(), t.TempDir()} {
+			other := create(t, mgr, fmt.Sprintf("elsewhere-%d", i), workDir)
+			if i < 2 {
+				if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), other.ID); err != nil {
+					t.Fatalf("Close elsewhere-%d: %v", i, err)
+				}
+			}
+		}
+	}
+	assertReadOnly := func(t *testing.T, rec *listReadRecorder, want ...string) {
+		t.Helper()
+		allowed := make(map[string]bool, len(want))
+		for _, id := range want {
+			allowed[id] = true
+		}
+		reads := rec.readIDs()
+		if len(reads) == 0 {
+			t.Fatal("the lookup issued no List; the same-workdir check was not reached")
+		}
+		for _, ids := range reads {
+			for _, id := range ids {
+				if !allowed[id] {
+					t.Fatalf("the lookup read session %s from another workdir; reads = %v, want only %v", id, reads, want)
+				}
+			}
+		}
+	}
+
+	t.Run("closed sole session", func(t *testing.T) {
+		rec := &listReadRecorder{Store: beads.NewMemStore()}
+		mgr := newTestManager(t, rec, runtime.NewFake())
+		seedOtherHistory(t, mgr)
+		workDir := t.TempDir()
+		target := create(t, mgr, "target", workDir)
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), target.ID); err != nil {
+			t.Fatalf("Close target: %v", err)
+		}
+
+		rec.reset()
+		path, lookup, err := mgr.TranscriptPathClassified(target.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" || lookup != TranscriptAbsent {
+			t.Fatalf("lookup = (%q, %v), want (\"\", TranscriptAbsent)", path, lookup)
+		}
+		assertReadOnly(t, rec, target.ID)
+	})
+
+	t.Run("closed history in the same workdir", func(t *testing.T) {
+		rec := &listReadRecorder{Store: beads.NewMemStore()}
+		mgr := newTestManager(t, rec, runtime.NewFake())
+		seedOtherHistory(t, mgr)
+		workDir := t.TempDir()
+		earlier := create(t, mgr, "earlier", workDir)
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), earlier.ID); err != nil {
+			t.Fatalf("Close earlier: %v", err)
+		}
+		target := create(t, mgr, "target", workDir)
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), target.ID); err != nil {
+			t.Fatalf("Close target: %v", err)
+		}
+
+		// A closed target still counts the closed session that shared its
+		// directory, so the refusal stands.
+		rec.reset()
+		path, lookup, err := mgr.TranscriptPathClassified(target.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" || lookup != TranscriptAmbiguous {
+			t.Fatalf("lookup = (%q, %v), want (\"\", TranscriptAmbiguous)", path, lookup)
+		}
+		assertReadOnly(t, rec, earlier.ID, target.ID)
+	})
+
+	t.Run("open target", func(t *testing.T) {
+		rec := &listReadRecorder{Store: beads.NewMemStore()}
+		mgr := newTestManager(t, rec, runtime.NewFake())
+		seedOtherHistory(t, mgr)
+		workDir := t.TempDir()
+		earlier := create(t, mgr, "earlier", workDir)
+		if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), earlier.ID); err != nil {
+			t.Fatalf("Close earlier: %v", err)
+		}
+		target := create(t, mgr, "target", workDir)
+
+		// A live target ignores closed history, so the closed session in its
+		// directory leaves it unambiguous.
+		rec.reset()
+		path, lookup, err := mgr.TranscriptPathClassified(target.ID, []string{t.TempDir()})
+		if err != nil {
+			t.Fatalf("TranscriptPathClassified: %v", err)
+		}
+		if path != "" || lookup != TranscriptAbsent {
+			t.Fatalf("lookup = (%q, %v), want (\"\", TranscriptAbsent)", path, lookup)
+		}
+		assertReadOnly(t, rec, target.ID)
+	})
+}
+
 func TestTranscriptPathCodexSessionKeyBeatsAmbiguousWorkDirFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

@@ -2164,13 +2164,17 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 // target b, restricted to the same provider family when the target's provider is
 // known. For a live target, closed historical sessions are excluded; for a
 // closed target they are kept so historical same-workdir ambiguity is preserved.
+//
+// The read is keyed on workDir, so a closed target reads the history of its own
+// directory rather than every session the store has ever held.
 func (m *Manager) sameWorkDirSessionBeads(b beads.Bead, provider, workDir string) ([]beads.Bead, error) {
 	all, err := m.store.List(beads.ListQuery{
 		Label:         LabelSession,
+		Metadata:      map[string]string{"work_dir": workDir},
 		IncludeClosed: b.Status == "closed",
 	})
 	if err != nil {
-		return nil, fmt.Errorf("listing sessions: %w", err)
+		return nil, fmt.Errorf("listing sessions in %q: %w", workDir, err)
 	}
 	var same []beads.Bead
 	for _, other := range all {
