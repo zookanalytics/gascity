@@ -683,7 +683,7 @@ func TestStandaloneBuildAgentsFnWithSessionBeads_UsesRigStoresForAssignedWork(t 
 		},
 	}
 
-	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", "/tmp/city", time.Now().UTC(), io.Discard)
+	buildFn := standaloneBuildAgentsFnWithSessionBeads("city", "/tmp/city", time.Now().UTC(), io.Discard, nil)
 	result := buildFn(cfg, runtime.NewFake(), cityStore, map[string]beads.Store{"repo": rigStore}, nil, nil)
 	if len(result.AssignedWorkBeads) != 1 {
 		t.Fatalf("AssignedWorkBeads len = %d, want 1 (%#v)", len(result.AssignedWorkBeads), result.AssignedWorkBeads)
@@ -726,7 +726,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial snapshot, want none", len(released))
@@ -752,7 +752,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released %d work bead(s) from a partial session snapshot, want none", len(released))
@@ -777,7 +777,7 @@ func TestReleaseOrphanedPoolAssignmentsWhenSnapshotsComplete_PartialSkipsComplet
 		},
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 1 {
 		t.Fatalf("complete one-shot snapshot released %d work bead(s), want 1", len(released))

@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -206,4 +210,77 @@ func TestOwnClaimActorTargets(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGcBdSessionHeartbeatReadsItsClaimWhereBdResolvesIDsExactly pins the
+// claim-identity heartbeat (gc-ox80c) on a scope whose bd resolves prefixed
+// ids exactly. The exact-ID write guard skips its read there
+// (bdWriteGuardNeedsRead), but the heartbeat needs the bead's assignee to act
+// under the claim identity, so a session's heartbeat still reads it once.
+// Outside a session, or when the child already acts as the session's id,
+// nothing consumes the bead and the read stays skipped.
+func TestGcBdSessionHeartbeatReadsItsClaimWhereBdResolvesIDsExactly(t *testing.T) {
+	run := func(t *testing.T, sessionID, ambientActor string) (reads int, actor string) {
+		t.Helper()
+		_, cityDir := bdSQLRefusalCityDir(t, "")
+		setCwd(t, cityDir)
+		writeBoundBackendMetadata(t, cityDir, "http")
+		binDir := t.TempDir()
+		logPath := filepath.Join(t.TempDir(), "bd-calls.log")
+		script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\n" +
+			"case \"$1\" in\n" +
+			"  show) printf '%s' '[{\"id\":\"demo-abc\",\"assignee\":\"lx-sess\",\"status\":\"in_progress\",\"issue_type\":\"task\"}]' ;;\n" +
+			"  heartbeat) printf 'actor=%s\\n' \"${BEADS_ACTOR:-}\" >> " + logPath + " ;;\n" +
+			"esac\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		t.Setenv("GC_SESSION_ID", sessionID)
+		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
+		t.Setenv("GC_ALIAS", "")
+		t.Setenv("BEADS_ACTOR", ambientActor)
+
+		var stdout, stderr bytes.Buffer
+		if code := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", code, stderr.String())
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := string(data)
+		if _, after, ok := strings.Cut(log, "actor="); ok {
+			actor = strings.TrimSpace(after)
+		}
+		return strings.Count(log, "show --json demo-abc"), actor
+	}
+
+	t.Run("a session's heartbeat reads its claim and refreshes as the claim id", func(t *testing.T) {
+		reads, actor := run(t, "lx-sess", "gc-pool-name")
+		if reads != 1 {
+			t.Fatalf("guard reads = %d, want 1", reads)
+		}
+		if actor != "lx-sess" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the owning session id %q", actor, "lx-sess")
+		}
+	})
+	t.Run("a session already acting as its claim id skips the read", func(t *testing.T) {
+		reads, actor := run(t, "lx-sess", "lx-sess")
+		if reads != 0 {
+			t.Fatalf("guard reads = %d, want 0: the actor needs no rewrite", reads)
+		}
+		if actor != "lx-sess" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want %q", actor, "lx-sess")
+		}
+	})
+	t.Run("outside a session the read stays skipped", func(t *testing.T) {
+		reads, actor := run(t, "", "gc-pool-name")
+		if reads != 0 {
+			t.Fatalf("guard reads = %d, want 0", reads)
+		}
+		if actor != "gc-pool-name" {
+			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q", actor, "gc-pool-name")
+		}
+	})
 }

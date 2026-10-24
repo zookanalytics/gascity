@@ -302,3 +302,21 @@ func TestRenderNudgeOutcome_JSONAndText(t *testing.T) {
 		}
 	}
 }
+
+func TestNudgeOutcomeForShadowStateFollowsClassifyTerminalState(t *testing.T) {
+	cases := map[string]string{
+		"accepted_for_injection": nudgeOutcomeDelivered,
+		"injected":               nudgeOutcomeDelivered,
+		"injected_unobserved":    nudgeOutcomeDelivered,
+		"expired":                nudgeOutcomeDropped,
+		"failed":                 nudgeOutcomeDropped,
+		"superseded":             nudgeOutcomeDropped,
+		"queued":                 nudgeOutcomeUnknown,
+		"no-such-state":          nudgeOutcomeUnknown,
+	}
+	for state, want := range cases {
+		if got := nudgeOutcomeForShadowState(state); got != want {
+			t.Errorf("nudgeOutcomeForShadowState(%q) = %q, want %q", state, got, want)
+		}
+	}
+}

@@ -27,6 +27,7 @@ next to that code; read the matching file before changing it.
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
 | `internal/session/` | `internal/session/AGENTS.md` |
+| `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
 | `internal/cliauth/`, `gc login`, `gc whoami` | `internal/cliauth/AGENTS.md` |
@@ -278,9 +279,10 @@ and policy targets, and a green `go test` is not evidence a change passes CI.
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`
   or `TMPDIR`.
 - **Git hooks:** `make setup` installs `.githooks` as `core.hooksPath`;
-  `make check-hooks` verifies it. Pre-commit runs nogo on staged packages;
-  pre-push runs `bazel test //...` and says loudly when it falls back to
-  `go test`. Beads' installer can silently take the path over and skip every
+  `make check-hooks` verifies it. Pre-commit runs nogo on staged packages
+  and pre-push runs `bazel test //...`; where bazel is not installed, each
+  says loudly that it fell back to plain Go (golangci-lint and `go vet`,
+  `go test`). Beads' installer can silently take the path over and skip every
   gate — see "Git hook ownership" in `CONTRIBUTING.md`.
 
 ## Code quality gates

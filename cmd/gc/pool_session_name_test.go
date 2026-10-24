@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -2525,7 +2526,7 @@ func releaseProbeAssignments(store *conditionalReleaseProbeStore, work beads.Bea
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 }
 
@@ -2834,18 +2835,18 @@ func releaseOrphanedPoolAssignmentsFromBeads(
 	}
 	// Single-store fixtures: the session class resolves to the work store, which
 	// is what a city without a [storage.classes] sessions binding does.
-	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil)
+	return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, cfg, cityPath, infos, assignedWorkBeads, assignedWorkStores, assignedWorkStoreRefs, rigStores, nil, nil, nil)
 }
 
 // gcSweepSessionBeadsFromBeads projects raw session beads to session.Info and
-// calls GCSweepSessionBeads, letting the raw-bead fixtures exercise the WI-5 W4
+// calls gcSweepSessionBeadsAt, letting the raw-bead fixtures exercise the
 // typed signature.
 func gcSweepSessionBeadsFromBeads(store beads.Store, sessionBeads []beads.Bead) []string {
 	var infos []session.Info
 	for _, b := range sessionBeads {
 		infos = append(infos, seedSessionInfo(b))
 	}
-	return GCSweepSessionBeads("", store, nil, infos)
+	return gcSweepSessionBeadsAt(store, testSeatWork("", nil, store, nil), infos, time.Now())
 }
 
 func TestDirectSessionBeadIDCandidates_DerivesModernPoolSessionBeadID(t *testing.T) {
@@ -2939,7 +2940,7 @@ func TestReleaseOrphanedPoolAssignments_SkipsLiveModernPoolSessionWhenLiveListMi
 		nil,
 		nil,
 		nil,
-		nil,
+		nil, nil,
 	)
 	if len(released) != 0 {
 		t.Fatalf("released = %v, want none — the owning pool session is live", released)

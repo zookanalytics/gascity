@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
@@ -286,18 +285,32 @@ func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	dryRun := false
 	quiet := false
 	confirm := false
+	ignoreRunTimeouts := false
 	cmd := &cobra.Command{
 		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale and prune closed order-tracking beads",
 		Long: `Close stale open order-tracking beads and prune expired closed history.
 
-This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.
+This is intended for maintenance exec orders. It closes open tracking beads
+older than --stale-after, except the bead of a run that may still be in
+flight: one with no outcome yet that records the timeout its run was started
+with (the order's timeout, capped by [orders].max_timeout). That bead stays
+open until it is --stale-after older than the recorded timeout, so an order
+whose timeout exceeds --stale-after keeps its single-flight gate for the whole
+run. Pass --ignore-run-timeouts to close such a bead at --stale-after too,
+when you know its run is dead.
+
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
 The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
+
+The controller's watchdog also closes stale open tracking beads, at most every
+30s, independent of this command. It keeps the same in-flight exception with a
+2m window in place of --stale-after, and closes any other open tracking bead
+once it is 2m old. A later config reload does not change a run's recorded
+timeout.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -310,17 +323,18 @@ proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
+			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, ignoreRunTimeouts, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 		ValidArgsFunction: completeOrderNames,
 	}
-	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for this command to close an open tracking bead")
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
+	cmd.Flags().BoolVar(&ignoreRunTimeouts, "ignore-run-timeouts", false, "also close the tracking beads of runs still inside the timeout they were started with")
 	// The help text hardcodes the default threshold rather than calling
 	// bulkDeleteConfirmThreshold(): that reads the environment at command
 	// construction time, which would make docs/reference/cli.md regenerate
@@ -871,7 +885,18 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 	// caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars})
+	// The root is created carrying the run's evidence, as the controller's
+	// dispatch creates it, in whichever store materializes the molecule.
+	// cachedOrderStoresResolver reads that binding back, so `gc order check`
+	// still finds this run.
+	var cursor *orders.EventCursor
+	if a.Trigger == "event" && ep != nil {
+		c := orders.EventCursor(headSeq)
+		cursor = &c
+	}
+	stampOrderRunRoute(recipe, pool)
+
+	cookResult, err := molecule.Instantiate(context.Background(), moleculeStore, recipe, molecule.Options{Vars: effectiveVars, RootLabels: orderRunRootLabels(scoped, cursor)})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -885,29 +910,6 @@ func doOrderRunWithJSON(aa []orders.Order, name, rig, cityPath string, store bea
 		if err := executionevent.EmitCurrent(ep, beads.GraphStore{Store: moleculeStore}, beads.WorkStore{Store: genericStore}, rootID, "order-run"); err != nil {
 			fmt.Fprintf(stderr, "warning: gc order run: projecting execution facts for %s: %v\n", rootID, err) //nolint:errcheck // successful order run is preserved
 		}
-	}
-
-	// Track the spawned root in the same store that created it so manual runs
-	// stay provider-aware and do not fall back to ambient bd CLI state. The
-	// order-run / order: / seq: labels are the run's evidence and they have to
-	// ride the bead they describe, which is resident wherever the molecule was
-	// materialized. cachedOrderStoresResolver reads that binding back, so
-	// `gc order check` still finds this run.
-	update := beads.UpdateOpts{
-		Labels: []string{"order-run:" + scoped},
-	}
-	if a.Trigger == "event" && ep != nil {
-		update.Labels = append(update.Labels,
-			"order:"+scoped,
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
-	if a.Pool != "" {
-		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
-	}
-	if err := moleculeStore.Update(rootID, update); err != nil {
-		fmt.Fprintf(stderr, "gc order run: labeling wisp: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
 	}
 
 	// Record the run in the order-tracking history index so a manual formula
@@ -971,8 +973,9 @@ func doOrderRunExecTracked(a orders.Order, cityPath string, cfg *config.City, fr
 	// cooldown clock, matching dispatcher-driven runs (order_dispatch.go) and the
 	// formula path. Without this, a manual `gc order run --rig` is invisible to
 	// the labelOrderTracking history index and the order re-fires every tick
-	// (#3570).
-	run, err := front.CreateRun(scoped, orders.RunOpts{})
+	// (#3570). The bead records the run's timeout, so the controller's
+	// watchdog keeps it open while the run may still be going.
+	run, err := front.CreateRun(scoped, orders.RunOpts{Timeout: orderRunTimeout(a, cfg)})
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order run: creating exec tracking bead for %s: %v\n", scoped, err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1011,13 +1014,18 @@ type orderRunExecResult struct {
 	failureLabel string
 }
 
-func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+// orderRunTimeout is how long `gc order run` lets an exec run of a go before
+// killing it: the order's timeout, capped by cfg's [orders].max_timeout.
+func orderRunTimeout(a orders.Order, cfg *config.City) time.Duration {
 	var maxTimeout time.Duration
 	if cfg != nil {
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
-	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return effectiveTimeout(a, maxTimeout)
+}
+
+func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, vars map[string]string, stdout, stderr io.Writer) orderRunExecResult {
+	ctx, cancel := context.WithTimeout(context.Background(), orderRunTimeout(a, cfg))
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)
@@ -1869,7 +1877,7 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
-func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm, ignoreRunTimeouts bool, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1915,10 +1923,11 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 	// point stale-close has already run, so normal reporting still happens and
 	// the non-zero exit is deferred to the end of the function.
 	confirmGateBlocked := false
+	honorRunTimeouts := !ignoreRunTimeouts
 	if dryRun {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, honorRunTimeouts)
 	} else {
-		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
+		result, sweepErr = sweepStaleOrderTrackingAcrossStores(stores, wispStore, now, staleAfter, onlyOrders, includeWisps, honorRunTimeouts)
 
 		// Bulk-delete confirm gate: before any retention deletions, count
 		// eligible beads and require --confirm when above
@@ -2084,7 +2093,10 @@ const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
-		Label:         "order:" + orderName,
+		// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
+		// only order dispatch writes it, so no plain bead can crowd the run
+		// records out of this bounded window (the #7766 review).
+		Label:         orders.RunLabel(orderName),
 		IncludeClosed: true,
 		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
@@ -2103,9 +2115,14 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
-	labelSets := make([][]string, len(beadList))
-	for i, b := range beadList {
-		labelSets[i] = b.Labels
+	// Only a run record's seq is the order's cursor (orders.IsRunRecord): a
+	// plain bead carrying the order:<name> and seq:<n> labels moves nothing
+	// (architecture B v2, the #7766 review).
+	labelSets := make([][]string, 0, len(beadList))
+	for _, b := range beadList {
+		if orders.IsRunRecord(b) {
+			labelSets = append(labelSets, b.Labels)
+		}
 	}
 	return orders.MaxSeqFromLabels(labelSets), nil
 }
@@ -2132,6 +2149,7 @@ func bdCursorAcrossStores(orderName string, stores ...beads.Store) (uint64, erro
 func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 	nudgeTTL := nudgeMailSweepDefaultNudgeTTL
 	mailTTL := nudgeMailSweepDefaultMailTTL
+	unreadMailTTL := nudgeMailSweepDefaultUnreadMailTTL
 	dryRun := false
 	quiet := false
 	cmd := &cobra.Command{
@@ -2140,7 +2158,10 @@ func newOrderSweepNudgeMailCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Close stale delivered nudge beads and read mail beads.
 
 Nudge beads that are past --nudge-ttl and not in the live nudge queue are
-closed. Read mail beads past --mail-ttl are closed. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
+closed. Read mail beads past --mail-ttl are closed. Closing unread mail is
+opt-in: when --unread-mail-ttl (or [mail] unread_retention_ttl) is set, unread
+mail beads past it are also closed, so mail nobody ever reads ages out instead
+of accumulating forever. A budget cap of ` + fmt.Sprintf("%d", nudgeMailSweepCloseBudget) + ` closes
 per invocation prevents runaway sweeps under load.
 
 Use --dry-run to log what would be closed without making any changes.
@@ -2148,7 +2169,8 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			mailTTLExplicit := cmd.Flags().Changed("mail-ttl")
-			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, mailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
+			unreadMailTTLExplicit := cmd.Flags().Changed("unread-mail-ttl")
+			if cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2156,6 +2178,7 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 	}
 	cmd.Flags().DurationVar(&nudgeTTL, "nudge-ttl", nudgeMailSweepDefaultNudgeTTL, "min age before a delivered nudge bead is GC'd")
 	cmd.Flags().DurationVar(&mailTTL, "mail-ttl", nudgeMailSweepDefaultMailTTL, "min age before a read mail bead is GC'd; 0 disables the mail-close phase (default: cfg.Mail.RetentionTTL when set, else "+nudgeMailSweepDefaultMailTTL.String()+")")
+	cmd.Flags().DurationVar(&unreadMailTTL, "unread-mail-ttl", nudgeMailSweepDefaultUnreadMailTTL, "min age before an unread mail bead is GC'd; 0 disables (default: cfg.Mail.UnreadRetentionTTL when set, else disabled)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "log what would be closed; make no changes")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
@@ -2167,18 +2190,24 @@ The controller watchdog also runs this sweep automatically every 5 minutes.`,
 // to disable the mail-close phase (see nudgeMailSweepMailTTLForConfig /
 // sweepStaleNudgeMail) -- but a negative value is rejected either way, and an
 // unset flag is left for config resolution rather than validated here.
-func validateNudgeMailSweepFlags(nudgeTTL, mailTTL time.Duration, mailTTLExplicit bool) error {
+// --unread-mail-ttl follows the same rule: an explicit 0 disables the opt-in
+// unread-mail phase, a negative value is rejected, and an unset flag is left
+// for config resolution.
+func validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit bool) error {
 	if nudgeTTL <= 0 {
 		return fmt.Errorf("--nudge-ttl must be positive")
 	}
 	if mailTTLExplicit && mailTTL < 0 {
 		return fmt.Errorf("--mail-ttl must not be negative")
 	}
+	if unreadMailTTLExplicit && unreadMailTTL < 0 {
+		return fmt.Errorf("--unread-mail-ttl must not be negative")
+	}
 	return nil
 }
 
-func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
-	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, mailTTLExplicit); err != nil {
+func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mailTTLExplicit, unreadMailTTLExplicit, dryRun, quiet bool, stdout, stderr io.Writer) int {
+	if err := validateNudgeMailSweepFlags(nudgeTTL, mailTTL, unreadMailTTL, mailTTLExplicit, unreadMailTTLExplicit); err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2196,10 +2225,10 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 
 	// Load nudge state to protect live nudge IDs from being swept. A missing
-	// state file is not an error (LoadState returns empty state), so any error
+	// state file is not an error (the snapshot is empty), so any error
 	// here is a real read/parse failure: fail closed rather than sweeping with
 	// no live-ID protection, which could close beads for in-flight nudges.
-	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
+	nudgeState, stateErr := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if stateErr != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2211,6 +2240,9 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 		// already loaded the city config through loadCityConfig, but it does not
 		// hand that config back to this caller, so the value is read again here.
 		mailTTL = nudgeMailSweepMailTTLForCity(cityPath, mailTTL, stderr)
+	}
+	if !unreadMailTTLExplicit {
+		unreadMailTTL = nudgeMailSweepUnreadMailTTLForCity(cityPath, unreadMailTTL, stderr)
 	}
 
 	now := time.Now()
@@ -2224,13 +2256,13 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL time.Duration, mailTTLExplicit, dr
 	nudges := cliNudgesStore(store, nil, cityPath)
 	mail := cliMailStore(store, nil, cityPath)
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 	}
-	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2247,8 +2279,8 @@ func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
-	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
 
 	if sweepErr != nil {
 		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each

@@ -151,10 +151,10 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // and calls missing a session key or work dir, are also not probeable; callers
 // should leave such sessions' resume metadata untouched rather than guess. When
 // probeable is true, exists reports whether the keyed transcript file was
-// found. The per-provider readers reached through DiscoverKeyedPath merge their
-// own default roots on top of searchPaths, so known probeable providers each
-// probe their real on-disk location even when given only a partial configured
-// search root.
+// found. The kimi, pi, copilot, kiro and antigravity readers reached through
+// DiscoverKeyedPath merge their own default roots on top of searchPaths. The
+// claude reader searches searchPaths exactly as given, so a claude caller
+// must include its default root: an empty list finds nothing.
 //
 // For the Claude layout only workDir's project folders count, although
 // DiscoverKeyedPath also finds a transcript filed under another project folder.
@@ -163,20 +163,20 @@ func isProvisionalGCSessionID(sessionID string) bool {
 // of their own: the same repository's worktrees, or a single match across all
 // folders. The probe counts only what a resume is sure to find.
 func HasKeyedTranscript(searchPaths []string, provider, workDir, sessionKey string) (exists, probeable bool) {
-	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !providerHasKeyedTranscript(provider) {
+	if strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(workDir) == "" || !ProviderHasKeyedTranscript(provider) {
 		return false, false
 	}
 	return discoverKeyedPath(searchPaths, provider, workDir, sessionKey, sessionlog.FindSessionFileByIDInWorkDir) != "", true
 }
 
-// providerHasKeyedTranscript reports whether the provider family can use keyed
+// ProviderHasKeyedTranscript reports whether the provider family can use keyed
 // transcript absence as a stale-resume signal. This is stricter than
 // SupportsIDLookup, which only answers whether transcript display lookup can
 // use a provider session id. Here we only claim a provider when its keyed
 // transcript absence is meaningful for resume-key invalidation, so the
 // stale-resume guard never clears a resume key for a provider whose restart
-// semantics we have not verified.
-func providerHasKeyedTranscript(provider string) bool {
+// semantics we have not verified. It is pure: it reads only the name.
+func ProviderHasKeyedTranscript(provider string) bool {
 	switch sessionlog.ProviderFamily(provider) {
 	case "copilot", "kiro", "kimi", "pi", "antigravity":
 		return true
