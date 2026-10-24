@@ -1191,6 +1191,86 @@ func TestFindSessionFileByIDForCandidatesPrefersEarlierSearchPath(t *testing.T) 
 	}
 }
 
+func writeSessionFileAt(t *testing.T, path string, modTime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A session launched outside the work_dir its session bead records, such as a
+// pool session restarted in the per-bead worktree of the work it holds, has its
+// transcript filed under the launch directory's project folder.
+func TestFindSessionFileByIDFindsUUIDKeyInAnotherProjectFolder(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/home/user/workers/worker-1"
+	launchDir := workDir + "/worktrees/bead-1"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	writeSessionFileAt(t, filepath.Join(base, ProjectSlug(workDir), "6fc01b58-32a1-45ac-a1c8-54f6565ba9e3.jsonl"), now)
+	want := filepath.Join(base, ProjectSlug(launchDir), key+".jsonl")
+	writeSessionFileAt(t, want, now)
+
+	if got := FindSessionFileByID([]string{base}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want %q", got, want)
+	}
+	if got := FindSessionFileByIDInWorkDir([]string{base}, workDir, key); got != "" {
+		t.Fatalf("FindSessionFileByIDInWorkDir() = %q, want empty: the file is outside workDir's project folders", got)
+	}
+	if got := FindSessionFileByID([]string{base}, workDir, "11111111-2222-4333-8444-555555555555"); got != "" {
+		t.Fatalf("FindSessionFileByID(absent key) = %q, want empty", got)
+	}
+}
+
+func TestFindSessionFileByIDPrefersWorkDirFolderOverAnotherProjectFolder(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	workDir := "/home/user/project"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	want := filepath.Join(secondBase, ProjectSlug(workDir), key+".jsonl")
+	writeSessionFileAt(t, want, now.Add(-time.Hour))
+	writeSessionFileAt(t, filepath.Join(firstBase, ProjectSlug("/home/user/other"), key+".jsonl"), now)
+
+	if got := FindSessionFileByID([]string{firstBase, secondBase}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want the work_dir folder's file %q", got, want)
+	}
+}
+
+func TestFindSessionFileByIDAnotherProjectFolderPrefersEarlierSearchPathThenNewest(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	workDir := "/home/user/project"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	writeSessionFileAt(t, filepath.Join(firstBase, ProjectSlug("/home/user/a"), key+".jsonl"), now.Add(-time.Hour))
+	want := filepath.Join(firstBase, ProjectSlug("/home/user/b"), key+".jsonl")
+	writeSessionFileAt(t, want, now)
+	writeSessionFileAt(t, filepath.Join(secondBase, ProjectSlug("/home/user/c"), key+".jsonl"), now.Add(time.Hour))
+
+	if got := FindSessionFileByID([]string{firstBase, secondBase}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want newest in the earliest search path %q", got, want)
+	}
+}
+
+// Only a UUID names one session wherever its file sits; any other key is
+// looked up in workDir's project folders alone.
+func TestFindSessionFileByIDNonUUIDKeyStaysInWorkDirFolders(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/home/user/project"
+	writeSessionFileAt(t, filepath.Join(base, ProjectSlug("/home/user/other"), "session-123.jsonl"), time.Now())
+
+	if got := FindSessionFileByID([]string{base}, workDir, "session-123"); got != "" {
+		t.Fatalf("FindSessionFileByID(non-UUID key) = %q, want empty", got)
+	}
+}
+
 func TestFindSessionFileUsesClaudeProjectPathAlias(t *testing.T) {
 	skipUnlessDarwinClaudePathAliases(t)
 
