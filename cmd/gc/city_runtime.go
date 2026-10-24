@@ -288,9 +288,10 @@ type CityRuntime struct {
 	// open snapshot against it to find sessions whose interval ended in between:
 	// the reconciler stamps a session's terminal state and closes its bead in one
 	// pass, so the open-bead scan the usage lane reads would otherwise never
-	// observe the interval end at all (gc-23ep6).
+	// observe the interval end at all (gc-23ep6). Each id carries the schedule on
+	// which the vanished lane retries it once it has left the open snapshot.
 	owingIntervalsMu sync.Mutex
-	owingIntervals   map[string]struct{}
+	owingIntervals   map[string]owedIntervalRetry
 
 	// transcriptMetaEnabled is set only by the machine-wide supervisor after it
 	// has armed the event-correlation sidecar gate. One asynchronous snapshot pass
