@@ -276,3 +276,34 @@ func TestProxiedBackupCoverageBoundsAllScopesByOneDeadline(t *testing.T) {
 		t.Fatalf("result = %v %q, want one deadline finding per scope", result.Status, result.Message)
 	}
 }
+
+// TestProxiedBackupCoverageCancelsBdOnceAbandoned: when the runner abandons the
+// check, its bd calls are canceled rather than left to run out the check's own
+// deadline.
+func TestProxiedBackupCoverageCancelsBdOnceAbandoned(t *testing.T) {
+	city := t.TempDir()
+	for i := 0; i < proxiedBackupCoverageParallelism+1; i++ {
+		name := fmt.Sprintf("r%d", i)
+		writeProxiedLocalScope(t, filepath.Join(city, "rigs", name), name)
+	}
+	check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml"), nil)
+	check.proxyLive = proxiesRunning
+	check.deadline = time.Hour
+	asked := make(chan struct{}, proxiedBackupCoverageParallelism+1)
+	check.status = func(ctx context.Context, _ *CheckContext, _ string, _ string) (bdBackupStatusReport, error) {
+		asked <- struct{}{}
+		<-ctx.Done()
+		return bdBackupStatusReport{}, ctx.Err()
+	}
+
+	done := make(chan struct{})
+	results := make(chan *CheckResult, 1)
+	go func() { results <- check.Run(&CheckContext{Done: done}) }()
+	<-asked
+	close(done)
+	select {
+	case <-results:
+	case <-time.After(30 * time.Second):
+		t.Fatal("bd calls kept running after the runner abandoned the check")
+	}
+}

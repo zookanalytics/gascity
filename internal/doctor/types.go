@@ -3,7 +3,12 @@
 // output, optional --fix support, and a summary report.
 package doctor
 
-import "io"
+import (
+	"context"
+	"errors"
+	"io"
+	"sync"
+)
 
 // CheckStatus represents the outcome of a health check.
 type CheckStatus int
@@ -61,6 +66,134 @@ type CheckContext struct {
 	// Checks that need to surface fix-time diagnostics should use this
 	// writer so captured doctor output includes the diagnostics.
 	Output io.Writer
+	// Done, when non-nil, is closed once the runner abandons this Run at the
+	// per-check timeout. Nothing reads an abandoned check's result, so a check
+	// that issues many store or subprocess calls should stop issuing new ones
+	// once it closes (see Canceled). Nil for unbounded runs. The runner never
+	// sets it for Fix, so it does not interrupt an abandoned fix mid-mutation.
+	Done <-chan struct{}
+	// abandon is set with Done by the runner, which abandons the Run through
+	// it. onAbandon follows it only while Done is the channel it closes.
+	abandon *abandonment
+}
+
+// ErrCheckAbandoned is what a check reports for the work it skipped because
+// the runner abandoned it (see Canceled).
+var ErrCheckAbandoned = errors.New("check abandoned at its timeout")
+
+// Canceled reports whether the runner has abandoned the check execution this
+// context belongs to. A nil context, or one without Done, is never canceled.
+func (c *CheckContext) Canceled() bool {
+	if c == nil || c.Done == nil {
+		return false
+	}
+	select {
+	case <-c.Done:
+		return true
+	default:
+		return false
+	}
+}
+
+// onAbandon arranges for stop to be called once the runner abandons the check
+// execution this context belongs to. The check calls the returned release
+// when it no longer needs stop; after release returns, stop is not called.
+//
+// The runner calls stop in its own goroutine before it moves on, because the
+// doctor process exits as soon as its last check is abandoned and a stop left
+// to another goroutine can lose that race. So stop must deliver its signal
+// without waiting, and must not call release. If the check is already
+// abandoned, stop is called at once. A context whose Done the runner does not
+// close, such as one with no runner behind it or one a check derives with a
+// Done of its own, calls stop from a goroutine once that Done closes. A
+// context without Done never calls it.
+func (c *CheckContext) onAbandon(stop func()) (release func()) {
+	if c == nil || c.Done == nil {
+		return func() {}
+	}
+	done := c.Done
+	if c.abandon != nil && done == c.abandon.done {
+		return c.abandon.register(stop)
+	}
+	a := newAbandonment()
+	releaseStop := a.register(stop)
+	finished := make(chan struct{})
+	go func() {
+		select {
+		case <-done:
+			a.abandonRun()
+		case <-finished:
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			releaseStop()
+			close(finished)
+		})
+	}
+}
+
+// runContext returns a context that is canceled once the runner abandons the
+// check (see onAbandon), for the subprocesses a check starts. The caller calls
+// cancel when the context is no longer needed.
+func (c *CheckContext) runContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	release := c.onAbandon(cancel)
+	return ctx, func() {
+		release()
+		cancel()
+	}
+}
+
+// abandonment is the runner's side of one bounded Run. abandonRun closes the
+// Run's Done and calls every stop registered through onAbandon.
+type abandonment struct {
+	mu        sync.Mutex
+	done      chan struct{}
+	abandoned bool
+	nextID    int
+	stops     map[int]func()
+}
+
+func newAbandonment() *abandonment {
+	return &abandonment{done: make(chan struct{}), stops: make(map[int]func())}
+}
+
+// register adds stop, or calls it at once when the Run is already abandoned.
+// Stops are called with mu held, so a release that returns has either removed
+// its stop or waited for the call to finish.
+func (a *abandonment) register(stop func()) (release func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.abandoned {
+		stop()
+		return func() {}
+	}
+	id := a.nextID
+	a.nextID++
+	a.stops[id] = stop
+	return func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		delete(a.stops, id)
+	}
+}
+
+// abandonRun closes Done, then calls each registered stop. Calls after the
+// first do nothing.
+func (a *abandonment) abandonRun() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.abandoned {
+		return
+	}
+	a.abandoned = true
+	close(a.done)
+	for id, stop := range a.stops {
+		delete(a.stops, id)
+		stop()
+	}
 }
 
 // Renderer is implemented by checks that produce additional, optional

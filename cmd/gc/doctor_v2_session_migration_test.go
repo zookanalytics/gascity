@@ -6,6 +6,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -217,5 +218,47 @@ func TestV2SessionMigrationBindingLegIsReadOnly(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Error("the binding database changed across a read-only census")
+	}
+}
+
+// v2SessionLegCloseRecorder counts CloseStore calls on a leg's store.
+type v2SessionLegCloseRecorder struct {
+	beads.Store
+	closed *atomic.Int32
+}
+
+func (s v2SessionLegCloseRecorder) CloseStore() error { //nolint:unparam // must satisfy the CloseStore() error store interface closeBeadStoreHandle asserts
+	s.closed.Add(1)
+	return nil
+}
+
+// TestV2SessionMigrationCheckStopsReadingLegsOnceAbandoned: abandoned while its
+// first leg's read is in flight, the check reads no other leg and still closes
+// every leg's store.
+func TestV2SessionMigrationCheckStopsReadingLegsOnceAbandoned(t *testing.T) {
+	cfg := chatCity("always")
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) int32 {
+		var closed atomic.Int32
+		var legs []v2SessionLeg
+		for _, ref := range []string{"binding:infra", "city", "rig:fixture"} {
+			legs = append(legs, v2SessionLeg{ref: ref, store: v2SessionLegCloseRecorder{Store: probe.wrap(censusStore()), closed: &closed}})
+		}
+		(&v2SessionMigrationCheck{cfg: cfg, cityName: "test-city", openLegs: func() []v2SessionLeg { return legs }}).Run(ctx)
+		return closed.Load()
+	}
+
+	full := newDoctorAbandonProbe()
+	if closed := run(full, &doctor.CheckContext{}); closed != 3 || full.reads.Load() == 0 || full.reads.Load()%3 != 0 {
+		t.Fatalf("unabandoned run made %d reads and closed %d leg stores, want the same reads on each of three legs, all closed", full.reads.Load(), closed)
+	}
+	perLeg := full.reads.Load() / 3
+
+	probe := newDoctorAbandonProbe()
+	closed := run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != perLeg {
+		t.Fatalf("abandoned run made %d reads, want only the first leg's %d", got, perLeg)
+	}
+	if closed != 3 {
+		t.Fatalf("abandoned run closed %d leg stores, want all three", closed)
 	}
 }

@@ -324,3 +324,34 @@ func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
 		t.Fatalf("details missing wisp-tier routed bead:\n%s", details)
 	}
 }
+
+// TestPoolIdleRoutedWorkCheckStopsListingOnceAbandoned: abandoned while its
+// first session listing is in flight, the check finishes that listing and
+// issues no other, in this scope or the next. It lists sessions once per pool
+// template per scope.
+func TestPoolIdleRoutedWorkCheckStopsListingOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "builder", Dir: "alpha"},
+			{Name: "reviewer", Dir: "alpha"},
+			{Name: "fixer", Dir: "alpha"},
+		},
+		Rigs: doctorAbandonTestRigs(t),
+	}
+
+	// Three templates in three scopes and no idle instance: nine session
+	// listings and no routed-work lookup.
+	full := newDoctorAbandonProbe()
+	newPoolIdleRoutedWorkCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() == 0 || full.reads.Load()%9 != 0 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want nine session listings over three scopes", full.reads.Load(), full.opens.Load())
+	}
+	perListing := full.reads.Load() / 9
+
+	probe := newDoctorAbandonProbe()
+	newPoolIdleRoutedWorkCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.reads.Load() != perListing || probe.opens.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes; want that listing's %d and no other scope opened", probe.reads.Load(), probe.opens.Load(), perListing)
+	}
+}

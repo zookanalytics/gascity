@@ -50,13 +50,13 @@ func (f routedToDriftFinding) describe() string {
 	return fmt.Sprintf("%s bead %s has gc.routed_to=%q; use one of %s", f.label, f.beadID, f.route, strings.Join(f.canonicals, ", "))
 }
 
-func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *v2RoutedToNamespaceCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	aliases := boundRoutedToAliases(c.cfg)
 	if len(aliases) == 0 {
 		return okCheck(c.Name(), "no binding-qualified route targets configured")
 	}
 
-	findings, skipped := c.collect(aliases)
+	findings, skipped := c.collect(ctx, aliases)
 	if len(findings) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no short-form gc.routed_to values targeting bound agents found")
 	}
@@ -91,12 +91,12 @@ func (c *v2RoutedToNamespaceCheck) Run(_ *doctor.CheckContext) *doctor.CheckResu
 // SetMetadata error on one bead, or a store this check could not scan, does
 // not stop it from attempting every other unambiguous finding — every error
 // encountered is accumulated and returned together via errors.Join.
-func (c *v2RoutedToNamespaceCheck) Fix(_ *doctor.CheckContext) error {
+func (c *v2RoutedToNamespaceCheck) Fix(ctx *doctor.CheckContext) error {
 	aliases := boundRoutedToAliases(c.cfg)
 	if len(aliases) == 0 {
 		return nil
 	}
-	findings, skipped := c.collect(aliases)
+	findings, skipped := c.collect(ctx, aliases)
 	var errs []error
 	for _, f := range findings {
 		if len(f.canonicals) != 1 {
@@ -119,8 +119,10 @@ func (c *v2RoutedToNamespaceCheck) Fix(_ *doctor.CheckContext) error {
 //
 // Each store is listed once and matched in memory, so the number of store
 // reads does not grow with the number of routes; a store path shared by two
-// scopes is listed once and matched for each of them.
-func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (findings []routedToDriftFinding, skipped []string) {
+// scopes is listed once and matched for each of them. Once the doctor runner
+// abandons the check it lists no other store, and reports each scope it did
+// not list as skipped.
+func (c *v2RoutedToNamespaceCheck) collect(ctx *doctor.CheckContext, aliases map[string][]string) (findings []routedToDriftFinding, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
@@ -144,6 +146,10 @@ func (c *v2RoutedToNamespaceCheck) collect(aliases map[string][]string) (finding
 		key := normalizePathForCompare(sc.path)
 		got, ok := listed[key]
 		if !ok {
+			if ctx.Canceled() {
+				skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
+				continue
+			}
 			store, err := c.newStore(sc.path)
 			if err != nil {
 				skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", sc.label, err))
