@@ -77,7 +77,7 @@ func TestPreparedStartResolvesTheDrainSourceWorkDirAcrossStores(t *testing.T) {
 }
 
 // The v2 reconciler's start effect (prepareRow) and its transcript probe's
-// work dir (launchWorkDir): they read through the effect's read-only stores,
+// work dir (launchWorkDirChoiceOf): they read through the effect's read-only stores,
 // the sessions store and the city work legs, with no trigger resolver of
 // their own.
 func TestV2PrepareRowResolvesTheDrainSourceWorkDirAcrossStores(t *testing.T) {
@@ -85,15 +85,12 @@ func TestV2PrepareRowResolvesTheDrainSourceWorkDirAcrossStores(t *testing.T) {
 		candidate, sourceDir := drainItemFixture(t, e, e.work)
 		r := effectReads{legs: testWorkLegs(e.cityPath, e.cfg, e.work, nil).readOnly(), city: e.sessionsStore(), cityPath: e.cityPath}
 		w := &World{CityPath: e.cityPath, Env: &reconcileEnv{Cfg: e.cfg}}
-		prepared, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
-		if err != nil {
-			t.Fatalf("prepareRow: %v", err)
-		}
+		prepared, chosen := prepareChosenRow(t, r, w, candidate.info, candidate.tp)
 		if prepared.cfg.WorkDir != sourceDir {
 			t.Fatalf("v2 prepared work dir = %q, want the drain source's %q", prepared.cfg.WorkDir, sourceDir)
 		}
-		if got := launchWorkDir(r, w, candidate.info, candidate.tp); got != sourceDir {
-			t.Fatalf("v2 launch work dir = %q, want the drain source's %q", got, sourceDir)
+		if chosen != sourceDir {
+			t.Fatalf("v2 launch work dir = %q, want the drain source's %q", chosen, sourceDir)
 		}
 	})
 }
@@ -114,10 +111,7 @@ func TestPreparedStartResolvesARigDrainSourceWorkDir(t *testing.T) {
 		}
 		r := effectReads{legs: testWorkLegs(e.cityPath, e.cfg, e.work, e.rigStores).readOnly(), city: e.sessionsStore(), cityPath: e.cityPath}
 		w := &World{CityPath: e.cityPath, Env: &reconcileEnv{Cfg: e.cfg}}
-		v2, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
-		if err != nil {
-			t.Fatalf("prepareRow: %v", err)
-		}
+		v2, _ := prepareChosenRow(t, r, w, candidate.info, candidate.tp)
 		if v2.cfg.WorkDir != sourceDir {
 			t.Fatalf("v2 prepared work dir = %q, want the rig drain source's %q", v2.cfg.WorkDir, sourceDir)
 		}
@@ -135,10 +129,7 @@ func TestV2PrepareRowAppliesARigTriggersOptionPins(t *testing.T) {
 		candidate := newTriggerSessionCandidate(t, e.sessionsStore(), trigger.ID, nil, "")
 		r := effectReads{legs: testWorkLegs(e.cityPath, e.cfg, e.work, e.rigStores).readOnly(), city: e.sessionsStore(), cityPath: e.cityPath}
 		w := &World{CityPath: e.cityPath, Env: &reconcileEnv{Cfg: e.cfg}}
-		prepared, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
-		if err != nil {
-			t.Fatalf("prepareRow: %v", err)
-		}
+		prepared, _ := prepareChosenRow(t, r, w, candidate.info, candidate.tp)
 		if !strings.Contains(prepared.cfg.Command, "--model claude-sonnet-4-6") {
 			t.Fatalf("v2 prepared command = %q, want the rig trigger %s's opt_model pin --model claude-sonnet-4-6", prepared.cfg.Command, trigger.ID)
 		}

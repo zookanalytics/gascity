@@ -136,6 +136,7 @@ var infoKeyCodec = []infoKeySpec{
 	{beadmeta.PackWorkspaceMetadataKey, func(i *Info, v string) { i.PackWorkspace = v }},
 	{beadmeta.WorkDirMetadataKey, func(i *Info, v string) { i.WorkDirCanonical = v }},
 	{beadmeta.WorkerDirMetadataKey, func(i *Info, v string) { i.WorkerDir = v }},
+	{LaunchTaskWorkDirMetadataKey, func(i *Info, v string) { i.LaunchTaskWorkDir = v }},
 
 	// state / bookkeeping cluster
 	{"pending_create_claim", func(i *Info, v string) {

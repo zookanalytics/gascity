@@ -169,21 +169,30 @@ func pathAtOrUnder(root, candidate string) bool {
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// sessionRecordedWorktreeDirs returns the working directories recorded for a
-// single session Info: the canonical worker_dir (via WorkerDirFromInfo), plus
-// the raw work_dir and gc.work_dir mirrors so a session whose canonical dir is
-// momentarily unstamped still contributes its recorded path. liveSessionWorktreeDirs
-// unions this across every open session to build the active-session set, and the
-// worker_dir auto-prune passes the retired session's own set to
-// worktreeLivenessBlocksPrune so the pass's pre-close snapshot entry for that
-// session is not read as a live signal against its own worktree.
-func sessionRecordedWorktreeDirs(info sessionpkg.Info) []string {
+// sessionOwnWorkDirs returns the work directories recorded as a session's own:
+// the canonical worker_dir (via WorkerDirFromInfo), plus the raw work_dir,
+// gc.work_dir and worker_dir mirrors so a session whose canonical dir is
+// momentarily unstamped still contributes its recorded path.
+func sessionOwnWorkDirs(info sessionpkg.Info) []string {
 	return []string{
 		sessionpkg.WorkerDirFromInfo(info),
 		info.WorkDir,
 		info.WorkDirCanonical,
 		info.WorkerDir,
 	}
+}
+
+// sessionRecordedWorktreeDirs returns the working directories recorded for a
+// single session Info: its own (sessionOwnWorkDirs), plus the task work_dir its
+// current incarnation was launched in (launch_task_work_dir), where it works in
+// place of its own. liveSessionWorktreeDirs unions this across every open
+// session to build the active-session set, start preparation reads it to find
+// the session working in a task work_dir (preparedTaskWorkDirOwner), and the
+// worker_dir auto-prune passes the retired session's own set to
+// worktreeLivenessBlocksPrune so the pass's pre-close snapshot entry for that
+// session is not read as a live signal against its own worktree.
+func sessionRecordedWorktreeDirs(info sessionpkg.Info) []string {
+	return append(sessionOwnWorkDirs(info), info.LaunchTaskWorkDir)
 }
 
 // liveSessionWorktreeDirs collects the recorded working directories of every
