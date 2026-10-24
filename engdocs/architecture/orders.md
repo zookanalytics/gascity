@@ -251,10 +251,12 @@ the tick never waits on order gates.
    - **Exec**: `dispatchExec()` runs the shell command via `ExecRunner`,
      labels the tracking bead with `exec` (or `exec-failed`), and
      records `order.completed` or `order.failed`.
-   - **Formula**: `dispatchWisp()` calls `instantiateWisp()` (which
-     delegates to `store.MolCook()`), labels the wisp root bead with
-     `order-run:<scopedName>` and `pool:<qualifiedPool>`, and
-     records `order.completed` or `order.failed`.
+   - **Formula**: `dispatchWisp()` compiles the formula, puts the
+     `gc.routed_to` pool route on the recipe's root step, instantiates it
+     with `molecule.Instantiate()`, passing the run's labels
+     (`order-run:<scopedName>`, and the `order:`/`seq:` event cursor for an
+     event trigger) as `molecule.Options.RootLabels`, and records
+     `order.completed` or `order.failed`.
 
 **Scanning (`orders.Scan()`):**
 
@@ -314,7 +316,7 @@ Violations indicate bugs.
   re-firing on the next lane pass while the dispatch goroutine is
   still running.
 
-- **The tracking watchdog never closes a run inside its timeout**: The
+- **Automated stale sweeps never close a run inside its timeout**: The
   open tracking bead is the order's single-flight gate. Each lane pass
   runs a watchdog, at most every 30s, that closes stale open tracking
   beads for every order, so a bead no dispatch closed cannot jam its
@@ -325,8 +327,23 @@ Violations indicate bugs.
   keeps its bead until the bead is 2m older than that recorded timeout.
   By then the run has been killed, even if a reload has since shortened
   the order's timeout or `max_timeout`. Any other open tracking bead is
-  closed at 2m. `gc order sweep-tracking` applies its `--stale-after`
-  alone.
+  closed at 2m. `gc order sweep-tracking`, which the core
+  `order-tracking-sweep` maintenance order runs every minute, applies
+  the same rule with its `--stale-after` in place of 2m, unless an
+  operator passes `--ignore-run-timeouts`.
+
+- **A dispatched root is created carrying its run evidence**: The
+  open-work gate, the cooldown clock's last-run fallback, the stale-wisp
+  sweep and `gc order history` find a formula order's run by the
+  `order-run:<scopedName>` label on its molecule root. Both writers of
+  that root, `dispatchWisp()` and `gc order run`, create it carrying the
+  label and the event cursor (`molecule.Options.RootLabels`) and the pool
+  route (on the recipe's root step), so the root exists with its evidence
+  or not at all. A root labeled by a later write is a running molecule
+  those readers cannot attribute to its order, and a non-idempotent order
+  fires again over it. The labels never ride the recipe:
+  `molecule.Instantiate` refuses a recipe step that carries an
+  `order-run:` label, a label only the order's own dispatch writes.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,
