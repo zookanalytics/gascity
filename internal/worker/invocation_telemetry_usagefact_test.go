@@ -489,6 +489,7 @@ func TestFactorySweepSessionModelUsageClaudeTranscriptOutsideWorkDirFolder(t *te
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
 		Store:       store,
 		Provider:    sp,
 		SearchPaths: []string{searchBase},
@@ -509,7 +510,7 @@ func TestFactorySweepSessionModelUsageClaudeTranscriptOutsideWorkDirFolder(t *te
 	if err != nil {
 		t.Fatalf("Session: %v", err)
 	}
-	if err := h.Start(context.Background()); err != nil {
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	id := h.sessionID
