@@ -62,7 +62,7 @@ func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 // TestLogNativeUnavailableDowngradesNativeTransportOffToDebug pins the
 // native_transport_off demotion. The gate fires on every store open of a
 // city that set beads.native_transport = "off" and on every control-plane
-// open, which pins the bd store, so it is silent at the default Info
+// open that pins the bd store, so it is silent at the default Info
 // threshold. It still emits at Debug: downgraded, not deleted.
 func TestLogNativeUnavailableDowngradesNativeTransportOffToDebug(t *testing.T) {
 	var buf bytes.Buffer
@@ -567,6 +567,81 @@ func TestOpenStoreAtForCityEmbeddedStampMarkerStillBlocksNativeStore(t *testing.
 	}
 }
 
+// TestNativeStoreAdmittedAgreesWithTheFactory pins that NativeStoreAdmitted is
+// the factory's own admission. For each check OpenStoreAtForCity makes other
+// than its preflight probe and the native open, a scope that check turns away
+// from the native store is not admitted, and OpenStoreAtForCity answers it with
+// another store although its preflight passes and its native open would
+// succeed. A scope every check admits gets the native store from both.
+func TestNativeStoreAdmittedAgreesWithTheFactory(t *testing.T) {
+	registerLibraryBackendForTest(t, "http")
+	doltMetadata := factoryPreflightDoltMetadata()
+	for _, tc := range []struct {
+		name          string
+		provider      string
+		transport     NativeTransportMode
+		forceFallback bool
+		metadata      string
+		// hook leaves the scope with an executable on_create gc did not install.
+		hook     bool
+		admitted bool
+	}{
+		{name: "every check admits", provider: "bd", metadata: doltMetadata, admitted: true},
+		{name: "the file provider", provider: "file", metadata: doltMetadata},
+		{name: "the process-wide fallback", provider: "bd", forceFallback: true, metadata: doltMetadata},
+		{name: "native transport off", provider: "bd", transport: NativeTransportOff, metadata: doltMetadata},
+		{name: "a provider outside the bd contract", provider: "unknown", metadata: doltMetadata},
+		{name: "a library-extension backend", provider: "bd", metadata: `{"database":"dolt","backend":"http","dolt_database":"gascity","project_id":"proj-1"}`},
+		{name: "proxied-server", provider: "bd", metadata: `{"backend":"dolt","dolt_mode":"proxied-server"}`},
+		{name: "an unsupported Dolt mode", provider: "bd", metadata: `{"backend":"dolt","dolt_mode":"carrier-pigeon"}`},
+		{name: "a backend the native store does not serve", provider: "bd", metadata: `{"database":"beads","backend":"postgres"}`},
+		{name: "an executable bd hook", provider: "bd", metadata: doltMetadata, hook: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fallback := ""
+			if tc.forceFallback {
+				fallback = "1"
+			}
+			t.Setenv(nativeForceFallbackEnv, fallback)
+			scope := t.TempDir()
+			beadsDir := filepath.Join(scope, ".beads")
+			if err := os.MkdirAll(filepath.Join(beadsDir, "hooks"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.hook {
+				if err := os.WriteFile(filepath.Join(beadsDir, "hooks", "on_create"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			open := func() (Store, error) { return NewMemStore(), nil }
+			opts := StoreOpenOptions{
+				ScopeRoot:        scope,
+				Provider:         tc.provider,
+				NativeTransport:  tc.transport,
+				PreflightChecker: factoryPreflightChecker(scope, doltMetadata, contract.PreflightBDContext{Backend: "dolt", DoltMode: "server"}),
+				OpenBdStore:      open,
+				OpenFileStore:    open,
+				OpenExecStore:    open,
+				OpenNativeStore:  open,
+			}
+
+			if got := NativeStoreAdmitted(opts); got != tc.admitted {
+				t.Fatalf("NativeStoreAdmitted() = %t, want %t", got, tc.admitted)
+			}
+			result, err := OpenStoreAtForCity(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity() error = %v", err)
+			}
+			if native := result.Diagnostic.Store == storeNameNativeDoltStore; native != tc.admitted {
+				t.Fatalf("OpenStoreAtForCity() answered with %s under gate %q, want the native store = %t", result.Diagnostic.Store, result.Diagnostic.PreflightGate, tc.admitted)
+			}
+		})
+	}
+}
+
 func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDContext) contract.PreflightChecker {
 	files := fsys.NewFake()
 	files.Dirs[filepath.Join(scope, ".beads")] = true
@@ -854,10 +929,10 @@ func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
 // the preflight route: the factory treats the missing checker as
 // preflight-unavailable and takes the bd fallback, stamping it like every
 // other path. The library-extension arm runs before preflight and consults no
-// checker, so a caller that must never be native says so with
-// NativeTransportOff instead, as the control dispatcher does (pinned by
-// TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff here
-// and by cmd/gc's
+// checker, so a caller that must never take that arm says so with
+// NativeTransportOff instead, as the control dispatcher does for such a scope
+// (pinned by TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff
+// here and by cmd/gc's
 // TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope).
 func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")

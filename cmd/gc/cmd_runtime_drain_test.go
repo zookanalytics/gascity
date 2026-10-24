@@ -2180,90 +2180,239 @@ func TestResolveAgentIdentityUnambiguous(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// findAgentByName unit tests (pool suffix stripping for gc prime)
+// Bare names that several agents share (lookupAgentIdentity, gc prime)
 // ---------------------------------------------------------------------------
 
-func TestFindAgentByNameExact(t *testing.T) {
+func qualifiedNamesOf(agents []config.Agent) []string {
+	names := make([]string, 0, len(agents))
+	for i := range agents {
+		names = append(names, agents[i].QualifiedName())
+	}
+	return names
+}
+
+func TestLookupAgentIdentityReturnsAgentsSharingABareName(t *testing.T) {
+	// Two imports that each define "dog" are two agents. The bare name
+	// resolves to neither, and the lookup hands back both in config order.
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "bd"},
+			{Name: "mayor", MaxActiveSessions: intPtr(1)},
+			{Name: "dog", BindingName: "gc-toolkit"},
+		},
+	}
+	a, ok, matches := lookupAgentIdentity(cfg, "dog", "")
+	if ok {
+		t.Fatalf("lookupAgentIdentity(dog) resolved %q, want no match for a name two agents share", a.QualifiedName())
+	}
+	if got, want := qualifiedNamesOf(matches), []string{"bd.dog", "gc-toolkit.dog"}; !slices.Equal(got, want) {
+		t.Errorf("matches = %q, want %q", got, want)
+	}
+	if a, ok := resolveAgentIdentity(cfg, "dog", ""); ok {
+		t.Errorf("resolveAgentIdentity(dog) resolved %q, want no match", a.QualifiedName())
+	}
+}
+
+func TestLookupAgentIdentityReturnsPoolInstancesSharingABareName(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "dog", BindingName: "bd", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			{Name: "dog", BindingName: "gc-toolkit", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+		},
+	}
+	a, ok, matches := lookupAgentIdentity(cfg, "dog-2", "")
+	if ok {
+		t.Fatalf("lookupAgentIdentity(dog-2) resolved %q, want no match for an instance two pools share", a.QualifiedName())
+	}
+	if got, want := qualifiedNamesOf(matches), []string{"bd.dog-2", "gc-toolkit.dog-2"}; !slices.Equal(got, want) {
+		t.Errorf("matches = %q, want the synthesized instances %q", got, want)
+	}
+}
+
+func TestLookupAgentIdentityReturnsNoMatchesUnlessABareNameIsShared(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{
 			{Name: "mayor", MaxActiveSessions: intPtr(1)},
 			{Name: "polecat", Dir: "frontend"},
+			{Name: "polecat", Dir: "backend"},
 		},
 	}
-	a, ok := findAgentByName(cfg, "mayor")
-	if !ok {
-		t.Fatal("expected to find mayor")
-	}
-	if a.Name != "mayor" {
-		t.Errorf("Name = %q, want %q", a.Name, "mayor")
+	for _, tc := range []struct {
+		input, rig string
+		wantOK     bool
+	}{
+		{"mayor", "", true},
+		{"polecat", "frontend", true},
+		{"backend/polecat", "", true},
+		{"nobody", "", false},
+		{"other/polecat", "", false},
+	} {
+		_, ok, matches := lookupAgentIdentity(cfg, tc.input, tc.rig)
+		if ok != tc.wantOK {
+			t.Errorf("lookupAgentIdentity(%q, %q) ok = %v, want %v", tc.input, tc.rig, ok, tc.wantOK)
+		}
+		if matches != nil {
+			t.Errorf("lookupAgentIdentity(%q, %q) matches = %q, want none", tc.input, tc.rig, qualifiedNamesOf(matches))
+		}
 	}
 }
 
-func TestFindAgentByNamePoolInstance(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "polecat", Dir: "frontend", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), ScaleCheck: "echo 3"},
-		},
+func TestPrimeAgentFromMatchesResolvesCopiesOfOneAgent(t *testing.T) {
+	// A pack agent has a copy in each rig that imports the pack and one under
+	// each binding name the pack is imported with. Every copy keeps the
+	// declaration it came from, so the bare name still renders it.
+	copyOf := func(binding, dir string) config.Agent {
+		return config.Agent{
+			Name:           "polecat",
+			BindingName:    binding,
+			Dir:            dir,
+			SourceDir:      "/packs/gastown",
+			PromptTemplate: "/packs/gastown/agents/polecat/prompt.template.md",
+			Declaration:    "/packs/gastown/agents/polecat",
+		}
 	}
-	// "polecat-3" should strip suffix and match "polecat" pool.
-	a, ok := findAgentByName(cfg, "polecat-3")
-	if !ok {
-		t.Fatal("expected to find polecat via pool suffix stripping")
-	}
-	if a.Name != "polecat" {
-		t.Errorf("Name = %q, want %q", a.Name, "polecat")
-	}
-}
-
-func TestFindAgentByNamePoolOutOfRange(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "polecat", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3), ScaleCheck: "echo 2"},
-		},
-	}
-	// "polecat-4" is out of range (max=3).
-	_, ok := findAgentByName(cfg, "polecat-4")
-	if ok {
-		t.Error("polecat-4 should not match pool with max=3")
-	}
-}
-
-func TestFindAgentByNameSingletonPoolRejectsSuffix(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "singleton", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(1), ScaleCheck: "echo 1"},
-		},
-	}
-	if _, ok := findAgentByName(cfg, "singleton-1"); ok {
-		t.Fatal("singleton-1 should not match a canonical singleton pool agent")
-	}
-}
-
-func TestFindAgentByNameUnlimitedPool(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
-		},
-	}
-	// Any instance number should match an unlimited pool.
-	a, ok := findAgentByName(cfg, "polecat-99")
-	if !ok {
-		t.Fatal("expected to find polecat-99 in unlimited pool")
-	}
-	if a.Name != "polecat" {
-		t.Errorf("Name = %q, want %q", a.Name, "polecat")
+	reconfigured := copyOf("tk", "beta")
+	reconfigured.Env = map[string]string{"MODE": "beta"}
+	reconfigured.AppendFragments = []string{"beta-notes"}
+	for _, tc := range []struct {
+		name    string
+		matches []config.Agent
+		want    string
+	}{
+		{"a copy in each rig", []config.Agent{copyOf("tk", "alpha"), copyOf("tk", "beta")}, "alpha/tk.polecat"},
+		{"a copy under each binding name", []config.Agent{copyOf("gastown", "alpha"), copyOf("gt", "beta")}, "alpha/gastown.polecat"},
+		{"a city-scoped copy before rig copies", []config.Agent{copyOf("gastown", "alpha"), copyOf("gastown", "")}, "gastown.polecat"},
+		// A patch or override that changes a copy's env or fragments leaves it
+		// a copy.
+		{"a copy an override gave its own env and fragments", []config.Agent{copyOf("tk", "alpha"), reconfigured}, "alpha/tk.polecat"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, ok, names := primeAgentFromMatches(tc.matches)
+			if !ok {
+				t.Fatalf("primeAgentFromMatches found nothing (names=%q), want the copies to resolve", names)
+			}
+			if got := a.QualifiedName(); got != tc.want {
+				t.Errorf("QualifiedName = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestFindAgentByNameNoMatch(t *testing.T) {
-	cfg := &config.City{
-		Agents: []config.Agent{
-			{Name: "mayor", MaxActiveSessions: intPtr(1)},
-		},
+func TestPrimeAgentFromMatchesRefusesDifferentAgents(t *testing.T) {
+	packDog := func(binding, dir, packDir string) config.Agent {
+		return config.Agent{
+			Name:           "dog",
+			BindingName:    binding,
+			Dir:            dir,
+			SourceDir:      packDir,
+			PromptTemplate: packDir + "/agents/dog/prompt.template.md",
+			Declaration:    packDir + "/agents/dog",
+		}
 	}
-	_, ok := findAgentByName(cfg, "nobody")
-	if ok {
-		t.Error("expected no match for nonexistent agent")
+	// inlineDog is a dog that city.toml declares with one prompt template for
+	// every dog, so only its declaration tells it apart.
+	inlineDog := func(dir, declaration string) config.Agent {
+		return config.Agent{Name: "dog", Dir: dir, PromptTemplate: "prompts/dog.template.md", Declaration: declaration}
+	}
+	retemplated := packDog("tk", "beta", "/packs/tk")
+	retemplated.PromptTemplate = "/city/prompts/beta-dog.template.md"
+	for _, tc := range []struct {
+		name      string
+		matches   []config.Agent
+		wantNames []string
+	}{
+		{
+			name:      "two packs' city-scoped agents",
+			matches:   []config.Agent{packDog("bd", "", "/packs/bd/dolt"), packDog("gc-toolkit", "", "/packs/toolkit")},
+			wantNames: []string{"bd.dog", "gc-toolkit.dog"},
+		},
+		{
+			// A binding name belongs to the import, so two rigs can bind two
+			// different packs to the same name.
+			name:      "two packs bound to one name in different rigs",
+			matches:   []config.Agent{packDog("tk", "alpha", "/packs/a"), packDog("tk", "beta", "/packs/b")},
+			wantNames: []string{"alpha/tk.dog", "beta/tk.dog"},
+		},
+		{
+			// Two [[agent]] tables are two agents even with one prompt template.
+			name: "inline rig agents sharing a prompt template",
+			matches: []config.Agent{
+				inlineDog("alpha", "/city/city.toml ([[agent]] 1)"),
+				inlineDog("beta", "/city/city.toml ([[agent]] 2)"),
+			},
+			wantNames: []string{"alpha/dog", "beta/dog"},
+		},
+		{
+			// An agent built in code has no declaration to share.
+			name:      "agents with no declaration",
+			matches:   []config.Agent{inlineDog("alpha", ""), inlineDog("beta", "")},
+			wantNames: []string{"alpha/dog", "beta/dog"},
+		},
+		{
+			// A copy that a patch or override points at another prompt
+			// template is a different agent from the other copies.
+			name:      "a copy an override points at another prompt template",
+			matches:   []config.Agent{packDog("tk", "alpha", "/packs/tk"), retemplated},
+			wantNames: []string{"alpha/tk.dog", "beta/tk.dog"},
+		},
+		{
+			// One name per pack, not one per rig copy.
+			name: "two packs' rig-scoped agents in three rigs",
+			matches: []config.Agent{
+				packDog("bd", "r1", "/packs/bd"), packDog("tk", "r1", "/packs/tk"),
+				packDog("bd", "r2", "/packs/bd"), packDog("tk", "r2", "/packs/tk"),
+				packDog("bd", "r3", "/packs/bd"), packDog("tk", "r3", "/packs/tk"),
+			},
+			wantNames: []string{"r1/bd.dog", "r1/tk.dog"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, ok, names := primeAgentFromMatches(tc.matches)
+			if ok {
+				t.Fatalf("primeAgentFromMatches resolved %q, want no match for different agents", a.QualifiedName())
+			}
+			if !slices.Equal(names, tc.wantNames) {
+				t.Errorf("names = %q, want %q", names, tc.wantNames)
+			}
+		})
+	}
+}
+
+func TestPrimeAmbiguityErrorNamesTheRequestedAgent(t *testing.T) {
+	dogs := primeAmbiguity{candidate: "dog", names: []string{"bd.dog", "gc-toolkit.dog"}}
+	cats := primeAmbiguity{candidate: "cat", names: []string{"a.cat", "b.cat"}}
+	for _, tc := range []struct {
+		name        string
+		agentName   string
+		ambiguities []primeAmbiguity
+		want        string
+	}{
+		{
+			name:        "the requested name",
+			agentName:   "dog",
+			ambiguities: []primeAmbiguity{dogs},
+			want:        `agent "dog" is ambiguous: matches bd.dog, gc-toolkit.dog; use a qualified name`,
+		},
+		{
+			// Hook mode tries the session template after an alias that
+			// names no agent.
+			name:        "the template behind an unknown alias",
+			agentName:   "my-alias",
+			ambiguities: []primeAmbiguity{dogs},
+			want:        `agent "my-alias" not found in city config; its template "dog" is ambiguous: matches bd.dog, gc-toolkit.dog; use a qualified name`,
+		},
+		{
+			name:        "the requested name and its template",
+			agentName:   "cat",
+			ambiguities: []primeAmbiguity{cats, dogs},
+			want:        `agent "cat" is ambiguous: matches a.cat, b.cat; its template "dog" is ambiguous: matches bd.dog, gc-toolkit.dog; use a qualified name`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := primeAmbiguityError(tc.agentName, tc.ambiguities).Error(); got != tc.want {
+				t.Errorf("primeAmbiguityError = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

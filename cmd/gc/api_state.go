@@ -1631,6 +1631,21 @@ func (cs *controllerState) storeMetadataChanged(next *config.City) bool {
 	return storeSignature != "" && storeSignature != storeMetadataSignature(cityPath, next)
 }
 
+// scopeMetadataDigest names the content of scopeRoot's .beads/metadata.json,
+// which binds the scope's store to a backend, a database and a Dolt mode. Two
+// equal digests name the same file content, or the same missing file.
+func scopeMetadataDigest(scopeRoot string) string {
+	data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
+	switch {
+	case err == nil:
+		return fmt.Sprintf("sha256=%x", sha256.Sum256(data))
+	case os.IsNotExist(err):
+		return "missing"
+	default:
+		return fmt.Sprintf("error=%T:%v", err, err)
+	}
+}
+
 func storeMetadataSignature(cityPath string, cfg *config.City) string {
 	if strings.TrimSpace(cityPath) == "" {
 		return ""
@@ -1641,17 +1656,7 @@ func storeMetadataSignature(cityPath string, cfg *config.City) string {
 			scopeRoot = cityPath
 		}
 		scopeRoot = resolveStoreScopeRoot(cityPath, scopeRoot)
-		fmt.Fprintf(&b, "%s:%s:", label, filepath.Clean(scopeRoot))
-		data, err := os.ReadFile(scopeMetadataJSONPath(scopeRoot))
-		switch {
-		case err == nil:
-			sum := sha256.Sum256(data)
-			fmt.Fprintf(&b, "sha256=%x\n", sum)
-		case os.IsNotExist(err):
-			b.WriteString("missing\n")
-		default:
-			fmt.Fprintf(&b, "error=%T:%v\n", err, err)
-		}
+		fmt.Fprintf(&b, "%s:%s:%s\n", label, filepath.Clean(scopeRoot), scopeMetadataDigest(scopeRoot))
 	}
 
 	appendScopeMetadataSignature("city", cityPath)

@@ -695,6 +695,50 @@ is running. A plain `gc supervisor install` is not a substitute either: when
 the service file is already current and a supervisor is running, it reports
 success without enabling the agent.
 
+## Supervisor Started Outside launchd From an SSH Session (macOS)
+
+Symptom: on macOS, `gc start` or `gc supervisor start` run over SSH prints a
+warning like the one below, and the city then runs with the SSH shell's
+environment, for example an `SSH_AUTH_SOCK` that stops working when that SSH
+login ends:
+
+```text
+gc supervisor start: warning: could not start launchd service "com.gascity.supervisor" (...); starting the supervisor outside launchd instead. It will not be restarted by launchd and inherits this shell's environment, ...
+```
+
+Cause: `gc` runs the supervisor as a launchd agent in your desktop login
+session (`gui/<uid>`). An SSH login does not create that session, so while
+nobody is logged in to the desktop, as after a reboot, launchd cannot start
+the agent. `gc start` and `gc supervisor start` then fork `gc supervisor run`
+from the current shell, and that supervisor keeps the shell's environment and
+its terminal instead of the service's.
+
+Fix: on a machine whose supervisor must always run under launchd, make that
+fallback an error in `$GC_HOME/supervisor.toml` (`~/.gc/supervisor.toml` by
+default):
+
+```toml
+[supervisor]
+require_service_manager = true
+```
+
+With it set, `gc start` and `gc supervisor start` never fork a supervisor.
+When launchd cannot start the service, they exit non-zero with launchctl's
+error and say what to do: log in to the desktop and rerun the command in a
+terminal there. If `gc supervisor stop` disabled the agent, a desktop login
+does not start it by itself. Rerunning the command enables it, as does
+`launchctl enable gui/$(id -u)/com.gascity.supervisor`. A `gc start` that
+would restart a drifted supervisor running outside launchd refuses to fork its
+replacement and asks you to stop it first with `gc supervisor stop --wait`.
+
+On Linux the setting refuses the same forks. `gc start` exits non-zero when it
+cannot install or start gc's systemd unit, and `gc supervisor start`, which
+starts no systemd unit, exits non-zero and names `gc start` and
+`systemctl --user start`. Leave the setting unset on hosts with no desktop
+session or user service manager, such as CI runners, where a forked supervisor
+is the only kind that can run. `gc supervisor run`, the command the service
+manager itself runs, is unaffected.
+
 ## JSONL Archive Push Failures
 
 The core pack runs `jsonl-export` every 15 minutes to export each bead

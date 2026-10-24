@@ -3120,8 +3120,14 @@ gc order sweep-nudge-mail [flags]
 Close stale open order-tracking beads and prune expired closed history.
 
 This is intended for maintenance exec orders. It closes open tracking beads
-older than --stale-after, whatever timeout their run was started with, so a
---stale-after longer than every order's timeout leaves in-flight runs alone.
+older than --stale-after, except the bead of a run that may still be in
+flight: one with no outcome yet that records the timeout its run was started
+with (the order's timeout, capped by [orders].max_timeout). That bead stays
+open until it is --stale-after older than the recorded timeout, so an order
+whose timeout exceeds --stale-after keeps its single-flight gate for the whole
+run. Pass --ignore-run-timeouts to close such a bead at --stale-after too,
+when you know its run is dead.
+
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
@@ -3129,11 +3135,10 @@ The manual command runs to completion; controller startup and watchdog sweeps
 use bounded cleanup to avoid spending an unbounded tick on stale work.
 
 The controller's watchdog also closes stale open tracking beads, at most every
-30s, independent of this command and of --stale-after. A run still in flight
-keeps its tracking bead until the bead is 2m older than the timeout the run was
-started with (the order's timeout, capped by [orders].max_timeout), which the
-bead records. A later config reload does not change that timeout. Any other
-open tracking bead is closed once it is 2m old.
+30s, independent of this command. It keeps the same in-flight exception with a
+2m window in place of --stale-after, and closes any other open tracking bead
+once it is 2m old. A later config reload does not change a run's recorded
+timeout.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -3153,6 +3158,7 @@ gc order sweep-tracking [order ...] [flags]
 |------|------|---------|-------------|
 | `--confirm` | bool |  | confirm bulk deletion when eligible count &gt; GC_BULK_DELETE_CONFIRM_THRESHOLD (default 20) |
 | `--dry-run` | bool |  | report stale order-tracking and order wisp beads without closing them |
+| `--ignore-run-timeouts` | bool |  | also close the tracking beads of runs still inside the timeout they were started with |
 | `--include-wisps` | bool |  | also close stale order-run wisp subtrees with open descendants |
 | `--quiet` | bool |  | suppress success output |
 | `--stale-after` | duration | `10m0s` | minimum age for this command to close an open tracking bead |
@@ -3488,6 +3494,19 @@ When agent-name is omitted, `GC_ALIAS` is used (falling back to `GC_AGENT`).
 If agent-name matches a configured agent with a prompt_template,
 that template is output. Otherwise outputs a default worker prompt.
 
+A bare agent-name picks an agent the city defines itself before one an
+import brings in: the city's agent for the current rig when run inside a
+rig directory, then one the city defines with no dir. Failing those, the
+name picks the one agent that has it. The copies of one declared agent
+count as one agent: a pack agent's copy in each rig that imports the pack,
+and its copy under each binding name the pack is imported with. A copy
+that a patch or override points at another prompt template is a
+different agent. So are agents declared separately, such as two
+[[agent]] tables, even when they share a prompt template. When different
+agents share the name, it picks none of them: gc prime warns and outputs
+the default prompt. Use a qualified name to pick one, for example
+gc prime gastown.mayor.
+
 Pass --strict to fail on debugging mistakes instead of falling back to
 the default prompt. Strict errors on:
 
@@ -3495,6 +3514,7 @@ the default prompt. Strict errors on:
   - city config fails to load
   - no agent name given (from args, GC_ALIAS, or GC_AGENT)
   - agent name not in city config (typo detection — the main use case)
+  - agent name shared by different agents (use a qualified name)
   - agent's prompt_template points at a file that cannot be read
 
 Without --strict, a prompt_template that cannot be read is reported on
@@ -5247,7 +5267,19 @@ gc supervisor run
 
 Start the machine-wide supervisor in the background.
 
-This forks "gc supervisor run", verifies it became ready, and returns.
+On macOS, when the installed launchd service runs this gc, start loads
+and starts that service. Otherwise it forks "gc supervisor run",
+verifies it became ready, and returns.
+
+A forked supervisor runs outside the service manager and inherits this
+shell's environment. On a machine whose supervisor must run under its
+service manager, set require_service_manager = true in the [supervisor]
+table of $GC_HOME/supervisor.toml (~/.gc/supervisor.toml by default).
+Start then never forks. When launchd cannot start the service, for
+example from an SSH session while nobody is logged in to the desktop,
+start exits non-zero and says why and what to do. On Linux it exits
+non-zero instead of forking; 'gc start' or 'systemctl --user start'
+starts the supervisor under systemd.
 
 ```
 gc supervisor start [flags]

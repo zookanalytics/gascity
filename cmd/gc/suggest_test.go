@@ -123,6 +123,35 @@ func TestAgentNotFoundMsg(t *testing.T) {
 	}
 }
 
+func TestAgentUnresolvedMsgNamesEveryAgentSharingTheName(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "beta", BindingName: "tk"},
+			{Name: "dog", BindingName: "gc-toolkit"},
+			{Name: "dog", BindingName: "bd"},
+			{Name: "polecat", Dir: "alpha", BindingName: "tk"},
+		},
+	}
+	for _, tc := range []struct{ input, want string }{
+		{"dog", `gc sling: agent "dog" is ambiguous: matches bd.dog, gc-toolkit.dog; use a qualified name`},
+		// Each rig's copy is its own target, so every copy is named.
+		{"polecat", `gc sling: agent "polecat" is ambiguous: matches alpha/tk.polecat, beta/tk.polecat; use a qualified name`},
+	} {
+		_, ok, matches := lookupAgentIdentity(cfg, tc.input, "")
+		if ok {
+			t.Fatalf("lookupAgentIdentity(%q) resolved, want no match", tc.input)
+		}
+		if got := agentUnresolvedMsg("gc sling", tc.input, cfg, matches); got != tc.want {
+			t.Errorf("agentUnresolvedMsg(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+
+	_, _, matches := lookupAgentIdentity(cfg, "mayer", "")
+	if got, want := agentUnresolvedMsg("gc session new", "mayer", cfg, matches), agentNotFoundMsg("gc session new", "mayer", cfg); got != want {
+		t.Errorf("agentUnresolvedMsg(mayer) = %q, want agentNotFoundMsg's %q", got, want)
+	}
+}
+
 func TestImportBindingOf(t *testing.T) {
 	cases := map[string]string{
 		"gc.run-operator":          "gc",

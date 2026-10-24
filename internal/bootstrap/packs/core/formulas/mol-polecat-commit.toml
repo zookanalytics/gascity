@@ -73,9 +73,12 @@ WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
-Record immediately so restarts and work-health recovery can find it:
+Record the worktree and its holder immediately, after a reuse as well as a
+create, so restarts and work-health recovery can find the tree, and
+load-context's duplicate-dispatch gate can tell this run from a tree left
+behind:
 ```bash
-gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
+gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$(pwd)" --set-metadata work_holder="${GC_SESSION_ID:-}"
 ```
 
 **3. Ensure clean working state:**
@@ -165,7 +168,7 @@ elif ! git -C "$REPO" worktree remove --force "$WORKTREE_PATH"; then
         echo "cleanup: refusing to rm -rf $WORKTREE_PATH: not a linked worktree" >&2
     fi
 fi
-gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
+gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir --unset-metadata work_holder
 ```
 
 **4. Close the bead:**

@@ -192,8 +192,8 @@ func TestStartBeadsLifecycleSkipsManagedDoltForALibraryBackendCity(t *testing.T)
 }
 
 // The control dispatcher keeps the raw bd store for a converted workspace.
-// Control paths never take a native or library-backend store, so the
-// library-backend arm, whose failed open is a hard error rather than a bd
+// Control paths ask for NativeTransportOff for a library-extension scope, so
+// the library-backend arm, whose failed open is a hard error rather than a bd
 // fallback, is never consulted for them.
 func TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope(t *testing.T) {
 	cityPath := writeLibraryBackendScope(t)
