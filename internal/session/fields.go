@@ -424,6 +424,14 @@ var registry = slices.Concat([]Field{
 	{Key: "transport", Class: ClassLaunchConfig, Writers: sites(op(srcManager, "Manager.persistTransport"))},
 	{Key: "manual_session", Class: ClassAssignmentIdentity, NoWriter: "retired: no production writer; legacy rows keep it and isManualSessionBead still reads it"},
 	{Key: beadmeta.WorkerDirMetadataKey, Class: ClassLaunchConfig, NoWriter: "no production writer: contract.SetWorkerDir has no caller yet; WorkerDirFromMetadata reads it first"},
+	// Where a start launches, built by LaunchTaskWorkDirPatch: legacy's start
+	// preparation records it before the launch, v2's PreWake before and its
+	// commit after, a relaunch (legacy and v2) with its baseline, and the
+	// Manager's own start clears it.
+	{Key: LaunchTaskWorkDirMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("internal/session/worker_dir.go", "LaunchTaskWorkDirPatch"),
+		legacy(srcLifecycle, "recordLaunchTaskWorkDir"), legacyCommit, legacy(srcReconciler, "rebaselineLaunchDriftHashesWithBatch"),
+		v2("cmd/gc/reconcile_effect_launch.go", "preWakeStep"), v2(srcLifecycle, "startCommitPatch"), v2("cmd/gc/reconcile_effect_restart.go", "relaunchResultStep"),
+		op("internal/session/chat.go", "Manager.ensureRunningOn"))},
 	{Key: CanonicalInstanceNameMetadata, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/session_identity.go", "desiredSessionIdentity"))},
 	{Key: CanonicalPoolSlotMetadata, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/session_identity.go", "desiredSessionIdentity"))},
 	{Key: "real_world_app_project_id", Class: ClassLaunchConfig, Writers: sites(op("internal/api/handler_session_create.go", "Server.persistSessionMeta"))},

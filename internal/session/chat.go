@@ -1043,6 +1043,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if started || converged {
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
+	// The Manager launches in cfg.WorkDir, the session's own work dir and
+	// never a task work_dir, so a start it made clears a recorded one.
+	if started {
+		if record := LaunchTaskWorkDirPatch(infoFromPersistedBead(b), ""); len(record) > 0 {
+			if binding == nil {
+				binding = MetadataPatch{}
+			}
+			maps.Copy(binding, record)
+		}
+	}
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go). It decides on the row
 	// as this start read it under the lease, with the incarnation it minted

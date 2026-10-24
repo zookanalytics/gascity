@@ -334,7 +334,7 @@ func TestPrepareNilTranscriptOptionIsLegacy(t *testing.T) {
 		if legacy {
 			_, _, err = buildPreparedStartWithWorkDirResolver(candidate, "", &config.City{}, store, nil, dispatchOptionSources{})
 		} else {
-			_, _, err = buildPreparedStartWithTranscript(candidate, "", &config.City{}, store, nil, dispatchOptionSources{}, new(sessTranscriptState))
+			_, _, err = buildPreparedStartWithTranscript(candidate, "", &config.City{}, store, nil, dispatchOptionSources{}, nil, new(sessTranscriptState))
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -516,6 +516,174 @@ func TestAdoptProbesTheRepairedWorkDir(t *testing.T) {
 	}
 }
 
+// Kills an adoption that chooses its launch dir again: the runtime it commits
+// is already running where its start launched it, so the adoption probes the
+// transcript in the task work_dir the start recorded (launch_task_work_dir)
+// and keeps that record, though no task names the dir any more.
+func TestAdoptProbesTheRecordedLaunchWorkDir(t *testing.T) {
+	taskDir := t.TempDir()
+	k := startKit(t, intentAdopt, "creating", "session_key", "k-1", session.LaunchTaskWorkDirMetadataKey, taskDir)
+	row := k.p.World.Census.Rows[k.it.Key]
+	tp := TemplateParams{TemplateName: "worker", WorkDir: t.TempDir(), ResolvedProvider: claudeResumeProvider()}
+	k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+	k.runtimeAs("gc-1", "tok", nil)
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) { probed = append(probed, dir); return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	if s := k.runKind(); s.Outcome != settledLanded {
+		t.Fatalf("settlement %+v, want the adoption landed", s)
+	}
+	if len(probed) == 0 || probed[0] != taskDir {
+		t.Fatalf("probed %v, want the recorded launch dir %s", probed, taskDir)
+	}
+	if got := k.meta(session.LaunchTaskWorkDirMetadataKey); got != taskDir {
+		t.Fatalf("launch_task_work_dir = %q, want %q kept", got, taskDir)
+	}
+}
+
+// Kills a v2 launch dir choice that is not the dir legacy's prepare launches
+// in (SESSION-START-021). PreWake probes the session key's transcript in its
+// choice and clears a key whose transcript is absent, so choosing a task
+// work_dir that legacy refuses would drop the conversation the session keeps
+// in its own work dir. On each route that resolves a task work_dir, refused or
+// kept, launchWorkDirChoiceOf chooses legacy's launch dir.
+func TestLaunchWorkDirIsPreparesLaunchDir(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// setup returns the store both reads use and the pass's assigned work.
+		setup func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead)
+	}{
+		{"another session's worktree as the trigger's drain source", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			root := f.createDrainItemRoot(t, f.otherWorktree)
+			trigger, err := f.store.Create(beads.Bead{Title: "unclaimed drain item step", Type: "task", Status: "open", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.SetMetadataBatch(f.session.ID, map[string]string{
+				beadmeta.TriggerBeadIDMetadataKey:       trigger.ID,
+				beadmeta.TriggerBeadStoreRefMetadataKey: "rig:frontend",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			return f.store, nil
+		}},
+		{"another session's worktree on a bead held under the role", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+			return f.store, nil
+		}},
+		{"another session's worktree stamped on an assigned drain item step", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			step := f.createInProgressBead(t, f.session.ID, map[string]string{
+				beadmeta.WorkDirMetadataKey:       f.otherWorktree,
+				beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree,
+			})
+			return f.store, []beads.Bead{step}
+		}},
+		{"a worktree another session was started in", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			if err := f.store.Close(f.otherSession.ID); err != nil {
+				t.Fatal(err)
+			}
+			merger := f.createBuilderSession(t, "custom-merger-1", filepath.Join(f.cityPath, ".gc", "worktrees", "frontend", "merger", "merger-1"))
+			if err := f.store.SetMetadata(merger.ID, session.LaunchTaskWorkDirMetadataKey, f.otherWorktree); err != nil {
+				t.Fatal(err)
+			}
+			f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+			return f.store, nil
+		}},
+		{"the session's own worktree", func(t *testing.T, f *foreignWorktreeFixture) (beads.Store, []beads.Bead) {
+			ownWorktree := filepath.Join(f.ownHome, "worktrees", "fe-own")
+			if err := os.MkdirAll(ownWorktree, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			f.createInProgressBead(t, f.session.ID, map[string]string{beadmeta.LegacyWorkDirMetadataKey: ownWorktree})
+			return f.store, nil
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newForeignWorktreeFixture(t)
+			store, assigned := c.setup(t, f)
+			var resolver taskWorkDirResolver
+			if len(assigned) > 0 {
+				resolver = newAssignedTaskWorkDirResolver("", assigned)
+			}
+			want := f.prepare(t, store, resolver).cfg.WorkDir
+			candidate := f.candidate(t)
+			w := &World{Env: &reconcileEnv{Cfg: foreignWorktreeCity()}, Demand: demandView{AssignedWork: assigned}}
+			got, err := launchWorkDirChoiceOf(effectReads{city: store}, w, candidate.info, candidate.tp)
+			if err != nil || got.dir != want {
+				t.Fatalf("launchWorkDirChoiceOf = %+v (err %v), want dir %q, the dir legacy's prepare launches in", got, err, want)
+			}
+		})
+	}
+}
+
+// transcriptOf is the transcript state a v2 launch's PreWake reads for row:
+// its session key's transcript in the work dir the launch chooses
+// (launchWorkDirChoiceOf).
+func transcriptOf(t *testing.T, r effectReads, w *World, row session.Info, tp TemplateParams) sessTranscriptState {
+	t.Helper()
+	launch, err := launchWorkDirChoiceOf(r, w, row, tp)
+	if err != nil {
+		t.Fatalf("launchWorkDirChoiceOf: %v", err)
+	}
+	return transcriptIn(w, row, tp, launch.dir)
+}
+
+// Kills a v2 prepare that chooses its launch dir again (SESSION-START-021):
+// the PreWake chose the dir, probed the transcript there and recorded it, so
+// the prepare that launches the row launches there, even when the open
+// sessions change in between and a second choice would differ. Probe and
+// launch then agree by construction.
+func TestPrepareRowLaunchesInTheChosenWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	if err := f.store.Close(f.otherSession.ID); err != nil {
+		t.Fatal(err)
+	}
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	candidate := f.candidate(t)
+	w := &World{Env: &reconcileEnv{Cfg: foreignWorktreeCity()}}
+	reads := effectReads{city: f.store}
+	chosen, err := launchWorkDirChoiceOf(reads, w, candidate.info, candidate.tp)
+	if err != nil || chosen.dir != f.otherWorktree {
+		t.Fatalf("the PreWake's choice = %+v (err %v), want the handed-off work dir %q", chosen, err, f.otherWorktree)
+	}
+	// A builder opens in the directory that contains the worktree: a choice
+	// made now refuses it.
+	f.createBuilderSession(t, "custom-builder-3", f.otherHome)
+	if again, err := launchWorkDirChoiceOf(reads, w, candidate.info, candidate.tp); err != nil || again.dir != f.ownHome {
+		t.Fatalf("a second choice = %+v (err %v), want the own work dir %q", again, err, f.ownHome)
+	}
+	prepared, err := prepareRow(reads, w, candidate.info, candidate.tp, chosen, sessTranscriptUnknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.cfg.WorkDir != f.otherWorktree || prepared.launchTaskWorkDir != f.otherWorktree {
+		t.Fatalf("prepared.cfg.WorkDir = %q, launchTaskWorkDir = %q; want both the chosen %q", prepared.cfg.WorkDir, prepared.launchTaskWorkDir, f.otherWorktree)
+	}
+}
+
+// Kills PreWake dropping the conversation of a session whose task work_dir is
+// inside another open session's work dir: prepare launches the session in its
+// own work dir, so transcriptOf probes the key there and finds it.
+func TestTranscriptOfProbesOwnWorkDirOverARefusedTaskWorkDir(t *testing.T) {
+	f := newForeignWorktreeFixture(t)
+	f.createInProgressBead(t, "frontend/worker", map[string]string{beadmeta.LegacyWorkDirMetadataKey: f.otherWorktree})
+	candidate := f.candidate(t)
+	candidate.info.SessionKey = "k-1"
+	candidate.tp.ResolvedProvider = claudeResumeProvider()
+	var probed []string
+	old := staleResumeKeyProbe
+	staleResumeKeyProbe = func(_ []string, _, dir, _ string) (bool, bool) {
+		probed = append(probed, dir)
+		return dir == f.ownHome, true
+	}
+	t.Cleanup(func() { staleResumeKeyProbe = old })
+	w := &World{Env: &reconcileEnv{Cfg: foreignWorktreeCity()}}
+	if got := transcriptOf(t, effectReads{city: f.store}, w, candidate.info, candidate.tp); got != sessTranscriptPresent {
+		t.Fatalf("transcriptOf = %v after probing %v, want present: the conversation is in the session's own work dir %q", got, probed, f.ownHome)
+	}
+}
+
 // Kills a prepare that writes (S-1): an adopt over a concrete pool row whose
 // work_dir needs repair commits, its prepare folding the repair in memory
 // only (the read-only stores would fail a write), and leaves the work_dir to
@@ -546,7 +714,7 @@ func TestTranscriptOfReadsObservePaths(t *testing.T) {
 		row := k.p.World.Census.Rows[k.it.Key]
 		tp := TemplateParams{TemplateName: "worker", Command: "claude", WorkDir: workDir, ResolvedProvider: claudeResumeProvider()}
 		k.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
-		if got := transcriptOf(effectReads{}, k.p.World, row.Info, tp); (got == sessTranscriptPresent) != observed {
+		if got := transcriptOf(t, effectReads{}, k.p.World, row.Info, tp); (got == sessTranscriptPresent) != observed {
 			t.Fatalf("observed %v: transcriptOf = %v", observed, got)
 		}
 		if s := k.runKind(); s.Outcome != settledLanded || len(leaf.cfgs) != 1 {
@@ -583,7 +751,7 @@ func TestV2ProbesTheLaunchConfigDir(t *testing.T) {
 		if c.dir != "" {
 			tp.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": c.dir}
 		}
-		if got := transcriptOf(effectReads{}, k.p.World, sessionInfoFromBead(row), tp); (got == sessTranscriptPresent) != c.found {
+		if got := transcriptOf(t, effectReads{}, k.p.World, sessionInfoFromBead(row), tp); (got == sessTranscriptPresent) != c.found {
 			t.Errorf("%s: transcriptOf = %v, want found %v", c.name, got, c.found)
 		}
 		v := abandonView(k, row, txRuntime{Class: rtAbsent}, startFailureRead{})
