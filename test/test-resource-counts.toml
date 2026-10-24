@@ -714,12 +714,12 @@ calls = 1
 [[count]]
 path = "cmd/gc/dolt_scope_watchdog_test.go"
 resource = "fixed_sleep"
-calls = 6
+calls = 4
 
 [[count]]
 path = "cmd/gc/dolt_scope_watchdog_test.go"
 resource = "subprocess"
-calls = 5
+calls = 3
 
 [[count]]
 path = "cmd/gc/dolt_standalone_conflict_test.go"
@@ -1380,6 +1380,18 @@ calls = 11
 path = "examples/bd/dolt/status_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "examples/bd/dolt/sync_concurrency_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "examples/bd/dolt/sync_concurrency_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
 
 [[count]]
 path = "examples/bd/dolt/sync_ffclassify_test.go"
@@ -2074,6 +2086,12 @@ resource = "subprocess"
 calls = 4
 
 [[count]]
+path = "internal/pidutil/vanish_darwin_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/processgroup/processgroup_unix_test.go"
 resource = "subprocess"
 calls = 1
@@ -2722,7 +2740,7 @@ calls = 2
 [[count]]
 path = "scripts/harness_reap_test.go"
 resource = "subprocess"
-calls = 4
+calls = 5
 
 [[count]]
 path = "scripts/makefile_cgo_test.go"
@@ -3111,7 +3129,7 @@ tagged = true
 [[count]]
 path = "test/integration/bdstore_test.go"
 resource = "subprocess"
-calls = 6
+calls = 7
 tagged = true
 
 [[count]]
