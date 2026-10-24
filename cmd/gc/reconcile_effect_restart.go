@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -172,6 +173,9 @@ type relaunched struct {
 	Hash  runtime.Config
 	Err   error
 	Held  string // L3, re-read just before Relaunch, holds it: no relaunch and no fallback
+	// LaunchTaskWorkDir is the task work_dir the relaunch respawned the agent
+	// in, "" for the session's own work dir.
+	LaunchTaskWorkDir string
 }
 
 // relaunchCall is legacy's relaunchAgentForLaunchDrift past its guards: the
@@ -187,7 +191,12 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 		out.Err = runtime.ErrRelaunchUnsupported
 		return out, nil
 	}
-	prepared, err := prepareRow(c.reads, p.w, p.row, p.tp, transcriptOf(c.reads, p.w, p.row, p.tp))
+	// One launch dir choice for the transcript probe and the respawn.
+	launch, err := launchWorkDirChoiceOf(c.reads, p.w, p.row, p.tp)
+	var prepared *preparedStart
+	if err == nil {
+		prepared, err = prepareRow(c.reads, p.w, p.row, p.tp, launch, transcriptIn(p.w, p.row, p.tp, launch.dir))
+	}
 	switch {
 	case err != nil:
 		out.Err = err
@@ -206,6 +215,7 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, out.Err == nil, p.now); err != nil {
 			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
 		}
+		out.LaunchTaskWorkDir = prepared.launchTaskWorkDir
 	}
 	out.OK = out.Err == nil
 	return out, nil
@@ -224,7 +234,11 @@ func relaunchResultStep(v txView) txStep {
 	case out.Held != "":
 		return txStep{Refuse: out.Held}
 	case out.OK:
-		step := txStep{Write: baselinePatch(out.Hash, baselineRelaunch), Done: true}
+		// A relaunch respawns the agent in its prepared work dir, which the
+		// row records as a launch does.
+		write := baselinePatch(out.Hash, baselineRelaunch)
+		maps.Copy(write, session.LaunchTaskWorkDirPatch(v.Row, out.LaunchTaskWorkDir))
+		step := txStep{Write: write, Done: true}
 		step.Facts.Events = []events.Event{{Type: events.SessionUpdated, Actor: "gc", Subject: res.TP.DisplayName(), Message: "agent relaunched (launch-only config change)"}}
 		return step
 	case out.Named:
