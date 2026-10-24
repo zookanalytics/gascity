@@ -73,6 +73,7 @@ go_library(
         "//internal/orders",
         "//internal/pathutil",
         "//internal/pidutil",
+        "//internal/processgroup",
         "//internal/remotesource",
         "//internal/runtime",
         "//internal/shellquote",

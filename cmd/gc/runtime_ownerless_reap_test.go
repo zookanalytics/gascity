@@ -318,7 +318,7 @@ func TestOwnerlessRuntimeFindings(t *testing.T) {
 	if err := c.sp.SetMeta("nocity", "GC_SESSION_ID", "gc-third"); err != nil {
 		t.Fatal(err)
 	}
-	findings, err := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute)
+	findings, err := ownerlessRuntimeFindings(nil, c.owners(), c.sp, c.city, ownerlessT0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +338,7 @@ func TestOwnerlessRuntimeFindings(t *testing.T) {
 	}
 	// A store that cannot answer proves no owner gone: only the runtime
 	// without GC_SESSION_ID is named.
-	findings, err = ownerlessRuntimeFindings(ownerLookup{stores: []beads.Store{&ownerGetErrStore{MemStore: beads.NewMemStore(), err: errors.New("store unreachable")}}}, c.sp, c.city, ownerlessT0, time.Minute)
+	findings, err = ownerlessRuntimeFindings(nil, ownerLookup{stores: []beads.Store{&ownerGetErrStore{MemStore: beads.NewMemStore(), err: errors.New("store unreachable")}}}, c.sp, c.city, ownerlessT0, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,6 +363,78 @@ func TestOwnerlessRuntimesDoctorCheck(t *testing.T) {
 	}
 }
 
+// TestOwnerlessRuntimesDoctorCheckStopsOnceAbandoned: abandoned while it
+// looks up its first runtime's owner, the check looks up no other runtime's
+// owner. It looks up the owner of every runtime that names one.
+func TestOwnerlessRuntimesDoctorCheckStopsOnceAbandoned(t *testing.T) {
+	c := newOwnerlessCase(t)
+	for _, name := range []string{"named-2", "named-3"} {
+		c.sp.visible[name] = true
+		c.sp.dead[name] = true
+		if err := c.sp.SetMeta(name, "GC_SESSION_ID", "gc-gone-"+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) *doctor.CheckResult {
+		return newOwnerlessRuntimesCheck(nil, c.city, probe.newStore(c.store), c.sp, nil).Run(ctx)
+	}
+
+	full := newDoctorAbandonProbe()
+	if res := run(full, &doctor.CheckContext{}); len(res.Details) != 3 {
+		t.Fatalf("unabandoned result %+v, want all three runtimes named", res)
+	}
+	perRuntime := full.reads.Load() / 3
+	if perRuntime < 1 || full.reads.Load() != 3*perRuntime {
+		t.Fatalf("unabandoned run made %d owner reads, want the same number for each of three runtimes", full.reads.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	res := run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != perRuntime {
+		t.Fatalf("abandoned run made %d owner reads, want only the first runtime's %d", got, perRuntime)
+	}
+	if res.Status != doctor.StatusWarning || !strings.Contains(res.Message, doctor.ErrCheckAbandoned.Error()) {
+		t.Fatalf("abandoned result %+v, want a warning that the scan stopped", res)
+	}
+}
+
+// TestOwnerlessRuntimeFindingsStopsBetweenOwnerStores: abandoned while it
+// reads the first of three stores for a runtime's owner, the finding reads
+// no other store and leaves the runtime unclassified, so only the read in
+// flight finishes. Unabandoned, it reads every store and classifies it.
+func TestOwnerlessRuntimeFindingsStopsBetweenOwnerStores(t *testing.T) {
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) (*ownerlessCase, []string, error) {
+		c := newOwnerlessCase(t)
+		owners := ownerLookup{stores: []beads.Store{probe.wrap(c.store), probe.wrap(beads.NewMemStore()), probe.wrap(beads.NewMemStore())}}
+		findings, err := ownerlessRuntimeFindings(ctx, owners, c.sp, c.city, ownerlessT0, time.Minute)
+		return c, findings, err
+	}
+
+	full := newDoctorAbandonProbe()
+	c, findings, err := run(full, &doctor.CheckContext{})
+	if err != nil || len(findings) != 1 || !strings.Contains(findings[0], "named-1: session bead gc-gone not found (dead") {
+		t.Fatalf("unabandoned findings %q, err %v; want named-1 named dead", findings, err)
+	}
+	if got := full.reads.Load(); got != 3 {
+		t.Fatalf("unabandoned run made %d owner reads, want one in each of the 3 stores", got)
+	}
+	if c.sp.attachReads != 1 {
+		t.Fatalf("unabandoned run read named-1's attachment %d time(s), want it classified once", c.sp.attachReads)
+	}
+
+	probe := newDoctorAbandonProbe()
+	c, findings, err = run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != 1 {
+		t.Errorf("abandoned run made %d owner reads, want only the read in flight", got)
+	}
+	if c.sp.attachReads != 0 {
+		t.Errorf("abandoned run read named-1's attachment %d time(s), want it left unclassified", c.sp.attachReads)
+	}
+	if !errors.Is(err, doctor.ErrCheckAbandoned) || len(findings) != 0 {
+		t.Errorf("abandoned findings %q, err %v; want none, with doctor.ErrCheckAbandoned", findings, err)
+	}
+}
+
 // TestOwnerlessReapReadsEveryOwnerStore (the #7811 review, CONTRACT
 // v5.10j item 2): the owner is missing only when every store a session row
 // can live in answers not found. A row in another store (a rig's, a moved
@@ -381,7 +453,7 @@ func TestOwnerlessReapReadsEveryOwnerStore(t *testing.T) {
 			if c.sp.stopCalls["named-1"] != 0 {
 				t.Fatalf("stopped %d time(s); want it left running", c.sp.stopCalls["named-1"])
 			}
-			if findings, _ := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute); strings.Contains(strings.Join(findings, "\n"), "named-1") {
+			if findings, _ := ownerlessRuntimeFindings(nil, c.owners(), c.sp, c.city, ownerlessT0, time.Minute); strings.Contains(strings.Join(findings, "\n"), "named-1") {
 				t.Fatalf("findings %q name a runtime whose owner is not proven missing", findings)
 			}
 		})
@@ -495,7 +567,7 @@ func TestOwnerlessLivenessErrorLeavesTheRuntime(t *testing.T) {
 			if c.sp.stopCalls["named-1"] != 0 {
 				t.Fatalf("stopped %d time(s); want the alive runtime left running", c.sp.stopCalls["named-1"])
 			}
-			if findings, _ := ownerlessRuntimeFindings(c.owners(), c.sp, c.city, ownerlessT0, time.Minute); !strings.Contains(strings.Join(findings, "\n"), "(liveness-error)") {
+			if findings, _ := ownerlessRuntimeFindings(nil, c.owners(), c.sp, c.city, ownerlessT0, time.Minute); !strings.Contains(strings.Join(findings, "\n"), "(liveness-error)") {
 				t.Fatalf("findings %q, want the liveness error named", findings)
 			}
 		})

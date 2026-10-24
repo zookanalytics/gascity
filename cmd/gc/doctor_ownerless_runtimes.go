@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func (c *ownerlessRuntimesCheck) ownerLookup(city beads.Store) ownerLookup {
 	return sessionOwnerLookup(c.cityPath, c.cfg, city, rigs)
 }
 
-func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+func (c *ownerlessRuntimesCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	store, err := c.newStore(c.cityPath)
 	if err != nil {
 		return warnCheck(c.Name(), fmt.Sprintf("skipping the ownerless-runtime scan: opening bead store: %v", err), "fix bead store access, then rerun gc doctor", nil)
@@ -70,7 +71,10 @@ func (c *ownerlessRuntimesCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 	if owners.err != nil {
 		return warnCheck(c.Name(), fmt.Sprintf("skipping the ownerless-runtime scan: %v", owners.err), "fix the rig store's access, then rerun gc doctor", nil)
 	}
-	findings, err := ownerlessRuntimeFindings(owners, c.sp, c.cityPath, time.Now(), ownerlessAgeGrace(c.cfg))
+	findings, err := ownerlessRuntimeFindings(ctx, owners, c.sp, c.cityPath, time.Now(), ownerlessAgeGrace(c.cfg))
+	if errors.Is(err, doctor.ErrCheckAbandoned) {
+		return warnCheck(c.Name(), fmt.Sprintf("skipping the rest of the ownerless-runtime scan: %v", err), "rerun gc doctor", nil)
+	}
 	if err != nil && len(findings) == 0 {
 		return warnCheck(c.Name(), fmt.Sprintf("listing runtimes: %v", err), "rerun gc doctor once the session provider answers", nil)
 	}
