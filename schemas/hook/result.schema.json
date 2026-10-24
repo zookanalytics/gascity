@@ -66,6 +66,10 @@
     },
     "drain_acknowledged": {
       "type": "boolean"
+    },
+    "step_reminder": {
+      "description": "The held claim's step rendered as the <system-reminder> block gc nudge and gc prime --hook deliver: its title, id, and description. Present on an existing_assignment or ready_assignment result when the bead has a title or description and is itself the step to continue. Absent for a molecule root, a graph.v2 workflow root, and a bead carrying a molecule_id, whose step is another bead.",
+      "type": "string"
     }
   },
   "allOf": [

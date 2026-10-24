@@ -175,7 +175,10 @@ the tick never waits on order gates.
   `maxConsecutiveFSPressureSkips`+1 passes. After the gate, a pass runs
   the managed-Dolt preflight and the periodic order rescan, installs any
   staged dispatcher (a reload's, or the rescan's), runs the
-  tracking/nudge-mail watchdogs, and calls `dispatch()`. A panic
+  tracking/nudge-mail watchdogs, and calls `dispatch()`. The preflight
+  waits at most 30 seconds for a Dolt recover, counted from when the
+  recover started; past that the pass carries on and the recover keeps
+  running, so a slow recover never holds up dispatch. A panic
   is recovered per pass (`safeTick`). Each pass is its own trace cycle
   with trigger `orders`.
 - **Reloads never wait on a pass.** A pass holds the lane's `passMu` for the
@@ -199,12 +202,39 @@ the tick never waits on order gates.
   `orders lane still running; skipping order dispatcher drain` and skips
   the drain rather than block on the pass or race it. Tracking beads left
   open are closed by the orphaned-tracking sweep on the next start.
+- **Dispatch budget.** `[orders] max_dispatches_per_tick` (default 4) caps
+  how many clock-driven orders (cooldown, cron and event triggers) a pass
+  dispatches; due condition orders are outside it. The cap is a rate over
+  the patrol interval. A pass may dispatch the cap once for each patrol
+  interval since the previous pass began, and only the fraction of a
+  dispatch carries to the next pass. A pass's length is store latency, the
+  maintenance arms and the duty cycle, none of which the cap is about, and a
+  cap spent once per pass would let a slow stretch cut the dispatch rate for
+  every order at once. A pass the lane skips for FS pressure or a suspended
+  city keeps the orders waiting just as a slow pass does, so the accrual
+  runs through it. A pass never gets less than the cap, which is what the
+  first pass after a start gets. It never gets more than one rotation,
+  because it cannot dispatch an order twice, so the burst after a long gap
+  is each due order once. When more orders are due than a pass may
+  dispatch, the pass serves them in a rotation that resumes after the last
+  order it dispatched, so each due order waits at most one rotation: the due
+  orders divided by the dispatch rate. A reload or rescan that rebuilds the
+  dispatcher resumes the rotation at the same order, found by name, and
+  keeps the budget accruing.
 - **Visibility.** Each tick that wakes the lane (so not a pressure-skipped
   or canceled tick) records a `wake_orders_lane` operation whose
   `backstop_ran`, `backstop_age_seconds` and `backstop_last_reason` fields
   give the age and trigger of the lane's last pass that reached dispatch.
   Passes the FS gate skips do not count, so an age that keeps growing means
-  the lane is stuck or starved by pressure.
+  the lane is stuck or starved by pressure. Each pass's `dispatch_orders`
+  operation splits the pass into its arms (`rescan_ms`, `install_ms`,
+  `tracking_sweep_ms`, `tracking_retention_ms`, `nudge_mail_sweep_ms`,
+  `dispatch_ms`) and records what the dispatch did: its `budget`, the
+  orders it `dispatched`, the budgeted orders the rotation left `unreached`,
+  and the orders each gate held back (`gated_open_tracking`,
+  `gated_open_work`, `gate_failed_closed`, `gate_backoff`). A pass that
+  keeps leaving orders unreached is short of budget; a pass whose gates
+  hold orders back is waiting on earlier dispatches or on a slow store.
 
 **Trigger evaluation and dispatch (on each lane pass):**
 
@@ -221,10 +251,12 @@ the tick never waits on order gates.
    - **Exec**: `dispatchExec()` runs the shell command via `ExecRunner`,
      labels the tracking bead with `exec` (or `exec-failed`), and
      records `order.completed` or `order.failed`.
-   - **Formula**: `dispatchWisp()` calls `instantiateWisp()` (which
-     delegates to `store.MolCook()`), labels the wisp root bead with
-     `order-run:<scopedName>` and `pool:<qualifiedPool>`, and
-     records `order.completed` or `order.failed`.
+   - **Formula**: `dispatchWisp()` compiles the formula, puts the
+     `gc.routed_to` pool route on the recipe's root step, instantiates it
+     with `molecule.Instantiate()`, passing the run's labels
+     (`order-run:<scopedName>`, and the `order:`/`seq:` event cursor for an
+     event trigger) as `molecule.Options.RootLabels`, and records
+     `order.completed` or `order.failed`.
 
 **Scanning (`orders.Scan()`):**
 
@@ -284,7 +316,7 @@ Violations indicate bugs.
   re-firing on the next lane pass while the dispatch goroutine is
   still running.
 
-- **The tracking watchdog never closes a run inside its timeout**: The
+- **Automated stale sweeps never close a run inside its timeout**: The
   open tracking bead is the order's single-flight gate. Each lane pass
   runs a watchdog, at most every 30s, that closes stale open tracking
   beads for every order, so a bead no dispatch closed cannot jam its
@@ -295,8 +327,23 @@ Violations indicate bugs.
   keeps its bead until the bead is 2m older than that recorded timeout.
   By then the run has been killed, even if a reload has since shortened
   the order's timeout or `max_timeout`. Any other open tracking bead is
-  closed at 2m. `gc order sweep-tracking` applies its `--stale-after`
-  alone.
+  closed at 2m. `gc order sweep-tracking`, which the core
+  `order-tracking-sweep` maintenance order runs every minute, applies
+  the same rule with its `--stale-after` in place of 2m, unless an
+  operator passes `--ignore-run-timeouts`.
+
+- **A dispatched root is created carrying its run evidence**: The
+  open-work gate, the cooldown clock's last-run fallback, the stale-wisp
+  sweep and `gc order history` find a formula order's run by the
+  `order-run:<scopedName>` label on its molecule root. Both writers of
+  that root, `dispatchWisp()` and `gc order run`, create it carrying the
+  label and the event cursor (`molecule.Options.RootLabels`) and the pool
+  route (on the recipe's root step), so the root exists with its evidence
+  or not at all. A root labeled by a later write is a running molecule
+  those readers cannot attribute to its order, and a non-idempotent order
+  fires again over it. The labels never ride the recipe:
+  `molecule.Instantiate` refuses a recipe step that carries an
+  `order-run:` label, a label only the order's own dispatch writes.
 
 - **ScopedName provides rig isolation**: The same order name
   deployed to multiple rigs produces independent scoped names (e.g.,

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -197,8 +198,16 @@ type cleanupTestingM struct {
 	paths []string
 }
 
+// noCityGuardTestingM fails the run on a start or stop refused for want of a
+// city that no test expected (session.FailOnNoCityRefusals).
+type noCityGuardTestingM struct{ m testscript.TestingM }
+
+func (m noCityGuardTestingM) Run() int {
+	return sessionpkg.FailOnNoCityRefusals(m.m.Run, os.Stderr)
+}
+
 func (m cleanupTestingM) Run() int {
-	code := m.m.Run()
+	code := sessionpkg.FailOnKeyViolations(m.m.Run(), os.Stderr) // a guard panic a recover() swallowed still fails
 	for _, path := range m.paths {
 		if path != "" {
 			_ = os.RemoveAll(path)
@@ -207,7 +216,15 @@ func (m cleanupTestingM) Run() int {
 	return code
 }
 
+// testscriptGC is the testscript "gc" command, the test binary re-executed
+// as gc: it runs under the no-city gate, as the parent's tests do.
+func testscriptGC() {
+	configureTestscriptEnvDefaults()
+	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
+}
+
 func TestMain(m *testing.M) {
+	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
 
@@ -218,10 +235,7 @@ func TestMain(m *testing.M) {
 		configureFSPressureForTests()
 		configureSupervisorHooksForTests()
 		testscript.Main(m, map[string]func(){
-			"gc": func() {
-				configureTestscriptEnvDefaults()
-				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-			},
+			"gc": testscriptGC,
 			"bd": bdTestCmd,
 		})
 		return
@@ -322,14 +336,12 @@ func TestMain(m *testing.M) {
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like
 	// -L test-city have exit-empty off and outlive their sessions forever).
 	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
+	testRunner = noCityGuardTestingM{m: testRunner}
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
 	testscript.Main(testRunner, map[string]func(){
-		"gc": func() {
-			configureTestscriptEnvDefaults()
-			os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-		},
+		"gc": testscriptGC,
 		"bd": bdTestCmd,
 	})
 }
@@ -345,6 +357,12 @@ func TestImportMigrateScript(t *testing.T) {
 
 func TestPackV2ImportsScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "pack-v2-imports.txtar")))
+}
+
+// TestBdPassthroughWalkUpScript pins gc bd's routing for the walk-up shape,
+// which in-process tests cannot reach (test binaries refuse ambient discovery).
+func TestBdPassthroughWalkUpScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "bd-passthrough-walkup.txtar")))
 }
 
 func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
@@ -6985,6 +7003,438 @@ max = 3
 	}
 }
 
+// writePrimeFixtureFiles writes each file under root, creating parent
+// directories as needed.
+func writePrimeFixtureFiles(t *testing.T, root string, files map[string]string) {
+	t.Helper()
+	for rel, content := range files {
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// writeSharedDogPacks writes a city pack whose two imports each define a
+// "dog" agent from dogAgentTOML. bd re-exports a vendored dolt pack, so its
+// dog is re-stamped bd.dog and comes first in config order; toolkit defines
+// toolkit.dog. Each dog's prompt names the pack it came from.
+func writeSharedDogPacks(t *testing.T, cityDir, dogAgentTOML string) {
+	t.Helper()
+	writePrimeFixtureFiles(t, cityDir, map[string]string{
+		"pack.toml": `[pack]
+name = "test-city"
+schema = 2
+
+[imports.bd]
+source = "./packs/bd"
+
+[imports.toolkit]
+source = "./packs/toolkit"
+`,
+		"packs/bd/pack.toml": `[pack]
+name = "bd"
+schema = 2
+
+[imports.dolt]
+source = "./dolt"
+export = true
+`,
+		"packs/bd/dolt/pack.toml":                     "[pack]\nname = \"dolt\"\nschema = 2\n",
+		"packs/bd/dolt/agents/dog/agent.toml":         dogAgentTOML,
+		"packs/bd/dolt/agents/dog/prompt.template.md": "dolt maintenance dog\n",
+		"packs/toolkit/pack.toml":                     "[pack]\nname = \"toolkit\"\nschema = 2\n",
+		"packs/toolkit/agents/dog/agent.toml":         dogAgentTOML,
+		"packs/toolkit/agents/dog/prompt.template.md": "warrant executor dog\n",
+	})
+}
+
+// requireAgentsNamed fails the test unless the city's composed config holds
+// exactly the agents called name with the wanted qualified names.
+func requireAgentsNamed(t *testing.T, cityDir, name string, want ...string) {
+	t.Helper()
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	var got []string
+	for _, a := range cfg.Agents {
+		if a.Name == name {
+			got = append(got, a.QualifiedName())
+		}
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("fixture agents named %q = %q, want %q", name, got, want)
+	}
+}
+
+func TestDoPrimeBareNameSharedByImportedPacksIsAmbiguous(t *testing.T) {
+	// A bare "dog" names neither imported dog, so gc prime must not render
+	// one of them for it.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeSharedDogPacks(t, dir, "scope = \"city\"\n")
+	writePrimeFixtureFiles(t, dir, map[string]string{
+		"city.toml":     "[workspace]\n",
+		".gc/site.toml": "workspace_name = \"test-city\"\n",
+	})
+	requireAgentsNamed(t, dir, "dog", "bd.dog", "toolkit.dog")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "bd.dog", "dolt maintenance dog\n")
+	requirePrimeRenders(t, "toolkit.dog", "warrant executor dog\n")
+
+	wantDiagnostic := `agent "dog" is ambiguous: matches bd.dog, toolkit.dog; use a qualified name`
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrime([]string{"dog"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc prime dog = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != defaultPrimePrompt {
+		t.Errorf("gc prime dog rendered %q, want the default prompt rather than either dog's", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantDiagnostic) {
+		t.Errorf("gc prime dog stderr = %q, want it to contain %q", stderr.String(), wantDiagnostic)
+	}
+
+	requirePrimeStrictRefuses(t, "dog", wantDiagnostic)
+}
+
+func TestDoPrimeBareNameResolvesRigCopiesOfOnePackAgent(t *testing.T) {
+	// Every rig that imports a pack gets its own copy of the pack's
+	// rig-scoped agents. The copies are one agent, so a bare name still
+	// renders its prompt.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	tk := []primeRigImport{{binding: "tk", source: "./packs/tk"}}
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: tk},
+		{name: "beta", imports: tk},
+	}, primeRigPackFiles("packs/tk", "tk", "polecat", "tk polecat\n"))
+	requireAgentsNamed(t, dir, "polecat", "alpha/tk.polecat", "beta/tk.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "polecat", "tk polecat\n")
+}
+
+// primeRigImport is one [rigs.imports.<binding>] entry of a fixture rig.
+type primeRigImport struct {
+	binding string
+	source  string
+}
+
+// primeFixtureRig is a fixture rig and the packs it imports. patches is TOML
+// written after the rig's imports, such as its [[rigs.patches]] tables.
+type primeFixtureRig struct {
+	name    string
+	imports []primeRigImport
+	patches string
+}
+
+// writePrimeRigCity writes a schema 2 city whose rigs each import packs
+// under [rigs.imports.<binding>], plus files.
+func writePrimeRigCity(t *testing.T, cityDir string, rigs []primeFixtureRig, files map[string]string) {
+	t.Helper()
+	var cityTOML, siteTOML strings.Builder
+	cityTOML.WriteString("[workspace]\n")
+	siteTOML.WriteString("workspace_name = \"test-city\"\n")
+	all := map[string]string{"pack.toml": "[pack]\nname = \"test-city\"\nschema = 2\n"}
+	for _, r := range rigs {
+		fmt.Fprintf(&cityTOML, "\n[[rigs]]\nname = %q\n", r.name)
+		for _, imp := range r.imports {
+			fmt.Fprintf(&cityTOML, "\n[rigs.imports.%s]\nsource = %q\n", imp.binding, imp.source)
+		}
+		cityTOML.WriteString(r.patches)
+		fmt.Fprintf(&siteTOML, "\n[[rig]]\nname = %q\npath = \"./%s\"\n", r.name, r.name)
+		all[r.name+"/.keep"] = ""
+	}
+	all["city.toml"] = cityTOML.String()
+	all[".gc/site.toml"] = siteTOML.String()
+	for rel, content := range files {
+		all[rel] = content
+	}
+	writePrimeFixtureFiles(t, cityDir, all)
+}
+
+// primeRigPackFiles returns the files of a schema 2 pack at dir that defines
+// one rig-scoped agent with the given prompt.
+func primeRigPackFiles(dir, packName, agentName, prompt string) map[string]string {
+	return map[string]string{
+		dir + "/pack.toml":                                   "[pack]\nname = \"" + packName + "\"\nschema = 2\n",
+		dir + "/agents/" + agentName + "/agent.toml":         "scope = \"rig\"\n",
+		dir + "/agents/" + agentName + "/prompt.template.md": prompt,
+	}
+}
+
+// requirePrimeRenders fails the test unless gc prime --strict renders want for
+// name.
+func requirePrimeRenders(t *testing.T, name, want string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{name}, &stdout, &stderr, false, true); code != 0 {
+		t.Fatalf("gc prime %s --strict = %d, want 0; stderr: %s", name, code, stderr.String())
+	}
+	if stdout.String() != want {
+		t.Errorf("gc prime %s rendered %q, want %q", name, stdout.String(), want)
+	}
+}
+
+// requirePrimeStrictRefuses fails the test unless gc prime --strict exits
+// non-zero for name with wantErr on stderr and nothing on stdout.
+func requirePrimeStrictRefuses(t *testing.T, name, wantErr string) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{name}, &stdout, &stderr, false, true); code == 0 {
+		t.Fatalf("gc prime %s --strict = 0, want non-zero; stdout: %q", name, stdout.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("gc prime %s --strict wrote %q to stdout, want nothing", name, stdout.String())
+	}
+	if !strings.Contains(stderr.String(), wantErr) {
+		t.Errorf("gc prime %s --strict stderr = %q, want it to contain %q", name, stderr.String(), wantErr)
+	}
+}
+
+func TestDoPrimeBareNameResolvesOnePackImportedUnderTwoBindings(t *testing.T) {
+	// One pack imported under a different binding name in each rig is still
+	// one agent, so its bare name renders its prompt.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: []primeRigImport{{binding: "gastown", source: "./packs/gastown"}}},
+		{name: "beta", imports: []primeRigImport{{binding: "gt", source: "./packs/gastown"}}},
+	}, primeRigPackFiles("packs/gastown", "gastown", "polecat", "gastown polecat\n"))
+	requireAgentsNamed(t, dir, "polecat", "alpha/gastown.polecat", "beta/gt.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "polecat", "gastown polecat\n")
+}
+
+func TestDoPrimeBareNameSharedByPacksBoundToOneNameIsAmbiguous(t *testing.T) {
+	// A binding name belongs to the import, so two rigs can bind two
+	// different packs to the same name. Their agents then share a
+	// binding-qualified name and are still two agents.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	files := primeRigPackFiles("packs/a", "a", "polecat", "pack a polecat\n")
+	for rel, content := range primeRigPackFiles("packs/b", "b", "polecat", "pack b polecat\n") {
+		files[rel] = content
+	}
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: []primeRigImport{{binding: "tk", source: "./packs/a"}}},
+		{name: "beta", imports: []primeRigImport{{binding: "tk", source: "./packs/b"}}},
+	}, files)
+	requireAgentsNamed(t, dir, "polecat", "alpha/tk.polecat", "beta/tk.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/tk.polecat, beta/tk.polecat; use a qualified name`)
+	requirePrimeRenders(t, "alpha/tk.polecat", "pack a polecat\n")
+	requirePrimeRenders(t, "beta/tk.polecat", "pack b polecat\n")
+}
+
+func TestDoPrimeBareNameSharedByACopyPatchedToAnotherTemplateIsAmbiguous(t *testing.T) {
+	// A rig patch that points its rig's copy of a pack agent at another prompt
+	// template makes that copy a different agent from the other rigs' copies.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	tk := []primeRigImport{{binding: "tk", source: "./packs/tk"}}
+	files := primeRigPackFiles("packs/tk", "tk", "polecat", "tk polecat\n")
+	files["prompts/beta-polecat.md"] = "beta polecat\n"
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: tk},
+		{name: "beta", imports: tk, patches: "\n[[rigs.patches]]\nagent = \"polecat\"\nprompt_template = \"prompts/beta-polecat.md\"\n"},
+	}, files)
+	requireAgentsNamed(t, dir, "polecat", "alpha/tk.polecat", "beta/tk.polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "alpha/tk.polecat", "tk polecat\n")
+	requirePrimeRenders(t, "beta/tk.polecat", "beta polecat\n")
+	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/tk.polecat, beta/tk.polecat; use a qualified name`)
+}
+
+// writePrimeInlineRigCity writes a city with rigs alpha and beta whose
+// city.toml declares agentTables, plus files.
+func writePrimeInlineRigCity(t *testing.T, cityDir, agentTables string, files map[string]string) {
+	t.Helper()
+	all := map[string]string{
+		"city.toml": "[workspace]\n\n[[rigs]]\nname = \"alpha\"\n\n[[rigs]]\nname = \"beta\"\n\n" + agentTables,
+		".gc/site.toml": `workspace_name = "test-city"
+
+[[rig]]
+name = "alpha"
+path = "./alpha"
+
+[[rig]]
+name = "beta"
+path = "./beta"
+`,
+		"alpha/.keep": "",
+		"beta/.keep":  "",
+	}
+	for rel, content := range files {
+		all[rel] = content
+	}
+	writePrimeFixtureFiles(t, cityDir, all)
+}
+
+func TestDoPrimeBareNameSharedByInlineRigAgentsIsAmbiguous(t *testing.T) {
+	// Agents the city declares inline in two rigs, each with its own prompt,
+	// are two agents.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeInlineRigCity(t, dir, `[[agent]]
+name = "polecat"
+dir = "alpha"
+prompt_template = "prompts/alpha-polecat.md"
+
+[[agent]]
+name = "polecat"
+dir = "beta"
+prompt_template = "prompts/beta-polecat.md"
+`, map[string]string{
+		"prompts/alpha-polecat.md": "alpha polecat\n",
+		"prompts/beta-polecat.md":  "beta polecat\n",
+	})
+	requireAgentsNamed(t, dir, "polecat", "alpha/polecat", "beta/polecat")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeStrictRefuses(t, "polecat", `agent "polecat" is ambiguous: matches alpha/polecat, beta/polecat; use a qualified name`)
+}
+
+func TestDoPrimeBareNameSharedByInlineAgentsWithOneTemplateIsAmbiguous(t *testing.T) {
+	// Two [[agent]] tables are two agents even when they share a prompt
+	// template. Each sets its own MODE, so the template renders different
+	// instructions for each.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writePrimeInlineRigCity(t, dir, `[[agent]]
+name = "worker"
+dir = "alpha"
+prompt_template = "prompts/shared.template.md"
+env = { MODE = "alpha" }
+
+[[agent]]
+name = "worker"
+dir = "beta"
+prompt_template = "prompts/shared.template.md"
+env = { MODE = "beta" }
+`, map[string]string{
+		"prompts/shared.template.md": "{{ .MODE }} worker doctrine\n",
+	})
+	requireAgentsNamed(t, dir, "worker", "alpha/worker", "beta/worker")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "alpha/worker", "alpha worker doctrine\n")
+	requirePrimeRenders(t, "beta/worker", "beta worker doctrine\n")
+	requirePrimeStrictRefuses(t, "worker", `agent "worker" is ambiguous: matches alpha/worker, beta/worker; use a qualified name`)
+}
+
+func TestDoPrimeAmbiguityNamesEachPackOnce(t *testing.T) {
+	// Two packs that each define a rig-scoped dog, imported into three rigs,
+	// are two agents with three copies each. The error names one copy of
+	// each pack's dog, and that name renders the pack's prompt.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	files := primeRigPackFiles("packs/bd", "bd", "dog", "bd dog\n")
+	for rel, content := range primeRigPackFiles("packs/tk", "tk", "dog", "tk dog\n") {
+		files[rel] = content
+	}
+	both := []primeRigImport{{binding: "bd", source: "./packs/bd"}, {binding: "tk", source: "./packs/tk"}}
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "r1", imports: both},
+		{name: "r2", imports: both},
+		{name: "r3", imports: both},
+	}, files)
+	requireAgentsNamed(t, dir, "dog", "r1/bd.dog", "r1/tk.dog", "r2/bd.dog", "r2/tk.dog", "r3/bd.dog", "r3/tk.dog")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeStrictRefuses(t, "dog", `agent "dog" is ambiguous: matches r1/bd.dog, r1/tk.dog; use a qualified name`)
+	requirePrimeRenders(t, "r1/bd.dog", "bd dog\n")
+	requirePrimeRenders(t, "r1/tk.dog", "tk dog\n")
+	// The names keep their rig because a rig-scoped agent's binding-qualified
+	// name resolves only inside one of its rigs.
+	requirePrimeStrictRefuses(t, "bd.dog", `agent "bd.dog" not found in city config`)
+}
+
+func TestDoPrimeBareNamePicksTheCitysOwnAgent(t *testing.T) {
+	// The city's own agent is never ambiguous. A bare name the city defines
+	// itself picks that agent over the imports that define the name too.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	writeSharedDogPacks(t, dir, "scope = \"city\"\n")
+	writePrimeFixtureFiles(t, dir, map[string]string{
+		"city.toml":                     "[workspace]\n",
+		".gc/site.toml":                 "workspace_name = \"test-city\"\n",
+		"agents/dog/agent.toml":         "scope = \"city\"\n",
+		"agents/dog/prompt.template.md": "city dog\n",
+	})
+	requireAgentsNamed(t, dir, "dog", "bd.dog", "dog", "toolkit.dog")
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "dog", "city dog\n")
+}
+
+func TestDoPrimeBareNameInsideARigPicksTheCitysOwnRigAgent(t *testing.T) {
+	// Inside a rig directory, a bare name picks the city's own agent for that
+	// rig over an imported agent of the same name in the rig. The city's own
+	// rig-scoped agent stays one agent with no dir, and the rig directory
+	// supplies its rig.
+	clearGCEnv(t)
+	dir := t.TempDir()
+	files := primeRigPackFiles("packs/tk", "tk", "worker", "tk worker\n")
+	files["agents/worker/agent.toml"] = "scope = \"rig\"\n"
+	files["agents/worker/prompt.template.md"] = "city worker\n"
+	writePrimeRigCity(t, dir, []primeFixtureRig{
+		{name: "alpha", imports: []primeRigImport{{binding: "tk", source: "./packs/tk"}}},
+	}, files)
+	requireAgentsNamed(t, dir, "worker", "alpha/tk.worker", "worker")
+	t.Chdir(filepath.Join(dir, "alpha"))
+	t.Setenv("GC_CITY_PATH", dir)
+
+	requirePrimeRenders(t, "worker", "city worker\n")
+}
+
+func TestDoPrimeHookAmbiguityNamesTheRequestedAgent(t *testing.T) {
+	// A hook session's alias names no agent, so gc prime tries its template,
+	// a bare name two packs share. The error names the alias that was asked
+	// for, then the template that was ambiguous.
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	writeSharedDogPacks(t, dir, "scope = \"city\"\n")
+	writePrimeFixtureFiles(t, dir, map[string]string{
+		"city.toml":     "[workspace]\n",
+		".gc/site.toml": "workspace_name = \"test-city\"\n",
+	})
+	t.Chdir(dir)
+	t.Setenv("GC_CITY_PATH", dir)
+	t.Setenv("GC_ALIAS", "my-alias")
+	t.Setenv("GC_TEMPLATE", "dog")
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode(nil, &stdout, &stderr, true, true); code == 0 {
+		t.Fatalf("gc prime --hook --strict = 0, want non-zero; stdout: %q", stdout.String())
+	}
+	want := `gc prime: agent "my-alias" not found in city config; its template "dog" is ambiguous: matches bd.dog, toolkit.dog; use a qualified name`
+	if !strings.Contains(stderr.String(), want) {
+		t.Errorf("gc prime --hook --strict stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}
+
 func TestDoPrimePoolAgentFallback(t *testing.T) {
 	// An explicit pool agent with no prompt_template reads the materialized
 	// pool-worker prompt from the materialized core system pack.
@@ -8027,4 +8477,47 @@ func gcRepoRootFromEnv() string {
 func chdirToRealPackageDir(t *testing.T) {
 	t.Helper()
 	bazeltest.ChdirPackageDir(t, "cmd/gc")
+}
+
+// A buffered --json result that cannot be copied to stdout must say so on
+// stderr. The copy is the only write a full disk or closed descriptor can
+// fail; exiting 1 without a word leaves the caller an empty or truncated file
+// and nothing to diagnose it with.
+func TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
+}
+
+// The failure-path twin of TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr:
+// a failing bounded --json command still buffers its own record, and copying
+// that record to stdout is a separate site that must name a write error too.
+func TestRunBufferedJSONFailureRecordWriteFailureIsReportedOnStderr(t *testing.T) {
+	args := []string{"lint", filepath.Join(t.TempDir(), "missing"), "--json"}
+
+	// Control: with a writable stdout the command fails and stdout carries
+	// lint's own report, not the command_failed fallback record, so the run
+	// below reaches the failure-path copy rather than the success-path one.
+	// The fallback record also decodes with a schema_version and passed=false,
+	// so the error_count check is what tells the two apart.
+	var stdout, controlStderr bytes.Buffer
+	code := run(args, &stdout, &controlStderr)
+	var report lintReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); code == 0 || err != nil || report.SchemaVersion == "" || report.Passed || report.ErrorCount == 0 {
+		t.Fatalf("control: exit = %d, stdout = %q (decode error %v), want a non-zero exit and a failing lint report; stderr=%q", code, stdout.String(), err, controlStderr.String())
+	}
+
+	var stderr bytes.Buffer
+	code = run(args, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with a failing lint and an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
 }

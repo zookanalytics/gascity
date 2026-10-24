@@ -85,6 +85,11 @@ var hookClaimMutationTimeout = 10 * time.Second
 // lands before the backstop's first nudge, and a pathological slow read only earns
 // the idle-claim backstop's next idempotent (NDI) re-nudge, never a double claim.
 // GC_HOOK_CLAIM_WINDOW (resolveHookClaimWindow) still overrides this default.
+//
+// The window fences when a claim may START. A claim that starts inside it gets
+// its own reserved hookClaimMutationTimeout budget (claimMutationContext) rather
+// than whatever sliver of the window the read left, so a found bead is always
+// claimable; the straddle unwind fires only past window + that reserve.
 var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
@@ -255,6 +260,13 @@ type hookClaimOps struct {
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
+	// EnqueueContinuationNudge enqueues a hook-claim-continuation nudge for the
+	// claiming session when a pool graph.v2 workflow root was freshly claimed and
+	// has at least one pre-assigned sibling step. This propels the root → step-1
+	// transition without requiring an external gc session nudge. Best-effort.
+	// ACP-transport sessions require daemon.nudge_dispatcher = "supervisor" for
+	// delivery; the legacy per-session poller cannot deliver to ACP sessions.
+	EnqueueContinuationNudge hookEnqueueContinuationNudgeFunc
 	// Release gives back a claim this invocation won but could not deliver. It
 	// is compare-and-swap on the assignee (release-if-current), so a claim that
 	// legitimately changed hands in the meantime is left alone. It reports
@@ -320,6 +332,9 @@ type (
 	// it still carries fromAssignee, reporting whether it now carries
 	// toAssignee.
 	hookClaimRestampFunc func(context.Context, string, []string, string, string, string) (bool, error)
+	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
+	// hook-claim-continuation nudge, keyed by the claim assignee.
+	hookEnqueueContinuationNudgeFunc func(assignee string)
 )
 
 type hookClaimJSONResult struct {
@@ -335,6 +350,7 @@ type hookClaimJSONResult struct {
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+	StepReminder         string   `json:"step_reminder,omitempty"`
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -457,8 +473,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 
 	output, err := ops.Runner(workQuery, dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck
-		return hookClaimResult{terminal: true, code: 1}
+		return hookClaimResult{terminal: true, code: reportClaimWorkQueryFailure(err, stderr)}
 	}
 
 	normalized := normalizeWorkQueryOutput(strings.TrimSpace(output))
@@ -483,9 +498,17 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
-		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		verdict, canonical := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
 		if verdict != hookAdoptionRefused {
-			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
+			if restamped, adopt := restampHookAdoption(bead, canonical.Assignee, verdict, *opts, *ops, dir, stderr); adopt {
+				// The step renders from the canonical bead, because the row can
+				// lag an edit made after the claim. An unverified adoption has
+				// no readback, so it renders the row it adopts on.
+				step := bead
+				if verdict == hookAdoptionOwned {
+					step = canonical
+				}
+				result.StepReminder = hookClaimStepReminder(step, result.BeadID)
 				bead = restamped
 				result.Assignee = restamped.Assignee
 				// minted=false: adoption returns work this session already owned.
@@ -553,6 +576,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
+	}
+	if ops.EnqueueContinuationNudge == nil {
+		ops.EnqueueContinuationNudge = hookContinuationNudgeEnqueue
 	}
 	if ops.ReadWorkMeta == nil {
 		ops.ReadWorkMeta = hookReadClaimedBeadWithBdStore
@@ -660,25 +686,33 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 	return resolveHookClaimWindow()
 }
 
-// claimMutationContext bounds a claim-write child by whichever is sooner: the
-// flat mutation timeout, or what remains of the claim window.
+// claimLandingWindowSpent reports whether a claim CAS that just returned landed
+// too late to hand to the invoking turn: past the claim window PLUS the reserved
+// claim budget. The window fences when a claim may START (claimWindowSpent); a
+// claim started inside it owns a separate, full mutation budget
+// (claimMutationContext), so only a CAS that overran that reserved budget is a
+// straddle.
+func (ops *hookClaimOps) claimLandingWindowSpent() bool {
+	return ops.invocationAge() > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+}
+
+// claimMutationContext bounds a claim-write child by the reserved mutation
+// budget, hookClaimMutationTimeout, measured from when the claim tier starts.
 //
-// Bounding by the window is half of F-B. The CAS runs in a bd child with its own
-// 120s ceiling (bdCommandTimeout), so without this a claim started at the last
-// second of the window keeps writing long past the fence — and a claim that
-// lands late is exactly the parked claim the fence exists to prevent.
+// The claim budget is deliberately SEPARATE from the read budget. It used to be
+// min(mutation timeout, what remains of the claim window), which let a slow
+// federated work query spend the claim's time: a read that returned a found
+// bead a few milliseconds before the window closed passed the start fence and
+// then ran the CAS on an already-expired context, so bd failed it with
+// `claiming bead "<id>": timed out after 0s (caller deadline)` and the seat
+// drained claims_errored with its routed work unclaimed (maintainer-city,
+// 2026-09-22/23). A claim that passes the start fence now always gets the full
+// budget, and F-B still holds: the CAS runs in a bd child with its own 120s
+// ceiling, so this bound is what keeps a claim from writing long past the fence,
+// and the straddle unwind (claimLandingWindowSpent) releases one that lands
+// after window + reserve.
 func (ops *hookClaimOps) claimMutationContext() (context.Context, context.CancelFunc) {
-	budget := hookClaimMutationTimeout
-	if remaining := ops.claimWindowOrDefault() - ops.invocationAge(); remaining < budget {
-		budget = remaining
-	}
-	if budget <= 0 {
-		// Already spent. The tier's own fence refuses before using this, but an
-		// already-expired context keeps the contract honest for any path that
-		// does not.
-		budget = time.Nanosecond
-	}
-	return context.WithTimeout(context.Background(), budget)
+	return context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 }
 
 // refuseExpiredHookClaimWindow reports the spent-window refusal and returns the
@@ -713,9 +747,13 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 // A candidate whose claim errors because THIS store cannot resolve the id is
 // skipped rather than fatal (see hookClaimBeadIsElsewhere), so the federated
 // caller can try the store that actually holds it; the returned result's
-// claimsErrored flag carries the skip to the shared drain. Every other claim
-// error still fails closed: ownership is unresolved on a bead this session
-// already owns, and claiming unrelated fresh work would strand it.
+// claimsErrored flag carries the skip to the shared drain. A routed candidate
+// that resolves to a wisp row (hookClaimBeadIsAWisp) and a binding that refuses
+// the claim CAS outright (hookClaimBindingRefusedTheClaim) are skipped for the
+// same reason: both are refused before any write, so nothing is outstanding.
+// Every other claim error still fails closed: ownership is unresolved on a
+// bead this session already owns, and claiming unrelated fresh work would
+// strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
 	ctx, cancel := ops.claimMutationContext()
 	defer cancel()
@@ -747,7 +785,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		claimActor := strings.TrimSpace(candidate.Assignee)
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
 		if err != nil {
-			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err)) {
+			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
 				// reads city-wide, so a graph step in a relocated class store
 				// arrives here while the claim runs against this store's bd
@@ -761,6 +799,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				// lands before any write (hookClaimBindingRefusedTheClaim). One
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
+				//
+				// A routed id that resolves to a wisp the binding could not claim
+				// through its update operation either carries the same proof for
+				// the same reason (hookClaimBeadIsAWisp): the refusal lands before
+				// any write, so nothing is outstanding, and retrying against the
+				// same binding cannot change the answer.
 				fmt.Fprintf(stderr, "gc hook --claim: skipping ready assignment %s: %v\n", candidate.ID, err) //nolint:errcheck
 				claimsErrored = true
 				continue
@@ -825,6 +869,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if result.Assignee == "" {
 			result.Assignee = claimActor
 		}
+		result.StepReminder = hookClaimStepReminder(claimed, result.BeadID)
 		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
@@ -1078,27 +1123,28 @@ const (
 // lifecycle record", and failing closed here would idle every seat behind one
 // store hiccup, the same trade the F-D probe makes for the same reason.
 //
-// On hookAdoptionOwned it also returns the canonical assignee spelling, which
-// may differ from the work query's (cached) row.
-func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, string) {
+// On hookAdoptionOwned it also returns the canonical bead, whose assignee
+// spelling and step text may differ from the work query's (cached) row. Every
+// other verdict returns the zero bead.
+func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (hookAdoptionVerdict, beads.Bead) {
 	beadID := strings.TrimSpace(bead.ID)
 	if beadID == "" || ops.ReadWorkMeta == nil {
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, beads.Bead{}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return hookAdoptionUnverified, beads.Bead{}
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
 			"gc hook --claim: refusing to re-serve %s: the canonical store records assignee=%q, not this session (%s)\n",
 			beadID, strings.TrimSpace(canonical.Assignee), opts.Assignee)
-		return hookAdoptionRefused, ""
+		return hookAdoptionRefused, beads.Bead{}
 	}
-	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+	return hookAdoptionOwned, canonical
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy
@@ -1229,13 +1275,13 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
 func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
-	// F-B straddle. The CAS was STARTED inside the window and LANDED outside it:
-	// the claim-write child carries its own ceiling, so a claim can commit after
-	// the invoking turn is already gone. That is the same parked claim by another
+	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
+	// window plus its reserved claim budget: the claim-write child carries its own
+	// ceiling, so a claim can commit after the invoking turn is already gone. That is the same parked claim by another
 	// route, so it takes the same unwind as an undelivered one.
-	if minted && ops.claimWindowSpent() {
-		cause := fmt.Sprintf("claim of %s landed after the %s claim window closed (invocation age %s); releasing it rather than parking it",
-			bead.ID, ops.claimWindowOrDefault(), ops.invocationAge().Round(time.Millisecond))
+	if minted && ops.claimLandingWindowSpent() {
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s); releasing it rather than parking it",
+			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.invocationAge().Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
@@ -1273,13 +1319,59 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		clearHookSessionCurrentClaim(opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
 	}
+	// Enqueue a per-session continuation nudge when the hook just claimed a
+	// graph.v2 workflow root and pre-assigned at least one continuation sibling.
+	// Only after the result was delivered: an undelivered claim is released
+	// above, and a nudge for a claim this session no longer holds would wake it
+	// for work it does not own.
+	// The gate is "a workflow root was delivered AND this claim freshly pinned
+	// at least one continuation sibling to this session". gc.kind=workflow has
+	// several writers (formula compile, API convoy dispatch, orders feed), and
+	// continuation groups are formula-declared (internal/graphroute), so the
+	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
+	// session that now owns pinned sibling work.
+	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+		ops.EnqueueContinuationNudge(opts.Assignee)
+	}
 	return 0
 }
 
+// hookClaimStepReminder renders the step a held claim stands for, which the
+// existing_assignment and ready_assignment results carry: a session handed a
+// claim it has no memory of making learns what the work is from the reply to
+// its claim. The claimed tier carries none, because the session minted that
+// claim on the same call. The step is rendered from bead under beadID, the id
+// the result names, through formatWispStepReminder, the renderer behind the
+// step gc nudge and gc prime --hook inject. It renders nothing for a bead with
+// neither a title nor a description, or for a bead whose work runs as other
+// beads (hookClaimStepRunsElsewhere), and then the result is the identifiers
+// alone.
+func hookClaimStepReminder(bead beads.Bead, beadID string) string {
+	if hookClaimStepRunsElsewhere(bead) ||
+		(strings.TrimSpace(bead.Title) == "" && strings.TrimSpace(bead.Description) == "") {
+		return ""
+	}
+	bead.ID = beadID
+	return formatWispStepReminder(&bead)
+}
+
+// hookClaimStepRunsElsewhere reports whether a claimed bead's work runs as
+// other beads, so that its own title and description are not the step to
+// continue. A molecule root's step is one of its children, which gc nudge and
+// gc prime --hook resolve to (resolveActiveWispStep). A source bead carrying a
+// molecule_id leads them to that molecule's step the same way. A graph.v2
+// workflow root's work runs as its step beads, which the hook hands out in
+// turn.
+func hookClaimStepRunsElsewhere(bead beads.Bead) bool {
+	return beads.IsMoleculeType(strings.TrimSpace(bead.Type)) ||
+		strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) == beadmeta.KindWorkflow
+}
+
 // writeHookClaimResultLine writes the one line that carries a claim result to
-// its consumer, and — unlike the plain-text path it replaces — reports whether
-// that write actually landed. The non-JSON form used to discard the error, which
-// is precisely the shape a dead tool pipe takes.
+// its consumer and returns the write's error, which is how the caller learns
+// that a dead tool pipe never received the claim. The JSON form is the whole
+// result; the plain form is the bead id alone.
 func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout io.Writer) error {
 	if jsonOut {
 		return writeCLIJSONLine(stdout, result)
@@ -1537,7 +1629,13 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
-			!hookClaimMatchesRoute(sibling, opts.RouteTargets) {
+			!hookClaimMatchesRoute(sibling, opts.RouteTargets) ||
+			// Pre-assignment is a decision about what to DO with a bead, and a
+			// canonical dispatch hold (beadmeta.DispatchHoldLabels) means the
+			// sibling's required next actor is, by construction, not this
+			// claimant — the same beadmeta.HasDispatchHold answer the hook's
+			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
+			beadmeta.HasDispatchHold(sibling.Labels) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -2959,6 +3057,66 @@ func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
 	}
 }
 
+// hookContinuationNudgeEnqueue is the production EnqueueContinuationNudge
+// implementation. It enqueues a queued nudge for the claiming session so the
+// pool agent re-enters its hook after claiming the workflow root and propels
+// the root → step-1 transition without an external gc session nudge. The city
+// path is resolved from the environment so this call is self-contained — the
+// same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
+// error is swallowed so a nudge-queue failure never blocks the claim.
+// ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
+// daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
+// See writeHookClaimWorkResultForBead for the call site.
+func hookContinuationNudgeEnqueue(assignee string) {
+	cityPath, err := resolveCity()
+	if err != nil {
+		return
+	}
+	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city
+	// uses daemon.nudge_dispatcher = "supervisor". A nil cfg (load error)
+	// falls through to legacy mode with no behavior change.
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	target := nudgeTarget{
+		cityPath:    cityPath,
+		sessionName: assignee,
+		cfg:         cfg,
+	}
+	// The assignee is the claim identity (hookClaimAssigneeIdentity picks the
+	// first of alias, session ID, agent, resolved agent name, and session
+	// name), not necessarily the runtime session name. Resolve it to the
+	// session bead without materializing named sessions so the poller gets the
+	// real runtime session name and transport, and the fence ties the item to
+	// this session's generation; delivery may re-fence it to a replacement
+	// occupant of the same seat. Best-effort: if the store is unavailable or
+	// the assignee does not resolve, fall back to a session-name fence lookup.
+	// Close only the handle this call opened, never the nudges-class store
+	// (see openOwnedNudgeBeadStore), and read session beads from the session
+	// class, not the nudges class.
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	if opened != nil {
+		defer closeBeadStoreHandle(opened) //nolint:errcheck
+		sessStore := cliSessionStore(opened, cfg, cityPath)
+		if id, err := resolveSessionIDWithConfig(cityPath, cfg, sessStore, assignee); err == nil {
+			if info, err := sessionFrontDoor(sessStore).Get(id); err == nil {
+				target = resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+			}
+		}
+		if target.sessionID == "" {
+			target = withNudgeTargetFence(sessStore, target)
+		}
+	}
+	// The assignee is the right queue key: delivery
+	// (queuedNudgeClaimableForTarget and the supervisor dispatcher) matches
+	// item.Agent against nudgeTarget.queueKeys, which carries the alias,
+	// session ID, agent identity, and session name for the session.
+	item := newQueuedNudgeWithOptions(assignee, "Work slung. Check your hook.", "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
+	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		return
+	}
+	maybeStartNudgePoller(target)
+	_ = pokeController(cityPath)
+}
+
 func hookListContinuationWithBdStore(_ context.Context, dir string, env []string, rootID, group string) ([]beads.Bead, error) {
 	store := hookClaimBdStore(dir, env, "")
 	return store.List(beads.ListQuery{
@@ -2988,7 +3146,9 @@ func hookRuntimeDrainAck(stderr io.Writer) error {
 }
 
 // errDrainAckRefused is hookRuntimeDrainAck's error for a v2 drain-ack that
-// wrote nothing because the session row refused it.
+// the session row refused: the incarnation check, which releases nothing, or
+// the row CAS after the held-claim release. Neither writes the row ack or the
+// env ack.
 var errDrainAckRefused = errors.New("runtime drain-ack refused by the session row")
 
 // errHookDrainAckTolerated marks a refused drain-ack the drain may complete
@@ -3197,6 +3357,9 @@ func workflowRunTargetFallbackEligible(candidate beads.Bead) bool {
 }
 
 func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
+	if workflowTopologyIsNonExecutable(candidate.Metadata[beadmeta.KindMetadataKey], candidate.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
+		return false
+	}
 	if len(routeTargets) == 0 {
 		return false
 	}
@@ -3215,6 +3378,18 @@ func hookClaimMatchesRoute(candidate beads.Bead, routeTargets []string) bool {
 		}
 	}
 	return false
+}
+
+// workflowTopologyIsNonExecutable excludes structural latches while preserving
+// the legacy root-only workflow whose root is itself the executable work.
+// Apply the same gate to demand: refusing a claim alone would leave a permanent
+// reason to spawn replacement workers, each of which immediately drains.
+func workflowTopologyIsNonExecutable(kind, expanded string) bool {
+	kind = strings.TrimSpace(kind)
+	if kind == beadmeta.KindWorkflow {
+		return strings.TrimSpace(expanded) == "true"
+	}
+	return slices.Contains(beadmeta.WorkflowTopologyKinds, kind)
 }
 
 // hookCandidateVisible reports whether a work_query candidate should be

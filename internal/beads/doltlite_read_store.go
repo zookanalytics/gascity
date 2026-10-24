@@ -221,6 +221,9 @@ func (s *DoltliteReadStore) CloseStore() error {
 	return nil
 }
 
+// readsBySubprocess overrides the embedded BdStore's: Get reads in-process.
+func (s *DoltliteReadStore) readsBySubprocess() bool { return false }
+
 // Get returns the bead with the given ID, open or closed.
 func (s *DoltliteReadStore) Get(id string) (Bead, error) {
 	beads, err := s.queryIssues(ListQuery{AllowScan: true, IncludeClosed: true, TierMode: TierBoth}, "i.id = ?", []any{id}, 1)
@@ -295,7 +298,8 @@ func (s *DoltliteReadStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
 	}
-	return s.queryIssues(query, "", nil, query.Limit)
+	rows, err := s.queryIssues(query, "", nil, query.Limit)
+	return query.Fields.project(rows), err
 }
 
 // ListOpen returns the open beads, filtered to status[0] when given.
@@ -360,7 +364,7 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	if hash != "" && hash == s.readyHash && s.readyCache != nil {
 		if cached, ok := s.readyCache[cacheKey]; ok {
 			s.readyMu.Unlock()
-			return cloneBeads(cached), nil
+			return rq.Fields.project(cloneBeads(cached)), nil
 		}
 	}
 	s.readyMu.Unlock()
@@ -401,7 +405,8 @@ func (s *DoltliteReadStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 		s.readyCache[cacheKey] = cloneBeads(out)
 	}
 	s.readyMu.Unlock()
-	return out, nil
+	// The cache keeps whole rows, so every field set is served from one entry.
+	return rq.Fields.project(out), nil
 }
 
 // LastOrderRun returns when the order named name last ran, or the zero time.
@@ -989,15 +994,16 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 // hydrating only those ids). It is restricted to the shapes whose result is
 // fully determined by SQL-expressible predicates and the standard
 // (created_at, id) sort, so the SQL LIMIT is exact. A custom orderBy, caller
-// extraWhere, or a ParentID/metadata/before-time filter all need post-SQL Go
-// work that a bounded SQL selection could truncate incorrectly, so those fall
-// back to the full-read merge.
+// extraWhere, or a ParentID/ParentIDs/metadata/before-time filter all need
+// post-SQL Go work that a bounded SQL selection could truncate incorrectly, so
+// those fall back to the full-read merge.
 func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extraWhere string, limit int, orderBy string) bool {
 	return limit > 0 &&
 		len(sets) > 1 &&
 		orderBy == "" &&
 		extraWhere == "" &&
 		query.ParentID == "" &&
+		len(query.ParentIDs) == 0 &&
 		len(query.Metadata) == 0 &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
@@ -1333,6 +1339,17 @@ func (s *DoltliteReadStore) buildDoltliteTableQuery(query ListQuery, tables dolt
 	if query.ParentID != "" {
 		where = append(where, doltliteQualifiedDependsOnExpr("pc")+" = ?")
 		args = append(args, query.ParentID)
+	}
+	if len(query.ParentIDs) > 0 {
+		parents := distinctNonEmpty(query.ParentIDs)
+		if len(parents) == 0 {
+			return doltliteTableQuery{skipTable: true}, nil
+		}
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(parents)), ",")
+		where = append(where, doltliteQualifiedDependsOnExpr("pc")+" IN ("+placeholders+")")
+		for _, parent := range parents {
+			args = append(args, parent)
+		}
 	}
 	if query.Label != "" {
 		where = append(where, "EXISTS (SELECT 1 FROM "+tables.labels+" l WHERE l.issue_id = i.id AND l.label = ?)")

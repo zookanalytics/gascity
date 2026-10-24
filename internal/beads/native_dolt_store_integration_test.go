@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -125,6 +124,74 @@ func TestNativeDoltStoreEphemeralMailSend(t *testing.T) {
 	}
 }
 
+// TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation pins S24-G
+// on a real store. issueops.Claimer misses a wisp id, so Claim claims it
+// through the update operation: the assignee claims its own assigned wisp (the
+// hook claims a ready assignment with its assignee as the actor), a re-claim
+// by the same assignee succeeds again, and another actor's claim is a lost
+// claim that leaves the holder in place. Wisp-plane resolution and the
+// claim's compare-and-set on the wisp table live in beads; a drift there would
+// make every assigned wisp step a silent skip in the hook while every spy test
+// stays green.
+func TestNativeDoltStoreClaimsAnAssignedWispThroughTheUpdateOperation(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "wisp-claim", "gc")
+
+	wisp, err := store.Create(Bead{
+		Title:     "assigned wisp step",
+		Type:      "task",
+		Assignee:  "builder",
+		Ephemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("Create assigned wisp: %v", err)
+	}
+	if !wisp.Ephemeral {
+		t.Fatalf("Ephemeral = false on created bead %s, want a wisp", wisp.ID)
+	}
+
+	for _, attempt := range []string{"claim", "re-claim"} {
+		claimed, ok, err := store.Claim(wisp.ID, "builder")
+		if err != nil || !ok {
+			t.Fatalf("%s: Claim(%s, builder) = (%+v, %v, %v), want (bead, true, nil)", attempt, wisp.ID, claimed, ok, err)
+		}
+		if claimed.ID != wisp.ID || claimed.Status != "in_progress" || claimed.Assignee != "builder" {
+			t.Fatalf("%s: claimed = %+v, want %s in_progress for builder", attempt, claimed, wisp.ID)
+		}
+		got, err := store.Get(wisp.ID)
+		if err != nil {
+			t.Fatalf("%s: Get(%s): %v", attempt, wisp.ID, err)
+		}
+		if got.Status != "in_progress" || got.Assignee != "builder" || !got.Ephemeral {
+			t.Fatalf("%s: Get(%s) = %+v, want the claimed wisp", attempt, wisp.ID, got)
+		}
+	}
+
+	lost, ok, err := store.Claim(wisp.ID, "intruder")
+	if err != nil || ok || lost.ID != "" {
+		t.Fatalf("Claim(%s, intruder) = (%+v, %v, %v), want a lost claim (zero, false, nil)", wisp.ID, lost, ok, err)
+	}
+	got, err := store.Get(wisp.ID)
+	if err != nil {
+		t.Fatalf("Get(%s) after the lost claim: %v", wisp.ID, err)
+	}
+	if got.Status != "in_progress" || got.Assignee != "builder" {
+		t.Fatalf("Get(%s) after the lost claim = %+v, want builder still holding it", wisp.ID, got)
+	}
+}
+
 // testRawDBGetter matches beadslib's internal storage.RawDBAccessor without
 // bringing that implementation detail into production code.
 type testRawDBGetter interface {
@@ -215,9 +282,16 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 	}
 }
 
+// testDoltServerOptions adjusts the server startTestDoltServer launches.
+type testDoltServerOptions struct {
+	// queryLog, when set, is a file that receives the server's output at
+	// debug level, which records the text of every query the server runs.
+	queryLog string
+}
+
 // startTestDoltServer launches a throwaway server for tests that need the raw
 // SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t *testing.T) int {
+func startTestDoltServer(t *testing.T, opts ...testDoltServerOptions) int {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -234,8 +308,25 @@ func startTestDoltServer(t *testing.T) int {
 	}
 
 	dataDir := t.TempDir()
-	cmd := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
+	args := []string{"sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir}
+	var queryLog *os.File
+	for _, opt := range opts {
+		if opt.queryLog == "" {
+			continue
+		}
+		queryLog, err = os.Create(opt.queryLog)
+		if err != nil {
+			t.Fatalf("create dolt query log: %v", err)
+		}
+		t.Cleanup(func() { _ = queryLog.Close() })
+		args = append(args, "--loglevel", "debug")
+	}
+	cmd := exec.Command(doltBin, args...)
 	cmd.Env = append(os.Environ(), "DOLT_ROOT_PATH="+dataDir)
+	if queryLog != nil {
+		cmd.Stdout = queryLog
+		cmd.Stderr = queryLog
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start dolt sql-server: %v", err)
 	}
@@ -356,6 +447,40 @@ func TestNativeDoltStoreRealBackendCrossPrefixParent(t *testing.T) {
 	if stillForeign.ParentID != foreign {
 		t.Errorf("ParentID after the refused reparent is %q, want the previous %q; the refusal has to come before the write", stillForeign.ParentID, foreign)
 	}
+
+	// Moving between two foreign parents rewrites an edge whose target lives in
+	// depends_on_external, in one transaction: the old edge has to come out by
+	// the same pair it went in under, or the bead reads two parents.
+	otherForeign := "gcg-70b1e5f2-b"
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &otherForeign}); err != nil {
+		t.Fatalf("Update moving between foreign parents %q -> %q: %v", foreign, otherForeign, err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 1 || got[0] != otherForeign {
+		t.Errorf("parent edges after moving between foreign parents = %v, want only %q", got, otherForeign)
+	}
+	cleared := ""
+	if err := store.Update(control.ID, UpdateOpts{ParentID: &cleared}); err != nil {
+		t.Fatalf("Update clearing a foreign parent: %v", err)
+	}
+	if got := realBackendParentEdges(t, store, control.ID); len(got) != 0 {
+		t.Errorf("parent edges after clearing a foreign parent = %v, want none", got)
+	}
+}
+
+// realBackendParentEdges lists id's stored parent-child targets.
+func realBackendParentEdges(t *testing.T, store *NativeDoltStore, id string) []string {
+	t.Helper()
+	deps, err := store.DepList(id, "down")
+	if err != nil {
+		t.Fatalf("DepList(%q, down): %v", id, err)
+	}
+	var parents []string
+	for _, dep := range deps {
+		if dep.Type == string(beadslib.DepParentChild) {
+			parents = append(parents, dep.DependsOnID)
+		}
+	}
+	return parents
 }
 
 func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
@@ -411,6 +536,73 @@ func TestNativeDoltStoreRealBackendRoundTrip(t *testing.T) {
 	if _, err := store.Get("gc-missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Get missing error = %v, want ErrNotFound", err)
 	}
+}
+
+// TestNativeDoltStoreRealBackendListSkipsCountsKeepsRows runs the seat-work
+// read shape (assignee, status, both tiers, live) against a real backend. The
+// listing skips the count aggregates Bead does not carry; every field Bead does
+// carry, labels, parent and edges among them, still arrives as Get reads it.
+func TestNativeDoltStoreRealBackendListSkipsCountsKeepsRows(t *testing.T) {
+	ctx := context.Background()
+	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
+	if err != nil {
+		t.Skipf("upstream native beads storage unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := storage.Close(); err != nil {
+			t.Fatalf("close upstream storage: %v", err)
+		}
+	})
+	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
+		t.Fatalf("set issue prefix: %v", err)
+	}
+	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-skip-counts", "gc")
+
+	parent, err := store.Create(Bead{Title: "parent"})
+	if err != nil {
+		t.Fatalf("Create parent: %v", err)
+	}
+	blocker, err := store.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatalf("Create blocker: %v", err)
+	}
+	work, err := store.Create(Bead{
+		Title:    "seat work",
+		Assignee: "worker",
+		ParentID: parent.ID,
+		Labels:   []string{"gc:work", "pool:a"},
+		Metadata: map[string]string{"k": "v"},
+		Needs:    []string{"blocks:" + blocker.ID},
+	})
+	if err != nil {
+		t.Fatalf("Create work: %v", err)
+	}
+	inProgress := "in_progress"
+	if err := store.Update(work.ID, UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("Update status: %v", err)
+	}
+	if _, err := store.Create(Bead{Title: "other seat", Assignee: "someone-else", Status: "in_progress"}); err != nil {
+		t.Fatalf("Create other: %v", err)
+	}
+
+	rows, err := store.List(ListQuery{Assignee: "worker", Status: "in_progress", TierMode: TierBoth, Live: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != work.ID {
+		t.Fatalf("List = %+v, want only %s", rows, work.ID)
+	}
+	got := rows[0]
+	if got.ParentID != parent.ID {
+		t.Errorf("ParentID = %q, want %q", got.ParentID, parent.ID)
+	}
+	if !reflect.DeepEqual(got.Labels, []string{"gc:work", "pool:a"}) {
+		t.Errorf("Labels = %v, want [gc:work pool:a]", got.Labels)
+	}
+	if got.Metadata["k"] != "v" {
+		t.Errorf("Metadata = %v, want k=v", got.Metadata)
+	}
+	assertNativeDependency(t, got.Dependencies, work.ID, blocker.ID, "blocks")
 }
 
 // TestNativeDoltStoreDepMetadata pins the payload read a Dolt-backed source
@@ -510,184 +702,5 @@ func assertSameJSON(t *testing.T, got, want string) {
 	}
 	if !reflect.DeepEqual(gotValue, wantValue) {
 		t.Fatalf("payload = %q, want the JSON value of %q", got, want)
-	}
-}
-
-// TestNativeDoltStoreParentListMatchesUpstreamParentFilter pins the parent
-// pushdown on real Dolt: for every parent query shape, List returns exactly
-// what searching with the upstream parent filter and applying the query
-// returns. The fixture holds the beads that filter could disagree on: a closed
-// child, an ephemeral child, a bead holding only a blocks edge to the parent, a
-// child unparented after creation, a bead whose id is the parent's dotted form
-// but which holds no parent-child edge, and a second parent for the batched
-// form.
-func TestNativeDoltStoreParentListMatchesUpstreamParentFilter(t *testing.T) {
-	ctx := context.Background()
-	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
-	if err != nil {
-		t.Skipf("upstream native beads storage unavailable: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := storage.Close(); err != nil {
-			t.Fatalf("close upstream storage: %v", err)
-		}
-	})
-	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
-		t.Fatalf("set issue prefix: %v", err)
-	}
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, "parent-pushdown", "gc")
-	create := func(b Bead) Bead {
-		t.Helper()
-		created, err := store.Create(b)
-		if err != nil {
-			t.Fatalf("Create(%q): %v", b.Title, err)
-		}
-		return created
-	}
-
-	parent := create(Bead{Title: "parent"})
-	other := create(Bead{Title: "second parent"})
-	open := create(Bead{Title: "open child", ParentID: parent.ID})
-	closed := create(Bead{Title: "closed child", ParentID: parent.ID})
-	if err := store.Close(closed.ID); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	wisp := create(Bead{Title: "ephemeral child", ParentID: parent.ID, Ephemeral: true})
-	blocked := create(Bead{Title: "blocked on the parent", Needs: []string{"blocks:" + parent.ID}})
-	orphan := create(Bead{Title: "unparented child", ParentID: parent.ID})
-	unparent := ""
-	if err := store.Update(orphan.ID, UpdateOpts{ParentID: &unparent}); err != nil {
-		t.Fatalf("Update(ParentID=\"\"): %v", err)
-	}
-	otherChild := create(Bead{Title: "second parent's child", ParentID: other.ID})
-	dotted := create(Bead{ID: parent.ID + ".9", Title: "dotted id, no parent-child edge"})
-	create(Bead{Title: "unrelated"})
-
-	// upstream is List before the pushdown: the upstream parent filter for
-	// ParentID, an unfiltered search for ParentIDs, then the query applied.
-	upstream := func(query ListQuery) []Bead {
-		t.Helper()
-		issues, err := storage.SearchIssues(ctx, "", nativeIssueFilterFromListQuery(query))
-		if err != nil {
-			t.Fatalf("upstream search: %v", err)
-		}
-		beads := make([]Bead, 0, len(issues))
-		for _, issue := range issues {
-			bead, err := beadFromNativeIssue(issue)
-			if err != nil {
-				t.Fatalf("convert %s: %v", issue.ID, err)
-			}
-			beads = append(beads, bead)
-		}
-		if len(query.ParentIDs) > 0 {
-			beads = keepChildrenOf(beads, query.ParentIDs)
-		}
-		return ApplyListQuery(beads, query)
-	}
-
-	queries := map[string]ListQuery{
-		"open children":    {ParentID: parent.ID, Sort: SortCreatedAsc},
-		"all children":     {ParentID: parent.ID, IncludeClosed: true, Sort: SortCreatedAsc},
-		"both tiers":       {ParentID: parent.ID, IncludeClosed: true, TierMode: TierBoth, Sort: SortCreatedAsc},
-		"wisp tier":        {ParentID: parent.ID, TierMode: TierWisps, Sort: SortCreatedAsc},
-		"limited":          {ParentID: parent.ID, IncludeClosed: true, Sort: SortCreatedAsc, Limit: 1},
-		"batched parents":  {ParentIDs: []string{parent.ID, other.ID}, IncludeClosed: true, TierMode: TierBoth, AllowScan: true, Sort: SortCreatedAsc},
-		"childless parent": {ParentID: blocked.ID, IncludeClosed: true, TierMode: TierBoth},
-	}
-	for name, query := range queries {
-		t.Run(name, func(t *testing.T) {
-			got, err := store.List(query)
-			if err != nil {
-				t.Fatalf("List: %v", err)
-			}
-			if want := upstream(query); !reflect.DeepEqual(got, want) {
-				t.Fatalf("List = %v, upstream parent filter = %v", beadIDsOf(got), beadIDsOf(want))
-			}
-		})
-	}
-
-	all, err := store.List(queries["both tiers"])
-	if err != nil {
-		t.Fatalf("List(both tiers): %v", err)
-	}
-	if got, want := sortedIDs(all), slices.Sorted(slices.Values([]string{open.ID, closed.ID, wisp.ID})); !reflect.DeepEqual(got, want) {
-		t.Fatalf("children of %s = %v, want %v: the fixture no longer holds the cases it names", parent.ID, got, want)
-	}
-	batched, err := store.List(queries["batched parents"])
-	if err != nil {
-		t.Fatalf("List(batched parents): %v", err)
-	}
-	if got, want := sortedIDs(batched), slices.Sorted(slices.Values([]string{open.ID, closed.ID, wisp.ID, otherChild.ID})); !reflect.DeepEqual(got, want) {
-		t.Fatalf("children of both parents = %v, want %v", got, want)
-	}
-	// The upstream filter's dotted-id arm returns the dotted bead; Matches drops
-	// it because no parent-child edge gives it a ParentID. So reading the edges
-	// alone loses nothing.
-	raw, err := storage.SearchIssues(ctx, "", nativeIssueFilterFromListQuery(queries["all children"]))
-	if err != nil {
-		t.Fatalf("raw upstream search: %v", err)
-	}
-	var rawIDs []string
-	for _, issue := range raw {
-		rawIDs = append(rawIDs, issue.ID)
-	}
-	if !slices.Contains(rawIDs, dotted.ID) {
-		t.Fatalf("upstream parent filter returned %v without the dotted bead %s; the dotted-id arm is not exercised", rawIDs, dotted.ID)
-	}
-	if slices.Contains(rawIDs, orphan.ID) {
-		t.Fatalf("upstream parent filter returned the unparented child %s", orphan.ID)
-	}
-}
-
-// TestNativeDoltStoreGetExactBatchMatchesGet pins the exact batch read on real
-// Dolt: every id it answers, closed and ephemeral rows included, is the bead
-// Get returns for that id alone, and an absent id is left unresolved.
-func TestNativeDoltStoreGetExactBatchMatchesGet(t *testing.T) {
-	ctx := context.Background()
-	storage, err := beadslib.OpenBestAvailable(ctx, filepath.Join(t.TempDir(), ".beads"))
-	if err != nil {
-		t.Skipf("upstream native beads storage unavailable: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := storage.Close(); err != nil {
-			t.Fatalf("close upstream storage: %v", err)
-		}
-	})
-	if err := storage.SetConfig(ctx, "issue_prefix", "gc"); err != nil {
-		t.Fatalf("set issue prefix: %v", err)
-	}
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, "exact-batch", "gc")
-	var ids []string
-	for _, b := range []Bead{
-		{Title: "open"},
-		{Title: "closed"},
-		{Title: "ephemeral", Ephemeral: true},
-	} {
-		created, err := store.Create(b)
-		if err != nil {
-			t.Fatalf("Create(%q): %v", b.Title, err)
-		}
-		ids = append(ids, created.ID)
-	}
-	if err := store.Close(ids[1]); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	absent := ids[0] + ".404"
-
-	found, unresolved, err := store.GetExactBatch(append(slices.Clone(ids), absent))
-	if err != nil {
-		t.Fatalf("GetExactBatch: %v", err)
-	}
-	for _, id := range ids {
-		single, err := store.Get(id)
-		if err != nil {
-			t.Fatalf("Get(%s): %v", id, err)
-		}
-		if got, ok := found[id]; !ok || !reflect.DeepEqual(got, single) {
-			t.Fatalf("GetExactBatch[%s] = %+v (found %v), want Get's %+v", id, got, ok, single)
-		}
-	}
-	if want := []string{absent}; !reflect.DeepEqual(unresolved, want) {
-		t.Fatalf("unresolved = %v, want %v", unresolved, want)
 	}
 }

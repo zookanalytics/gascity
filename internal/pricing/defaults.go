@@ -87,18 +87,6 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 3.75,
 		},
 	},
-	// Claude 4.6 Opus.
-	{
-		Provider:     "claude",
-		Model:        "claude-opus-4-6",
-		LastVerified: "2026-08-13",
-		Tier: Tier{
-			PromptUSDPer1M:        5.00,
-			CompletionUSDPer1M:    25.00,
-			CacheReadUSDPer1M:     0.50,
-			CacheCreationUSDPer1M: 6.25,
-		},
-	},
 	// Claude 4.7 Opus.
 	{
 		Provider:     "claude",
@@ -123,6 +111,19 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 6.25,
 		},
 	},
+	// Claude 5.5 Opus. Cache reads are published at 0.05x the prompt rate;
+	// most models use 0.1x.
+	{
+		Provider:     "claude",
+		Model:        "claude-opus-5-5",
+		LastVerified: "2026-09-25",
+		Tier: Tier{
+			PromptUSDPer1M:        4.00,
+			CompletionUSDPer1M:    20.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 5.00,
+		},
+	},
 	// Claude 4.5 Haiku.
 	{
 		Provider:     "claude",
@@ -135,40 +136,11 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 1.25,
 		},
 	},
-	// Claude 4.5 Haiku, undated alias. Registry.Lookup matches the model
-	// string exactly, so the dated entry above does not cover transcripts
-	// that report the alias.
-	{
-		Provider:     "claude",
-		Model:        "claude-haiku-4-5",
-		LastVerified: "2026-08-13",
-		Tier: Tier{
-			PromptUSDPer1M:        1.00,
-			CompletionUSDPer1M:    5.00,
-			CacheReadUSDPer1M:     0.10,
-			CacheCreationUSDPer1M: 1.25,
-		},
-	},
-	// Claude Sonnet 5. $2/$10 per 1M is the standard rate: it launched as
-	// introductory pricing through 2026-08-31, and the scheduled 2026-09-01
-	// increase to $3/$15 was canceled on 2026-08-10. There is no pending
-	// step-up, so these rates need no expiry handling.
-	{
-		Provider:     "claude",
-		Model:        "claude-sonnet-5",
-		LastVerified: "2026-08-14",
-		Tier: Tier{
-			PromptUSDPer1M:        2.00,
-			CompletionUSDPer1M:    10.00,
-			CacheReadUSDPer1M:     0.20,
-			CacheCreationUSDPer1M: 2.50,
-		},
-	},
-	// Claude Opus 5. Same regular usage pricing as Opus 4.8.
+	// Claude 5 Opus. Regular usage pricing is unchanged from Opus 4.7/4.8.
 	{
 		Provider:     "claude",
 		Model:        "claude-opus-5",
-		LastVerified: "2026-08-13",
+		LastVerified: "2026-09-15",
 		Tier: Tier{
 			PromptUSDPer1M:        5.00,
 			CompletionUSDPer1M:    25.00,
@@ -176,11 +148,38 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 6.25,
 		},
 	},
+	// Claude 5 Sonnet.
+	{
+		Provider:     "claude",
+		Model:        "claude-sonnet-5",
+		LastVerified: "2026-09-15",
+		Tier: Tier{
+			PromptUSDPer1M:        2.00,
+			CompletionUSDPer1M:    10.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 2.50,
+		},
+	},
+	// Claude Sonnet 5.5. Same published rates as Sonnet 5 ($2/$10 per 1M,
+	// cache reads $0.20). It is the model string the fleet's agents report
+	// most often, so an unpriced entry here hides their cost entirely
+	// (gc-kawr5).
+	{
+		Provider:     "claude",
+		Model:        "claude-sonnet-5-5",
+		LastVerified: "2026-10-13",
+		Tier: Tier{
+			PromptUSDPer1M:        2.00,
+			CompletionUSDPer1M:    10.00,
+			CacheReadUSDPer1M:     0.20,
+			CacheCreationUSDPer1M: 2.50,
+		},
+	},
 	// Claude Fable 5.
 	{
 		Provider:     "claude",
 		Model:        "claude-fable-5",
-		LastVerified: "2026-08-13",
+		LastVerified: "2026-09-15",
 		Tier: Tier{
 			PromptUSDPer1M:        10.00,
 			CompletionUSDPer1M:    50.00,
@@ -188,15 +187,17 @@ var claudeDefaults = []ModelPricing{
 			CacheCreationUSDPer1M: 12.50,
 		},
 	},
-	// Claude Mythos 5. Same capabilities and pricing as Fable 5.
+	// Claude Fable 5.1. Same prompt/completion tier as Fable 5, but cache
+	// reads are published at $0.25/MTok rather than the 0.1x prompt rate the
+	// rest of the family uses — see the ratio note in defaults_test.go.
 	{
 		Provider:     "claude",
-		Model:        "claude-mythos-5",
-		LastVerified: "2026-08-13",
+		Model:        "claude-fable-5-1",
+		LastVerified: "2026-09-15",
 		Tier: Tier{
 			PromptUSDPer1M:        10.00,
 			CompletionUSDPer1M:    50.00,
-			CacheReadUSDPer1M:     1.00,
+			CacheReadUSDPer1M:     0.25,
 			CacheCreationUSDPer1M: 12.50,
 		},
 	},

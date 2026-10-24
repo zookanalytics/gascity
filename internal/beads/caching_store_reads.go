@@ -15,9 +15,19 @@ import (
 // backing-store history when possible, preserving partial backing rows when bd
 // reports corrupt entries and returning partial-result errors when backing
 // history cannot be fully read.
+//
+// A query whose field set omits the text is served from cache with the text
+// cleared from the rows it returns, and passes its field set to every backing
+// read. A Live or ParentID list refreshes the cache from the rows its backing
+// read returns, but not a projected one: a projected row carries no text, so
+// installing it would erase the cached text of its bead. The cache learns rows
+// only from whole reads.
 func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
+	}
+	if (query.Live || query.ParentID != "") && query.Fields.omitsText() {
+		return c.backing.List(query)
 	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
@@ -58,7 +68,7 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 			if query.Limit > 0 && len(items) > query.Limit {
 				items = items[:query.Limit]
 			}
-			return items, err
+			return query.Fields.project(items), err
 		}
 
 		if !query.IncludesClosed() {
@@ -312,7 +322,7 @@ func (c *CachingStore) collectCachedListLocked(query ListQuery) []Bead {
 	if query.Limit > 0 && len(cached) > query.Limit {
 		cached = cached[:query.Limit]
 	}
-	return cached
+	return query.Fields.project(cached)
 }
 
 // cacheServableForListQueryLocked refuses to treat PrimeActive's open and
@@ -365,7 +375,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	if c.state != cacheLive && c.state != cachePartial {
 		return items
 	}
-	now := time.Now()
+	now := c.clockNow()
 	refreshed := make([]Bead, 0, len(items))
 	for _, item := range items {
 		if c.deletedSeq[item.ID] > startSeq {
@@ -452,7 +462,7 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 		}
 		c.evictListedGoneLocked(id)
 	}
-	c.markFreshLocked(time.Now())
+	c.markFreshLocked(c.clockNow())
 	c.updateStatsLocked()
 	return refreshed
 }
@@ -609,8 +619,8 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 			if depsFromBacking {
 				opts.depsMode, opts.deps = depsExplicit, freshDeps
 			}
-			c.absorbFreshLocked(id, fresh, time.Now(), opts)
-			c.markFreshLocked(time.Now())
+			c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+			c.markFreshLocked(c.clockNow())
 			c.updateStatsLocked()
 			c.mu.Unlock()
 			return fresh, nil
@@ -832,13 +842,16 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if depsFromBacking {
 			opts.depsMode, opts.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, time.Now(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if eventType == "bead.closed" {
+		c.noteCloseAnnouncedLocked(id)
+	}
 	if changed || evicted {
 		// The eviction dropped the row's beadSeq, a dirty uncached row's
 		// included, so it is stamped anew.
@@ -846,7 +859,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 		if (found && !held) || (held && (!found || cached.Status != installed.Status)) {
 			c.clearDependentReadyProjectionsLocked(id)
 		}
-		c.markFreshLocked(time.Now())
+		c.markFreshLocked(c.clockNow())
 		c.updateStatsLocked()
 	}
 	c.mu.Unlock()
@@ -892,11 +905,42 @@ func rowRefreshChange(held bool, cached Bead, cachedDeps []Dep, found bool, inst
 	return "bead.updated", true
 }
 
-// Ready returns open beads whose blocking deps are all closed.
+// Ready returns open beads whose blocking deps are all closed. A query with a
+// selector (tier, assignee or limit) reads the backing. A query without one is
+// served from cache when the cache can vouch for it; its field set selects no
+// rows, so it does not count as a selector.
 func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if readyQueryFromArgs(query) != (ReadyQuery{}) {
+	q := readyQueryFromArgs(query)
+	if (ReadyQuery{Fields: q.Fields}) != q {
 		return c.backing.Ready(query...)
 	}
+	if rows, ok := c.readyFromCache(q); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query...)
+}
+
+// ReadyPreferCache answers any ready query (tier, assignee, limit) from the
+// cache when the cache can vouch for it, under exactly the rules the
+// zero-query Ready applies: a fully live, dependency-complete cache whose
+// ready projection is not degraded, with dirty rows refreshed through the
+// bounded overlay first. When the cache is cold, partial, invalidated past the
+// overlay, or cannot vouch for one candidate's verdict, it reads the backing
+// with the caller's query, as Live.Ready does.
+//
+// It is a separate entry rather than a widening of Ready because Ready with
+// arguments has always meant "authoritative" to its existing callers; the
+// native Ready endpoint opts in explicitly.
+func (c *CachingStore) ReadyPreferCache(query ReadyQuery) ([]Bead, error) {
+	if rows, ok := c.readyFromCache(query); ok {
+		return rows, nil
+	}
+	return c.backing.Ready(query)
+}
+
+// readyFromCache computes query's ready set from the cache, reporting false
+// when the cache cannot answer and the caller must read the backing.
+func (c *CachingStore) readyFromCache(query ReadyQuery) ([]Bead, bool) {
 	var (
 		statusByID      map[string]string
 		workOutcomeByID map[string]string
@@ -924,13 +968,17 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 				}
 				statusByID[b.ID] = b.Status
 				workOutcomeByID[b.ID] = ReadinessWorkOutcome(b.Metadata)
-				if IsReadyCandidate(b, now) {
-					if c.readyProjectionUnknownLocked(b.ID) {
-						unanswerable = true
-						return
-					}
-					openBeads = append(openBeads, cloneBead(b))
+				if !IsReadyCandidateForTier(b, now, query.TierMode) {
+					continue
 				}
+				if query.Assignee != "" && b.Assignee != query.Assignee {
+					continue
+				}
+				if c.readyProjectionUnknownLocked(b.ID) {
+					unanswerable = true
+					return
+				}
+				openBeads = append(openBeads, cloneBead(b))
 			}
 			depsByID = make(map[string][]Dep, len(openBeads))
 			for _, b := range openBeads {
@@ -938,12 +986,12 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 			}
 		},
 	); err != nil {
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 	if unanswerable {
 		// One candidate whose verdict the cache cannot vouch for costs this
 		// read the cache, not correctness: the live scan is slower and right.
-		return c.backing.Ready(query...)
+		return nil, false
 	}
 
 	var result []Bead
@@ -956,7 +1004,10 @@ func (c *CachingStore) Ready(query ...ReadyQuery) ([]Bead, error) {
 	// call; impose the canonical ready order so cache-served results
 	// match the SQL-backed ready readers (#3208).
 	sortBeadsReadyOrder(result)
-	return result, nil
+	if query.Limit > 0 && len(result) > query.Limit {
+		result = result[:query.Limit]
+	}
+	return query.Fields.project(result), true
 }
 
 // ReadyContext answers only from the dependency-complete active cache. It
@@ -1114,6 +1165,18 @@ func (c *CachingStore) Children(parentID string, opts ...QueryOpt) ([]Bead, erro
 		Sort:          SortCreatedAsc,
 		TierMode:      TierModeFromOpts(opts),
 	})
+}
+
+var _ ChildrenBatchLister = (*CachingStore)(nil)
+
+// ChildrenOfAny reads every parent's children from the backing store in one
+// batched read (or one exact Children per parent on a backing without the
+// batch). A ParentID listing never reads the cache: Children forwards every one
+// to the backing, so this answers with the same consistency Children does and
+// saves the per-parent round trip the controller's graph and cleanup walks
+// would otherwise pay.
+func (c *CachingStore) ChildrenOfAny(parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
+	return ChildrenOfAny(c.backing, parentIDs, opts...)
 }
 
 // ListByLabel returns beads matching the given label. By default, serves from

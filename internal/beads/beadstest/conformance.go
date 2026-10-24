@@ -5,6 +5,8 @@ package beadstest
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -293,6 +295,73 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 		if got.Status != "closed" {
 			t.Errorf("Status = %q, want %q", got.Status, "closed")
+		}
+	})
+
+	// CloseAllLeavesAnAlreadyClosedBeadClosed pins the part of CloseAll's
+	// contract every store honors when one of the ids is already closed: no
+	// error, both beads end closed, and the open one carries the metadata. It
+	// pins neither the count nor whether the closed bead was stamped, because
+	// stores answer both differently (see the Store.CloseAll doc).
+	t.Run("CloseAllLeavesAnAlreadyClosedBeadClosed", func(t *testing.T) {
+		s := newStore()
+		open, err := s.Create(beads.Bead{Title: "close in the batch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done, err := s.Create(beads.Bead{Title: "closed before the batch"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(done.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.CloseAll([]string{open.ID, done.ID}, map[string]string{"closed_by": "conformance"}); err != nil {
+			t.Fatalf("CloseAll over an open and an already-closed bead: %v", err)
+		}
+		for _, id := range []string{open.ID, done.ID} {
+			got, err := s.Get(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "closed" {
+				t.Errorf("%s Status = %q, want %q", id, got.Status, "closed")
+			}
+		}
+		got, err := s.Get(open.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata["closed_by"] != "conformance" {
+			t.Errorf("closed_by = %q on the bead the batch closed, want %q", got.Metadata["closed_by"], "conformance")
+		}
+	})
+
+	// UpdateAddsLabelToClosedBead pins that a label can be appended to a bead
+	// after it is closed, leaving it closed. Mail archiving relies on it: it
+	// closes a message first and labels it "read" second, so no write ever
+	// leaves it read but still open.
+	t.Run("UpdateAddsLabelToClosedBead", func(t *testing.T) {
+		s := newStore()
+		b, err := s.Create(beads.Bead{Title: "label after close"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(b.ID, beads.UpdateOpts{Labels: []string{"read"}}); err != nil {
+			t.Fatalf("Update(labels) on a closed bead: %v", err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "closed" {
+			t.Errorf("Status = %q after labeling, want %q", got.Status, "closed")
+		}
+		if !slices.Contains(got.Labels, "read") {
+			t.Errorf("Labels = %v, want %q", got.Labels, "read")
 		}
 	})
 
@@ -681,6 +750,46 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		}
 	})
 
+	// ChildrenOfAny answers the union of Children(id, IncludeClosed, opts...)
+	// over its parents (beads.ChildrenBatchLister), through the store's batched
+	// read when it has one. molecule.ListSubtree asks without IncludeClosed and
+	// relies on the closed rows to reach an open descendant behind a closed
+	// intermediate, so a batched read that drops them leaves a workflow's
+	// teardown sweep short of members.
+	t.Run("ChildrenOfAnyIncludesClosedChildren", func(t *testing.T) {
+		s := newStore()
+		parent, err := s.Create(beads.Bead{Title: "parent", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		open, err := s.Create(beads.Bead{Title: "open child", ParentID: parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closed, err := s.Create(beads.Bead{Title: "closed child", ParentID: parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(closed.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		children, err := beads.ChildrenOfAny(s, []string{parent.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make([]string, 0, len(children))
+		for _, child := range children {
+			got = append(got, child.ID)
+		}
+		sort.Strings(got)
+		want := []string{open.ID, closed.ID}
+		sort.Strings(want)
+		if !slices.Equal(got, want) {
+			t.Fatalf("ChildrenOfAny(%s) = %v, want both children %v, the closed one included", parent.ID, got, want)
+		}
+	})
+
 	// ParentID is a WEAK, CITY-SCOPED reference (see beads.Bead.ParentID), and
 	// on a split city the parent routinely lives in another store: a graph-class
 	// molecule in the binding hangs its steps off a work-class bead in a rig
@@ -813,7 +922,7 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			t.Fatal(err)
 		}
 		// Create beads with types that bd ready excludes.
-		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig"} {
+		for _, typ := range []string{"molecule", "step", "convoy", "message", "gate", "merge-request", "session", "agent", "role", "rig", "op"} {
 			if _, err := s.Create(beads.Bead{Title: typ, Type: typ}); err != nil {
 				t.Fatal(err)
 			}
@@ -1096,6 +1205,121 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		s := newStore()
 		if err := s.Tx("conformance nil tx", nil); err == nil {
 			t.Fatal("Tx(nil) returned nil, want error")
+		}
+	})
+
+	t.Run("CoreFieldSetOmitsOnlyTheText", func(t *testing.T) {
+		s := newStore()
+		worked, err := s.Create(beads.Bead{
+			Title:       "worked",
+			Description: "worked description",
+			Assignee:    "worker",
+			Labels:      []string{"core-read"},
+			Metadata:    map[string]string{"route": "pool"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		blocker, err := s.Create(beads.Bead{Title: "blocker", Description: "blocker description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		dependent, err := s.Create(beads.Bead{Title: "dependent", Description: "dependent description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DepAdd(dependent.ID, blocker.ID, "blocks"); err != nil {
+			t.Fatal(err)
+		}
+		finished, err := s.Create(beads.Bead{Title: "finished", Description: "finished description"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(finished.ID); err != nil {
+			t.Fatal(err)
+		}
+
+		// A core read must return the rows a full read returns, each equal to
+		// its whole row with the description cleared.
+		sameRows := func(t *testing.T, what string, full, core []beads.Bead) {
+			t.Helper()
+			if len(core) != len(full) {
+				t.Fatalf("%s: core read returned %v, full read %v", what, titlesOf(core), titlesOf(full))
+			}
+			withText := 0
+			byID := make(map[string]beads.Bead, len(full))
+			for _, b := range full {
+				if b.Description != "" {
+					withText++
+				}
+				b.Description = ""
+				byID[b.ID] = b
+			}
+			if withText == 0 {
+				t.Fatalf("%s: full read returned no description; the fixture proves nothing", what)
+			}
+			for _, b := range core {
+				want, ok := byID[b.ID]
+				if !ok {
+					t.Fatalf("%s: core read returned %s (%q), which the full read did not", what, b.ID, b.Title)
+				}
+				if b.Description != "" {
+					t.Errorf("%s: core row %s has Description %q, want empty", what, b.ID, b.Description)
+				}
+				if !reflect.DeepEqual(b, want) {
+					t.Errorf("%s: core row %s = %+v, want the full row without its description %+v", what, b.ID, b, want)
+				}
+			}
+		}
+
+		for _, q := range []struct {
+			name  string
+			query beads.ListQuery
+		}{
+			{"open scan", beads.ListQuery{AllowScan: true, Sort: beads.SortCreatedAsc}},
+			{"scan with closed", beads.ListQuery{AllowScan: true, IncludeClosed: true, Sort: beads.SortCreatedAsc}},
+			{"label", beads.ListQuery{Label: "core-read"}},
+			{"assignee", beads.ListQuery{Assignee: "worker"}},
+			{"both tiers", beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth, Sort: beads.SortCreatedAsc}},
+			{"ids", beads.ListQuery{IDs: []string{worked.ID, dependent.ID}}},
+		} {
+			full, err := s.List(q.query)
+			if err != nil {
+				t.Fatalf("List(%s) full: %v", q.name, err)
+			}
+			core := q.query
+			core.Fields = beads.FieldsCore
+			projected, err := s.List(core)
+			if err != nil {
+				t.Fatalf("List(%s) core: %v", q.name, err)
+			}
+			sameRows(t, "List("+q.name+")", full, projected)
+		}
+
+		for _, q := range []struct {
+			name  string
+			query beads.ReadyQuery
+		}{
+			{"default", beads.ReadyQuery{}},
+			{"both tiers", beads.ReadyQuery{TierMode: beads.TierBoth}},
+			{"assignee", beads.ReadyQuery{Assignee: "worker"}},
+		} {
+			full, err := s.Ready(q.query)
+			if err != nil {
+				t.Fatalf("Ready(%s) full: %v", q.name, err)
+			}
+			core := q.query
+			core.Fields = beads.FieldsCore
+			projected, err := s.Ready(core)
+			if err != nil {
+				t.Fatalf("Ready(%s) core: %v", q.name, err)
+			}
+			sameRows(t, "Ready("+q.name+")", full, projected)
+			for _, b := range projected {
+				if b.ID == dependent.ID {
+					t.Errorf("Ready(%s) core read offered %s while its blocker is open", q.name, dependent.ID)
+				}
+			}
 		}
 	})
 
@@ -1393,6 +1617,35 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 			t.Errorf("CloseReason after Reopen = %q, want empty", got.CloseReason)
 		}
 	})
+
+	// The closer's metadata.close_reason is the close's input: a store that
+	// kept it across Reopen handed the old reason to the next close made
+	// without one (bd close, a controller close), so that close reported why
+	// the PREVIOUS close happened.
+	t.Run("ReopenClearsCloseReasonMetadataSoTheNextCloseHasNone", func(t *testing.T) {
+		s := newStore()
+		b := closeWithReason(t, s, "reopened then closed again")
+		if err := s.Reopen(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := reopened.Metadata["close_reason"]; got != "" {
+			t.Errorf("metadata.close_reason after Reopen = %q, want it cleared", got)
+		}
+		if err := s.Close(b.ID); err != nil {
+			t.Fatal(err)
+		}
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.CloseReason != "" {
+			t.Errorf("CloseReason after reopen and a close without a reason = %q, want empty", got.CloseReason)
+		}
+	})
 }
 
 // RunCloseReasonAfterReopenTests pins that a reopen, by Reopen or by an Update
@@ -1400,11 +1653,11 @@ func RunCloseReasonTests(t *testing.T, newStore func() beads.Store) {
 // gives no reason, by Close or by an Update to closed, reports none. Call it
 // for the stores whose reopen drops metadata.close_reason: MemStore, FileStore
 // and SQLiteStore. BdStore and NativeDoltStore hand that key to bd as the close
-// reason, and bd's reopen clears its close_reason column but not the key, so
-// their next close reports the old reason (ga-c8fe4w). NativeDoltStore's
-// conformance fixture is not a caller either: its storage is a MemStore that
-// drops the key and ignores the reason it is handed, so it would pass on
-// MemStore's behalf.
+// reason; their Reopen clears it first (staleCloseReasonToClear), but an Update
+// to open keeps it, so their next close after one reports the old reason
+// (ga-c8fe4w). NativeDoltStore's conformance fixture is not a caller either:
+// its storage is a MemStore that drops the key and ignores the reason it is
+// handed, so it would pass on MemStore's behalf.
 func RunCloseReasonAfterReopenTests(t *testing.T, newStore func() beads.Store) {
 	t.Helper()
 
@@ -1448,6 +1701,48 @@ func RunCloseReasonAfterReopenTests(t *testing.T, newStore func() beads.Store) {
 				}
 			})
 		}
+	}
+	runReopenRemovesCloseReasonKeyTests(t, newStore)
+}
+
+// runReopenRemovesCloseReasonKeyTests pins that Reopen removes
+// metadata.close_reason whatever status it reopens from, as CachingStore's
+// reopen patch does (dropCloseReasonMetadata). A key left present but empty
+// differs from that patch, so the next reconcile reads the backing row as
+// changed and announces a bead.updated nothing made.
+func runReopenRemovesCloseReasonKeyTests(t *testing.T, newStore func() beads.Store) {
+	t.Helper()
+	for _, from := range []struct{ name, status string }{
+		{name: "Closed", status: "closed"},
+		{name: "InProgress", status: "in_progress"},
+	} {
+		t.Run("ReopenFrom"+from.name+"RemovesCloseReasonKey", func(t *testing.T) {
+			s := newStore()
+			b, err := s.Create(beads.Bead{Title: "reopened from " + from.status})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetMetadata(b.ID, "close_reason", closeReason); err != nil {
+				t.Fatal(err)
+			}
+			status := from.status
+			if err := s.Update(b.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Reopen(b.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.Get(b.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "open" {
+				t.Fatalf("Status = %q, want open", got.Status)
+			}
+			if v, ok := got.Metadata["close_reason"]; ok {
+				t.Errorf("metadata.close_reason after Reopen = %q, want the key removed", v)
+			}
+		})
 	}
 }
 
