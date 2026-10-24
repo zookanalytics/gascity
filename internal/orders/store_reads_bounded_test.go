@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,10 +134,11 @@ func TestListTrackingUnlimitedStaysUnlimited(t *testing.T) {
 }
 
 // nativeTrackingLedger is a native Dolt storage whose reader answers a listing
-// as bd's does for the requests the sweep readers send: a named status selects
-// only the rows recorded with it, while no status (the native store always sends
-// AllFlag) selects every status, closed included. It keeps the id of every row
-// it serves, which is every row the native store decodes.
+// as bd's does for the requests the sweep readers send: a named status, or a
+// comma-separated list of them, selects only the rows recorded with one of
+// them, while no status (the native store always sends AllFlag) selects every
+// status, closed included. It keeps the id of every row it serves, which is
+// every row the native store decodes.
 type nativeTrackingLedger struct {
 	beadslib.Storage
 	rows   []*beadslib.Issue
@@ -148,7 +150,7 @@ func (l *nativeTrackingLedger) IssueReader() (issueops.Reader, error) { return l
 func (l *nativeTrackingLedger) List(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	page := issueops.IssuePage{Items: []*issueops.IssueWithCounts{}}
 	for _, row := range l.rows {
-		if req.Status != "" && string(row.Status) != req.Status {
+		if req.Status != "" && !slices.Contains(strings.Split(req.Status, ","), string(row.Status)) {
 			continue
 		}
 		if len(req.Labels) > 0 && !slices.Contains(row.Labels, req.Labels[0]) {
@@ -193,11 +195,10 @@ func nativeTrackingRow(id string, status beadslib.Status, created time.Time) *be
 
 // TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt guards the stale watchdog's
 // read, which runs every 30 s against every swept store. A native Dolt listing
-// cannot exclude a status, so a query that does not name one hands the store
-// every retained closed tracking bead (a week of runs by default) to decode and
-// then drop in Go: the per-tick full-history hydrate sr-dp9o removed from the
-// dispatch index. Each of the sweep's queries names its status, so the reader
-// serves no closed row.
+// that selects no status hands the store every retained closed tracking bead (a
+// week of runs by default) to decode and then drop in Go: the per-tick
+// full-history hydrate sr-dp9o removed from the dispatch index. Each of the
+// sweep's queries names its status, so the reader serves no closed row.
 func TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt(t *testing.T) {
 	created := time.Now().Add(-time.Hour)
 	ledger := &nativeTrackingLedger{rows: []*beadslib.Issue{
@@ -219,14 +220,22 @@ func TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt(t *testing.T) {
 		t.Fatalf("StaleOpenRuns() had the native store decode closed rows (served %v); every query must name the status it reads", ledger.served)
 	}
 
-	// The control: a query that names no status is served the closed rows, so
-	// the ledger above would have caught one.
+	// The control: a listing that selects no status is served the closed rows,
+	// so the ledger above would have caught one. A not-closed listing is not
+	// such a query: the native store pushes its statuses down as a list.
+	ledger.served = nil
+	if _, err := store.List(beads.ListQuery{Label: "order-tracking", IncludeClosed: true, TierMode: beads.TierBoth}); err != nil {
+		t.Fatalf("List(every status): %v", err)
+	}
+	if !ledger.servedStatus(beadslib.StatusClosed) {
+		t.Fatalf("an every-status listing was served %v, want the closed rows too; the ledger no longer models the native request", ledger.served)
+	}
 	ledger.served = nil
 	if _, err := store.List(beads.ListQuery{Label: "order-tracking", Live: true, TierMode: beads.TierBoth}); err != nil {
 		t.Fatalf("List(not closed): %v", err)
 	}
-	if !ledger.servedStatus(beadslib.StatusClosed) {
-		t.Fatalf("a not-closed listing was served %v, want the closed rows too; the ledger no longer models the native request", ledger.served)
+	if ledger.servedStatus(beadslib.StatusClosed) || !ledger.servedStatus(beadslib.StatusOpen) {
+		t.Fatalf("a not-closed listing was served %v, want the open rows and no closed row", ledger.served)
 	}
 }
 

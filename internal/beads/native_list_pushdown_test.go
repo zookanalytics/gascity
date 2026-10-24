@@ -51,22 +51,22 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "one plural assignee is the singular predicate",
 			query: ListQuery{Assignees: []string{"worker"}},
-			want:  []planShape{{assignee: "worker"}},
+			want:  []planShape{{assignee: "worker", status: nativeListLiveStatuses}},
 		},
 		{
 			name:  "plural assignees fan out one keyed request each",
 			query: ListQuery{Type: "message", Status: "open", Assignees: []string{"worker", "gc-1"}},
-			want:  []planShape{{assignee: "worker"}, {assignee: "gc-1"}},
+			want:  []planShape{{assignee: "worker", status: nativeListOpenStatuses}, {assignee: "gc-1", status: nativeListOpenStatuses}},
 		},
 		{
 			name:  "duplicate assignees are asked once",
 			query: ListQuery{Assignees: []string{"worker", "worker", "gc-1"}},
-			want:  []planShape{{assignee: "worker"}, {assignee: "gc-1"}},
+			want:  []planShape{{assignee: "worker", status: nativeListLiveStatuses}, {assignee: "gc-1", status: nativeListLiveStatuses}},
 		},
 		{
 			name:  "an empty assignee means unassigned, which the request cannot say",
 			query: ListQuery{Assignees: []string{"worker", ""}},
-			want:  []planShape{{}},
+			want:  []planShape{{status: nativeListLiveStatuses}},
 		},
 		{
 			// A session's inbox joins its closed predecessors' routes, so a hook
@@ -87,9 +87,9 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			want:  []planShape{{status: "closed"}},
 		},
 		{
-			name:  "gc open is every bd status but two, so it stays client-side",
+			name:  "gc open is the built-in bd statuses it covers",
 			query: ListQuery{Status: "open", Label: "gc:session"},
-			want:  []planShape{{}},
+			want:  []planShape{{status: nativeListOpenStatuses}},
 		},
 		{
 			// sr-i54yd: a Live read is owed the backing's raw answer, as BdStore's
@@ -102,7 +102,7 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "a registered non-infra type is pushed",
 			query: ListQuery{Type: "session", Status: "open"},
-			want:  []planShape{{issueType: "session"}},
+			want:  []planShape{{status: nativeListOpenStatuses, issueType: "session"}},
 		},
 		{
 			name:  "molecule steps are pushed with their status",
@@ -112,12 +112,12 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "an infra type would read the ephemeral plane alone, so it stays client-side",
 			query: ListQuery{Type: "message", Assignee: "worker"},
-			want:  []planShape{{assignee: "worker"}},
+			want:  []planShape{{assignee: "worker", status: nativeListLiveStatuses}},
 		},
 		{
 			name:  "rig was a bd default infra type until Jun 2026, so it stays client-side",
 			query: ListQuery{Type: "rig", Status: "open"},
-			want:  []planShape{{}},
+			want:  []planShape{{status: nativeListOpenStatuses}},
 		},
 		{
 			name:  "a type gc does not register would be refused, so it stays client-side",
@@ -594,7 +594,7 @@ func TestNativeDoltStoreListLogsAnUnkeyedPlan(t *testing.T) {
 
 // filteringReader answers the reader role over a fixed row set the way
 // workapi.BuildListFilter disposes of the request this store sends: exact
-// status, type and assignee predicates; an infra type routes the read to the
+// status (one name or a comma-separated set), type and assignee predicates; an infra type routes the read to the
 // ephemeral rows alone; and the pinned default applies unless AllFlag lifts it.
 // It is the oracle the pushdown property is proved against.
 type filteringReader struct {
@@ -608,7 +608,7 @@ var filteringReaderInfra = map[string]bool{"agent": true, "rig": true, "role": t
 func (r filteringReader) list(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
 	var page []*issueops.IssueWithCounts
 	for _, issue := range r.rows {
-		if req.Status != "" && string(issue.Status) != req.Status {
+		if req.Status != "" && !slices.Contains(strings.Split(req.Status, ","), string(issue.Status)) {
 			continue
 		}
 		if req.IssueType != "" {
@@ -660,7 +660,7 @@ func readerOrderLess(a, b *beadslib.Issue, req issueops.ListRequest) bool {
 }
 
 func randomPushdownFixture(rng *rand.Rand, n int) []*beadslib.Issue {
-	statuses := []beadslib.Status{beadslib.StatusOpen, beadslib.StatusInProgress, beadslib.StatusClosed, "deferred", "blocked", "hooked"}
+	statuses := []beadslib.Status{beadslib.StatusOpen, beadslib.StatusInProgress, beadslib.StatusClosed, "deferred", "blocked", "hooked", "pinned"}
 	types := []string{"message", "session", "molecule", "step", "wisp", "task", "agent", "rig"}
 	assignees := []string{"", "planner-a", "gc-1", "worker", "gc-2"}
 	rows := make([]*beadslib.Issue, 0, n)
@@ -1075,4 +1075,39 @@ func sortedBeadIDs(items []Bead) []string {
 	}
 	sort.Strings(ids)
 	return ids
+}
+
+// gc's not-closed default and its "open" travel as the set of bd's built-in
+// statuses they cover, so a listing of live work does not read the closed
+// history; "in_progress" and "closed" still travel as themselves, and a query
+// that admits closed rows pushes no status.
+func TestNativeListPlanPushesTheNotClosedStatuses(t *testing.T) {
+	for _, tc := range []struct {
+		query ListQuery
+		want  string
+	}{
+		{ListQuery{AllowScan: true, TierMode: TierBoth}, "open,in_progress,blocked,deferred,pinned,hooked"},
+		{ListQuery{Assignee: "worker", Status: "open"}, "open,blocked,deferred,pinned,hooked"},
+		{ListQuery{Assignee: "worker", Status: "in_progress"}, "in_progress"},
+		{ListQuery{Label: "gc:session", Status: "closed", IncludeClosed: true}, "closed"},
+		{ListQuery{AllowScan: true, IncludeClosed: true}, ""},
+	} {
+		for i, req := range NativeListPlan(tc.query) {
+			if req.Status != tc.want {
+				t.Errorf("NativeListPlan(%+v)[%d].Status = %q, want %q", tc.query, i, req.Status, tc.want)
+			}
+		}
+	}
+}
+
+// The not-closed set narrows nothing but the closed history, so a request it
+// alone keys still reads the whole live ledger and counts as unkeyed.
+func TestNativeListRequestKeyedIgnoresTheNotClosedStatuses(t *testing.T) {
+	for _, query := range []ListQuery{{AllowScan: true}, {Status: "open", AllowScan: true}} {
+		for _, req := range NativeListPlan(query) {
+			if NativeListRequestKeyed(req) {
+				t.Errorf("NativeListRequestKeyed(%+v) = true for %+v, want false", req, query)
+			}
+		}
+	}
 }
