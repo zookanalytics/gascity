@@ -1001,10 +1001,7 @@ func TestV2PrepareRowReadsTriggerPinsPastAStaleCache(t *testing.T) {
 			candidate := newTriggerSessionCandidate(t, sessions, trigger.ID, nil, "rig:alpha")
 			r := effectReads{legs: testWorkLegs(cityPath, cfg, work, rigStores).readOnly(), city: sessions, cityPath: cityPath}
 			w := &World{CityPath: cityPath, Env: &reconcileEnv{Cfg: cfg}}
-			prepared, err := prepareRow(r, w, candidate.info, candidate.tp, sessTranscriptUnknown)
-			if err != nil {
-				t.Fatalf("prepareRow: %v", err)
-			}
+			prepared, _ := prepareChosenRow(t, r, w, candidate.info, candidate.tp)
 			if !strings.Contains(prepared.cfg.Command, "--effort low") {
 				t.Fatalf("v2 prepared command = %q, want the trigger's pin --effort low as its store holds it", prepared.cfg.Command)
 			}

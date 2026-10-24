@@ -170,6 +170,11 @@ func TestRelaunchResultStep(t *testing.T) {
 	if _, live := step.Write["started_live_hash"]; live {
 		t.Fatalf("landed: step %+v writes the live hash", step)
 	}
+	inTask := v
+	inTask.prev = relaunched{OK: true, Hash: cfg, LaunchTaskWorkDir: "/wt/fe-1"}
+	if step := relaunchResultStep(inTask); !step.Done || step.Write[session.LaunchTaskWorkDirMetadataKey] != "/wt/fe-1" {
+		t.Fatalf("landed in a task work_dir: step %+v, want the task work_dir recorded with the baseline", step)
+	}
 	named := v
 	named.prev = relaunched{Named: true, Err: errors.New("no box")}
 	if step := relaunchResultStep(named); step.Done || len(step.Write) != 0 || step.Refuse != "" {

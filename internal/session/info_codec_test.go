@@ -95,6 +95,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		PackWorkspace:       b.Metadata[beadmeta.PackWorkspaceMetadataKey],
 		WorkDirCanonical:    b.Metadata[beadmeta.WorkDirMetadataKey],
 		WorkerDir:           b.Metadata[beadmeta.WorkerDirMetadataKey],
+		LaunchTaskWorkDir:   b.Metadata[LaunchTaskWorkDirMetadataKey],
 
 		MetadataState:              b.Metadata["state"],
 		SessionNameMetadata:        b.Metadata["session_name"],

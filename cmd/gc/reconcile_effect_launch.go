@@ -33,6 +33,7 @@ const (
 	causeSessionName       = "session-name-invalid" // START-012
 	causeHeld              = "held"                 // a hold or kill fence since the pass
 	causeWorktree          = "worktree"
+	causeWorkDirUnchecked  = "work-dir-unchecked" // the open sessions a task work_dir is checked against could not be read
 	causeStartError        = "start-error"
 	causeStartDeferred     = "start-deferred" // C5a2's deferred class
 	causeCapacity          = "capacity"
@@ -103,6 +104,14 @@ type preWakeFold struct {
 	reset      session.MetadataPatch
 	transcript sessTranscriptState
 	notResumed error
+	// dir is the work dir the launch runs in, chosen once: the transcript is
+	// probed there, the record names it, and the launch's prepare launches in
+	// it.
+	dir launchWorkDirChoice
+	// launch records the task work_dir the launch runs in
+	// (LaunchTaskWorkDirPatch), so a start prepared while this one is coming
+	// up already sees the session there.
+	launch session.MetadataPatch
 }
 
 // verifyWorktree is worktree.Verify; a test injects its own.
@@ -112,8 +121,9 @@ var verifyWorktree = worktree.Verify
 // holds the fresh one to: the binding's worktree verified (POOL-055, #34),
 // the recorded work dir a parked seat's resume keeps verified
 // (parkedWorkDirUsable; one that cannot host the resume is re-derived), the
-// concrete-pool repair, the key's transcript probed in the launch's work dir
-// (S-1), and a fresh token and key.
+// concrete-pool repair, the launch's work dir chosen once
+// (launchWorkDirChoiceOf), the key's transcript probed there (S-1), and a
+// fresh token and key.
 func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error) {
 	ticket, err := callResult[*startTicket](v)
 	if err != nil {
@@ -152,9 +162,16 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 	next := foldInfo(foldInfo(base, patch), f.bind)
 	f.repair = concretePoolWorkDirRepairPatch(startCandidate{info: next, tp: tp}, v.World.CityPath, v.World.Env.Cfg)
 	next = foldInfo(next, f.repair)
+	// One launch dir choice for the transcript probe, the record and the
+	// launch.
+	launch, err := launchWorkDirChoiceOf(r, v.World, next, tp)
+	if err != nil {
+		return f, err
+	}
+	f.dir, f.launch = launch, session.LaunchTaskWorkDirPatch(next, launch.task)
 	// Only a key whose transcript is gone and that staleResumeKeyClears is
 	// reset; an allocated key no start committed yet is kept.
-	if f.transcript = transcriptOf(r, v.World, next, tp); f.transcript == sessTranscriptAbsent && staleResumeKeyClears(next, tp.ResolvedProvider) {
+	if f.transcript = transcriptIn(v.World, next, tp, launch.dir); f.transcript == sessTranscriptAbsent && staleResumeKeyClears(next, tp.ResolvedProvider) {
 		f.reset = clearStaleResumeKeyMetadata("", nil) // its patch only
 	}
 	return f, nil
@@ -167,6 +184,7 @@ func foldPreWake(_ context.Context, r effectReads, v txView) (preWakeFold, error
 type launchPass struct {
 	launchRow
 	bound      session.Info
+	dir        launchWorkDirChoice // where the PreWake chose to launch
 	transcript sessTranscriptState
 	ticket     *startTicket
 	undo       preWakeUndo // what the PreWake wrote, for a capacity refusal's restore (S3)
@@ -174,13 +192,15 @@ type launchPass struct {
 	notResumed error       // why the PreWake re-derived a parked resume's kept work dir
 }
 
-// preWakeStep is the PreWake's Decide: the ticket admitted, START-012's
-// name, no hold (preWakeRefused) or kill fence, the runtime still absent; then
-// PreWakePatch with the binding, the stop request cleared (D1), the repair,
-// the stale-resume clear with its continuation rotation (legacy's
-// commitPendingContinuationReset at the start) and the set-once key fill
-// (R1). The Launch runs the verb section's template with its trigger env
-// taken from the bound row.
+// preWakeStep is the PreWake's Decide: the ticket admitted, a launch work dir
+// chosen (a task work_dir the open sessions could not be read to check
+// refuses), START-012's name, no hold (preWakeRefused) or kill fence, the
+// runtime still absent; then PreWakePatch with the binding, the stop request
+// cleared (D1), the repair, the stale-resume clear with its continuation
+// rotation (legacy's commitPendingContinuationReset at the start), the launch
+// work dir's record and the set-once key fill (R1). The Launch runs the verb
+// section's template with its trigger env taken from the bound row, in the
+// chosen work dir.
 func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 	ticket, err := callResult[*startTicket](v)
 	switch {
@@ -188,6 +208,8 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return healInstead(v, txStep{Refuse: causeEndpointGate})
 	case err != nil:
 		return txStep{Fail: causeCallError, Err: err}
+	case errors.Is(probeErr, errTaskWorkDirUnchecked): // neither the task work_dir nor the own dir is known right: launch in neither
+		return txStep{Refuse: causeWorkDirUnchecked, Err: probeErr}
 	case probeErr != nil && f.work != nil:
 		return healInstead(v, txStep{Refuse: causeWorktree, Err: probeErr, Facts: effectFacts{Work: f.work}})
 	case probeErr != nil:
@@ -208,7 +230,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		patch = session.MetadataPatch{}
 	}
 	_, _, wake, wakeClass := preWakePatch(base, v.Now, f.token)
-	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset} {
+	for _, more := range []session.MetadataPatch{wake, f.bind, stopEndPatch(), f.repair, f.reset, f.launch} {
 		maps.Copy(patch, more)
 	}
 	// The heal's cells and then the PreWake cell, minted at the write.
@@ -224,7 +246,7 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		next = foldInfo(next, session.MetadataPatch{"session_key": f.key})
 	}
 	launch := launchRow{w: v.World, row: next, tp: boundTemplate(tp, next), agent: ticket.launch.agent}
-	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0), notResumed: f.notResumed}
+	pass := launchPass{launchRow: launch, bound: foldInfo(base, f.bind), dir: f.dir, transcript: transcript, ticket: ticket, undo: preWakeUndoOf(v, foldClass(patch, class), len(f.reset) > 0), notResumed: f.notResumed}
 	pass.undo.token, pass.relaunched = f.token, creating(v.Row)
 	facts := effectFacts{Work: f.work}
 	if heal := v.It.Heal; heal != nil && heal.Reason == decideDeadRuntimeHeal && heal.Event != nil { // the death's record, its write folded into this one
@@ -332,7 +354,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 			c.start.rec.Record(woke)
 		}
 	})
-	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.transcript)
+	prepared, err := prepareRow(c.reads, in.w, in.row, in.tp, in.dir, in.transcript)
 	if err != nil {
 		return startOutcome{prepErr: err, undo: in.undo, relaunched: in.relaunched, tp: in.tp}, nil
 	}
