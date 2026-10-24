@@ -82,10 +82,33 @@ func nativeListFanOutAssignees(query ListQuery) []string {
 	return out
 }
 
-// nativeListPushableStatus reports whether a gc status maps one-to-one onto a
-// bd status. mapBdStatus folds every other bd status into gc's "open".
-func nativeListPushableStatus(status string) bool {
-	return status == "in_progress" || status == "closed"
+// nativeListOpenStatuses are the bd built-in statuses mapBdStatus folds into
+// gc's "open". Custom statuses are not listed, so a row holding one is missing
+// from a listing that pushes this set.
+const nativeListOpenStatuses = "open,blocked,deferred,pinned,hooked"
+
+// nativeListLiveStatuses are nativeListOpenStatuses and in_progress: every
+// built-in status but closed.
+const nativeListLiveStatuses = "open,in_progress,blocked,deferred,pinned,hooked"
+
+// nativeListStatusPushdown is the bd status selector a query's status pushes
+// as, or "" when it pushes none. "in_progress" and "closed" map one-to-one; a
+// Live "open" is bd's raw open (nativeListPushesRawOpen); otherwise gc's "open"
+// and the not-closed default push the built-in statuses they cover, so a
+// listing of live work does not read the closed history.
+func nativeListStatusPushdown(query ListQuery) string {
+	switch {
+	case query.Status == "in_progress" || query.Status == "closed":
+		return query.Status
+	case nativeListPushesRawOpen(query):
+		// A Live "open" is bd's raw open, not gc's folded one.
+		return query.Status
+	case query.Status == "open":
+		return nativeListOpenStatuses
+	case query.Status == "" && !query.IncludeClosed:
+		return nativeListLiveStatuses
+	}
+	return ""
 }
 
 // nativeListPushesRawOpen reports whether query's "open" is pushed to the
@@ -225,7 +248,7 @@ func NativeListRequestKeyed(req issueops.ListRequest) bool {
 		len(req.Labels) > 0 ||
 		len(req.MetadataFields) > 0 ||
 		req.CreatedBefore != nil ||
-		req.Status != "" ||
+		req.Status == "in_progress" || req.Status == "closed" ||
 		req.IssueType != ""
 }
 
