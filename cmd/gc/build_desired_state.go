@@ -7768,6 +7768,14 @@ func materializeProviderOverlaysBeforeFingerprint(
 // this pass and by session-start staging. Hook entries Gas City does not
 // manage stay in the file, and a file left holding nothing is removed.
 //
+// Every tick runs the strip after its staging and before the template's
+// CopyFiles probe. Staging merges the same overlay into the file by matcher,
+// whether or not a session start merged it back in since the last tick, and
+// the strip then removes the same entries, so the probe reads the same content
+// on every tick. Session-start staging puts the managed copies back after the
+// fingerprint, and the next tick strips them before it probes, so they never
+// read as config drift.
+//
 // The codex-hooks-drift doctor check audits the same provider-derived surface
 // (agentUsesCodexHookSurface matches the resolved provider, not install hooks),
 // so a file this pass strips reads clean there.

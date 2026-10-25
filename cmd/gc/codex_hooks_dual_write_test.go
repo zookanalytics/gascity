@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -160,7 +161,8 @@ func installCodex(t *testing.T, cityDir, workDir string) {
 // pack overlay that ships Gas City's own hook commands into the file, and the
 // tick's hooks.Install removes every managed entry again, because a Codex
 // session gets those hooks from its launch command and a copy in a file Codex
-// reads would run them twice. The pack's own hook stays.
+// reads would run them twice. The pack's own hook stays, and every tick leaves
+// the same document, whatever session-start staging merged in since the last.
 func TestCodexHooksTickStripsManagedCopies(t *testing.T) {
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
@@ -199,14 +201,32 @@ func TestCodexHooksTickStripsManagedCopies(t *testing.T) {
 		}
 	}
 
-	seedDriftedHybrid(t, cityDir, workDir)
-	stageCodex(t, overlaySrc, workDir, false)
-	if data, _ := os.ReadFile(hooksPath); !hooks.CodexHooksHaveManagedEntries(data) {
-		t.Fatalf("session-start staging did not merge the pack's managed copy in; the strip below proves nothing\n%s", data)
+	startSession := func(t *testing.T) {
+		t.Helper()
+		stageCodex(t, overlaySrc, workDir, false)
+		if data, _ := os.ReadFile(hooksPath); !hooks.CodexHooksHaveManagedEntries(data) {
+			t.Fatalf("session-start staging did not merge the pack's managed copy in; the strip below proves nothing\n%s", data)
+		}
 	}
-	stageCodex(t, overlaySrc, workDir, true)
-	installCodex(t, cityDir, workDir)
+	tick := func() {
+		stageCodex(t, overlaySrc, workDir, true)
+		installCodex(t, cityDir, workDir)
+	}
+
+	seedDriftedHybrid(t, cityDir, workDir)
+	startSession(t)
+	tick()
 	assertOnlyPackHook(t, "after the tick")
+	afterTick, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", hooksPath, err)
+	}
+	startSession(t)
+	tick()
+	assertOnlyPackHook(t, "after the next tick")
+	if again, _ := os.ReadFile(hooksPath); !bytes.Equal(again, afterTick) {
+		t.Fatalf("the next tick left a different document\nfirst:\n%s\nnext:\n%s", afterTick, again)
+	}
 }
 
 // TestMaterializeProviderOverlays_SkipsInstallerOwnedMergeableHook guards the
