@@ -195,7 +195,8 @@ func (tp TemplateParams) DisplayName() string {
 // resolveTemplate computes all session parameters from a config.Agent.
 // It also reconciles managed Claude settings before wiring the active
 // --settings path so runtime fingerprinting sees the current projected file,
-// and registers Codex's managed hooks on the launch command.
+// and registers Codex's managed hooks on the launch command and on the ACP
+// launch a CLI template keeps (ACPLaunch).
 //
 // qualifiedName is the agent's canonical identity. fpExtra carries additional
 // fingerprint data (e.g., pool bounds); pass nil for pool instances.
@@ -275,7 +276,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
 	if len(hookArgs) > 0 {
-		command = command + " " + shellquote.Join(hookArgs)
+		hookArgList := shellquote.Join(hookArgs)
+		command = command + " " + hookArgList
+		if acpCommand != "" {
+			acpCommand = acpCommand + " " + hookArgList
+		}
 	}
 	if sa != "" {
 		command = command + " " + sa

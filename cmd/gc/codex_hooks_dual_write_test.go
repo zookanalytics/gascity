@@ -14,6 +14,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
 // packCodexOverlayHooks is a pack's per-provider/codex/.codex/hooks.json that
@@ -226,6 +228,66 @@ func TestCodexHooksTickStripsManagedCopies(t *testing.T) {
 	assertOnlyPackHook(t, "after the next tick")
 	if again, _ := os.ReadFile(hooksPath); !bytes.Equal(again, afterTick) {
 		t.Fatalf("the next tick left a different document\nfirst:\n%s\nnext:\n%s", afterTick, again)
+	}
+}
+
+// TestResolveTemplateRegistersCodexHooksOnACPLaunch covers a Codex template
+// whose provider has an ACP launch but which resolves the CLI transport, here
+// by naming it, as a template moved off ACP does. It keeps an ACP launch for a
+// session recorded on ACP (templateParamsForSession), and that launch is the
+// command the same agent resolves on the ACP transport, so it registers Gas
+// City's managed hooks as that command does. A session kept on its ACP launch
+// then starts with its hooks, and the drift hash it is compared by reads the
+// same command it started with.
+func TestResolveTemplateRegistersCodexHooksOnACPLaunch(t *testing.T) {
+	supportsACP := true
+	params := upstreamTestParams(t, &config.City{})
+	params.workspace = &config.Workspace{Provider: "codex-acp"}
+	params.providers = map[string]config.ProviderSpec{"codex-acp": {
+		Base:        stringPtr("builtin:codex"),
+		ACPCommand:  "codex-acp",
+		SupportsACP: &supportsACP,
+	}}
+	hookArgs, err := hooks.CodexLaunchArgs(params.cityPath)
+	if err != nil {
+		t.Fatalf("CodexLaunchArgs: %v", err)
+	}
+	registration := shellquote.Join(hookArgs)
+	resolve := func(transport string) TemplateParams {
+		t.Helper()
+		agent := &config.Agent{Name: "runner", Session: transport}
+		tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate(session=%q): %v", transport, err)
+		}
+		return tp
+	}
+
+	cli := resolve(config.SessionTransportTmux)
+	if cli.IsACP || cli.ACPLaunch == nil {
+		t.Fatalf("template IsACP = %v, ACPLaunch = %v; want a CLI template that keeps an ACP launch", cli.IsACP, cli.ACPLaunch)
+	}
+	if !strings.Contains(cli.Command, registration) {
+		t.Fatalf("CLI launch %q does not register the managed hooks %q", cli.Command, registration)
+	}
+	if !strings.Contains(cli.ACPLaunch.Command, registration) {
+		t.Fatalf("ACP launch %q does not register the managed hooks %q", cli.ACPLaunch.Command, registration)
+	}
+	acp := resolve(config.SessionTransportACP)
+	if !acp.IsACP {
+		t.Fatalf("template with session=%q resolved IsACP = false", config.SessionTransportACP)
+	}
+	if cli.ACPLaunch.Command != acp.Command {
+		t.Fatalf("ACP launch = %q, want the command the agent resolves on the ACP transport, %q", cli.ACPLaunch.Command, acp.Command)
+	}
+
+	recorded := session.Info{Transport: config.SessionTransportACP}
+	kept, swapped := templateParamsForSession(cli, recorded)
+	if !swapped || kept.Command != acp.Command {
+		t.Fatalf("session recorded on ACP starts with %q (swapped = %v), want %q", kept.Command, swapped, acp.Command)
+	}
+	if got := sessionCoreConfigForHashInfo(cli, recorded).Command; got != acp.Command {
+		t.Fatalf("drift hash of a session recorded on ACP reads %q, want %q", got, acp.Command)
 	}
 }
 
