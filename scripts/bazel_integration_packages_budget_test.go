@@ -41,6 +41,7 @@ var integrationPackagesShards = map[string]int{
 	"//internal/beads/exec:exec_test":                            1,
 	"//internal/beads:beads_test":                                9,
 	"//internal/credentialprovider:credentialprovider_test":      1,
+	"//internal/hooks:hooks_test":                                1,
 	"//internal/orders:orders_test":                              1,
 	"//internal/processgroup:processgroup_test":                  1,
 	"//internal/runtime/acp:acp_test":                            1,
