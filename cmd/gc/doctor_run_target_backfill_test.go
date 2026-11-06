@@ -30,6 +30,10 @@ func TestRunTargetRoutedToBackfillCheck(t *testing.T) {
 		{ID: "WR-2", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
 			"gc.kind": "workflow", "gc.run_target": "mayor", "gc.routed_to": "mayor",
 		}},
+		// An expanded root is no lane: routing it again resurrects it (NEW-5).
+		{ID: "WR-3", Title: "root", Type: "task", Status: "open", Metadata: map[string]string{
+			"gc.kind": "workflow", "gc.run_target": "mayor", "gc.workflow_expanded": "true",
+		}},
 		// Not a workflow root — must be ignored even though run_target is set.
 		{ID: "T-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{
 			"gc.run_target": "mayor",
@@ -72,7 +76,7 @@ func TestRunTargetRoutedToBackfillCheck(t *testing.T) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
 	}
-	for _, notWant := range []string{"WR-2", "T-1", "CTRL-1", "CTRL-2", "TOPO-1"} {
+	for _, notWant := range []string{"WR-2", "WR-3", "T-1", "CTRL-1", "CTRL-2", "TOPO-1"} {
 		if strings.Contains(details, notWant) {
 			t.Fatalf("details should not mention %q:\n%s", notWant, details)
 		}
@@ -197,4 +201,24 @@ type runTargetBackfillListErrorStore struct {
 
 func (s runTargetBackfillListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
+}
+
+// TestRunTargetRoutedToBackfillCheckStopsOnceAbandoned: abandoned by the doctor
+// runner while its first store read is in flight, the check opens no other
+// scope and issues no other read.
+func TestRunTargetRoutedToBackfillCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newRunTargetRoutedToBackfillCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() != 3 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want one read in each of three scopes", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newRunTargetRoutedToBackfillCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.opens.Load() != 1 || probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes, want only the first scope's one read", probe.reads.Load(), probe.opens.Load())
+	}
 }

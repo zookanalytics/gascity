@@ -26,6 +26,9 @@ import (
 // hot per-tick paths (order dispatch) must reuse an already-resolved
 // *config.City instead of driving this counter once per scope per tick
 // (ga-237xpr) — tests assert on this counter to guard against a regression.
+// It counts loader calls: inside an invocation scope a call the memo answers
+// still counts here (see invocationConfigMemo). composedCityConfigLoads counts
+// the compositions actually performed.
 var loadCityConfigCalls atomic.Int64
 
 const agentAddPromptScaffold = `You are the {{ .AgentName }} agent.
@@ -63,7 +66,7 @@ func loadCityConfigFS(fs fsys.FS, tomlPath string, warningWriter ...io.Writer) (
 	if err := ensureBuiltinPacksForConfigLoad(fs, tomlPath, resolveLoadCityConfigWarningWriter(warningWriter...)); err != nil {
 		return nil, err
 	}
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, skipRevisionSnapshot)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, skipRevisionSnapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +97,7 @@ func loadCityConfigWithoutBuiltinPackRefresh(cityPath string, warningWriter ...i
 // only in skipping the refresh; opts is what separates a blocking load from an
 // advisory one.
 func loadPrematerializedCityConfig(fs fsys.FS, tomlPath string, opts config.LoadOptions, warnings io.Writer) (*config.City, error) {
-	cfg, prov, err := config.LoadWithIncludesOptions(fs, tomlPath, opts)
+	cfg, prov, err := loadComposedCityConfig(fs, tomlPath, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +368,15 @@ func updateRootPackAgentSuspended(fs fsys.FS, cityPath string, cityCfg *config.C
 // This context sensitivity is for interactive CLI input. Persisted routes such
 // as gc.routed_to must already be canonical and must not be re-resolved here.
 func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool) {
+	a, ok, _ := lookupAgentIdentity(cfg, input, currentRigDir)
+	return a, ok
+}
+
+// lookupAgentIdentity resolves input exactly as resolveAgentIdentity does.
+// When step 3 finds more than one agent with the bare name, it also returns
+// those agents in config order, pool members synthesized, so a caller can
+// name them in its error.
+func lookupAgentIdentity(cfg *config.City, input, currentRigDir string) (config.Agent, bool, []config.Agent) {
 	// Step 1: contextual rig match (bare name + rig context).
 	// When the user is inside a rig directory and types a bare name like
 	// "claude", prefer the rig-scoped agent (hello-world/claude) over the
@@ -372,12 +384,12 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	// the agent by bare name.
 	if !strings.Contains(input, "/") && currentRigDir != "" {
 		if a, ok := findAgentByQualified(cfg, currentRigDir+"/"+input); ok {
-			return a, true
+			return a, true, nil
 		}
 	}
 	// Step 2: literal match (qualified or city-scoped).
 	if a, ok := findAgentByQualified(cfg, input); ok {
-		return a, true
+		return a, true, nil
 	}
 	// Step 2b: qualified pool instance — "rig/polecat-2" (slash-qualified) or
 	// "binding.polecat-2" (dot-qualified, binding-qualified city-scoped pool)
@@ -387,28 +399,33 @@ func resolveAgentIdentity(cfg *config.City, input, currentRigDir string) (config
 	// (#4843).
 	if strings.ContainsAny(input, "/.") {
 		if a, ok := resolvePoolInstance(cfg, input); ok {
-			return a, true
+			return a, true, nil
 		}
 	}
 	// Step 3: unambiguous bare name — scan all agents by Name (ignoring Dir).
 	// Succeeds only when exactly one agent matches. Handles pool instances too.
-	if !strings.Contains(input, "/") {
-		var matches []config.Agent
-		for _, a := range cfg.Agents {
-			if a.Name == input {
-				matches = append(matches, a)
-				continue
-			}
-			// Pool instance: "polecat-2" matches pool "polecat" with Max >= 2 (or unlimited).
-			if a, ok := matchPoolInstance(a, input); ok {
-				matches = append(matches, a)
-			}
+	if strings.Contains(input, "/") {
+		return config.Agent{}, false, nil
+	}
+	var matches []config.Agent
+	for _, a := range cfg.Agents {
+		if a.Name == input {
+			matches = append(matches, a)
+			continue
 		}
-		if len(matches) == 1 {
-			return matches[0], true
+		// Pool instance: "polecat-2" matches pool "polecat" with Max >= 2 (or unlimited).
+		if a, ok := matchPoolInstance(a, input); ok {
+			matches = append(matches, a)
 		}
 	}
-	return config.Agent{}, false
+	switch len(matches) {
+	case 0:
+		return config.Agent{}, false, nil
+	case 1:
+		return matches[0], true, nil
+	default:
+		return config.Agent{}, false, matches
+	}
 }
 
 // resolvePoolInstance handles qualified pool instance names like "rig/polecat-2"
@@ -503,7 +520,7 @@ have moved to "gc session" and "gc runtime".`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, list, suspend, resume)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc agent: missing subcommand (add, is-foreign, list, suspend, resume)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc agent: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -512,6 +529,7 @@ have moved to "gc session" and "gc runtime".`,
 	}
 	cmd.AddCommand(
 		newAgentAddCmd(stdout, stderr),
+		newAgentIsForeignCmd(stdout, stderr),
 		newAgentListCmd(stdout, stderr),
 		newAgentResumeCmd(stdout, stderr),
 		newAgentSuspendCmd(stdout, stderr),

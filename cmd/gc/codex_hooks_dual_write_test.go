@@ -30,6 +30,20 @@ const packCodexOverlayHooks = `{
   }
 }`
 
+// gastownCodexOverlayHooks is a pack's per-provider/codex/.codex/hooks.json
+// that ships nothing but Gas City's own hook commands. It is copied from the
+// gastown pack's codex overlay in gascity-packs.
+const gastownCodexOverlayHooks = `{
+  "hooks": {
+    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart gc prime --hook --hook-format codex"}]}],
+    "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc handoff --auto \"context cycle\""}]}],
+    "UserPromptSubmit": [{"matcher": "", "hooks": [
+      {"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc nudge drain --inject --hook-format codex"},
+      {"type": "command", "command": "export PATH=\"$HOME/go/bin:$HOME/.local/bin:$PATH\" && gc mail check --inject --hook-format codex"}
+    ]}]
+  }
+}`
+
 // seedCodexOverlay writes packCodexOverlayHooks into a temp overlay source dir
 // (per-provider/codex/.codex/hooks.json) for staging to copy.
 func seedCodexOverlay(t *testing.T) string {
@@ -115,18 +129,21 @@ func seedDriftedHybrid(t *testing.T, cityDir, workDir string) {
 	}
 }
 
-// stageCodex runs the staging half of the build_desired_state home-dir tick.
-// skipMergeable selects the fixed (skip) vs legacy (no-skip) path.
-func stageCodex(t *testing.T, overlaySrc, workDir string, skipMergeable bool) {
+// stageCodex stages the codex overlay into workDir. onTick selects the
+// build_desired_state home-dir tick's path, which skips only the mergeable
+// files hooks.Install writes for codex, over session-start staging, which skips
+// nothing.
+func stageCodex(t *testing.T, overlaySrc, workDir string, onTick bool) {
 	t.Helper()
 	var err error
-	if skipMergeable {
-		err = runtime.StageProviderOverlayDirSkippingMergeable(overlaySrc, workDir, []string{"codex"}, nil)
+	if onTick {
+		installed := hooks.InstalledWorkDirPaths([]string{"codex"}, nil)
+		err = runtime.StageProviderOverlayDirSkippingInstalledMergeable(overlaySrc, workDir, []string{"codex"}, func(relPath string) bool { return installed[relPath] }, nil)
 	} else {
 		err = runtime.StageProviderOverlayDir(overlaySrc, workDir, []string{"codex"}, nil)
 	}
 	if err != nil {
-		t.Fatalf("stage codex overlay (skip=%v): %v", skipMergeable, err)
+		t.Fatalf("stage codex overlay (onTick=%v): %v", onTick, err)
 	}
 }
 
@@ -138,13 +155,12 @@ func installCodex(t *testing.T, cityDir, workDir string) {
 	}
 }
 
-// TestCodexHooksTickStripsManagedCopies covers the reconcile tick's two
-// writers of a Codex agent's .codex/hooks.json. Session-start staging merges a
+// TestCodexHooksTickStripsManagedCopies covers the writers of a Codex agent's
+// .codex/hooks.json. Session-start staging and the tick's staging both merge a
 // pack overlay that ships Gas City's own hook commands into the file, and the
 // tick's hooks.Install removes every managed entry again, because a Codex
 // session gets those hooks from its launch command and a copy in a file Codex
-// reads would run them twice. The pack's own hook stays, and the skipping
-// staging path the tick uses never brings the managed copy back.
+// reads would run them twice. The pack's own hook stays.
 func TestCodexHooksTickStripsManagedCopies(t *testing.T) {
 	overlaySrc := seedCodexOverlay(t)
 	cityDir := t.TempDir()
@@ -191,49 +207,112 @@ func TestCodexHooksTickStripsManagedCopies(t *testing.T) {
 	stageCodex(t, overlaySrc, workDir, true)
 	installCodex(t, cityDir, workDir)
 	assertOnlyPackHook(t, "after the tick")
-	stageCodex(t, overlaySrc, workDir, true)
-	assertOnlyPackHook(t, "after the next tick's staging")
 }
 
-// TestMaterializeProviderOverlays_SkipsMergeableCodexHook guards the production
-// caller wiring: materializeProviderOverlaysBeforeFingerprint (the
-// staging-only half of prepareTemplateResolution) must skip the reconciler-owned
-// mergeable .codex/hooks.json while still staging non-mergeable overlay
-// siblings. This is the observation point where skip vs non-skip staging
-// diverge — the trailing hooks.Install converges either way, so only the
-// staging-only state distinguishes a reverted caller wiring.
-func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
+// TestMaterializeProviderOverlays_SkipsInstallerOwnedMergeableHook guards the
+// production caller wiring: materializeProviderOverlaysBeforeFingerprint (the
+// staging-only half of prepareTemplateResolution) must skip a reconciler-owned
+// mergeable hook file that hooks.Install writes on the same tick
+// (install_agent_hooks names gemini, whose installer writes
+// .gemini/settings.json), while still staging non-mergeable overlay siblings.
+// This is the observation point where skip vs non-skip staging diverge — the
+// trailing hooks.Install converges either way, so only the staging-only state
+// distinguishes a reverted caller wiring.
+func TestMaterializeProviderOverlays_SkipsInstallerOwnedMergeableHook(t *testing.T) {
+	workDir := materializeProviderOverlayForTest(t, "gemini", []string{"gemini"}, map[string]string{
+		".gemini/settings.json": `{"hooks":{"SessionStart":[]}}`,
+		"AGENTS.gemini.md":      "gemini",
+	})
+	if _, err := os.Stat(filepath.Join(workDir, ".gemini", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("build_desired_state staging wrote reconciler-owned .gemini/settings.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.gemini.md")); err != nil {
+		t.Fatalf("non-mergeable gemini overlay sibling not staged: %v", err)
+	}
+}
+
+// TestMaterializeProviderOverlays_StagesCodexHookWithoutManagedCopies covers a
+// Codex agent's .codex/hooks.json on the tick. Installing for codex writes no
+// work-dir file, because a Codex session takes Gas City's managed hooks on its
+// launch command, so whatever install_agent_hooks names, the staging pass is
+// the file's only tick writer and stages a pack's copy before the fingerprint.
+// It then strips the managed entries from it, since a copy Codex reads would
+// run each managed hook a second time. The pack's own hooks stay, and a file
+// left holding only managed entries is removed.
+func TestMaterializeProviderOverlays_StagesCodexHookWithoutManagedCopies(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		installHooks []string
+	}{
+		{name: "install_agent_hooks names codex", installHooks: []string{"codex"}},
+		{name: "install_agent_hooks omits codex"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := materializeProviderOverlayForTest(t, "codex", tc.installHooks, map[string]string{
+				".codex/hooks.json": packCodexOverlayHooks,
+				"AGENTS.codex.md":   "codex",
+			})
+			data, err := os.ReadFile(filepath.Join(workDir, ".codex", "hooks.json"))
+			if err != nil {
+				t.Fatalf("staging skipped .codex/hooks.json, which no installer writes on the tick: %v", err)
+			}
+			if hooks.CodexHooksHaveManagedEntries(data) {
+				t.Fatalf("managed hook entries survived the tick's staging pass\n%s", data)
+			}
+			if !strings.Contains(string(data), "/opt/pack-guard.sh") {
+				t.Fatalf("the pack's own hook did not survive the tick's staging pass\n%s", data)
+			}
+			if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
+				t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
+			}
+
+			workDir = materializeProviderOverlayForTest(t, "codex", tc.installHooks, map[string]string{
+				".codex/hooks.json": gastownCodexOverlayHooks,
+			})
+			if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
+				t.Fatalf("a hooks file holding only managed copies survived the tick's staging pass (err=%v)", err)
+			}
+		})
+	}
+}
+
+// materializeProviderOverlayForTest runs the staging-only half of
+// prepareTemplateResolution for a rig-scoped agent of the given builtin
+// provider family, with the given install_agent_hooks and with files (paths
+// relative to the provider's per-provider overlay) in its rig's pack overlay,
+// and returns its work dir.
+func materializeProviderOverlayForTest(t *testing.T, family string, installHooks []string, files map[string]string) string {
+	t.Helper()
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "myrig")
 	if err := os.MkdirAll(rigDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(rig): %v", err)
 	}
 	overlayDir := filepath.Join(cityDir, "packs", "myrig", "overlay")
-	codexOverlay := filepath.Join(overlayDir, "per-provider", "codex", ".codex")
-	if err := os.MkdirAll(codexOverlay, 0o755); err != nil {
-		t.Fatalf("MkdirAll(overlay): %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(codexOverlay, "hooks.json"), []byte(`{"hooks":{"SessionStart":[]}}`), 0o644); err != nil {
-		t.Fatalf("write codex hooks overlay: %v", err)
-	}
-	sibling := filepath.Join(overlayDir, "per-provider", "codex", "AGENTS.codex.md")
-	if err := os.WriteFile(sibling, []byte("codex"), 0o644); err != nil {
-		t.Fatalf("write codex sibling overlay: %v", err)
+	for rel, body := range files {
+		dst := filepath.Join(overlayDir, "per-provider", family, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", filepath.Dir(dst), err)
+		}
+		if err := os.WriteFile(dst, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s overlay %s: %v", family, rel, err)
+		}
 	}
 
-	codexBase := "builtin:codex"
+	base := "builtin:" + family
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
-			Name:     "polecat",
-			Provider: "codex",
-			Scope:    "rig",
-			Dir:      "myrig",
+			Name:              "polecat",
+			Provider:          family,
+			Scope:             "rig",
+			Dir:               "myrig",
+			InstallAgentHooks: installHooks,
 		}},
 		Providers: map[string]config.ProviderSpec{
 			// Explicit command + resume_command so resolution does not depend on
-			// a real codex binary on PATH; base still yields the codex family.
-			"codex": {Base: &codexBase, Command: "/bin/echo", ResumeCommand: "/bin/echo resume {{.SessionKey}}"},
+			// a real provider binary on PATH; base still yields the family.
+			family: {Base: &base, Command: "/bin/echo", ResumeCommand: "/bin/echo resume {{.SessionKey}}"},
 		},
 		Rigs:           []config.Rig{{Name: "myrig", Path: rigDir}},
 		RigOverlayDirs: map[string][]string{"myrig": {overlayDir}},
@@ -253,11 +332,5 @@ func TestMaterializeProviderOverlays_SkipsMergeableCodexHook(t *testing.T) {
 
 	// Staging only — hooks.Install is a separate step in prepareTemplateResolution.
 	materializeProviderOverlaysBeforeFingerprint(bp, cfgAgent, resolved, "myrig/polecat", rigName, workDir, io.Discard)
-
-	if _, err := os.Stat(filepath.Join(workDir, ".codex", "hooks.json")); !os.IsNotExist(err) {
-		t.Fatalf("build_desired_state staging wrote reconciler-owned .codex/hooks.json (err=%v); caller must use the skip variant so hooks.Install is sole writer", err)
-	}
-	if _, err := os.Stat(filepath.Join(workDir, "AGENTS.codex.md")); err != nil {
-		t.Fatalf("non-mergeable codex overlay sibling not staged: %v", err)
-	}
+	return workDir
 }

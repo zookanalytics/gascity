@@ -32,29 +32,20 @@ const (
 	supervisorHolderUnknown
 )
 
-// readSupervisorExeLink returns the raw /proc/<pid>/exe readlink target,
-// including any kernel-appended " (deleted)" marker.
-//
-// Callers that want the on-disk path use readSupervisorExePath, which strips
-// the marker; callers that want to know whether the image is still on disk
-// use classifySupervisorHolder, which interprets it.
-func readSupervisorExeLink(pid int) (string, error) {
-	return os.Readlink(supervisorExeProcPath(pid))
-}
-
-// supervisorExeProcPath is the procfs link to a process's running image.
-func supervisorExeProcPath(pid int) string {
-	return filepath.Join("/proc", strconv.Itoa(pid), "exe")
-}
-
 // These follow the package's test-double convention; tests that replace them
 // must not run in parallel. classifySupervisorHolder's verdict depends on
 // filesystem state that cannot be staged for a real process, so the three
 // probes it makes are injectable.
+//
+// The raw link comes from readProcExeLinkHook (cmd_start_drift.go), the one
+// procfs reader the supervisor-binary doctor check and the drift probe share;
+// readSupervisorExeLink strips the marker, and this classifier needs it.
 var (
-	supervisorExeLinkReader = readSupervisorExeLink
+	supervisorExeLinkReader = func(pid int) (string, error) { return readProcExeLinkHook(pid) }
 	supervisorExeStat       = os.Stat
-	supervisorExeProcStat   = func(pid int) (os.FileInfo, error) { return os.Stat(supervisorExeProcPath(pid)) }
+	supervisorExeProcStat   = func(pid int) (os.FileInfo, error) {
+		return os.Stat(filepath.Join("/proc", strconv.Itoa(pid), "exe"))
+	}
 )
 
 // classifySupervisorHolder reports whether the supervisor holding the city is

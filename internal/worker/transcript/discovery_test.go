@@ -607,6 +607,37 @@ func TestSupportsIDLookup(t *testing.T) {
 	}
 }
 
+// A transcript reader wants the session's transcript wherever its provider
+// filed it. The stale-resume guard asks whether a resume started in workDir
+// finds the transcript in workDir's own project folders.
+func TestKeyedClaudeTranscriptInAnotherProjectFolder(t *testing.T) {
+	base := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "worker-1")
+	launchDir := filepath.Join(workDir, "worktrees", "bead-1")
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	slugDir := filepath.Join(base, sessionlog.ProjectSlug(launchDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(slugDir, key+".jsonl")
+	if err := os.WriteFile(want, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := DiscoverKeyedPath([]string{base}, "claude", workDir, key); got != want {
+		t.Fatalf("DiscoverKeyedPath() = %q, want %q", got, want)
+	}
+	if got := DiscoverPath([]string{base}, "claude/tmux-cli", workDir, key); got != want {
+		t.Fatalf("DiscoverPath() = %q, want %q", got, want)
+	}
+	if exists, probeable := HasKeyedTranscript([]string{base}, "claude", workDir, key); !probeable || exists {
+		t.Fatalf("HasKeyedTranscript(workDir) = (exists=%v, probeable=%v), want (false, true)", exists, probeable)
+	}
+	if exists, probeable := HasKeyedTranscript([]string{base}, "claude", launchDir, key); !probeable || !exists {
+		t.Fatalf("HasKeyedTranscript(launchDir) = (exists=%v, probeable=%v), want (true, true)", exists, probeable)
+	}
+}
+
 func TestHasKeyedTranscript(t *testing.T) {
 	base := t.TempDir()
 	workDir := filepath.Join(t.TempDir(), "claude-project")
@@ -844,5 +875,61 @@ func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
 	}
 	if got := DiscoverScopedPath([]string{base}, "claude/tmux-cli", workDir, "pool-1", "gcg-session-a", "1"); got != "" {
 		t.Fatalf("DiscoverScopedPath(claude) = %q, want empty for a non-zcode family", got)
+	}
+}
+
+// Kills a keyed-lookup predicate that disagrees with DiscoverKeyedPath: a
+// family it resolves by key reported as keyless, or a keyless one as keyed.
+func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "gemini": true, "kimi": true, "pi": true,
+		"zcode": true, "zcode/tmux-cli": true,
+		"opencode": true, "mimocode": false,
+	} {
+		if got := HasKeyedLookup(provider); got != want {
+			t.Errorf("HasKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+	// A keyless family resolves nothing by key, however the key is spelled.
+	if got := DiscoverKeyedPath([]string{t.TempDir()}, "mimocode", t.TempDir(), "key"); got != "" {
+		t.Fatalf("DiscoverKeyedPath(mimocode) = %q, want none", got)
+	}
+}
+
+// Kills an OpenCode keyed lookup that returns the newest export in the root
+// instead of the one the session key names.
+func TestDiscoverKeyedPathOpenCodePrefersKeyOverNewest(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	write := func(id string, mtime time.Time) string {
+		path := filepath.Join(root, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now()
+	want := write("ses_x", now.Add(-time.Hour))
+	write("ses_y", now)
+
+	if got := DiscoverKeyedPath([]string{root}, "opencode", workDir, "ses_x"); got != want {
+		t.Fatalf("DiscoverKeyedPath(opencode, ses_x) = %q, want %q", got, want)
+	}
+}
+
+// Kills an exact keyed-lookup predicate that admits a family whose by-key
+// lookup can return another conversation's file, or refuses an exact one.
+func TestHasExactKeyedLookup(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true, "zcode": true,
+		"opencode": true, "gemini": false, "mimocode": false,
+	} {
+		if got := HasExactKeyedLookup(provider); got != want {
+			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
 	}
 }

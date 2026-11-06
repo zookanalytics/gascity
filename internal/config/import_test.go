@@ -1606,6 +1606,130 @@ scope = "city"
 	}
 }
 
+// declarationsByQualifiedName maps each explicit agent's qualified name to
+// its Declaration.
+func declarationsByQualifiedName(agents []Agent) map[string]string {
+	declarations := make(map[string]string)
+	for _, a := range explicitAgents(agents) {
+		declarations[a.QualifiedName()] = a.Declaration
+	}
+	return declarations
+}
+
+func TestImport_CopiesOfAPackAgentShareItsDeclaration(t *testing.T) {
+	// Each rig that imports a pack gets a copy of the pack's rig-scoped
+	// agents, under the binding name the rig gives the import. Every copy
+	// keeps the declaration it came from: a pack.toml [[agent]] table or an
+	// agents/<name> directory.
+	t.Setenv("GC_HOME", t.TempDir())
+	dir := t.TempDir()
+	cityDir := filepath.Join(dir, "city")
+	gasDir := filepath.Join(dir, "gastown")
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "alpha"
+path = "/tmp/alpha"
+
+[rigs.imports.gs]
+source = "../gastown"
+
+[[rigs]]
+name = "beta"
+path = "/tmp/beta"
+
+[rigs.imports.gs]
+source = "../gastown"
+
+[[rigs]]
+name = "gamma"
+path = "/tmp/gamma"
+
+[rigs.imports.gt]
+source = "../gastown"
+`)
+	writeTestFile(t, gasDir, "pack.toml", `
+[pack]
+name = "gastown"
+schema = 1
+
+[[agent]]
+name = "polecat"
+scope = "rig"
+`)
+	writeTestFile(t, gasDir, "agents/witness/agent.toml", "scope = \"rig\"\n")
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	declarations := declarationsByQualifiedName(cfg.Agents)
+	for _, name := range []string{"polecat", "witness"} {
+		copies := []string{"alpha/gs." + name, "beta/gs." + name, "gamma/gt." + name}
+		want := declarations[copies[0]]
+		if want == "" {
+			t.Fatalf("%s has no declaration; declarations: %v", copies[0], declarations)
+		}
+		for _, c := range copies[1:] {
+			got, ok := declarations[c]
+			if !ok {
+				t.Errorf("%s missing; declarations: %v", c, declarations)
+				continue
+			}
+			if got != want {
+				t.Errorf("%s declaration = %q, want %q, the declaration of %s", c, got, want, copies[0])
+			}
+		}
+	}
+	if polecat := declarations["alpha/gs.polecat"]; polecat == declarations["alpha/gs.witness"] {
+		t.Errorf("polecat and witness share declaration %q, want one each", polecat)
+	}
+}
+
+func TestLoadWithIncludes_StampsADeclarationPerAgentTable(t *testing.T) {
+	// Each [[agent]] table is its own declaration, even when two tables set
+	// the same name and prompt template.
+	t.Setenv("GC_HOME", t.TempDir())
+	cityDir := t.TempDir()
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+
+[[rigs]]
+name = "alpha"
+path = "/tmp/alpha"
+
+[[rigs]]
+name = "beta"
+path = "/tmp/beta"
+
+[[agent]]
+name = "worker"
+dir = "alpha"
+prompt_template = "prompts/shared.template.md"
+
+[[agent]]
+name = "worker"
+dir = "beta"
+prompt_template = "prompts/shared.template.md"
+`)
+
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+	declarations := declarationsByQualifiedName(cfg.Agents)
+	alpha, beta := declarations["alpha/worker"], declarations["beta/worker"]
+	if alpha == "" || beta == "" {
+		t.Fatalf("worker declarations = %q and %q, want both set; declarations: %v", alpha, beta, declarations)
+	}
+	if alpha == beta {
+		t.Errorf("both workers have declaration %q, want one per [[agent]] table", alpha)
+	}
+}
+
 func TestImport_RigImportsCoexistWithIncludes(t *testing.T) {
 	// V1 rig includes and V2 rig imports should work together.
 	dir := t.TempDir()

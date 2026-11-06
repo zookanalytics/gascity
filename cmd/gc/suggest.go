@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -151,6 +152,22 @@ func agentNotFoundMsg(prefix, input string, cfg *config.City) string {
 		return base + hint
 	}
 	return base + formatAvailable("agents", names)
+}
+
+// agentUnresolvedMsg returns the error for an agent input that did not
+// resolve. matches holds the agents a bare input named when more than one
+// has the name, as lookupAgentIdentity returns them, and the error names each
+// by its qualified name. With no matches it is agentNotFoundMsg's.
+func agentUnresolvedMsg(prefix, input string, cfg *config.City, matches []config.Agent) string {
+	if len(matches) == 0 {
+		return agentNotFoundMsg(prefix, input, cfg)
+	}
+	names := make([]string, 0, len(matches))
+	for i := range matches {
+		names = append(names, matches[i].QualifiedName())
+	}
+	slices.Sort(names)
+	return fmt.Sprintf("%s: agent %q is ambiguous: matches %s; use a qualified name", prefix, input, strings.Join(names, ", "))
 }
 
 // rigNotFoundMsg returns a user-friendly error string for when a rig

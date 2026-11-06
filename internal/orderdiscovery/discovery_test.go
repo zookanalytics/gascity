@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/orders"
 )
 
 func TestScanAllNilConfigUsesDefaultCityRootsAndOSFS(t *testing.T) {
@@ -196,76 +195,6 @@ interval = "1h"
 	}
 	if aa[0].Interval != "15m" {
 		t.Fatalf("Interval = %q, want partially applied override %q", aa[0].Interval, "15m")
-	}
-}
-
-// TestScanAllStaleOverrideKeepsLaterOverridesInForce covers the deployment
-// shape: an [[orders.overrides]] entry naming an order that no longer exists,
-// sitting above the entries that throttle the background orders. The caller
-// logs and continues, so the entries below the stale one decide what the
-// supervisor actually runs — they must be in force, and the diagnostic must
-// name the entry that was skipped.
-func TestScanAllStaleOverrideKeepsLaterOverridesInForce(t *testing.T) {
-	cityPath, cityLayer := orderDiscoveryCity(t)
-	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "liveness-sweep", `[order]
-formula = "mol-liveness-sweep"
-trigger = "cooldown"
-interval = "6h"
-`)
-	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "feedback-distiller", `[order]
-formula = "mol-feedback-distiller"
-trigger = "cooldown"
-interval = "24h"
-`)
-
-	disabled := false
-	interval := "24h"
-	cfg := &config.City{
-		FormulaLayers: config.FormulaLayers{
-			City: []string{cityLayer},
-		},
-		Orders: config.OrdersConfig{
-			Overrides: []config.OrderOverride{
-				// The stale entry, at the top of the array where it used to
-				// cost every entry below it.
-				{Name: "doc-keeper-drift-audit", Rig: "signal-loom", Enabled: &disabled},
-				{Name: "liveness-sweep", Interval: &interval},
-				{Name: "feedback-distiller", Enabled: &disabled},
-			},
-		},
-	}
-
-	var handled string
-	aa, err := ScanAll(cityPath, cfg, ScanOptions{
-		OnOverrideError: func(err error) error {
-			handled = err.Error()
-			return nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("ScanAll returned error: %v", err)
-	}
-	if !strings.Contains(handled, `order "doc-keeper-drift-audit"`) {
-		t.Fatalf("handled override error = %q, want the stale entry named", handled)
-	}
-
-	byName := map[string]orders.Order{}
-	for _, a := range aa {
-		byName[a.Name] = a
-	}
-	sweep, ok := byName["liveness-sweep"]
-	if !ok {
-		t.Fatalf("liveness-sweep missing from %#v", aa)
-	}
-	if sweep.Interval != "24h" {
-		t.Errorf("liveness-sweep interval = %q, want the override applied (%q)", sweep.Interval, "24h")
-	}
-	distiller, ok := byName["feedback-distiller"]
-	if !ok {
-		t.Fatalf("feedback-distiller missing from %#v", aa)
-	}
-	if distiller.IsEnabled() {
-		t.Error("feedback-distiller is enabled; want the override to have disabled it")
 	}
 }
 
@@ -933,6 +862,48 @@ tz = "Amrica/New_York"
 	}
 	if !strings.Contains(err.Error(), `invalid tz "Amrica/New_York"`) {
 		t.Errorf("error = %q, want it to name the invalid tz", err)
+	}
+}
+
+func TestScanAllOverrideHandlerKeepsOverridesAfterUnmatchedOne(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "missing"},
+				{Name: "backup", Enabled: &disabled},
+			},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnOverrideError: func(err error) error {
+			handled = err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, `order "missing" not found`) {
+		t.Fatalf("handled override error = %q, want missing-order error", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].IsEnabled() {
+		t.Fatal("backup enabled: the enabled=false override after the unmatched one was not applied")
 	}
 }
 

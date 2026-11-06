@@ -2,17 +2,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
-	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -39,14 +37,23 @@ func carriedPoolRoute(b beads.Bead) string {
 	// withheld qualified one, and the restore's read-merge-write can land over
 	// the activation and put the fence back. The same holds for any bead Ready
 	// would never surface: it is not pool work, whatever gc.run_target says.
+	// A bead on a dispatch hold is parked rather than lost: its next actor is
+	// not the pool, so its empty gc.routed_to is deliberate too.
 	if strings.TrimSpace(b.Metadata[beadmeta.InstantiatingMetadataKey]) != "" ||
 		strings.TrimSpace(b.Metadata[beadmeta.DeferredRoutedToMetadataKey]) != "" ||
-		beads.IsReadyExcludedBead(b) {
+		beads.IsReadyExcludedBead(b) ||
+		beadmeta.HasDispatchHold(b.Labels) {
 		return ""
 	}
 	// Legacy pre-ga-eld2x workflow root: gc.run_target is the root's pool route
-	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule.
+	// only while gc.routed_to is empty — exactly legacyWorkflowRunTarget's rule
+	// — and only while the root is unexpanded. An expanded root is neither
+	// demanded nor claimable (#5900); restoring its run_target into
+	// gc.routed_to would make it both (NEW-5).
 	if route := legacyWorkflowRunTarget(b); route != "" {
+		if !workflowRunTargetFallbackEligible(b) {
+			return ""
+		}
 		return route
 	}
 	// Broaden beyond workflow roots to plain standalone work beads. Any non-empty
@@ -62,72 +69,41 @@ func carriedPoolRoute(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[beadmeta.RunTargetMetadataKey])
 }
 
-// workflowIDMetadataKey is the BARE (non-gc-prefixed) key a graph workflow
-// launch stamps on its source bead to point at the root now driving it, and
-// that every path returning the bead to the pool clears. It is deliberately not
-// beadmeta.WorkflowIDMetadataKey ("gc.workflow_id"), which names a different
-// key on a different bead — see the same distinction in
-// internal/api/handler_beads.go.
-const workflowIDMetadataKey = "workflow_id"
-
-// liveGraphWorkflowDrivesBead reports whether a graph workflow is currently
-// driving b's work, in which case b's retired pool route must stay retired.
-//
-// A started graph workflow is the single live dispatch surface for the work it
-// drives, and it establishes that by retiring gc.routed_to on its bead
-// (internal/sling: retireClaimRoute). gc.run_target survives that retire on
-// purpose — it is the archived route reopen-source and this recovery restore
-// the bead from once the workflow is gone (ga-20zd) — so without this gate the
-// retire lasts exactly until the next pass, which re-promotes the archived
-// route and hands the pool a bead the workflow is already dispatching. That is
-// the double dispatch the retire exists to prevent (gc-p64nt), reintroduced one
-// pass later: two polecats on one branch.
-//
-// Liveness — not the mere presence of a link — is the gate, so the answer stops
-// being true the moment the workflow reaches a terminal status and the bead
-// becomes recoverable again. A marker that outlived its workflow would strand
-// the bead in the one state this recovery exists to heal.
-//
-// Both launch shapes are checked because they leave different links behind. A
-// convoy-first pour (the graph.v2 shape: `gc sling <bead> --on <formula>` mints
-// a synthetic input convoy over the bead) clears gc.source_bead_id and links
-// back only through gc.input_convoy_id -> the convoy -> its tracked members,
-// which is the reverse walk. A workflow attached to a source bead instead
-// stamps that bead's workflow_id with the root id, and carries no input convoy
-// to walk. Neither link alone sees the other's shape.
-//
-// graphStore is where workflow roots live on a city that relocates the graph
-// coordination class; pass nil where graph collapses onto the work store.
-func liveGraphWorkflowDrivesBead(store, graphStore beads.Store, b beads.Bead) (bool, error) {
-	rootStore := graphStore
-	if rootStore == nil {
-		rootStore = store
-	}
-	if rootID := strings.TrimSpace(b.Metadata[workflowIDMetadataKey]); rootID != "" {
-		root, err := rootStore.Get(rootID)
-		switch {
-		case errors.Is(err, beads.ErrNotFound):
-			// The root is gone, so nothing dispatches through it. Fall through
-			// rather than return: a bead can carry a stale attachment link and
-			// still be a live convoy-first workflow's member.
-		case err != nil:
-			return false, fmt.Errorf("reading workflow %s: %w", rootID, err)
-		case !convoycore.IsTerminalStatus(root.Status):
-			return true, nil
-		}
-	}
-	roots, err := sourceworkflow.ListLiveInputConvoyRootsForItem(store, rootStore, b.ID, "")
-	if err != nil {
-		return false, err
-	}
-	return len(roots) > 0, nil
-}
-
 // routeRecoveryLaneOf returns this runtime's lane, creating it on first use so a
 // directly-constructed CityRuntime (every test, every one-shot) needs no wiring.
 func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 	cr.routeRecoveryOnce.Do(func() { cr.routeRecovery = newRouteRecoveryLane() })
 	return cr.routeRecovery
+}
+
+// claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
+// alerts go to the runtime's recorder and stderr.
+func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
+	cr.claimLoopOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimLoop = newClaimLoopGuard(record, cr.stderr)
+	})
+	return cr.claimLoop
+}
+
+// claimStallGuardOf is the runtime's claims-stall guard, created on first use
+// and configured from the runtime's config. Its alerts go to the runtime's
+// recorder and stderr.
+func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
+	cr.claimStallOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimStall = newClaimStallGuard(record, cr.stderr)
+		cr.claimStall.configure(cr.cfg)
+	})
+	return cr.claimStall
 }
 
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
@@ -231,10 +207,7 @@ func (cr *CityRuntime) runRouteRecoveryBackstop(reason string) routeRecoveryRepo
 		return routeRecoveryReport{lane: "backstop", reason: reason, err: err}
 	}
 	started := time.Now()
-	// Where the graph class is relocated every scope's workflow roots live in
-	// the one binding; where it is not, they live beside the work in each
-	// scope's own store, which is what a nil graphStore selects.
-	report := lane.backstopPass(plan, cr.relocatedGraphStore(), reason)
+	report := lane.backstopPass(plan, reason)
 	report.duration = time.Since(started)
 	lane.noteBackstopRan(time.Now(), reason, report.partial || report.err != nil)
 	cr.logRouteRecovery(report)
@@ -267,7 +240,7 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 		lane.force(backstopReasonCursorGap)
 		return routeRecoveryReport{lane: "delta", candidates: len(candidates), err: err}
 	}
-	report := lane.deltaPass(plan, cr.relocatedGraphStore(), candidates)
+	report := lane.deltaPass(plan, candidates)
 	if report.partial || report.err != nil {
 		// A leg the delta pass could not read is a leg whose convergence is now
 		// owed to the scan.
@@ -281,10 +254,11 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 // feed that makes the tick's delta passes possible, and the background sweeps
 // that converge what the feed can miss.
 //
-// One feed, three lanes plus the completion-fact index. A second watcher on the
-// same journal would be a second cursor to keep honest, and the gap semantics
-// have to be identical anyway: an event the tail missed is a gap for ALL of
-// them.
+// One feed, three lanes plus the completion-fact index and the claim-loop
+// guard. A second watcher on the same journal would be a second cursor to keep
+// honest, and the lanes' gap semantics have to be identical anyway: an event the
+// tail missed is a gap for ALL of the lanes. The guard is the one consumer that
+// treats a gap as nothing (see below).
 //
 // The sweeps are minutes of sequential remote reads on a large city — together
 // 88% of a 373s tick before this slice and its predecessor — so they run off the
@@ -295,6 +269,16 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	route := cr.routeRecoveryLaneOf()
 	completions := cr.completionsLaneOf()
 	orphans := cr.detachedOrphanLaneOf()
+	// The claim-loop guard rides the same feed and is published for the demand
+	// passes, which reach it by city path (claim_loop_guard.go). It needs no gap
+	// handling: a missed claim failure only delays a hold, and a missed bead
+	// change is covered by the hold's own expiry.
+	claimLoop := cr.claimLoopGuardOf()
+	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
+	// So does the claims-stall guard: a missed event delays a stall by a
+	// seat at most, and its holds run out on their own.
+	claimStall := cr.claimStallGuardOf()
+	registerClaimStallGuard(ctx, cr.cityPath, claimStall)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -307,8 +291,13 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			completions.observe(evt)
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
+			claimLoop.observe(evt)
+			claimStall.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
+	// The cross-store gate lane reads work stores, so it polls off the tick
+	// too (cross_store_gate_lane.go).
+	go cr.runCrossStoreGateLoop(ctx)
 	go cr.runCompletionsSweepLoop(ctx, completions)
 	go cr.runDetachedOrphanBackstopLoop(ctx, orphans)
 }
@@ -326,7 +315,36 @@ func (cr *CityRuntime) runRouteRecoveryBackstopLoop(ctx context.Context, lane *r
 		if reason, due := lane.backstopDue(time.Now()); due {
 			cr.safeTick(func() { cr.runRouteRecoveryBackstop(reason) }, "route-recovery-backstop")
 		}
+		cr.safeTick(func() { cr.runRouteRecoveryLedgerDeferred() }, "route-recovery-ledger-deferred")
 	}
+}
+
+// runRouteRecoveryLedgerDeferred repairs, off the tick, the named candidates the
+// tick's delta pass found in no binding (work beads on a work leg, read-audit
+// R11). An empty queue reads nothing and builds no plan.
+func (cr *CityRuntime) runRouteRecoveryLedgerDeferred() routeRecoveryReport {
+	if cr.beadsQuiescent.Load() {
+		// Suspended with nothing running: no store is read until resume, and
+		// the queue waits for it.
+		return routeRecoveryReport{lane: "ledger-delta"}
+	}
+	lane := cr.routeRecoveryLaneOf()
+	candidates := lane.takeLedgerPending()
+	if len(candidates) == 0 {
+		return routeRecoveryReport{lane: "ledger-delta"}
+	}
+	plan, err := cr.routeRecoveryPlan()
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "%s: route recovery: resolving work legs: %v\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+		lane.force(backstopReasonCursorGap)
+		return routeRecoveryReport{lane: "ledger-delta", candidates: len(candidates), err: err}
+	}
+	report := lane.ledgerCandidatePass(plan, candidates)
+	if report.partial || report.err != nil {
+		lane.force(backstopReasonLegDegrade)
+	}
+	cr.logRouteRecovery(report)
+	return report
 }
 
 // backstopPollInterval is how often a background convergence lane asks whether
@@ -353,10 +371,23 @@ func (cr *CityRuntime) logRouteRecovery(report routeRecoveryReport) {
 			len(report.flapping), routeRecoveryFlapLimit, strings.Join(report.flapping, " "))
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %s\n", cr.logPrefix, report.lane, flap) //nolint:errcheck // best-effort stderr
 	}
-	if report.offPlaneRouted > 0 {
-		// Loud, because the tick's demand read cannot see these and therefore
-		// spawns nothing for them. The remedy is a migration, not a wider tick.
-		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed bead(s) sit on a work leg the runtime plane does not read, so no pool seat is spawned for them; run `gc storage migrate` to move them to the infra binding\n", cr.logPrefix, report.lane, report.offPlaneRouted) //nolint:errcheck // best-effort stderr
+	if report.offPlaneInfra > 0 {
+		// Loud, because no runtime reader looks for an infrastructure-class row
+		// in a work store. A work-class bead never moves and a single-store
+		// city has nothing to move (#7410). Rig-resident residue is pre-S4
+		// graph history, which `gc storage migrate --from-rigs` moves (S4b),
+		// so it names that command per rig; residue in the city work store
+		// stays the operator's decision.
+		remedy := "need an operator decision"
+		if len(report.offPlaneRigs) > 0 {
+			rigs := slices.Sorted(slices.Values(report.offPlaneRigs))
+			commands := make([]string, 0, len(rigs))
+			for _, rig := range rigs {
+				commands = append(commands, "`"+rigImportInstruction(rig)+"`")
+			}
+			remedy = "are rig graph history; import them with " + strings.Join(commands, ", ")
+		}
+		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): %d open routed infrastructure-class bead(s) sit in a work store, outside the class binding their class is served from, where no runtime reader looks for them (e.g. %s); they are pre-split residue the storage migration did not move and %s\n", cr.logPrefix, report.lane, report.offPlaneInfra, strings.Join(report.offPlaneSample, " "), remedy) //nolint:errcheck // best-effort stderr
 	}
 	if report.quarantined > 0 {
 		fmt.Fprintf(cr.stderr, "%s: route recovery (%s): quarantined %d bead(s) for operator review (`gc doctor` route-recovery-quarantine)\n", cr.logPrefix, report.lane, report.quarantined) //nolint:errcheck // best-effort stderr

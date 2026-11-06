@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -45,16 +46,18 @@ type Override struct {
 //     regardless of rig.
 //   - otherwise:     matches only the order with that exact rig.
 //
-// An entry that matches no order is skipped; every other entry still applies.
-// The returned error names every skipped entry (following the agent override
-// pattern where unmatched targets are errors, not silent no-ops), so a caller
-// that logs the error and keeps the orders is running the operator's override
-// set minus exactly the entries that log line names.
+// Returns an error if an override has no name or targets a nonexistent
+// order (following the agent override pattern where unmatched targets are
+// errors, not silent no-ops). A bad override never stops the others: every
+// override that matches is applied, and the error joins one entry per bad
+// override, in config order. An override can name an absent order because
+// the order was retired or renamed, its own file disables it, or the city's
+// orders skip list removed it.
 func ApplyOverrides(aa []Order, overrides []Override) error {
-	var skipped []error
+	var errs []error
 	for i, ov := range overrides {
 		if ov.Name == "" {
-			skipped = append(skipped, fmt.Errorf("orders.overrides[%d]: name is required", i))
+			errs = append(errs, fmt.Errorf("orders.overrides[%d]: name is required", i))
 			continue
 		}
 		found := false
@@ -69,27 +72,10 @@ func ApplyOverrides(aa []Order, overrides []Override) error {
 			found = true
 		}
 		if !found {
-			skipped = append(skipped, notFoundError(i, ov, aa))
+			errs = append(errs, notFoundError(i, ov, aa))
 		}
 	}
-	if len(skipped) > 0 {
-		return skippedError(skipped, len(overrides))
-	}
-	return nil
-}
-
-// skippedError renders the skipped entries as one line: callers that log and
-// continue print the error through a single Printf, where a multi-line error
-// would split the warning across records that no longer carry the log prefix.
-// The counts lead so the operator reads how much of the block is in force
-// before reading which entries are not.
-func skippedError(skipped []error, total int) error {
-	msgs := make([]string, len(skipped))
-	for i, err := range skipped {
-		msgs[i] = err.Error()
-	}
-	return fmt.Errorf("orders.overrides: %d of %d entries skipped (%d applied): %s",
-		len(skipped), total, total-len(skipped), strings.Join(msgs, "; "))
+	return errors.Join(errs...)
 }
 
 func rigMatches(ovRig, orderRig string) bool {

@@ -2,7 +2,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "tomledit",
-    srcs = ["tomledit.go"],
+    srcs = [
+        "tomledit.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/tomledit",
     visibility = ["//:__subpackages__"],
 )

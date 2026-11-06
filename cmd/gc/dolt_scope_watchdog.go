@@ -29,6 +29,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -324,9 +325,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 				return 0
 			}
 			fmt.Fprintf(logFile, "gc scope watchdog: received %v; terminating dolt sql-server pid %d\n", sig, child.pid) //nolint:errcheck
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
-			<-child.done
-			return 0
+			terminateErr := terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
+			return finishManagedDoltScopeWatchdogTermination(child.done, terminateErr, logFile, child.pid)
 
 		case <-ticker.C:
 			if !managedDoltScopeGone(configFile) {
@@ -344,9 +344,8 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			}
 			fmt.Fprintf(logFile, "gc scope watchdog: config %s gone for %d consecutive checks; terminating dolt sql-server pid %d\n", //nolint:errcheck
 				configFile, goneStreak, child.pid)
-			_ = terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
-			<-child.done
-			return 0
+			terminateErr := terminateManagedDoltScopeWatchdogChild(cityPath, child.pid, child.ticks, child.identity)
+			return finishManagedDoltScopeWatchdogTermination(child.done, terminateErr, logFile, child.pid)
 
 		case <-restartDue:
 			restartTimer = nil
@@ -414,6 +413,19 @@ func runManagedDoltScopeWatchdog(args []string, stdout, stderr *os.File) int {
 			return managedDoltScopeWatchdogGiveUp(logFile, stderr, exitedPID, len(restarts), budget)
 		}
 	}
+}
+
+// finishManagedDoltScopeWatchdogTermination waits for the child only after the
+// termination path succeeded. A failed lock-ownership gate can leave the child
+// alive indefinitely; waiting for cmd.Wait in that state wedges the watchdog
+// and hides the termination failure behind its earlier "terminating" log line.
+func finishManagedDoltScopeWatchdogTermination(done <-chan error, terminateErr error, logFile io.Writer, pid int) int {
+	if terminateErr != nil {
+		fmt.Fprintf(logFile, "gc scope watchdog: failed to terminate dolt sql-server pid %d: %v\n", pid, terminateErr) //nolint:errcheck
+		return 1
+	}
+	<-done
+	return 0
 }
 
 // scheduleManagedDoltRestart charges one restart against the rolling budget

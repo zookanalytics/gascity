@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"slices"
 	"sort"
 	"time"
 )
@@ -102,9 +103,10 @@ type ListQuery struct {
 	Assignees []string
 	ParentID  string
 	// ParentIDs matches beads whose parent_id is any of the listed ids — a
-	// batched form of ParentID for graph/subtree walks. Backends that do not
-	// recognize it should ignore it (returning a superset); callers that need
-	// exact results must filter the returned beads by parent in memory.
+	// batched form of ParentID for graph/subtree walks. An empty entry names no
+	// parent. A store that cannot push the list into its backend returns a
+	// superset, which ApplyListQuery/Matches then cut exactly, so the result is
+	// exact. It counts as a filter, so a ParentIDs query needs no AllowScan.
 	ParentIDs []string
 	// IDs matches beads whose id is any of the listed ids — the IN-list form of
 	// a batch of Gets. It exists so a lane that already knows WHICH beads it
@@ -131,9 +133,15 @@ type ListQuery struct {
 	// caller does not need labels for change detection. Stores that cannot
 	// omit labels may ignore it.
 	SkipLabels bool
-	// Live bypasses CachingStore and reads from the backing store. Other Store
-	// implementations ignore it. Use it only for lifecycle gates that must
-	// observe external mutations immediately.
+	// Live bypasses CachingStore and reads from the backing store. Use it only
+	// for lifecycle gates that must observe external mutations immediately.
+	// A Live Status "open" is the backing's own answer, which on a bd-backed
+	// store is bd's raw "open": a bead bd records as blocked, deferred or
+	// another parked status reads as "open" but is not in it. NativeDoltStore
+	// reads the flag to push that raw status (nativeListPushesRawOpen); other
+	// backing stores ignore it. A non-Live "open" through CachingStore is gc's
+	// folded answer only while the cache serves it: the cache's fallback
+	// re-issues the read Live, so a cold or dirty cache returns the raw answer.
 	Live bool
 	Sort SortOrder
 	// AllowBackingCreatedLimit lets a backing store satisfy a bounded
@@ -171,6 +179,10 @@ type ListQuery struct {
 	// first silently drops page rows — so seeked reads fetch a superset and cut
 	// the page in Go.
 	SeekAfter *SeekBoundary
+	// Fields names the fields each returned row must populate. The zero
+	// value, FieldsFull, reads whole rows; FieldsCore leaves the free-form
+	// text out (see FieldSet). It never changes which rows match.
+	Fields FieldSet
 }
 
 // SeekBoundary identifies the last row a pagination client has seen, in the
@@ -203,6 +215,35 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+
+	// Unassigned and MetadataEquals are ADVISORY narrowing predicates, the
+	// same contract ListQuery.ParentIDs carries: a store MAY apply them to
+	// narrow its answer, and a store that does not recognize them ignores them
+	// and returns a superset. A store that applies one must apply it exactly —
+	// never drop a row that satisfies it — so a caller that needs the exact
+	// answer re-applies the predicates to what comes back, and pays for the
+	// pushdown only in rows it does not have to read.
+	//
+	// Unassigned keeps beads whose assignee is empty, as `bd ready
+	// --unassigned` matches.
+	Unassigned bool
+	// MetadataEquals keeps beads whose metadata carries every key with exactly
+	// that value, as `bd ready --metadata-field key=value` matches. Keys and
+	// values are passed as given; a caller that cannot vouch for a pair's
+	// equality semantics on every backend (a value that is a JSON literal, a
+	// key outside bd's key grammar) must not push it.
+	MetadataEquals map[string]string
+	// Fields names the fields each returned row must populate, as
+	// ListQuery.Fields does. It selects no rows, so a query whose only
+	// non-zero member is Fields still asks for every ready bead.
+	Fields FieldSet
+}
+
+// IsZero reports whether q selects nothing beyond Ready's historical default:
+// every open, unblocked, main-tier bead.
+func (q ReadyQuery) IsZero() bool {
+	return q.Assignee == "" && q.Limit == 0 && q.TierMode == TierIssues &&
+		!q.Unassigned && len(q.MetadataEquals) == 0
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {
@@ -220,6 +261,7 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
+		len(q.ParentIDs) > 0 ||
 		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
@@ -280,6 +322,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		}
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
+		return false
+	}
+	if len(q.ParentIDs) > 0 && (b.ParentID == "" || !slices.Contains(q.ParentIDs, b.ParentID)) {
 		return false
 	}
 	if len(q.IDs) > 0 {
@@ -348,7 +393,9 @@ func beadHasLabel(b Bead, want string) bool {
 	return false
 }
 
-// ApplyListQuery filters, sorts, and limits an in-memory bead slice.
+// ApplyListQuery filters, sorts, and limits an in-memory bead slice, and
+// clears from the rows it returns the fields q.Fields omits. It returns a new
+// slice and leaves items untouched.
 func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 	filtered := make([]Bead, 0, len(items))
 	for _, b := range items {
@@ -360,11 +407,27 @@ func ApplyListQuery(items []Bead, q ListQuery) []Bead {
 	if q.Limit > 0 && len(filtered) > q.Limit {
 		filtered = filtered[:q.Limit]
 	}
-	return filtered
+	return q.Fields.project(filtered)
 }
 
 func applyListQuery(items []Bead, q ListQuery) []Bead {
 	return ApplyListQuery(items, q)
+}
+
+// distinctNonEmpty returns the distinct non-empty entries of ids in the order
+// they first appear. An empty entry names no bead, and an id is compared
+// exactly, never trimmed.
+func distinctNonEmpty(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
 }
 
 // SortBeads sorts items into the canonical (created_at, id) total order for

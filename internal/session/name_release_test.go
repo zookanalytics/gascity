@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // closedNameHolder stores a CLOSED session bead holding the given runtime
@@ -45,7 +46,7 @@ func TestReleaseSessionNameClaim_ClearsClosedHolderReservations(t *testing.T) {
 	)
 	id := closedNameHolder(t, store, sessionName, identity)
 
-	released, err := ReleaseSessionNameClaim(store, sessionName)
+	released, err := ReleaseSessionNameClaim(beadstest.Sessions(store), sessionName)
 	if err != nil {
 		t.Fatalf("ReleaseSessionNameClaim: %v", err)
 	}
@@ -71,7 +72,7 @@ func TestReleaseSessionNameClaim_ClearsClosedHolderReservations(t *testing.T) {
 	}
 
 	// The released name is available again.
-	if err := ensureSessionNameAvailable(store, sessionName); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), sessionName); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after release = %v, want nil", err)
 	}
 }
@@ -87,7 +88,7 @@ func TestReleaseSessionNameClaim_ResolvesByAlias(t *testing.T) {
 	)
 	id := closedNameHolder(t, store, sessionName, identity)
 
-	released, err := ReleaseSessionNameClaim(store, identity)
+	released, err := ReleaseSessionNameClaim(beadstest.Sessions(store), identity)
 	if err != nil {
 		t.Fatalf("ReleaseSessionNameClaim(alias): %v", err)
 	}
@@ -111,7 +112,7 @@ func TestReleaseSessionNameClaim_RefusesLiveHolder(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	released, err := ReleaseSessionNameClaim(store, sessionName)
+	released, err := ReleaseSessionNameClaim(beadstest.Sessions(store), sessionName)
 	if !errors.Is(err, ErrSessionNameClaimLive) {
 		t.Fatalf("ReleaseSessionNameClaim(live holder) = %v, want %v", err, ErrSessionNameClaimLive)
 	}
@@ -130,7 +131,7 @@ func TestReleaseSessionNameClaim_RefusesLiveHolder(t *testing.T) {
 func TestReleaseSessionNameClaim_NoHolder(t *testing.T) {
 	store := beads.NewMemStore()
 
-	released, err := ReleaseSessionNameClaim(store, "nobody-holds-this")
+	released, err := ReleaseSessionNameClaim(beadstest.Sessions(store), "nobody-holds-this")
 	if err != nil {
 		t.Fatalf("ReleaseSessionNameClaim(no holder) = %v, want nil", err)
 	}
@@ -144,7 +145,7 @@ func TestReleaseSessionNameClaim_NoHolder(t *testing.T) {
 func TestReleaseSessionNameClaim_RejectsEmptyTarget(t *testing.T) {
 	store := beads.NewMemStore()
 
-	if _, err := ReleaseSessionNameClaim(store, "  "); err == nil {
+	if _, err := ReleaseSessionNameClaim(beadstest.Sessions(store), "  "); err == nil {
 		t.Fatal("ReleaseSessionNameClaim(empty target) = nil, want error")
 	}
 }

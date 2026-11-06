@@ -803,3 +803,113 @@ func (s *residueClaimedOnGetSpyStore) SetMetadataBatch(id string, kvs map[string
 	s.writes++
 	return s.Store.SetMetadataBatch(id, kvs)
 }
+
+// On a single-store city the session store the check indexes is the city store
+// rebuilt with an emitter under its policy layer (withMainStoreEmission): a
+// different value over the same engine. The check must still treat the city
+// scope as the session store, and still flag and fix the residue there.
+func TestExecutorIdentityResidueCheckSingleStoreCityComparesStoresByEngine(t *testing.T) {
+	cityDir := t.TempDir()
+	writeOneShotCityTOML(t, cityDir, "")
+	captureCLIStorageStderr(t)
+	cfg := &config.City{}
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the city engine: %v", err)
+	}
+	stale, err := engine.Create(beads.Bead{Title: "stale stamp", Type: "task", Metadata: map[string]string{
+		"gc.routed_to":    "gascity/reviewer",
+		"gc.session_name": "gascity--builder",
+	}})
+	if err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+	cityStore := wrapStoreWithBeadPolicies(engine, cfg) // what openCityStoreAt returns
+
+	sessionStore := cliSessionStore(cityStore, cfg, cityDir)
+	if sessionStore == cityStore {
+		t.Fatal("cliSessionStore returned the city store itself; the single-store emitter did not engage")
+	}
+	if !sameStoreEngine(cityStore, sessionStore) {
+		t.Fatalf("sameStoreEngine(%T, %T) = false, want true: both serve the one city engine", cityStore, sessionStore)
+	}
+	if sameStoreEngine(cityStore, wrapStoreWithBeadPolicies(beads.NewMemStore(), cfg)) {
+		t.Fatal("sameStoreEngine reported a rig's distinct store as the city engine")
+	}
+
+	check := newExecutorIdentityResidueCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return cityStore, nil
+	})
+	result := check.Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusWarning || !strings.Contains(strings.Join(result.Details, "\n"), stale.ID) {
+		t.Fatalf("Run = %v %v, want a warning naming %s", result.Status, result.Details, stale.ID)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if result := check.Run(&doctor.CheckContext{}); result.Status != doctor.StatusOK {
+		t.Fatalf("Run after Fix = %v %v, want ok", result.Status, result.Details)
+	}
+}
+
+// TestExecutorIdentityResidueCheckStopsOnceAbandoned: abandoned while it builds
+// the session-identity index, the check scans no scope for residue. It scans
+// each of the three scopes once the index is built.
+func TestExecutorIdentityResidueCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	indexReads := full.reads.Load() - 3
+	if full.opens.Load() != 3 || indexReads < 1 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want the index reads plus one scan per scope", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newExecutorIdentityResidueCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if got := probe.reads.Load(); got != indexReads {
+		t.Fatalf("abandoned run made %d reads, want only the %d that build the index", got, indexReads)
+	}
+}
+
+// TestExecutorIdentityResidueCheckStopsAfterScopeIndexOnceAbandoned: abandoned
+// while it builds a rig scope's own session-identity index, the check scans
+// neither that scope nor the next. Each rig has its own store, so neither is
+// the session store and each builds its own index before its scan.
+func TestExecutorIdentityResidueCheckStopsAfterScopeIndexOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+	// Only the rig stores are probed, so the probe's first read is the first
+	// rig's index build.
+	run := func(probe *doctorAbandonProbe, ctx *doctor.CheckContext) {
+		stores := map[string]beads.Store{cityDir: beads.NewMemStore()}
+		for _, rig := range cfg.Rigs {
+			stores[rig.Path] = probe.wrap(beads.NewMemStore())
+		}
+		newExecutorIdentityResidueCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+			return stores[path], nil
+		}).Run(ctx)
+	}
+
+	index := newDoctorAbandonProbe()
+	if _, err := buildExecutorRouteIdentityIndex(index.wrap(beads.NewMemStore())); err != nil {
+		t.Fatalf("buildExecutorRouteIdentityIndex: %v", err)
+	}
+	indexReads := index.reads.Load()
+
+	full := newDoctorAbandonProbe()
+	run(full, &doctor.CheckContext{})
+	if got, want := full.reads.Load(), 2*(indexReads+1); got != want {
+		t.Fatalf("unabandoned run made %d rig reads, want each rig's %d index reads and its scan (%d)", got, indexReads, want)
+	}
+
+	probe := newDoctorAbandonProbe()
+	run(probe, probe.ctx())
+	if got := probe.reads.Load(); got != indexReads {
+		t.Fatalf("abandoned run made %d rig reads, want only the %d that build the first rig's index", got, indexReads)
+	}
+}

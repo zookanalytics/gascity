@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"path/filepath"
 	"slices"
@@ -32,6 +33,9 @@ type countingRouteStore struct {
 	lists  int
 	gets   int
 	writes int
+	// batches counts exact batch reads (GetExactBatch), the one read by id a
+	// production work store (bd, native Dolt) answers beads.GetMany with.
+	batches int
 	// scanned records whether any List asked for the whole open corpus, which is
 	// the read this slice moved off the tick.
 	scanned int
@@ -60,7 +64,27 @@ func (s *countingRouteStore) SetMetadataBatch(id string, kvs map[string]string) 
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
-func (s *countingRouteStore) reads() int { return s.lists + s.gets }
+// GetExactBatch answers an exact batch read from the wrapped store, as one
+// counted round trip.
+func (s *countingRouteStore) GetExactBatch(ids []string) (map[string]beads.Bead, []string, error) {
+	s.batches++
+	found := make(map[string]beads.Bead, len(ids))
+	var unresolved []string
+	for _, id := range ids {
+		b, err := s.Store.Get(id)
+		switch {
+		case err == nil:
+			found[id] = b
+		case errors.Is(err, beads.ErrNotFound):
+			unresolved = append(unresolved, id)
+		default:
+			return nil, nil, err
+		}
+	}
+	return found, unresolved, nil
+}
+
+func (s *countingRouteStore) reads() int { return s.lists + s.gets + s.batches }
 
 // unroutedWorkBead is the recoverable shape: open, unassigned, kind-less, a pool
 // route in gc.run_target and nothing in gc.routed_to.
@@ -278,7 +302,7 @@ func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testi
 	// No event ever names it, so no number of ticks repairs it. This is the
 	// delta lane being honestly delta — and it is why the sweep is not optional.
 	for range 3 {
-		if report := lane.deltaPass(plan, nil, nil); report.restored != 0 {
+		if report := lane.deltaPass(plan, nil); report.restored != 0 {
 			t.Fatalf("a delta pass restored %d for an unannounced bead, want 0", report.restored)
 		}
 	}
@@ -286,7 +310,7 @@ func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testi
 		t.Fatalf("GB-lost gc.routed_to = %q after delta ticks, want empty (the delta path is scanning)", got)
 	}
 
-	first := lane.backstopPass(plan, nil, backstopReasonCadence)
+	first := lane.backstopPass(plan, backstopReasonCadence)
 	if first.restored != 1 {
 		t.Fatalf("the convergence pass restored %d, want 1 — a binding-resident loss has no other repair path", first.restored)
 	}
@@ -296,7 +320,7 @@ func TestRouteRecoveryBackstopHealsABindingResidentLossOnAConvergedCity(t *testi
 
 	// Idempotency: converging twice writes once.
 	writesAfterHeal := binding.writes
-	if second := lane.backstopPass(plan, nil, backstopReasonCadence); second.restored != 0 {
+	if second := lane.backstopPass(plan, backstopReasonCadence); second.restored != 0 {
 		t.Fatalf("the second convergence pass restored %d, want 0", second.restored)
 	}
 	if binding.writes != writesAfterHeal {
@@ -635,7 +659,7 @@ func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T)
 
 	t.Run("runtime plane", func(t *testing.T) {
 		plan, work, rig, binding := newPlan(t)
-		report := newRouteRecoveryLane().backstopPassOnPlane(plan, nil, backstopReasonCadence, runtimePlane)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, backstopReasonCadence, runtimePlane)
 		if got := work.reads() + rig.reads(); got != 0 {
 			t.Fatalf("the runtime plane issued %d work-ledger/rig round trip(s), want 0 — a ledger leg on the tick is a misrouting bug", got)
 		}
@@ -654,7 +678,7 @@ func TestRouteRecoveryRuntimePlaneReadsTheBindingAndNeverTheLedger(t *testing.T)
 
 	t.Run("reconcile plane converges every leg, binding included", func(t *testing.T) {
 		plan, work, rig, binding := newPlan(t)
-		report := newRouteRecoveryLane().backstopPassOnPlane(plan, nil, backstopReasonCadence, reconcilePlane)
+		report := newRouteRecoveryLane().backstopPassOnPlane(plan, backstopReasonCadence, reconcilePlane)
 		if work.reads() == 0 || rig.reads() == 0 {
 			t.Fatalf("work reads=%d rig reads=%d, want both non-zero", work.reads(), rig.reads())
 		}
@@ -696,7 +720,7 @@ func TestRouteRecoveryDeltaPassRefusesTheLedgerLeg(t *testing.T) {
 	}
 
 	lane := newRouteRecoveryLane()
-	report := lane.deltaPass(plan, nil, []string{"CW-1", "GB-1"})
+	report := lane.deltaPass(plan, []string{"CW-1", "GB-1"})
 	if work.reads() != 0 {
 		t.Fatalf("the delta pass issued %d work-ledger round trip(s), want 0", work.reads())
 	}
@@ -721,7 +745,7 @@ func TestRouteRecoverySingleStoreCityKeepsItsOnlyLeg(t *testing.T) {
 	if plan.TouchesBinding() {
 		t.Fatal("the single-store fixture grew a binding; it is not testing the degradation")
 	}
-	report := newRouteRecoveryLane().deltaPass(plan, nil, []string{"CW-1"})
+	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1"})
 	if report.restored != 1 {
 		t.Fatalf("delta restored %d on a single-store city, want 1", report.restored)
 	}
@@ -884,7 +908,7 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 		t.Fatalf("Plan(RoutedWork): %v", err)
 	}
 
-	report := newRouteRecoveryLane().deltaPass(plan, nil, []string{"CW-1", "GB-1"})
+	report := newRouteRecoveryLane().deltaPass(plan, []string{"CW-1", "GB-1"})
 	if report.dropped != 1 {
 		t.Fatalf("delta dropped=%d for one on-plane and one off-plane candidate, want 1", report.dropped)
 	}
@@ -893,7 +917,7 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 	}
 	// Control: a pass whose candidates all resolve reports no drops at all, so
 	// the field is a signal rather than a constant.
-	clean := newRouteRecoveryLane().deltaPass(plan, nil, []string{"GB-1"})
+	clean := newRouteRecoveryLane().deltaPass(plan, []string{"GB-1"})
 	if clean.dropped != 0 {
 		t.Fatalf("delta dropped=%d when every candidate resolved, want 0", clean.dropped)
 	}

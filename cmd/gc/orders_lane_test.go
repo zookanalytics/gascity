@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // run() waits for the orders lane before returning. A startup step that gives
@@ -410,6 +411,88 @@ func TestOrdersLaneFiresDueConditionOrderOutsideTheRotationBudget(t *testing.T) 
 
 	if got := runCountFor(t, store, "queue-c"); got != 1 {
 		t.Fatalf("condition order runs after one lane pass = %d, want 1 (#5990)", got)
+	}
+}
+
+// The dispatch_orders trace record splits the pass into its arms and carries
+// what the dispatch did with its budget, so a slow or starved pass can be
+// attributed from the trace: which arm took the time, whether the budget ran
+// out before the rotation did, and which gate held orders back.
+func TestOrdersLanePassTraceRecordsArmsAndBudget(t *testing.T) {
+	store := beads.NewMemStore()
+	m := alwaysDueCooldownDispatcher(t, store, 0, "a", "b", "c", "d")
+	if _, err := orders.NewStore(beads.OrdersStore{Store: store}).CreateRun("c", orders.RunOpts{}); err != nil {
+		t.Fatalf("seed open tracking bead: %v", err)
+	}
+	cr := ordersLaneTestRuntime(t, m, "1h", nil)
+	cr.trace = newSessionReconcilerTracer(cr.cityPath, cr.cityName, io.Discard)
+
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	drainOrderDispatch(t, m)
+
+	var fields map[string]any
+	for _, r := range closeTrace(t, cr) {
+		if r.RecordType == TraceRecordOperation && r.Fields["operation_name"] == "dispatch_orders" {
+			fields = r.Fields
+		}
+	}
+	if fields == nil {
+		t.Fatal("the lane pass recorded no dispatch_orders operation")
+	}
+	for _, key := range []string{"rescan_ms", "install_ms", "tracking_sweep_ms", "tracking_retention_ms", "nudge_mail_sweep_ms", "dispatch_ms"} {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("dispatch_orders fields = %v, want the %s arm timing", fields, key)
+		}
+	}
+	// c is held by its open tracking bead; a and b spend the budget of 2, and
+	// the rotation does not reach d.
+	for key, want := range map[string]int{
+		"budget":              2,
+		"dispatched":          2,
+		"unreached":           1,
+		"gated_open_tracking": 1,
+		"gated_open_work":     0,
+		"gate_failed_closed":  0,
+		"gate_backoff":        0,
+	} {
+		if got := fmt.Sprint(fields[key]); got != fmt.Sprint(want) {
+			t.Errorf("dispatch_orders %s = %s, want %d", key, got, want)
+		}
+	}
+}
+
+// The orders a suspended city holds back wait through the suspension just as
+// they wait through a slow pass, so the budget keeps accruing over it: the
+// first pass after the resume dispatches the patrol intervals the suspension
+// spanned, not the configured cap.
+func TestOrdersLaneSuspendedPassesKeepTheBudgetAccruing(t *testing.T) {
+	store := beads.NewMemStore()
+	names := make([]string, 50)
+	for i := range names {
+		names[i] = fmt.Sprintf("cooldown-%02d", i)
+	}
+	m := alwaysDueCooldownDispatcher(t, store, 30*time.Second, names...)
+	// The last pass before the suspension, five minutes ago.
+	m.budgetPassStart = time.Now().Add(-5 * time.Minute)
+	cr := ordersLaneTestRuntime(t, m, "1h", nil)
+	setCitySuspended := func(suspended bool) {
+		t.Helper()
+		if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, cr.cityPath, &suspended); err != nil {
+			t.Fatalf("writing the city's suspension state: %v", err)
+		}
+	}
+
+	setCitySuspended(true)
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	if got := countOrderTrackingRuns(t, store); got != 0 {
+		t.Fatalf("tracking runs from a suspended city's pass = %d, want 0", got)
+	}
+	setCitySuspended(false)
+	cr.runOrdersLanePass(context.Background(), cr.cityPath, ordersLaneReasonCadence)
+	drainOrderDispatch(t, m)
+
+	if got := countOrderTrackingRuns(t, store); got != 20 {
+		t.Fatalf("tracking runs after the resume = %d, want 20: the ten intervals the suspension spanned accrue 2 each", got)
 	}
 }
 

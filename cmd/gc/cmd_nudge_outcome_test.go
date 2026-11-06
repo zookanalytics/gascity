@@ -33,9 +33,9 @@ func TestQueueSessionNudgeJSONReportsNudgeID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := deliverSessionNudgeWithWorker(target, store, fake, "check your hook", nudgeDeliveryQueue, true, &stdout, &stderr)
+	code := deliverSessionNudgeKeyed(target, store, fake, "check your hook", nudgeDeliveryQueue, "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
+		t.Fatalf("deliverSessionNudgeKeyed = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
 	var got sessionNudgeJSON
@@ -78,8 +78,8 @@ func TestQueueSessionNudgeTextReportsNudgeID(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := deliverSessionNudgeWithWorker(target, store, fake, "check your hook", nudgeDeliveryQueue, false, &stdout, &stderr); code != 0 {
-		t.Fatalf("deliverSessionNudgeWithWorker = %d, want 0; stderr: %s", code, stderr.String())
+	if code := deliverSessionNudgeKeyed(target, store, fake, "check your hook", nudgeDeliveryQueue, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("deliverSessionNudgeKeyed = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
 	pending, _, _, err := listQueuedNudges(dir, "worker", time.Now())
@@ -299,6 +299,24 @@ func TestRenderNudgeOutcome_JSONAndText(t *testing.T) {
 	for _, want := range []string{"nudge-abc", nudgeOutcomeDropped, "queued nudge session fence mismatch"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("stdout = %q, missing %q", stdout.String(), want)
+		}
+	}
+}
+
+func TestNudgeOutcomeForShadowStateFollowsClassifyTerminalState(t *testing.T) {
+	cases := map[string]string{
+		"accepted_for_injection": nudgeOutcomeDelivered,
+		"injected":               nudgeOutcomeDelivered,
+		"injected_unobserved":    nudgeOutcomeDelivered,
+		"expired":                nudgeOutcomeDropped,
+		"failed":                 nudgeOutcomeDropped,
+		"superseded":             nudgeOutcomeDropped,
+		"queued":                 nudgeOutcomeUnknown,
+		"no-such-state":          nudgeOutcomeUnknown,
+	}
+	for state, want := range cases {
+		if got := nudgeOutcomeForShadowState(state); got != want {
+			t.Errorf("nudgeOutcomeForShadowState(%q) = %q, want %q", state, got, want)
 		}
 	}
 }

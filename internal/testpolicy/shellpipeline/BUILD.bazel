@@ -2,7 +2,9 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "shellpipeline",
-    srcs = ["shellpipeline.go"],
+    srcs = [
+        "shellpipeline.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/testpolicy/shellpipeline",
     visibility = ["//:__subpackages__"],
 )

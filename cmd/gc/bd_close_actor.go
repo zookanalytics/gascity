@@ -78,6 +78,32 @@ func ownClaimActorTargets(bdArgs []string) ([]string, bool) {
 	return workRecordCloseTargets(bdArgs)
 }
 
+// ownClaimHeartbeatNeedsRead returns the bead id a session's `heartbeat <id>`
+// must still read, and whether it must. The exact-ID write guard skips its
+// read where bd resolves ids exactly (bdWriteGuardNeedsRead), but the
+// claim-identity heartbeat needs the bead's assignee to choose its actor.
+// Close-shaped writes already keep the guard's read. No read is needed when
+// targets already holds the bead, outside a session, or when the child's
+// effective actor already is GC_SESSION_ID: closeActorForOwnClaim then never
+// changes the actor.
+func ownClaimHeartbeatNeedsRead(bdArgs []string, targets map[string]beads.Bead, getenv func(string) string, effectiveActor string) (string, bool) {
+	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
+		return "", false
+	}
+	ids, ok := ownClaimActorTargets(bdArgs)
+	if !ok {
+		return "", false
+	}
+	sessionID := strings.TrimSpace(getenv("GC_SESSION_ID"))
+	if sessionID == "" || strings.TrimSpace(effectiveActor) == sessionID {
+		return "", false
+	}
+	if _, read := targets[ids[0]]; read {
+		return "", false
+	}
+	return ids[0], true
+}
+
 // ownClaimCloseEnv returns the bd child's env for bdArgs: unchanged, or with
 // BEADS_ACTOR set to the claim identity closeActorForOwnClaim chose, judged
 // against the BEADS_ACTOR already in env (what bd would otherwise see).

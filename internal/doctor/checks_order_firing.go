@@ -81,12 +81,27 @@ func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFi
 	}
 }
 
+// OrderFiringCurrentInapplicableFunc reports whether an order's
+// requires_backend rules out the backend its bead scope uses, and names that
+// backend. The dispatcher never runs such an order there, so it never fires.
+type OrderFiringCurrentInapplicableFunc func(order orders.Order) (backend string, inapplicable bool)
+
+// WithOrderFiringCurrentInapplicableFunc lets callers mark orders that do not
+// apply to their scope's backend. The check reports them as inapplicable
+// rather than stale or never-fired.
+func WithOrderFiringCurrentInapplicableFunc(fn OrderFiringCurrentInapplicableFunc) OrderFiringCurrentOption {
+	return func(c *OrderFiringCurrentCheck) {
+		c.inapplicable = fn
+	}
+}
+
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
 	clock          func() time.Time
 	lastRun        OrderFiringCurrentLastRunFunc
+	inapplicable   OrderFiringCurrentInapplicableFunc
 	historyTimeout time.Duration
 	readEvents     orderFiringEventReadFunc
 }
@@ -124,16 +139,36 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// The order-history resolver opens the beads/Dolt store and does not accept
 	// a context. Keep that potentially blocking I/O from wedging the complete
-	// doctor run; the gc process exits after printing this failed check.
+	// doctor run; the gc process exits after printing this failed check. The
+	// inner run gets its own Done, closed when this check stops waiting for it
+	// or the runner abandons the check, so it issues no further lookup.
+	abandoned := make(chan struct{})
+	var runCtx CheckContext
+	var runnerDone <-chan struct{}
+	if ctx != nil {
+		runCtx = *ctx
+		runnerDone = ctx.Done
+	}
+	runCtx.Done = abandoned
 	results := make(chan *CheckResult, 1)
 	go func() {
-		results <- c.run(ctx)
+		results <- c.run(&runCtx)
 	}()
 
 	select {
 	case result := <-results:
 		return result
+	case <-runnerDone:
+		close(abandoned)
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusError,
+			Severity: SeverityAdvisory,
+			TimedOut: true,
+			Message:  ErrCheckAbandoned.Error(),
+		}
 	case <-time.After(timeout):
+		close(abandoned)
 		// A timed-out lookup is inconclusive, not proof of a stale/never-fired
 		// order (#4895): the query being slow says nothing about whether orders
 		// are actually firing. SeverityBlocking is CheckSeverity's zero value, so
@@ -176,6 +211,21 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		result.Message = fmt.Sprintf("scan orders: %v", err)
 		return result
 	}
+	// An order its scope's backend rules out is never dispatched, so it never
+	// fires. It is reported as inapplicable, never counted as stale.
+	var inapplicableDetails []string
+	if c.inapplicable != nil {
+		applicable := allOrders[:0:0]
+		for _, order := range allOrders {
+			if backend, ok := c.inapplicable(order); ok {
+				inapplicableDetails = append(inapplicableDetails, fmt.Sprintf("%s: inapplicable (backend %s)", orderDisplayName(order), backend))
+				continue
+			}
+			applicable = append(applicable, order)
+		}
+		allOrders = applicable
+	}
+	defer func() { result.Details = append(result.Details, inapplicableDetails...) }()
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
 	firedEvents, err := c.readEventTail(eventPath, events.Filter{Type: events.OrderFired}, orderFiringEventTailLimit)
@@ -208,7 +258,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
 	// the expected intervals — and therefore which orders need a lookup — are
 	// identical to what the loop derives for itself.
-	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
+	lastRunFor := c.prefetchedLastRunFunc(ctx, c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -646,15 +696,19 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 // prefetchedLastRunFunc resolves pending in parallel and returns a resolver
 // serving those results. A lookup the pre-pass did not anticipate still falls
 // through to the live resolver, so the classification loop can never silently
-// lose an answer.
-func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(pending []orders.Order) OrderFiringCurrentLastRunFunc {
+// lose an answer. Once ctx is canceled no lookup reaches the live resolver; it
+// answers ErrCheckAbandoned instead.
+func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(ctx *CheckContext, pending []orders.Order) OrderFiringCurrentLastRunFunc {
 	if c.lastRun == nil {
 		return nil
 	}
-	prefetched := c.prefetchLastRuns(pending)
+	prefetched := c.prefetchLastRuns(ctx, pending)
 	return func(order orders.Order) (time.Time, error) {
 		if result, ok := prefetched[order.ScopedName()]; ok {
 			return result.at, result.err
+		}
+		if ctx.Canceled() {
+			return time.Time{}, ErrCheckAbandoned
 		}
 		return c.lastRun(order)
 	}
@@ -666,8 +720,10 @@ func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(pending []orders.Order) 
 // alone exceed the check budget, while the check's own timeout means a slow
 // fan-out reports a blocking failure that says nothing about order firing
 // (ga-klv). Results (values AND errors) are handed back verbatim so the
-// classification loop behaves exactly as it did when it called inline.
-func (c *OrderFiringCurrentCheck) prefetchLastRuns(pending []orders.Order) map[string]orderFiringLastRunResult {
+// classification loop behaves exactly as it did when it called inline. A lookup
+// that gets its turn after ctx is canceled is not issued; it records
+// ErrCheckAbandoned.
+func (c *OrderFiringCurrentCheck) prefetchLastRuns(ctx *CheckContext, pending []orders.Order) map[string]orderFiringLastRunResult {
 	out := make(map[string]orderFiringLastRunResult, len(pending))
 	if c.lastRun == nil || len(pending) == 0 {
 		return out
@@ -686,7 +742,10 @@ func (c *OrderFiringCurrentCheck) prefetchLastRuns(pending []orders.Order) map[s
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			at, err := c.lastRun(order)
+			at, err := time.Time{}, ErrCheckAbandoned
+			if !ctx.Canceled() {
+				at, err = c.lastRun(order)
+			}
 			mu.Lock()
 			out[order.ScopedName()] = orderFiringLastRunResult{at: at, err: err}
 			mu.Unlock()

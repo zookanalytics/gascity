@@ -3273,8 +3273,8 @@ func TestPrepareTemplateResolution_StripsStagedCodexHooks(t *testing.T) {
 		t.Fatalf("the pack's own hook was dropped:\n%s", first)
 	}
 
-	// The tick's own staging skips the mergeable file, so a second pass leaves
-	// the stripped file byte for byte as it was.
+	// A second pass stages the pack's file over the stripped one and strips it
+	// again, leaving the file byte for byte as it was.
 	prepareTemplateResolution(bp, &cfg.Agents[0], "myrig/polecat-codex", io.Discard)
 	second, err := os.ReadFile(staged)
 	if err != nil {
@@ -3416,6 +3416,52 @@ mode = "always"
 	}
 	if watcher.ConfiguredNamedIdentity != "repo/gs.watcher" {
 		t.Fatalf("repo--gs__watcher ConfiguredNamedIdentity = %q, want %q", watcher.ConfiguredNamedIdentity, "repo/gs.watcher")
+	}
+}
+
+func TestBuildDesiredState_SharedBareNameSpawnsEachAgentWithItsOwnPrompt(t *testing.T) {
+	// Two imports each define a pool named "dog". A spawned session renders
+	// the prompt of the agent it was built from, and its hook re-prime gets
+	// that agent's qualified name, so the shared bare name never decides which
+	// prompt a session receives.
+	cityPath := t.TempDir()
+	writeSharedDogPacks(t, cityPath, "scope = \"city\"\nmin_active_sessions = 1\nmax_active_sessions = 2\n")
+	writePrimeFixtureFiles(t, cityPath, map[string]string{
+		"city.toml": `
+[workspace]
+provider = "claude"
+
+[providers.claude]
+base = "builtin:claude"
+`,
+		".gc/site.toml": "workspace_name = \"test-city\"\n",
+	})
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes: %v", err)
+	}
+
+	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
+
+	byTemplate := make(map[string]TemplateParams)
+	for _, tp := range dsResult.State {
+		byTemplate[tp.TemplateName] = tp
+	}
+	for _, tc := range []struct{ template, want, wantNot string }{
+		{"bd.dog", "dolt maintenance dog", "warrant executor dog"},
+		{"toolkit.dog", "warrant executor dog", "dolt maintenance dog"},
+	} {
+		tp, ok := byTemplate[tc.template]
+		if !ok {
+			t.Fatalf("desired state has no %s session; keys=%v", tc.template, mapKeys(dsResult.State))
+		}
+		if !strings.Contains(tp.Prompt, tc.want) || strings.Contains(tp.Prompt, tc.wantNot) {
+			t.Errorf("%s session prompt = %q, want its own %q and not %q", tc.template, tp.Prompt, tc.want, tc.wantNot)
+		}
+		if got := tp.Env["GC_TEMPLATE"]; got != tc.template {
+			t.Errorf("%s session GC_TEMPLATE = %q, want the qualified %q", tc.template, got, tc.template)
+		}
 	}
 }
 
@@ -4394,18 +4440,13 @@ func TestRealizePoolDesiredSessionsBindsTriggerBeadToFreshSession(t *testing.T) 
 		t.Fatalf("desired sessions = %d, want 1", len(desired))
 	}
 	for _, tp := range desired {
-		if got := tp.Env["GC_TRIGGER_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_BEAD_ID = %q, want gp-59q", got)
+		// The stamp stays controller-side demand bookkeeping: the seat's shell
+		// carries only the presence marker, never the id or its store ref
+		// (gastownhall/gascity#5738).
+		if got := tp.Env["GC_SPAWN_ORIGIN"]; got != "demand" {
+			t.Fatalf("GC_SPAWN_ORIGIN = %q, want demand", got)
 		}
-		if got := tp.Env["GC_TRIGGER_WORK_BEAD_ID"]; got != "gp-59q" {
-			t.Fatalf("GC_TRIGGER_WORK_BEAD_ID = %q, want gp-59q", got)
-		}
-		if got := tp.Env["GC_TRIGGER_BEAD_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_BEAD_STORE_REF = %q, want rig:gascity-packs", got)
-		}
-		if got := tp.Env["GC_TRIGGER_WORK_STORE_REF"]; got != "rig:gascity-packs" {
-			t.Fatalf("GC_TRIGGER_WORK_STORE_REF = %q, want rig:gascity-packs", got)
-		}
+		assertEnvWithholdsTriggerIDs(t, "seat env", tp.Env)
 		if got := tp.Env["GC_PACKER_PACK"]; got != "packer" {
 			t.Fatalf("GC_PACKER_PACK = %q, want packer", got)
 		}
@@ -5157,6 +5198,7 @@ func TestNormalizeNonExpandingPoolSessionBeadReclaimsDeferredAlias(t *testing.T)
 }
 
 func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testing.T) {
+	testCity := t.TempDir()
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	stale, err := store.Create(beads.Bead{
@@ -5232,9 +5274,9 @@ func TestReconcilerClosesUnselectedCanonicalSingletonBeforeAliasReclaim(t *testi
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
 	var reconcileStdout, reconcileStderr bytes.Buffer
-	reconcileSessionBeads(
-		context.Background(), sessions, dsResult.State, configuredSessionNames(cfg, "", store), cfg, sp,
-		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), testCity, sessions, dsResult.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
 	)
 
@@ -5309,7 +5351,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 5, 6, 4, 0, 0, 0, time.UTC)}
 	var syncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
-		cityPath, beads.SessionStore{Store: store}, nil, dsResult.State,
+		cityPath, beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil), dsResult.State,
 		runtime.NewFake(), allConfiguredDS(dsResult.State), cfg, clk, &syncStderr, false, sessionBeads, nil,
 	)
 
@@ -5338,6 +5380,7 @@ func TestSyncDoesNotMintDuplicateForSameCycleSingletonCreate(t *testing.T) {
 }
 
 func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T) {
+	testCity := t.TempDir()
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
 	stale, err := store.Create(beads.Bead{
@@ -5408,8 +5451,7 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 	var firstSyncStderr bytes.Buffer
 	syncSessionBeadsWithSnapshotAndRigStores(
 		cityPath,
-		beads.SessionStore{Store: store},
-		nil,
+		beads.SessionStore{Store: store}, testSeatWork(cityPath, cfg, beads.SessionStore{Store: store}, nil),
 		firstTick.State,
 		sp,
 		configuredSessionNames(cfg, "", store),
@@ -5436,9 +5478,9 @@ func TestProductionOrderDeferredSingletonAliasReclaimsOnSecondTick(t *testing.T)
 		t.Fatalf("loadSessionBeads: %v", err)
 	}
 	var reconcileStdout, reconcileStderr bytes.Buffer
-	reconcileSessionBeads(
-		context.Background(), open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
-		store, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
+	reconcileSessionBeadsAtPath(
+		context.Background(), testCity, open, firstTick.State, configuredSessionNames(cfg, "", store), cfg, sp,
+		store, nil, nil, nil, nil, newDrainTracker(), map[string]int{"cashmaster/refinery": 1}, false, nil, "",
 		nil, clk, events.Discard, 0, 0, &reconcileStdout, &reconcileStderr,
 	)
 	closedCanonical, err := store.Get(canonical.ID)
@@ -13404,7 +13446,7 @@ func TestControlDispatcherRouteRepairAgreesWithTheMinter(t *testing.T) {
 		if !scoped {
 			t.Fatalf("ScopeRigContext(%q) not scoped", tc.root)
 		}
-		minted, err := graphroute.ControlDispatcherBinding(nil, "test-city", cfg, rigContext, deps)
+		minted, err := graphroute.ControlDispatcherBinding(beads.SessionStore{}, "test-city", cfg, rigContext, deps)
 		if err != nil {
 			t.Fatalf("ControlDispatcherBinding(%q): %v", tc.root, err)
 		}
@@ -14833,6 +14875,61 @@ func TestBuildDesiredState_APICreatedAgentSessionBeadStaysDesired(t *testing.T) 
 			if tp.ConfiguredNamedIdentity != "" {
 				t.Fatalf("desired[%q].ConfiguredNamedIdentity = %q, want empty — the ad-hoc bead must not adopt the named session identity",
 					sessionName, tp.ConfiguredNamedIdentity)
+			}
+		})
+	}
+}
+
+// TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID reproduces
+// gastownhall/gascity#5738: a demand-spawned pool seat's shell must carry only
+// the presence-only GC_SPAWN_ORIGIN marker, never an id-shaped trigger hint a
+// ${GC_BEAD_ID:-${GC_TRIGGER_BEAD_ID:-…}} close chain could mistake for the
+// bead the seat actually claimed (the pool is pull). That holds when the
+// controller's own environment carries a launching pane's GC_TRIGGER_* keys
+// too: the seat withholds them rather than inheriting a foreign id, and an
+// unstamped seat withholds the marker as well.
+func TestRealizePoolDesiredSessionsSeatShellCarriesNoTriggerBeadID(t *testing.T) {
+	for _, c := range []struct {
+		name, workBeadID, wantOrigin string
+	}{
+		{"stamped", "gp-a", demandSpawnOriginValue},
+		{"unstamped", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			setControllerDemandSpawnEnv(t)
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              "worker",
+					StartCommand:      "true",
+					MinActiveSessions: intPtr(0),
+					MaxActiveSessions: intPtr(1),
+				}},
+			}
+			var stderr bytes.Buffer
+			bp := newAgentBuildParams("test-city", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+			bp.sessionBeads = &sessionBeadSnapshot{}
+			desired := map[string]TemplateParams{}
+
+			realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+				Template: "worker",
+				Requests: []SessionRequest{{
+					Template:     "worker",
+					Tier:         "new",
+					WorkBeadID:   c.workBeadID,
+					WorkStoreRef: "rig:gascity",
+				}},
+			}, desired, &stderr)
+
+			if len(desired) != 1 {
+				t.Fatalf("desired sessions = %d, want 1; stderr=%q", len(desired), stderr.String())
+			}
+			for _, tp := range desired {
+				assertEnvWithholdsTriggerIDs(t, "pool seat shell env", tp.Env)
+				if got, ok := tp.Env["GC_SPAWN_ORIGIN"]; !ok || got != c.wantOrigin {
+					t.Errorf("GC_SPAWN_ORIGIN = (%q, present=%v), want %q", got, ok, c.wantOrigin)
+				}
 			}
 		})
 	}
