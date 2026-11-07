@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/closeorder"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -90,6 +92,15 @@ const (
 	orderTrackingHistoryIndexLimit   = 256
 	defaultMaxOrderDispatchesPerTick = 4
 	orderTrackingSweepCloseBudget    = 4
+
+	// orderTrackingSweepWatchdogNotClosedInterval is how often the stale
+	// watchdog reads every not-closed tracking bead, rather than only the open
+	// and in_progress ones, so that it releases a tracking bead parked by hand
+	// (blocked, deferred, ...). A native Dolt store decodes its retained closed
+	// tracking history for that read, so the 30 s passes skip it. A not-closed
+	// pass that does not complete is retried sooner
+	// (CityRuntime.scheduleOrderSweepWatchdogNotClosed).
+	orderTrackingSweepWatchdogNotClosedInterval = 10 * time.Minute
 
 	// orderTrackingRetentionWatchdogInterval is the minimum time between
 	// controller-driven closed-bead retention sweeps. 15 minutes balances
@@ -175,12 +186,18 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 	var cleanupOnce sync.Once
 	startedPGID := 0
 	canceled := false
+	var escapedGroups []int
+	var escapedErr error
 	cleanupProcess := func() error {
 		cleanupOnce.Do(func() {
 			cleanupMu.Lock()
 			pgid := startedPGID
+			escaped := escapedGroups
+			snapErr := escapedErr
 			cleanupMu.Unlock()
-			err := cancelShellExecProcessGroup(cmd, pgid)
+			escapedDone := make(chan error, 1)
+			go func() { escapedDone <- terminateProcessGroups(escaped, shellExecSignalGrace) }()
+			err := errors.Join(cancelShellExecProcessGroup(cmd, pgid), <-escapedDone, snapErr)
 			cleanupMu.Lock()
 			cleanupErr = err
 			cleanupMu.Unlock()
@@ -190,8 +207,16 @@ func shellExecRunner(ctx context.Context, command, dir string, env []string) ([]
 		return cleanupErr
 	}
 	cmd.Cancel = func() error {
+		// Collect the groups the shell's descendants started before anything
+		// is signaled and they are reparented away from it. os/exec cancels
+		// before it reaps the shell, so its PID still names it, unless the
+		// shell's own exit races the context: its children have then already
+		// been reparented, and the walk finds none.
+		escaped, snapErr := snapshotEscapedOrderGroups(cmd)
 		cleanupMu.Lock()
 		canceled = true
+		escapedGroups = escaped
+		escapedErr = snapErr
 		cleanupMu.Unlock()
 		_ = cleanupProcess()
 		return nil
@@ -241,8 +266,14 @@ func cancelShellExecProcessGroup(cmd *exec.Cmd, pgid int) error {
 	return processgroup.TerminateCommand(cmd, pgid, shellExecSignalGrace, processgroup.Options{})
 }
 
+// mergeOrderExecEnv builds an exec order's environment from the dispatcher's
+// environ. It drops runtime store keys and secrets (mergeRuntimeEnv) and the
+// session-scoped identity of whichever seat started the dispatcher
+// (withoutSessionIdentityEnv), so the order acts for the city rather than for
+// that seat. Keys set explicitly in env (the curated controller env,
+// [order.env], and dispatch vars) replace any inherited value.
 func mergeOrderExecEnv(environ, env []string) []string {
-	out := mergeRuntimeEnv(environ, nil)
+	out := withoutSessionIdentityEnv(mergeRuntimeEnv(environ, nil))
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok {
@@ -329,6 +360,47 @@ type memoryOrderDispatcher struct {
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// inapplicableReported holds the orders this controller boot has already
+	// reported as inapplicable, so each is announced once rather than on every
+	// tick or webhook delivery. Created on first use (inapplicableReports) and
+	// guarded by cacheMu. The set locks itself, so dispatchers share it:
+	// carryInapplicableReportsFrom hands it across dispatcher rebuilds, and the
+	// controller's webhook adapter hands every per-delivery dispatcher the same set.
+	inapplicableReported *inapplicableReportSet
+	// poursWork memoizes, per scoped order, whether its formula compiles to a
+	// WORK-class molecule (a v1 poured recipe), whose run evidence then lives
+	// in the order's target work store rather than the graph binding. Guarded
+	// by cacheMu; refreshed by every dispatch, which compiles the recipe anyway.
+	poursWork map[string]bool
+	// poursWorkFailedUntil holds, per scoped order, until when a failed
+	// compile is not retried for the gate (orderPoursWorkFailureTTL). Guarded
+	// by cacheMu.
+	poursWorkFailedUntil map[string]time.Time
+	// eventFloors holds, per scoped event order, the event seq its checks have
+	// read through with no match (eventCheckStart). Guarded by cacheMu; memory
+	// only, carried across rebuilds by carryEventFloorsFrom.
+	eventFloors map[string]uint64
+	// eventSeeds holds, per scoped event order, the event seq it was first
+	// watched from (watchEventOrders): the start of an order that has never
+	// run. Guarded by cacheMu; memory only, carried across rebuilds by
+	// carryEventFloorsFrom.
+	eventSeeds map[string]uint64
+
+	// budgetInterval is the wall-clock period maxDispatchesPerTick is a rate
+	// over: the patrol interval. Zero spends the cap once per pass
+	// (passDispatchBudget). budgetPassStart is when the previous pass's budget
+	// was computed, zero before the first pass. budgetRemainder is what that
+	// pass accrued short of one more dispatch, in units where one dispatch
+	// costs budgetInterval nanoseconds.
+	budgetInterval  time.Duration
+	budgetPassStart time.Time
+	budgetRemainder int64
+
+	// lastPass is what the most recent dispatch call did with its budget and
+	// why it held orders back. Only dispatch and the gates it runs write it,
+	// and the orders lane reads it for the pass's trace record, all under the
+	// lane's passMu.
+	lastPass orderDispatchPassStats
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -338,17 +410,42 @@ type memoryOrderDispatcher struct {
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
 }
 
+// orderDispatchPassStats is what one dispatch pass did with its budget, and why
+// it held back the orders it did not dispatch, for the pass's trace record.
+type orderDispatchPassStats struct {
+	// budget is the pass's allowance of budgeted dispatches. Every pass of an
+	// unsuspended city computes one, at least 1 when capped, so 0 means the
+	// dispatcher is uncapped, which configuration cannot set: a
+	// max_dispatches_per_tick below 1 keeps the default.
+	budget int
+	// dispatched counts the dispatches the pass launched, budgeted or not,
+	// including the trigger-env failure records that stand in for one.
+	dispatched int
+	// unreached counts the budgeted candidates the rotation did not reach
+	// because the budget ran out. Their due-ness was not evaluated.
+	unreached int
+	// The gate counts are orders held back by an open tracking bead, by open
+	// work under an earlier dispatch, by a gate read that failed closed (a
+	// contention timeout on a non-idempotent order, or a store error), and by
+	// the backoff an earlier timeout left.
+	gatedOpenTracking int
+	gatedOpenWork     int
+	gateFailedClosed  int
+	gateBackoff       int
+}
+
 type orderDispatchTrackingIndex struct {
-	// mu guards entries and errs. dispatch shares ONE index across every
-	// order's open-work gate, and gateOpenWorkBounded runs each gate in a
-	// goroutine it abandons on timeout/ctx-cancel (#2893) — so multiple gate
-	// goroutines touch these maps concurrently. The lock is held only around
-	// the map reads/writes below, never across the RecentRunsAll/OpenRuns bd
-	// calls, so one slow or contended store read cannot stall sibling gates (the
-	// property gateOpenWorkBounded exists to preserve).
-	mu      sync.Mutex
-	entries map[string]map[string]orderTrackingSummary
-	errs    map[string]error
+	// mu guards reads. dispatch shares ONE index across every order's
+	// open-work gate, and gateOpenWorkBounded runs each gate in a goroutine it
+	// abandons on timeout/ctx-cancel (#2893) — so multiple gate goroutines
+	// reach this map concurrently. The lock is held only to find or register a
+	// store's read, never across the bd call or the wait for it, so a slow read
+	// of one store cannot stall the gates reading another (the property
+	// gateOpenWorkBounded exists to preserve). A gate on the slow store waits
+	// for that store's read inside its own gate goroutine, where
+	// gateOpenWorkBounded still bounds it.
+	mu    sync.Mutex
+	reads map[string]*orderIndexRead
 
 	// stderr carries the ONE line a failed index read emits, once per store per
 	// tick. Without it a store whose index read fails would fall back to the
@@ -388,12 +485,15 @@ type orderTrackingSummary struct {
 // field stamped so they use independent scoped labels. routes is the caller's
 // resolved storage binding; nil is the identity routing of a single-store city.
 func buildOrderDispatcher(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) orderDispatcher { //nolint:unparam // routes is nil in current callers but is the storage binding a production caller must pass
-	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan")
+	od, _ := buildOrderDispatcherWithSnapshot(routes, cityPath, cfg, rec, stderr, "gc start: order scan", nil)
 	return od
 }
 
-func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string) (orderDispatcher, orderSetSnapshot) {
-	snapshot, err := scanOrderSetSnapshotFS(fsys.OSFS{}, cityPath, cfg, stderr, cmdName)
+// buildOrderDispatcherWithSnapshot scans the order set and builds the
+// dispatcher over it. The scan logs the registrations it drops for their rig
+// scope through unbound (scanOrderSetSnapshotFSWith).
+func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderDispatcher, orderSetSnapshot) {
+	snapshot, err := scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityPath, cfg, stderr, cmdName, unbound)
 	if err != nil {
 		logDispatchError(stderr, "%s: %v", cmdName, err)
 		return nil, orderSetSnapshot{}
@@ -402,8 +502,23 @@ func buildOrderDispatcherWithSnapshot(routes *storageRoutes, cityPath string, cf
 }
 
 func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string) (orderSetSnapshot, error) {
+	return scanOrderSetSnapshotFSWith(fs, cityPath, cfg, stderr, cmdName, nil)
+}
+
+// scanOrderSetSnapshotFSWith is scanOrderSetSnapshotFS logging the
+// registrations the scan drops for their rig scope through unbound, which
+// leaves out a warning the previous scan through it already reported. A nil
+// unbound logs every one the scan reports.
+func scanOrderSetSnapshotFSWith(fs fsys.FS, cityPath string, cfg *config.City, stderr io.Writer, cmdName string, unbound *unboundRigScopedLog) (orderSetSnapshot, error) {
 	if cfg == nil {
 		cfg = &config.City{}
+	}
+	var onUnbound orderdiscovery.UnboundRigScopedHandler = func(orderName string, boundRigs []string) {
+		logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
+	}
+	scanned := func() {}
+	if unbound != nil {
+		onUnbound, scanned = unbound.scan(stderr, cmdName)
 	}
 	allAA, err := orderdiscovery.ScanAll(cityPath, cfg, orderdiscovery.ScanOptions{
 		FS: fs,
@@ -419,18 +534,64 @@ func scanOrderSetSnapshotFS(fs fsys.FS, cityPath string, cfg *config.City, stder
 			logDispatchError(stderr, "%s: order %s: %v", cmdName, orderName, err)
 			return nil
 		},
-		OnUnboundRigScoped: func(orderName string, boundRigs []string) {
-			logDispatchError(stderr, "%s: %s", cmdName, orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs))
-		},
-		ValidateOrder: validateOrderExecEnvOverrides,
+		OnUnboundRigScoped: onUnbound,
+		ValidateOrder:      validateOrderExecEnvOverrides,
 	})
 	if err != nil {
 		return orderSetSnapshot{}, err
 	}
+	scanned()
 	return orderSetSnapshot{
 		Orders:    append([]orders.Order(nil), allAA...),
 		Signature: orderSetSignature(allAA),
 	}, nil
+}
+
+// unboundRigScopedLog logs the registrations order-set scans drop for their
+// rig scope. A scan logs only the warnings the previous scan did not report: a
+// warning every scan repeats unchanged is logged once, a changed one is
+// logged, and so is one that goes away and later comes back. The drop is
+// expected for a rig-scoped order in a pack every rig imports, and the
+// supervisor scans the order set at start, on every config reload, and every
+// orderRescanInterval on the orders lane, so logging every warning of every
+// scan buries the log.
+type unboundRigScopedLog struct {
+	mu sync.Mutex
+	// last is the warnings of the latest completed scan, by order name. A scan
+	// in progress adds each warning it logs, so a scan running beside it does
+	// not log that warning again.
+	last map[string]string
+}
+
+// scan begins one scan logged through l, prefixed with cmdName. It returns the
+// handler the scan reports its dropped registrations to, and scanned, which the
+// caller runs once the scan has completed to make the scan's warnings the set
+// the next scan is compared with. A scan that fails does not run scanned, so a
+// warning it did not reach is not taken for gone.
+func (l *unboundRigScopedLog) scan(stderr io.Writer, cmdName string) (report orderdiscovery.UnboundRigScopedHandler, scanned func()) {
+	reported := make(map[string]string)
+	report = func(orderName string, boundRigs []string) {
+		msg := orderdiscovery.UnboundRigScopedMessage(orderName, boundRigs)
+		l.mu.Lock()
+		reported[orderName] = msg
+		news := l.last[orderName] != msg
+		if news {
+			if l.last == nil {
+				l.last = make(map[string]string)
+			}
+			l.last[orderName] = msg
+		}
+		l.mu.Unlock()
+		if news {
+			logDispatchError(stderr, "%s: %s", cmdName, msg)
+		}
+	}
+	scanned = func() {
+		l.mu.Lock()
+		l.last = reported
+		l.mu.Unlock()
+	}
+	return report, scanned
 }
 
 func orderSetSignature(aa []orders.Order) string {
@@ -495,7 +656,7 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 	}
 
 	dispatchCtx, dispatchCancel := context.WithCancel(context.Background())
-	return &memoryOrderDispatcher{
+	m := &memoryOrderDispatcher{
 		aa: aa,
 		storeFn: func(target execStoreTarget) (beads.Store, error) {
 			// Reuse cfg (rebuilt only on config reload/rescan — see
@@ -511,12 +672,15 @@ func newMemoryOrderDispatcher(routes *storageRoutes, aa []orders.Order, cityPath
 		stderr:               lockedStderr(stderr),
 		maxTimeout:           cfg.Orders.MaxTimeoutDuration(),
 		maxDispatchesPerTick: maxDispatchesPerTick,
+		budgetInterval:       cfg.Daemon.PatrolIntervalDuration(),
 		cfg:                  cfg,
 		cityName:             loadedCityName(cfg, cityPath),
 		cityPath:             cityPath,
 		dispatchCtx:          dispatchCtx,
 		dispatchCancel:       dispatchCancel,
 	}
+	m.watchEventOrders()
+	return m
 }
 
 // orderConditionCheckConcurrency bounds how many condition-check subprocesses a
@@ -614,6 +778,7 @@ func (m *memoryOrderDispatcher) prefetchConditionResults(candidates []*orderDisp
 }
 
 func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, now time.Time) {
+	m.lastPass = orderDispatchPassStats{}
 	// Skip all order dispatch when the city is suspended. Use the
 	// dispatcher's in-scope city path so suspension state resolves
 	// against the controlled city rather than the process cwd.
@@ -646,22 +811,11 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		}()
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex(m.stderr)
-	budgetSpent := 0
 
 	total := len(m.aa)
-	if total == 0 {
-		return
-	}
 	start := 0
-	if m.maxDispatchesPerTick > 0 {
+	if m.maxDispatchesPerTick > 0 && total > 0 {
 		start = m.nextDispatchStart % total
-	}
-	spendDispatchBudget := func(idx int) bool {
-		budgetSpent++
-		if m.maxDispatchesPerTick > 0 {
-			m.nextDispatchStart = (idx + 1) % total
-		}
-		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
 	}
 
 	// Phase 1: resolve and open-tracking-gate every order, in rotation order.
@@ -672,6 +826,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
+	// scopeBackends memoizes each scope's backend for this tick: resolving it
+	// reads the scope's metadata and, when that names none, city.toml.
+	scopeBackends := make(map[string]string)
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
@@ -684,6 +841,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
+		}
+		// An order that requires a backend its scope does not use is never
+		// dispatched there, and never counted as a failure: it is reported
+		// once as inapplicable and skipped before any store is opened.
+		if a.RequiresBackend != nil {
+			backend, ok := scopeBackends[target.ScopeRoot]
+			if !ok {
+				backend = orderScopeBackendFn(cityPath, target.ScopeRoot)
+				scopeBackends[target.ScopeRoot] = backend
+			}
+			if !a.AppliesToBackend(backend) {
+				m.reportInapplicable(a, target, backend)
+				continue
+			}
 		}
 
 		storeKey := orderStoreTargetKey(target)
@@ -701,7 +872,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if !legacyOK {
 			continue
 		}
-		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore)
+		storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, storeKey, legacyStore, func() bool { return m.orderPoursWork(ctx, a) })
 		scoped := a.ScopedName()
 		// NoWorkGate orders (pure probes/sweeps that track no beads) opt out of
 		// BOTH open-work gates entirely. The gates exist to suppress re-dispatch
@@ -714,6 +885,7 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// interval plus the synchronous tracking bead created below.
 		if !a.NoWorkGate {
 			if m.gateBackoffActive(scoped, now) {
+				m.lastPass.gateBackoff++
 				continue
 			}
 			hasOpenTracking, err := gateOpenWorkBounded(ctx, orderGateTimeout, scoped, func() (bool, error) {
@@ -730,10 +902,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 						// contended Dolt every tick (#3688 #3770).
 						m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 					}
+					m.lastPass.gateFailedClosed++
 					continue
 				}
 			}
 			if hasOpenTracking {
+				m.lastPass.gatedOpenTracking++
 				continue
 			}
 		}
@@ -779,18 +953,87 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 			budgeted = append(budgeted, cand)
 		}
 	}
+	budget := m.passDispatchBudget(now, len(budgeted))
+	m.lastPass.budget = budget
+	budgetSpent := 0
+	spendDispatchBudget := func(idx int) bool {
+		budgetSpent++
+		if budget > 0 {
+			m.nextDispatchStart = (idx + 1) % total
+		}
+		return budget > 0 && budgetSpent >= budget
+	}
 	for _, cand := range unbudgeted {
-		m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now)
+		if m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
+			m.lastPass.dispatched++
+		}
 	}
 	for i, cand := range budgeted {
 		if !m.fireCandidate(ctx, cand, trackingIndex, &inFlight, cityPath, now) {
 			continue
 		}
+		m.lastPass.dispatched++
 		if spendDispatchBudget(cand.idx) {
-			m.logUnreachedCandidates(budgeted[i+1:])
+			m.lastPass.unreached = len(budgeted[i+1:])
+			m.logUnreachedCandidates(budget, budgeted[i+1:])
 			return
 		}
 	}
+}
+
+// passDispatchBudget returns how many budgeted dispatches the pass beginning at
+// now may launch, and 0 when dispatch is uncapped. rotation is the number of
+// budgeted candidates the pass has, each of which it dispatches at most once.
+//
+// maxDispatchesPerTick is a rate: that many dispatches for each budgetInterval
+// of wall time. A pass accrues it for the time since the previous pass began,
+// so the rate holds when passes slow down or the lane skips them. A pass's
+// length is store latency, maintenance arms and the lane's duty cycle, none of
+// which the cap limits. A cap spent once per pass would let a slow stretch cut
+// the dispatch rate for every order at once: with more due orders than one
+// pass's budget, each order waits a whole rotation between dispatches, and the
+// rotation grows with the pass. Accrual keeps three bounds:
+//
+//   - A pass never gets less than maxDispatchesPerTick, which is also what the
+//     first pass gets.
+//   - A pass never gets more than its rotation. One rotation is the most a
+//     pass can dispatch, so it bounds the burst after a long gap: each due
+//     order once.
+//   - Only the fraction of a dispatch carries to the next pass. Budget a pass
+//     leaves unspent because fewer orders were due is dropped, so a quiet
+//     stretch builds no burst.
+func (m *memoryOrderDispatcher) passDispatchBudget(now time.Time, rotation int) int {
+	if m.maxDispatchesPerTick <= 0 {
+		return 0
+	}
+	floor := m.maxDispatchesPerTick
+	ceiling := max(floor, rotation)
+	prev := m.budgetPassStart
+	m.budgetPassStart = now
+	if prev.IsZero() || m.budgetInterval <= 0 || !now.After(prev) {
+		m.budgetRemainder = 0
+		return floor
+	}
+	elapsed := now.Sub(prev)
+	// A gap whose whole intervals alone accrue the ceiling, or one long enough
+	// to overflow the product below, gets the ceiling.
+	if elapsed/m.budgetInterval >= time.Duration(ceiling) || int64(floor) > (math.MaxInt64-m.budgetRemainder)/int64(elapsed) {
+		m.budgetRemainder = 0
+		return ceiling
+	}
+	// Integer accrual, so fractional dispatches add up exactly across passes.
+	accrued := int64(floor)*int64(elapsed) + m.budgetRemainder
+	budget := accrued / int64(m.budgetInterval)
+	m.budgetRemainder = accrued % int64(m.budgetInterval)
+	switch {
+	case budget < int64(floor):
+		m.budgetRemainder = 0
+		return floor
+	case budget >= int64(ceiling):
+		m.budgetRemainder = 0
+		return ceiling
+	}
+	return int(budget)
 }
 
 // dueConditionCandidate reports whether a candidate is a condition-triggered
@@ -831,7 +1074,10 @@ const maxUnreachedOrderNames = 8
 // claims only what the tick already knows for free — that these orders were not
 // reached — and leaves the operator to judge whether the ones they expected to
 // fire are among them before reaching for orders.max_dispatches_per_tick.
-func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatchCandidate) {
+// budget is the pass's own allowance (passDispatchBudget), which a pass that
+// accrued more than one patrol interval's worth reports above the configured
+// cap.
+func (m *memoryOrderDispatcher) logUnreachedCandidates(budget int, unreached []*orderDispatchCandidate) {
 	if len(unreached) == 0 {
 		return
 	}
@@ -844,7 +1090,7 @@ func (m *memoryOrderDispatcher) logUnreachedCandidates(unreached []*orderDispatc
 		names = append(names, cand.scoped)
 	}
 	logDispatchError(m.stderr, "gc: order dispatch: per-tick budget %d spent; the rotation did not reach %d more order(s) this tick (due-ness not evaluated): %s",
-		m.maxDispatchesPerTick, len(unreached), strings.Join(names, ", "))
+		budget, len(unreached), strings.Join(names, ", "))
 }
 
 // openWorkGateShut reports whether the wisp-aware open-work gate (#2921) is
@@ -870,10 +1116,12 @@ func (m *memoryOrderDispatcher) openWorkGateShut(ctx context.Context, cand *orde
 				// using the tick-start 'now' would set a deadline that has already passed.
 				m.setGateBackoff(scoped, time.Now().Add(orderGateBackoffDuration))
 			}
+			m.lastPass.gateFailedClosed++
 			return true
 		}
 	}
 	if hasOpenWork {
+		m.lastPass.gatedOpenWork++
 		// This skip is the one that can last forever: a wisp subtree
 		// stalled in a store the recovery sweep does not search holds the
 		// gate shut on every tick with nothing emitted (see
@@ -915,6 +1163,11 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 	storesForGate, storeKeysForGate := cand.gateStores, cand.gateStoreKeys
 	scoped := cand.scoped
 
+	// The fallback is a deliberate union over the gate's legs: an order's run
+	// evidence is a tracking bead (orders class), a wisp or graph.v2 root
+	// (graph class) or, for a v1 poured formula, a work-class molecule root on
+	// the work leg gateStoresFor adds. Each leg is read by the run label, so a
+	// class leg's read may select nothing there that another leg holds.
 	baseLastRunFn := trackingIndex.lastRunFunc(storesForGate, storeKeysForGate,
 		orders.LastRunFuncWithEventFallback(orders.LastRunAcross(orderFrontDoorsForStores(storesForGate)), m.ep))
 	var lastRunErr error
@@ -930,14 +1183,21 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		return last, err
 	}
 	cursorFn := orders.CursorAcross(orderFrontDoorsForStores(storesForGate))
+	var eventHead uint64
 	if a.Trigger == "event" {
 		cursor, err := bdCursorAcrossStores(a.ScopedName(), storesForGate...)
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: reading event cursor for %s: %v", a.ScopedName(), err)
 			return false
 		}
+		start, head, err := m.eventCheckStart(scoped, cursor)
+		if err != nil {
+			logDispatchError(m.stderr, "gc: order dispatch: reading event head for %s: %v", a.ScopedName(), err)
+			return false
+		}
+		eventHead = head
 		cursorFn = func(string) uint64 {
-			return cursor
+			return start
 		}
 	}
 	triggerOpts := cand.triggerOpts
@@ -993,6 +1253,16 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 		// (ga-ocypq2). Raise the order's check_timeout to fix.
 		if a.Trigger == "condition" && result.TimedOut {
 			logDispatchError(m.stderr, "gc: order dispatch: %s %s — raise check_timeout if the check needs a slow store read", a.ScopedName(), result.Reason)
+		}
+		// An event check that could not read the log never proves that no
+		// event matched: it is reported and moves nothing, and the next pass
+		// reads the same events again.
+		if a.Trigger == "event" {
+			if result.ReadFailed {
+				logDispatchError(m.stderr, "gc: order dispatch: %s %s", a.ScopedName(), result.Reason)
+			} else {
+				m.advanceEventFloor(scoped, eventHead)
+			}
 		}
 		return false
 	}
@@ -1098,7 +1368,7 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Timeout: m.runTimeout(a)})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
@@ -1164,10 +1434,54 @@ func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 
 func newOrderDispatchTrackingIndex(stderr io.Writer) *orderDispatchTrackingIndex {
 	return &orderDispatchTrackingIndex{
-		entries: make(map[string]map[string]orderTrackingSummary),
-		errs:    make(map[string]error),
-		stderr:  stderr,
+		reads:  make(map[string]*orderIndexRead),
+		stderr: stderr,
 	}
+}
+
+// orderIndexRead is one store read of the pass, shared by every caller that
+// asks for its key. The first caller performs it, and every later caller gets
+// its result, waiting on done while the read is still in flight.
+//
+// The wait is what keeps a slow store from being read once per order. A gate
+// abandoned at its bound leaves its read running, and the next order's gate on
+// the same store asks for the same key before that read lands. Reading again
+// would add a scan of the already-slow store for every order on it, each
+// starting later than the read already running. Waiting lets that one read,
+// when it lands, answer every gate still waiting on it. A waiting gate stays
+// bounded, because it waits inside its own gate goroutine.
+//
+// entries and err are written once, before done is closed, and are read only
+// after it is.
+type orderIndexRead struct {
+	done    chan struct{}
+	entries map[string]orderTrackingSummary
+	err     error
+}
+
+// sharedRead returns the pass's read for key. The first caller performs it with
+// read; a later caller gets the same entries and error, after waiting for the
+// read if it is still in flight. A failed read stays failed for the rest of the
+// pass, since each store is read once per pass, and every caller handles its
+// error as its own.
+func (idx *orderDispatchTrackingIndex) sharedRead(key string, read func() (map[string]orderTrackingSummary, error)) (map[string]orderTrackingSummary, error) {
+	idx.mu.Lock()
+	r, started := idx.reads[key]
+	if !started {
+		r = &orderIndexRead{done: make(chan struct{})}
+		idx.reads[key] = r
+	}
+	idx.mu.Unlock()
+	if started {
+		<-r.done
+		return r.entries, r.err
+	}
+	// close is not deferred: a read that panics publishes nothing, so a caller
+	// waiting on it keeps waiting, as it would on a read still in flight,
+	// rather than reading an empty index as "no open work".
+	r.entries, r.err = read()
+	close(r.done)
+	return r.entries, r.err
 }
 
 func (idx *orderDispatchTrackingIndex) hasOpenTracking(
@@ -1315,24 +1629,17 @@ func (idx *orderDispatchTrackingIndex) lastRunForStore(store beads.Store, storeK
 }
 
 func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
-	key := storeKey + "\x00history"
-	idx.mu.Lock()
-	if err, ok := idx.errs[key]; ok {
-		idx.mu.Unlock()
-		return nil, err
-	}
-	if entries, ok := idx.entries[key]; ok {
-		idx.mu.Unlock()
-		return entries, nil
-	}
-	idx.mu.Unlock()
+	return idx.sharedRead(storeKey+"\x00history", func() (map[string]orderTrackingSummary, error) {
+		return readOrderRunHistory(store)
+	})
+}
+
+// readOrderRunHistory reads one store's order-run history, the read
+// historyEntriesForStore shares across the pass.
+func readOrderRunHistory(store beads.Store) (map[string]orderTrackingSummary, error) {
 	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).RecentRunsAll(orderTrackingHistoryIndexLimit)
 	if err != nil {
-		wrapped := fmt.Errorf("listing order-tracking history: %w", err)
-		idx.mu.Lock()
-		idx.errs[key] = wrapped
-		idx.mu.Unlock()
-		return nil, wrapped
+		return nil, fmt.Errorf("listing order-tracking history: %w", err)
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, run := range runs {
@@ -1342,25 +1649,18 @@ func (idx *orderDispatchTrackingIndex) historyEntriesForStore(store beads.Store,
 		}
 		entries[run.Scoped] = summary
 	}
-	// A sibling gate goroutine may have populated this key while we listed;
-	// both computed the same result from the same store, so last writer wins.
-	idx.mu.Lock()
-	idx.entries[key] = entries
-	idx.mu.Unlock()
 	return entries, nil
 }
 
 func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
-	idx.mu.Lock()
-	if err, ok := idx.errs[storeKey]; ok {
-		idx.mu.Unlock()
-		return nil, err
-	}
-	if entries, ok := idx.entries[storeKey]; ok {
-		idx.mu.Unlock()
-		return entries, nil
-	}
-	idx.mu.Unlock()
+	return idx.sharedRead(storeKey, func() (map[string]orderTrackingSummary, error) {
+		return idx.readOrderRunIndex(store, storeKey)
+	})
+}
+
+// readOrderRunIndex reads one store's order-run index, the read entriesForStore
+// shares across the pass.
+func (idx *orderDispatchTrackingIndex) readOrderRunIndex(store beads.Store, storeKey string) (map[string]orderTrackingSummary, error) {
 	// ONE read per store per tick, for every order at once.
 	//
 	// The label-per-order queries this replaces could not be batched — a
@@ -1388,18 +1688,14 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	})
 	if err != nil {
 		wrapped := fmt.Errorf("listing order-run beads: %w", err)
-		idx.mu.Lock()
-		_, seen := idx.errs[storeKey]
-		idx.errs[storeKey] = wrapped
-		idx.mu.Unlock()
-		if !seen {
-			logDispatchError(idx.stderr, "gc: order dispatch: order-run index for store %s unavailable, falling back to one live gate read per order: %v", storeKey, wrapped)
-		}
+		logDispatchError(idx.stderr, "gc: order dispatch: order-run index for store %s unavailable, falling back to one live gate read per order: %v", storeKey, wrapped)
 		return nil, wrapped
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, b := range items {
-		if b.Status == "closed" {
+		// A plain bead carrying an order-run label is no run of the order
+		// (orders.IsRunRecord, mc-v8g4p): it holds no single-flight.
+		if b.Status == "closed" || !orders.IsRunRecord(b) {
 			continue
 		}
 		tracking := orders.IsTrackingBead(b)
@@ -1421,11 +1717,6 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 			entries[scoped] = summary
 		}
 	}
-	// A sibling gate goroutine may have populated this key while we listed;
-	// both computed the same result from the same store, so last writer wins.
-	idx.mu.Lock()
-	idx.entries[storeKey] = entries
-	idx.mu.Unlock()
 	return entries, nil
 }
 
@@ -1508,6 +1799,252 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 	for key, last := range prev.lastRunCache {
 		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
 			m.lastRunCache[key] = last
+		}
+	}
+}
+
+// inapplicableReportSet is the set of orders already reported as
+// inapplicable, keyed by scoped name and backend. Its zero value is ready to
+// use and it is safe for concurrent use, so dispatchers that each live for
+// less than a controller boot can share one.
+type inapplicableReportSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// claim marks key reported and reports whether this is its first report.
+func (r *inapplicableReportSet) claim(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, seen := r.seen[key]; seen {
+		return false
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]struct{})
+	}
+	r.seen[key] = struct{}{}
+	return true
+}
+
+// inapplicableReports returns the dispatcher's report set, creating it on
+// first use.
+func (m *memoryOrderDispatcher) inapplicableReports() *inapplicableReportSet {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = &inapplicableReportSet{}
+	}
+	return m.inapplicableReported
+}
+
+// reportInapplicable records one order.inapplicable event for an order its
+// scope's backend rules out, the first time this controller boot sees that
+// order on that backend.
+func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execStoreTarget, backend string) {
+	scoped := a.ScopedName()
+	if !m.inapplicableReports().claim(scoped + "\x00" + backend) {
+		return
+	}
+
+	scope := "city"
+	if target.ScopeKind == "rig" && target.RigName != "" {
+		scope = "rig:" + target.RigName
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderInapplicable,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("%s: requires backend %s; %s scope uses %s, so it is not dispatched there",
+			orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), scope, backend),
+		Payload: events.OrderInapplicablePayloadJSON(events.OrderInapplicablePayload{
+			OrderName:       scoped,
+			Scope:           scope,
+			Backend:         backend,
+			RequiresBackend: append([]string(nil), a.RequiresBackend...),
+		}),
+	})
+}
+
+// eventCheckStart returns the seq an event order's trigger check reads past,
+// and the event head read before the check, which a check that matches
+// nothing has read through (advanceEventFloor).
+//
+// cursor is the order's run cursor, the seq:<n> its last run stamped. The
+// check starts at the larger of it and the order's floor, so it reads only
+// the events recorded since its previous check. Without the floor, an order on
+// an event that stays absent re-reads from its last run on every pass, and one
+// that has never run re-reads the whole event history, every archive included.
+//
+// An order that has never run starts where the controller began watching it
+// (watchEventOrders), however many passes its first check waits: an event
+// recorded since then fires it, history recorded before then is not replayed.
+// Floors and starts are memory only. A controller restart forgets them, so an
+// order that has run resumes from its run cursor, catching up on events
+// recorded while no controller watched, and one that has not starts where the
+// new controller began watching.
+func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (start, head uint64, err error) {
+	if m.ep == nil {
+		return cursor, 0, nil
+	}
+	head, err = m.ep.LatestSeq()
+	if err != nil {
+		return 0, 0, err
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	floor, seen := m.eventFloors[scoped]
+	if !seen && cursor == 0 {
+		floor = head
+		if seed, watched := m.eventSeeds[scoped]; watched {
+			floor = seed
+		}
+		if m.eventFloors == nil {
+			m.eventFloors = make(map[string]uint64)
+		}
+		m.eventFloors[scoped] = floor
+	}
+	return max(cursor, floor), head, nil
+}
+
+// watchEventOrders records the event head as the start of every event order
+// of this dispatcher: an order that has never run fires on the matching events
+// recorded after it. A dispatcher is built when the controller starts, before
+// it records controller.started, and again on every reload or rescan, where
+// carryEventFloorsFrom hands an order the previous dispatcher already watched
+// its earlier start, so only an order a rebuild adds starts at the rebuild's
+// head. An order whose start could not be read starts at its first check.
+func (m *memoryOrderDispatcher) watchEventOrders() {
+	if m.ep == nil {
+		return
+	}
+	var watched []string
+	for i := range m.aa {
+		if m.aa[i].Trigger == "event" {
+			watched = append(watched, m.aa[i].ScopedName())
+		}
+	}
+	if len(watched) == 0 {
+		return
+	}
+	head, err := m.ep.LatestSeq()
+	if err != nil {
+		logDispatchError(m.stderr, "gc: order dispatch: reading the event head the event orders start from: %v; an event order that has never run starts at its first check instead", err)
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.eventSeeds == nil {
+		m.eventSeeds = make(map[string]uint64, len(watched))
+	}
+	for _, scoped := range watched {
+		m.eventSeeds[scoped] = head
+	}
+}
+
+// advanceEventFloor records that an event order's check matched nothing in
+// the events through head, the head eventCheckStart read before the check:
+// the order's next check starts there. Call it only for a check that read the
+// log; one that failed (TriggerResult.ReadFailed) proves nothing.
+func (m *memoryOrderDispatcher) advanceEventFloor(scoped string, head uint64) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if head <= m.eventFloors[scoped] {
+		return
+	}
+	if m.eventFloors == nil {
+		m.eventFloors = make(map[string]uint64)
+	}
+	m.eventFloors[scoped] = head
+}
+
+// carryEventFloorsFrom hands this dispatcher the event floors and starts of a
+// previous one for the event orders it still has. Without them a reload or
+// rescan would start an order that has never run at the rebuild's head,
+// skipping the events recorded since the previous dispatcher's last check or,
+// for an order it never checked, since it began watching, and would send an
+// order that has run back to its run cursor. Entries carry by presence: a
+// floor of 0, a first check that read an empty journal, is a floor.
+func (m *memoryOrderDispatcher) carryEventFloorsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.eventFloors) == 0 && len(prev.eventSeeds) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	for i := range m.aa {
+		if m.aa[i].Trigger != "event" {
+			continue
+		}
+		scoped := m.aa[i].ScopedName()
+		if seed, ok := prev.eventSeeds[scoped]; ok {
+			if m.eventSeeds == nil {
+				m.eventSeeds = make(map[string]uint64, len(prev.eventSeeds))
+			}
+			m.eventSeeds[scoped] = seed
+		}
+		floor, ok := prev.eventFloors[scoped]
+		if !ok {
+			continue
+		}
+		if cur, has := m.eventFloors[scoped]; has && cur >= floor {
+			continue
+		}
+		if m.eventFloors == nil {
+			m.eventFloors = make(map[string]uint64, len(prev.eventFloors))
+		}
+		m.eventFloors[scoped] = floor
+	}
+}
+
+// carryInapplicableReportsFrom hands this dispatcher the report set of a
+// previous one, so a reload or rescan does not announce again an order the
+// previous one already reported: the report is once per controller boot. Call
+// before this dispatcher reports anything; a set it already holds is replaced.
+func (m *memoryOrderDispatcher) carryInapplicableReportsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	reports := prev.inapplicableReports()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.inapplicableReported = reports
+}
+
+// carryDispatchRotationFrom carries the budget rotation from the dispatcher a
+// reload or rescan replaces. The cursor resumes at the order prev would have
+// served next, found by scoped name because the rebuilt order set can differ
+// from prev's. The budget keeps accruing from prev's last pass; the carried
+// fraction of a dispatch is dropped when the patrol interval it was measured in
+// changed. A rebuild that started the rotation over at the head of the order
+// list would make every order the cursor had not reached yet wait another full
+// rotation. Callers invoke this after draining prev, under the orders lane's
+// passMu, so no dispatch moves prev's cursor meanwhile.
+func (m *memoryOrderDispatcher) carryDispatchRotationFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	m.budgetPassStart = prev.budgetPassStart
+	if m.budgetInterval == prev.budgetInterval {
+		m.budgetRemainder = prev.budgetRemainder
+	}
+	if len(prev.aa) == 0 || len(m.aa) == 0 {
+		return
+	}
+	position := make(map[string]int, len(m.aa))
+	for i, a := range m.aa {
+		if _, seen := position[a.ScopedName()]; !seen {
+			position[a.ScopedName()] = i
+		}
+	}
+	for offset := 0; offset < len(prev.aa); offset++ {
+		next := prev.aa[(prev.nextDispatchStart+offset)%len(prev.aa)]
+		if i, ok := position[next.ScopedName()]; ok {
+			m.nextDispatchStart = i
+			return
 		}
 	}
 }
@@ -1719,8 +2256,7 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		return
 	}
 
-	timeout := effectiveTimeout(a, m.maxTimeout)
-	childCtx, cancel := context.WithTimeout(ctx, timeout)
+	childCtx, cancel := withOrderTimeout(ctx, m.runTimeout(a))
 	defer cancel()
 
 	m.rec.Record(events.Event{
@@ -1933,7 +2469,7 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
-			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
+			execErrMsg = execenv.RedactText(orderRunErrorText(ctx, err), redactionEnv)
 			outcome = orders.RunOutcomeExecFailed
 			logDispatchError(m.stderr, "gc: order exec %s failed: %s", scoped, execErrMsg)
 			if len(output) > 0 {
@@ -1984,11 +2520,87 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	}
 }
 
+// orderFormulaVars returns the vars an order's formula is invoked with. It
+// gives a formula order the invocation context a targeted sling gives its
+// formula (sling.BuildSlingFormulaVars): the dispatch args win, then the
+// order rig's formula_vars, then the routing vars rig_name, binding_name and
+// binding_prefix. The formula's own defaults apply last, in
+// prepareOrderWispRecipe. The binding vars are set only when the order's
+// source pack has exactly one binding in the order's scope: a pack imported
+// under two bindings is discovered once, so its orders have no single one.
+func orderFormulaVars(cfg *config.City, a orders.Order, args map[string]string) map[string]string {
+	vars := make(map[string]string, len(args))
+	for k, v := range args {
+		vars[k] = v
+	}
+	if cfg == nil {
+		return vars
+	}
+	setDefault := func(key, value string) {
+		if _, explicit := vars[key]; !explicit {
+			vars[key] = value
+		}
+	}
+	if a.Rig != "" {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name != a.Rig {
+				continue
+			}
+			for k, v := range cfg.Rigs[i].FormulaVars {
+				setDefault(k, v)
+			}
+			break
+		}
+	}
+	setDefault("rig_name", a.Rig)
+	if binding, ok := orderSourceBinding(cfg, a); ok {
+		prefix := ""
+		if binding != "" {
+			prefix = binding + "."
+		}
+		setDefault("binding_name", binding)
+		setDefault("binding_prefix", prefix)
+	}
+	return vars
+}
+
+// orderSourceBinding returns the import binding of the pack that declared the
+// order, resolved the way qualifyOrderPool resolves a bare pool: agents of the
+// order's scope (its rig, then the city) whose source is the order's pack,
+// exact source first, then the two-component tail match. It reports false
+// when no agent names the pack or when the pack has more than one binding.
+func orderSourceBinding(cfg *config.City, a orders.Order) (string, bool) {
+	hint := orderPoolSourceDirHint(a)
+	if cfg == nil || hint == "" {
+		return "", false
+	}
+	dirs := []string{a.Rig}
+	if a.Rig != "" {
+		dirs = append(dirs, "")
+	}
+	for _, dir := range dirs {
+		for _, match := range []func(config.Agent, string) bool{agentSourceDirEqualsOrderHint, agentMatchesOrderSourceHint} {
+			bindings := sourceBindingsMatchingOrderHint(cfg, dir, hint, match)
+			switch len(bindings) {
+			case 0:
+				continue
+			case 1:
+				for binding := range bindings {
+					return binding, true
+				}
+			default:
+				return "", false
+			}
+		}
+	}
+	return "", false
+}
+
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
 // the resolved invocation vars alongside it. The caller must thread those vars
 // into molecule.Instantiate; without them every {{var}} referencing a
 // caller-supplied value renders empty on the instantiated beads (#4668).
-func prepareOrderWispRecipe(ctx context.Context, store beads.Store, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
+func prepareOrderWispRecipe(ctx context.Context, store beads.WorkStore, a orders.Order, searchPaths []string, vars map[string]string) (*formula.Recipe, map[string]string, error) {
 	inv, err := graphv2.PrepareInvocation(ctx, store, a.Formula, searchPaths, "", vars)
 	if err != nil {
 		return nil, nil, err
@@ -2029,6 +2641,43 @@ func stampOrderWispRuntimeVars(recipe *formula.Recipe, vars map[string]string) {
 		}
 		recipe.Steps[i].Metadata[graphv2.RuntimeVarsMetadataKey] = runtimeVars
 	}
+}
+
+// orderRunRootLabels returns the labels an order run's root is created
+// carrying: the order-run label, and the event cursor of an event-triggered
+// run (cursor is nil for every other trigger).
+//
+// Every reader that keeps an order single-flight finds a run by the order-run
+// label on its root: the open-work gate, the cooldown clock's last-run
+// fallback, the stale-wisp sweep and `gc order history`. A root that gets the
+// label from a write after its create is, until that write lands, a running
+// molecule none of them can attribute to its order, and it stays one for good
+// if the write fails, so a non-idempotent order fires again over it. Created
+// carrying the labels, the root exists with its evidence or not at all.
+//
+// The labels go to molecule.Options.RootLabels, not onto the recipe:
+// molecule.Instantiate refuses a recipe step that carries an order-run label,
+// a label only the order's own dispatch writes.
+func orderRunRootLabels(scoped string, cursor *orders.EventCursor) []string {
+	labels := []string{orders.RunLabel(scoped)}
+	if cursor != nil {
+		labels = append(labels, "order:"+scoped, fmt.Sprintf("seq:%d", uint64(*cursor)))
+	}
+	return labels
+}
+
+// stampOrderRunRoute puts the pool route on the recipe's root step, so an
+// order run's root is created routed to its pool. An order with no pool passes
+// an empty pool, and the recipe is left as it is.
+func stampOrderRunRoute(recipe *formula.Recipe, pool string) {
+	if pool == "" || recipe == nil || len(recipe.Steps) == 0 {
+		return
+	}
+	root := &recipe.Steps[0]
+	if root.Metadata == nil {
+		root.Metadata = make(map[string]string)
+	}
+	root.Metadata[beadmeta.RoutedToMetadataKey] = pool
 }
 
 func poolOrderRouteVisibilityWarning(a orders.Order, recipe *formula.Recipe) string {
@@ -2085,6 +2734,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 			return fmt.Errorf("formulas v2 order step %q has no routing target; set order pool or gc.run_target", step.ID)
 		}
 	}
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(b)).
 	return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(
 		recipe,
 		routeVars,
@@ -2093,7 +2743,7 @@ func applyOrderRecipeRouting(recipe *formula.Recipe, pool string, vars map[strin
 		scopeRef,
 		storeRef,
 		graphroute.GraphRouteBinding{},
-		store,
+		beads.SessionStore{Store: store},
 		cityName,
 		cfg,
 		cliGraphrouteDeps(cityPath),
@@ -2147,7 +2797,7 @@ func (m *memoryOrderDispatcher) ordersStoreFor(store beads.Store) beads.Store {
 // are the same bead in the same database by construction rather than by each
 // call site remembering to route.
 func (m *memoryOrderDispatcher) orderFrontDoorFor(store beads.Store) *orders.Store {
-	return orders.NewStore(beads.OrdersStore{Store: m.ordersStoreFor(store)})
+	return orders.NewStore(scopeStores(m.cityPath, m.storageRoutes, store).Orders())
 }
 
 // graphStoreKey is the gate/cooldown cache key for the graph store. It names the
@@ -2221,7 +2871,19 @@ func (m *memoryOrderDispatcher) ordersStoreKey() string {
 // untouched — runOrderTrackingSweepWatchdog still sweeps the city store and every
 // rig, so the residue is closed on its own cadence rather than gating forever.
 // The convergence lane does not narrow; only the latency lane does.
-func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store) ([]beads.Store, []string) {
+//
+// # A work-class order keeps its target work leg
+//
+// A v1 POURED order formula is the one recipe whose molecule is work class, so
+// the dispatch pours it into the order's target work store (dispatchWisp,
+// moleculeClassStore) and its root carries the order-run label and the event
+// cursor there. For such an order (poursWork) the target work store stays a
+// gate leg on a split city too: without it the open-work gate re-fires while
+// the run is still open, and the cooldown clock and the event cursor regress
+// once the tracking bead is gone (R17). Every other order keeps the binding
+// legs alone. poursWork is asked only when a binding exists, so a
+// single-store city never compiles a formula to build its gate; nil means no.
+func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store, storeKey string, legacyStore beads.Store, poursWork func() bool) ([]beads.Store, []string) {
 	workStores := []beads.Store{store}
 	workKeys := []string{storeKey}
 	if legacyStore != nil {
@@ -2240,9 +2902,73 @@ func (m *memoryOrderDispatcher) gateStoresFor(cityPath string, store beads.Store
 		infraKeys = append(infraKeys, m.ordersStoreKey())
 	}
 	if len(infraStores) > 0 {
+		if poursWork != nil && store != nil && !storeListContains(infraStores, store) && poursWork() {
+			infraStores = append(infraStores, store)
+			infraKeys = append(infraKeys, storeKey)
+		}
 		return infraStores, infraKeys
 	}
 	return workStores, workKeys
+}
+
+// orderPoursWork reports whether a's formula compiles to a work-class molecule,
+// so its run evidence lands in the target work store (see gateStoresFor). The
+// answer is memoized per order; every dispatch refreshes it from the recipe it
+// actually poured (rememberOrderPoursWork), so an edited formula is picked up
+// by the next run. An exec order pours nothing into the work store.
+//
+// A formula that does not compile here answers TRUE and is not memoized: the
+// work leg then stays on the gate. Reading one store too many costs a read;
+// reading one too few would miss a previous run's evidence (after a restart
+// the memo is empty) and fire the order again.
+func (m *memoryOrderDispatcher) orderPoursWork(ctx context.Context, a orders.Order) bool {
+	if a.IsExec() || strings.TrimSpace(a.Formula) == "" {
+		return false
+	}
+	scoped := a.ScopedName()
+	now := time.Now()
+	m.cacheMu.Lock()
+	known, ok := m.poursWork[scoped]
+	failedUntil := m.poursWorkFailedUntil[scoped]
+	m.cacheMu.Unlock()
+	if ok {
+		return known
+	}
+	if now.Before(failedUntil) {
+		return true
+	}
+	recipe, err := orderGateCompile(ctx, a.Formula, orderFormulaSearchPaths(m.cfg, a), nil)
+	if err != nil {
+		// Remembered briefly, as "keep the work leg", so a broken formula is
+		// not recompiled every tick; never memoized as an answer.
+		m.cacheMu.Lock()
+		if m.poursWorkFailedUntil == nil {
+			m.poursWorkFailedUntil = make(map[string]time.Time)
+		}
+		m.poursWorkFailedUntil[scoped] = now.Add(orderPoursWorkFailureTTL)
+		m.cacheMu.Unlock()
+		return true
+	}
+	pours := recipeCoordClass(recipe) == coordclass.ClassWork
+	m.rememberOrderPoursWork(scoped, pours)
+	return pours
+}
+
+// orderGateCompile compiles an order's formula for the gate's class question.
+// Package var so tests can count compiles.
+var orderGateCompile = formula.CompileWithoutRuntimeVarValidation
+
+// orderPoursWorkFailureTTL is how long a formula that failed to compile for
+// the gate is not recompiled. The gate keeps the work leg meanwhile.
+var orderPoursWorkFailureTTL = 5 * time.Minute
+
+func (m *memoryOrderDispatcher) rememberOrderPoursWork(scoped string, pours bool) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.poursWork == nil {
+		m.poursWork = make(map[string]bool)
+	}
+	m.poursWork[scoped] = pours
 }
 
 // storeListContains reports whether stores already holds this exact store, so a
@@ -2280,7 +3006,7 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.orderFrontDoorFor(store).SetOutcome(trackingID, orders.RunOutcomeWispCanceled) //nolint:errcheck // best-effort
 		return
@@ -2306,14 +3032,15 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
+	vars = orderFormulaVars(m.cfg, a, vars)
 	searchPaths := orderFormulaSearchPaths(m.cfg, a)
-	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, store, a, searchPaths, vars)
+	recipe, effectiveVars, err := prepareOrderWispRecipe(ctx, beads.WorkStore{Store: store}, a, searchPaths, vars)
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2354,26 +3081,16 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		}
 	}
 
-	// Everything from here on writes the molecule, which is graph class, so it
-	// goes to the graph store rather than the order-class store the tracking
-	// bead lives in. On a single-store city the two are the same value.
-	//
-	// KNOWN GAP, deliberately not closed here (ga-fk1a5). "Graph class" is true
-	// of a graph.v2 pour and a root-only wisp but NOT of a v1 POURED order
-	// formula, whose molecule container and assigned task steps are all
-	// ClassWork by coordclass.Classify — relocating those hides the assigned
-	// steps from `gc hook`, which reads the work scope. The CLI twin
-	// (doOrderRunWithJSON) gates this on moleculeClassStore and is correct.
-	// The dispatcher cannot simply follow, because this root is a TWO-CLASS
-	// object: it also carries the order:/seq: event-cursor labels, and
-	// orders.Store unions order-run evidence across the ORDERS and GRAPH legs
-	// only. Route the molecule by class and an event-triggered v1 poured order
-	// loses its cursor and re-fires; leave it and its steps stay unreachable.
-	// Closing it means persisting the cursor onto the orders-class tracking
-	// bead the way the exec arm already does (front.SetCursor at the exec
-	// branch above) — a production behavior change rather than wiring, so it is
-	// its own slice. TestOrderDispatchPouredV1MoleculeRelocatesWithTheGraphClass
-	// pins the current answer so that slice has a test to flip.
+	// The routing decoration resolves sessions and named targets, which live
+	// with the graph class, so it reads through the graph store. The molecule
+	// itself is poured below into the store its CLASS demands
+	// (moleculeClassStore, as `gc order run` does): a graph.v2 pour or a
+	// root-only wisp into the graph binding, a v1 POURED recipe — a molecule
+	// container plus plain assigned steps, all work class — into the order's
+	// target work store, where `gc hook` reads its steps (ga-fk1a5). Its root
+	// carries the order's run evidence there, which is why the order gate keeps
+	// that store as a leg for such an order (gateStoresFor). On a single-store
+	// city every one of these is the same store.
 	graphStore := m.graphStoreFor(store)
 
 	// Route before instantiation. A routing failure must not leave an
@@ -2397,13 +3114,26 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 	// the created bead text instead of the caller's value (#4668).
 	stampOrderWispRuntimeVars(recipe, effectiveVars)
 
-	cookResult, err := molecule.Instantiate(ctx, graphStore, recipe, molecule.Options{Vars: effectiveVars})
+	// The root carries the run's evidence from its create, in the store that
+	// holds it; orders.Store's mixed orders+graph reads union it with the
+	// tracking bead's own order-run evidence.
+	var cursor *orders.EventCursor
+	if a.Trigger == "event" && m.ep != nil {
+		c := orders.EventCursor(headSeq)
+		cursor = &c
+	}
+	stampOrderRunRoute(recipe, pool)
+
+	moleculeStore := moleculeClassStore(recipe, store, graphStore)
+	m.rememberOrderPoursWork(scoped, recipeCoordClass(recipe) == coordclass.ClassWork)
+	cookResult, err := molecule.Instantiate(ctx, moleculeClassTarget(recipe, moleculeStore, moleculeStore), recipe,
+		molecule.Options{Vars: effectiveVars, RootLabels: orderRunRootLabels(scoped, cursor)})
 	if err != nil {
 		m.rec.Record(events.Event{
 			Type:    events.OrderFailed,
 			Actor:   "controller",
 			Subject: scoped,
-			Message: err.Error(),
+			Message: orderRunErrorText(ctx, err),
 		})
 		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
 		return
@@ -2419,34 +3149,6 @@ func (m *memoryOrderDispatcher) dispatchWisp(ctx context.Context, store beads.St
 		if err := executionevent.EmitCurrent(m.rec, beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: executionEmitStore(store, cityPath)}, rootID, "order-dispatch"); err != nil {
 			logDispatchError(m.stderr, "gc: order %s: projecting execution facts for %s: %v", scoped, rootID, err)
 		}
-	}
-
-	// Stamp the created wisp through the store contract rather than a raw
-	// bd subprocess so controller dispatch stays provider-aware. The label goes
-	// to the store that holds the root; orders.Store's mixed orders+graph reads
-	// are what union it back with the tracking bead's own order-run evidence.
-	update := beads.UpdateOpts{Labels: []string{"order-run:" + scoped}}
-	if a.Trigger == "event" && m.ep != nil {
-		update.Labels = append(update.Labels,
-			fmt.Sprintf("order:%s", scoped),
-			fmt.Sprintf("seq:%d", headSeq),
-		)
-	}
-	if a.Pool != "" {
-		update.Metadata = map[string]string{beadmeta.RoutedToMetadataKey: pool}
-	}
-	if err := graphStore.Update(rootID, update); err != nil {
-		// Label failure is critical for duplicate-dispatch prevention.
-		// Log and emit an event so operators can investigate.
-		logDispatchError(m.stderr, "gc: order %s: failed to label wisp %s: %v", scoped, rootID, err)
-		m.rec.Record(events.Event{
-			Type:    events.OrderFailed,
-			Actor:   "controller",
-			Subject: scoped,
-			Message: fmt.Sprintf("wisp %s created but label failed: %v", rootID, err),
-		})
-		m.markTrackingFailure(store, trackingID, scoped, a, headSeq)
-		return
 	}
 
 	m.rec.Record(events.Event{
@@ -2541,10 +3243,19 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 // open order-run:<scoped> bead that is NOT an order-tracking bead, it decides
 // whether the wisp/molecule root still has open work. A root-only wisp counts as
 // in-flight; a molecule root counts only if its subtree still has open
-// descendants. It stays in the controller because the subtree walk is graph
-// residual (molecule membership + graph traversal).
+// descendants; a root its own instantiation marked molecule_failed never counts.
+// It stays in the controller because the subtree walk is graph residual
+// (molecule membership + graph traversal).
 func (m *memoryOrderDispatcher) wispRootHasOpenWork(store beads.Store, b beads.Bead) (bool, error) {
 	if !isOrderWispRootCandidate(b) {
+		return false, nil
+	}
+	// A pour that died part-way leaves a root that carries its order-run label
+	// from the create, with some of its steps open. The dispatch already
+	// recorded that run as failed. Sling and the dispatch drain close a
+	// molecule_failed root and molecule recovery skips one, so it does not hold
+	// the order shut here either.
+	if b.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
 		return false, nil
 	}
 	if isOrderRootOnlyWispCandidate(b) {
@@ -2596,13 +3307,18 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // every descendant created by any growth path (initial pour, convoy Attach,
 // fanout fragments, retry attempts) carries gc.root_bead_id == rootID, an
 // invariant enforced in internal/molecule. A single metadata-filtered List
-// therefore returns the whole membership set in one store round-trip, instead
-// of the O(tree) per-node ParentID/DepList walk that spawned a bd subprocess
-// per node and blew past the dispatch gate's time bound under Dolt write
-// contention (#2893). The membership query's ownership predicate is exactly
-// the walk's orderWispGraphDependentOwnedByRoot, so it is strictly at least as
+// therefore returns every open member in one store round-trip, instead of the
+// O(tree) per-node ParentID/DepList walk that spawned a bd subprocess per node
+// and blew past the dispatch gate's time bound under Dolt write contention
+// (#2893). The membership query's ownership predicate is exactly the walk's
+// orderWispGraphDependentOwnedByRoot, so it is strictly at least as
 // conservative as the walk — it can only ever report MORE open work, never
 // less, and single-flight is never weakened.
+//
+// The membership List excludes closed beads. A closed member is never
+// reported, and a Dolt-backed store answers a metadata filter that includes
+// closed beads by reading the metadata of every row, closed history included,
+// where excluding them confines the read to the non-closed rows.
 //
 // When skip is non-nil, an open member for which skip returns true is not
 // treated as blocking open work — the gate passes isTransientNotificationBead so
@@ -2610,17 +3326,16 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // descendant view (e.g. the stale-wisp sweeper) pass nil. Both the membership
 // fast path and the walk fallback honor skip.
 //
-// When the fast path finds no open member (the membership set is empty,
-// all-closed, or only partially stamped — a molecule can carry gc.root_bead_id
+// When the fast path finds no open member (no stamped member is open, or the
+// molecule is only partially stamped — a molecule can carry gc.root_bead_id
 // on some steps while sibling ParentID-only steps are un-stamped), it falls
 // back to the authoritative tree walk before reporting the root idle, so
 // single-flight is never weakened for un-stamped or partial-stamp data.
 func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
 	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
@@ -2638,14 +3353,13 @@ func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Be
 	if len(open) > 0 {
 		return open, nil
 	}
-	// No OPEN stamped member found. An empty or all-closed membership set does
-	// NOT prove the root is idle, because the index may be incomplete for a
-	// partial-stamp molecule (some steps carry gc.root_bead_id, sibling
-	// ParentID-only steps do not). Confirm with the authoritative walk before
-	// reporting no open work, keeping single-flight safe. The fast path still
-	// answers the common in-flight case (any open stamped member) in one
-	// query; the walk runs only when no open member is found — i.e. for
-	// orphan/just-completed roots.
+	// No OPEN stamped member found. That does NOT prove the root is idle,
+	// because the index may be incomplete for a partial-stamp molecule (some
+	// steps carry gc.root_bead_id, sibling ParentID-only steps do not).
+	// Confirm with the authoritative walk before reporting no open work,
+	// keeping single-flight safe. The fast path still answers the common
+	// in-flight case (any open stamped member) in one query; the walk runs
+	// only when no open member is found — i.e. for orphan/just-completed roots.
 	id, err := storeFirstOpenDescendantByWalk(store, rootID, skip)
 	if err != nil || id == "" {
 		return nil, err
@@ -3047,19 +3761,50 @@ func sweepStaleOrderTrackingLimit(store beads.Store, now time.Time, staleAfter t
 	return result.trackingClosed, err
 }
 
-func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0)
+// staleTrackingRead names the read a stale order-tracking sweep lists its
+// candidates with.
+type staleTrackingRead int
+
+const (
+	// staleTrackingReadNotClosed lists every not-closed tracking bead
+	// (orders.Store.StaleNotClosedRuns): the set the strict open-work gate
+	// counts, a tracking bead parked by hand included. It is the on-demand
+	// sweep's read, and the watchdog's on its first pass and then once every
+	// orderTrackingSweepWatchdogNotClosedInterval.
+	staleTrackingReadNotClosed staleTrackingRead = iota
+	// staleTrackingReadOpenInProgress lists only the open and in_progress ones
+	// (orders.Store.StaleOpenRuns): every backing selects those exactly, so a
+	// native Dolt store decodes no closed row for it. It is the read of the
+	// watchdog's other 30 s passes.
+	staleTrackingReadOpenInProgress
+)
+
+// runs lists the stale tracking runs this read selects at or before cutoff.
+func (r staleTrackingRead) runs(front *orders.Store, cutoff time.Time) ([]orders.OrderRun, error) {
+	if r == staleTrackingReadOpenInProgress {
+		return front.StaleOpenRuns(cutoff)
+	}
+	return front.StaleNotClosedRuns(cutoff)
+}
+
+func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, staleTrackingReadNotClosed, honorRunTimeouts)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
-func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+//
+// honorRunTimeouts keeps the tracking bead of a run that may still be in
+// flight until the bead is staleAfter older than the timeout the run was
+// launched with (orderTrackingRunInsideTimeout). False applies staleAfter
+// alone.
+func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, read staleTrackingRead, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, read, honorRunTimeouts)
 }
 
-func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true)
+func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, staleTrackingReadNotClosed, honorRunTimeouts)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -3091,7 +3836,7 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // and multiply the reported count. When it is itself one of the swept stores the
 // loop has already covered it, and the hoisted pass is skipped for the same
 // count-once reason.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3112,7 +3857,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, read, honorRunTimeouts)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -3163,14 +3908,14 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, staleTrackingReadNotClosed, false)
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, staleTrackingReadNotClosed, false)
 }
 
-func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead, honorRunTimeouts bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3178,12 +3923,20 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 		return orderTrackingSweepResult{}, fmt.Errorf("include-wisps requires at least one order name")
 	}
 	cutoff := now.Add(-staleAfter)
-	// StaleOpenRuns is the typed read half: OPEN tracking runs at or before the
-	// cutoff, across both tiers, with best-effort names. The sweep-vocabulary
-	// close (below) stays raw because it stamps sweep audit metadata that the
-	// domain object deliberately omits, and the wisp-subtree recovery is graph
-	// residual.
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).StaleOpenRuns(cutoff)
+	// read is the typed read half: the tracking runs at or before the cutoff
+	// that it selects, across both tiers, with best-effort names. The
+	// sweep-vocabulary close (below) stays raw because it stamps sweep audit
+	// metadata that the domain object deliberately omits, and the wisp-subtree
+	// recovery is graph residual.
+	// The sweep federates the scope stores, kept for tracking rows written
+	// before the orders class moved to its binding, with the binding itself:
+	// a scope leg reads relics.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = read.runs(orders.NewStore(beads.OrdersStore{Store: store}), cutoff)
+		return listErr
+	})
 	if err != nil {
 		return orderTrackingSweepResult{}, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -3198,6 +3951,9 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 			if _, ok := onlyOrders[run.Scoped]; !ok {
 				continue
 			}
+		}
+		if honorRunTimeouts && orderTrackingRunInsideTimeout(run, cutoff) {
+			continue
 		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
@@ -3235,6 +3991,21 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 		}
 	}
 	return result, nil
+}
+
+// orderTrackingRunInsideTimeout reports whether a stale sweep with the given
+// cutoff must leave run's tracking bead open: the run has no outcome yet, its
+// bead records the timeout it was launched with, and the bead is not yet older
+// than that timeout plus the sweep window. Until then the run may still be in
+// flight, and closing the bead would reopen the order's single-flight gate
+// under it. A bead that records an outcome has no run behind it, and a bead
+// that records no timeout gives no deadline to wait for, so only the sweep
+// window applies to either.
+func orderTrackingRunInsideTimeout(run orders.OrderRun, cutoff time.Time) bool {
+	if run.Outcome != orders.RunOutcomeNone || run.Timeout <= 0 {
+		return false
+	}
+	return run.CreatedAt.After(cutoff.Add(-run.Timeout))
 }
 
 func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
@@ -3297,7 +4068,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	// A scope leg of the retention sweep reads pre-cutover tracking relics;
+	// see sweepStaleOrderTrackingWithOptionsLimitMode.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		return listErr
+	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -3369,7 +4147,14 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	if policy.retainLast < minClosedOrderTrackingRetained {
 		policy.retainLast = minClosedOrderTrackingRetained
 	}
-	runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+	// A scope leg of the retention sweep reads pre-cutover tracking relics;
+	// see sweepStaleOrderTrackingWithOptionsLimitMode.
+	var runs []orders.OrderRun
+	err := beads.RelicRead(func() error {
+		var listErr error
+		runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		return listErr
+	})
 	if err != nil {
 		return 0, fmt.Errorf("listing closed order-tracking beads: %w", err)
 	}
@@ -3440,7 +4225,14 @@ func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Ti
 		if store == nil {
 			continue
 		}
-		runs, err := orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+		// A scope leg reads pre-cutover tracking relics; see
+		// sweepStaleOrderTrackingWithOptionsLimitMode.
+		var runs []orders.OrderRun
+		err := beads.RelicRead(func() error {
+			var listErr error
+			runs, listErr = orders.NewStore(beads.OrdersStore{Store: store}).ClosedRunsForRetention()
+			return listErr
+		})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("listing closed order-tracking %s: %w", orderTrackingSweepStoreLabel(store, i), err))
 			continue
@@ -3885,9 +4677,11 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 // bounded retries. On startup the bead store's backing server may not be
 // query-ready yet (dolt cold-start race, #753). Errors are retried; the
 // total count of beads closed across attempts is returned. Retrying on
-// partial closes is safe because beads.Store.CloseAll skips already-closed
-// beads (see internal/beads/beads.go). The wrapper sleeps for up to
-// attempts*backoff in the worst case.
+// partial closes is safe because every attempt lists the open tracking beads
+// again, so the next attempt closes only what is still open (whether CloseAll
+// would stamp an already-closed bead is store-specific; see
+// internal/beads/beads.go). The wrapper sleeps for up to attempts*backoff in
+// the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
 	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
 }
@@ -3931,6 +4725,51 @@ func effectiveTimeout(a orders.Order, maxTimeout time.Duration) time.Duration {
 		return maxTimeout
 	}
 	return t
+}
+
+// orderTimeoutError is the cause an order run's deadline carries. It names the
+// run's effective timeout, so a run the timeout stopped can say it timed out
+// and after how long. It unwraps to context.DeadlineExceeded, so an errors.Is
+// check for a deadline still matches it.
+type orderTimeoutError struct {
+	timeout time.Duration
+}
+
+func (e orderTimeoutError) Error() string {
+	return fmt.Sprintf("order timeout of %s exceeded", e.timeout)
+}
+
+func (e orderTimeoutError) Unwrap() error {
+	return context.DeadlineExceeded
+}
+
+// withOrderTimeout bounds an order run by its effective timeout, with an
+// orderTimeoutError naming that timeout as the deadline's cause.
+func withOrderTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeoutCause(ctx, timeout, orderTimeoutError{timeout: timeout})
+}
+
+// orderRunErrorText returns the failure text for err, an error from work an
+// order run did under ctx. When the run's order timeout ended ctx, the timeout
+// leads the text: err alone reads "context deadline exceeded", or "signal:
+// killed" from a runner that reports the kill, and neither says the order timed
+// out. Any other end of ctx, such as a controller shutdown, leaves err's text
+// as it is.
+func orderRunErrorText(ctx context.Context, err error) string {
+	var timeout orderTimeoutError
+	if !errors.As(context.Cause(ctx), &timeout) || errors.Is(err, timeout) {
+		return err.Error()
+	}
+	return timeout.Error() + ": " + err.Error()
+}
+
+// runTimeout is how long this dispatcher lets a run of a go before killing it:
+// effectiveTimeout over the max_timeout the dispatcher was built with.
+// launchResolvedDispatch records it on the run's tracking bead and dispatchOne
+// gives it to the run as its deadline, so the stale sweep reads the deadline the
+// run actually has, whatever a later reload sets.
+func (m *memoryOrderDispatcher) runTimeout(a orders.Order) time.Duration {
+	return effectiveTimeout(a, m.maxTimeout)
 }
 
 // rigExclusiveLayers returns the suffix of rigLayers that is not in

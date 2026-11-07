@@ -63,7 +63,7 @@ func TestRouteRecoveryQuarantineCheckFixLiftsTheMarker(t *testing.T) {
 	}
 	// Control: the lifted bead is still a repair candidate. Lifting must re-arm
 	// the lane, not retire the bead.
-	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store}, nil)
+	report := newRouteRecoveryLane().backstopLeg(planeLeg{store: store})
 	if report.restored != 1 {
 		t.Fatalf("backstop restored %d after the quarantine was lifted, want 1", report.restored)
 	}
@@ -87,5 +87,25 @@ func TestRouteRecoveryQuarantineCheckReportsAFlapAsASiblingLaneBug(t *testing.T)
 	// above is reading the reason and not a constant.
 	if flapRemedy == relicRemedy {
 		t.Fatalf("both reasons produced the same remedy %q", flapRemedy)
+	}
+}
+
+// TestRouteRecoveryQuarantineCheckStopsOnceAbandoned: abandoned by the doctor
+// runner while its first store read is in flight, the check opens no other
+// scope and issues no other read.
+func TestRouteRecoveryQuarantineCheckStopsOnceAbandoned(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Rigs: doctorAbandonTestRigs(t)}
+
+	full := newDoctorAbandonProbe()
+	newRouteRecoveryQuarantineCheck(cfg, cityDir, full.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(&doctor.CheckContext{})
+	if full.opens.Load() != 3 || full.reads.Load() != 3 {
+		t.Fatalf("unabandoned run made %d reads over %d scopes, want one read in each of three scopes", full.reads.Load(), full.opens.Load())
+	}
+
+	probe := newDoctorAbandonProbe()
+	newRouteRecoveryQuarantineCheck(cfg, cityDir, probe.newStore(beads.NewMemStoreFrom(0, nil, nil))).Run(probe.ctx())
+	if probe.opens.Load() != 1 || probe.reads.Load() != 1 {
+		t.Fatalf("abandoned run made %d reads over %d scopes, want only the first scope's one read", probe.reads.Load(), probe.opens.Load())
 	}
 }

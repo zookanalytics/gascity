@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -71,9 +72,11 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&CustomTypesCheck{},
 		&DeprecatedAttachmentFieldsCheck{},
 		&DoltConfigCheck{},
+		&DoltCorruptAsideCheck{},
 		&DoltLogSizeCheck{},
 		&DoltNomsSizeCheck{},
 		&DoltServerCheck{},
+		&DoltUnboundDatabasesCheck{},
 		&DoltVersionCheck{},
 		&DurationRangeCheck{},
 		&EventLogSizeCheck{},
@@ -223,6 +226,86 @@ func TestDoctor_FixFails(t *testing.T) {
 	}
 }
 
+// hintedFixCheck fails with a FixHint and a fixable remediation whose Fix
+// returns fixErr.
+type hintedFixCheck struct {
+	fixErr error
+}
+
+func (c *hintedFixCheck) Name() string { return "hinted-fix" }
+func (c *hintedFixCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{
+		Name:    "hinted-fix",
+		Status:  StatusError,
+		Message: "imports out of sync",
+		FixHint: "run the sync",
+	}
+}
+func (c *hintedFixCheck) CanFix() bool              { return true }
+func (c *hintedFixCheck) Fix(_ *CheckContext) error { return c.fixErr }
+func (c *hintedFixCheck) WarmupEligible() bool      { return false }
+
+func TestDoctor_FixHintErrorReplacesHint(t *testing.T) {
+	cause := errors.New("sync failed")
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: fmt.Errorf("syncing: %w", &FixHintError{
+		Err:  cause,
+		Hint: "register a pack credential:\n  gc import credential add github.com/acme",
+	})})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if len(r.Results) != 1 {
+		t.Fatalf("Results = %d, want 1", len(r.Results))
+	}
+	res := r.Results[0]
+	if res.FixError != "syncing: sync failed" {
+		t.Errorf("FixError = %q, want the wrapped error text unchanged", res.FixError)
+	}
+	if want := "register a pack credential:\n  gc import credential add github.com/acme"; res.FixHint != want {
+		t.Errorf("FixHint = %q, want %q", res.FixHint, want)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "      fix failed: syncing: sync failed\n") {
+		t.Errorf("output missing fix error: %q", out)
+	}
+	if !strings.Contains(out, "      hint: register a pack credential:\n              gc import credential add github.com/acme\n") {
+		t.Errorf("output missing replaced, aligned hint: %q", out)
+	}
+	if strings.Contains(out, "run the sync") {
+		t.Errorf("pre-fix hint must be replaced: %q", out)
+	}
+}
+
+func TestDoctor_PlainFixErrorKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: errors.New("lockfile write")})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	res := r.Results[0]
+	if res.FixError != "lockfile write" || res.FixHint != "run the sync" {
+		t.Errorf("FixError/FixHint = %q/%q, want %q/%q", res.FixError, res.FixHint, "lockfile write", "run the sync")
+	}
+	if out := buf.String(); strings.Contains(out, "credential") {
+		t.Errorf("non-auth fix failure printed a credential hint: %q", out)
+	}
+}
+
+func TestDoctor_FixHintErrorEmptyHintKeepsHint(t *testing.T) {
+	d := &Doctor{}
+	d.Register(&hintedFixCheck{fixErr: &FixHintError{Err: errors.New("sync failed")}})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, true)
+
+	if got := r.Results[0].FixHint; got != "run the sync" {
+		t.Errorf("FixHint = %q, want the pre-fix hint kept", got)
+	}
+}
+
 func TestDoctor_FixSucceedsButCheckStillFails(t *testing.T) {
 	d := &Doctor{}
 	d.Register(&unchangedFixCheck{})
@@ -346,6 +429,25 @@ func TestDoctor_FixHint(t *testing.T) {
 
 	if !strings.Contains(buf.String(), "hint: try this") {
 		t.Errorf("output missing fix hint: %q", buf.String())
+	}
+}
+
+// TestPrintResultIndentsMultiLineFixHint keeps every line of a multi-line
+// hint under its "hint:" label.
+func TestPrintResultIndentsMultiLineFixHint(t *testing.T) {
+	var buf bytes.Buffer
+	printResult(&buf, &CheckResult{
+		Name:    "hint-check",
+		Status:  StatusWarning,
+		Message: "problem",
+		FixHint: "Fix, either:\n  - one\n  - two",
+	}, false)
+
+	want := "      hint: Fix, either:\n" +
+		"              - one\n" +
+		"              - two\n"
+	if !strings.HasSuffix(buf.String(), want) {
+		t.Errorf("printResult output =\n%s\nwant it to end with\n%s", buf.String(), want)
 	}
 }
 
@@ -1081,3 +1183,353 @@ func TestPanickingFixDoesNotCrashTheRun(t *testing.T) {
 }
 
 func (panickingFixCheck) WarmupEligible() bool { return false }
+
+// eventCheck records the order of its Run and Fix calls into a shared log.
+type eventCheck struct {
+	mockCheck
+	log *[]string
+}
+
+func (e *eventCheck) Run(ctx *CheckContext) *CheckResult {
+	*e.log = append(*e.log, "run "+e.name)
+	return e.mockCheck.Run(ctx)
+}
+
+func (e *eventCheck) Fix(ctx *CheckContext) error {
+	*e.log = append(*e.log, "fix "+e.name)
+	return e.mockCheck.Fix(ctx)
+}
+
+// BeforeFix must run before every remediation and before the re-run that
+// verifies it, and never on a run without --fix, so a caller sharing reads
+// across one run never answers a fix or its verification from pre-fix data.
+func TestDoctorBeforeFixPrecedesFixAndVerify(t *testing.T) {
+	for _, timeout := range []time.Duration{0, time.Minute} {
+		t.Run(fmt.Sprintf("timeout=%s", timeout), func(t *testing.T) {
+			var log []string
+			d := &Doctor{CheckTimeout: timeout, BeforeFix: func() { log = append(log, "before-fix") }}
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "ok", status: StatusOK, canFix: true}, log: &log})
+			d.Register(&eventCheck{mockCheck: mockCheck{name: "broken", status: StatusError, canFix: true}, log: &log})
+
+			d.Run(&CheckContext{}, io.Discard, false)
+			if want := "run ok,run broken"; strings.Join(log, ",") != want {
+				t.Fatalf("without --fix: events = %v, want %s", log, want)
+			}
+
+			log = nil
+			report := d.Run(&CheckContext{}, io.Discard, true)
+			want := "run ok,run broken,before-fix,fix broken,before-fix,run broken"
+			if got := strings.Join(log, ","); got != want {
+				t.Fatalf("with --fix: events = %s, want %s", got, want)
+			}
+			if report.Fixed != 1 {
+				t.Fatalf("Fixed = %d, want 1", report.Fixed)
+			}
+		})
+	}
+}
+
+// abandonObservingCheck blocks until the runner signals abandonment through
+// CheckContext.Done, then records what Canceled reported.
+type abandonObservingCheck struct {
+	sawCancel chan bool
+}
+
+func (c *abandonObservingCheck) Name() string { return "abandon-observer" }
+func (c *abandonObservingCheck) Run(ctx *CheckContext) *CheckResult {
+	if ctx.Canceled() {
+		c.sawCancel <- false // canceled before the timeout fired: wrong
+		return &CheckResult{Name: c.Name(), Status: StatusOK}
+	}
+	select {
+	case <-ctx.Done:
+		c.sawCancel <- ctx.Canceled()
+	case <-time.After(5 * time.Second):
+		c.sawCancel <- false
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *abandonObservingCheck) CanFix() bool              { return false }
+func (c *abandonObservingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *abandonObservingCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutSignalsAbandonedCheck: when the runner abandons a check at
+// the per-check timeout it closes CheckContext.Done, so a check that issues
+// many store calls can stop issuing them instead of running on unobserved.
+func TestRunCheckTimeoutSignalsAbandonedCheck(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &abandonObservingCheck{sawCancel: make(chan bool, 1)}
+	d.Register(check)
+
+	report := d.Run(&CheckContext{}, io.Discard, false)
+	if len(report.Results) != 1 || !report.Results[0].TimedOut {
+		t.Fatalf("report = %+v, want the check to time out", report)
+	}
+	select {
+	case canceled := <-check.sawCancel:
+		if !canceled {
+			t.Fatal("abandoned check did not observe cancellation through CheckContext.Done/Canceled")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("abandoned check never observed CheckContext.Done closing")
+	}
+	d.Wait()
+}
+
+// callLoopCheck walks a series of blocking calls, the shape of a check that
+// reads one store per scope and pool template. Each call blocks until release
+// closes, after which a check that ignored cancellation would issue calls
+// without end. stopped closes when Run returns.
+type callLoopCheck struct {
+	release chan struct{}
+	stopped chan struct{}
+	issued  atomic.Int64
+}
+
+func (c *callLoopCheck) Name() string { return "call-loop" }
+func (c *callLoopCheck) Run(ctx *CheckContext) *CheckResult {
+	defer close(c.stopped)
+	for !ctx.Canceled() {
+		c.issued.Add(1)
+		<-c.release
+	}
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *callLoopCheck) CanFix() bool              { return false }
+func (c *callLoopCheck) Fix(_ *CheckContext) error { return nil }
+func (c *callLoopCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutStopsAbandonedCallLoop: a check still issuing calls when
+// the per-check timeout fires is abandoned without being waited on, and once
+// the call it had in flight returns it issues no more, so it stops loading the
+// store while the checks after it run.
+func TestRunCheckTimeoutStopsAbandonedCallLoop(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	loop := &callLoopCheck{release: make(chan struct{}), stopped: make(chan struct{})}
+	d.Register(loop)
+	d.Register(&mockCheck{name: "after", status: StatusOK, msg: "ran"})
+
+	reports := make(chan *Report, 1)
+	go func() { reports <- d.RunCollect(&CheckContext{}, false) }()
+	var report *Report
+	select {
+	case report = <-reports:
+	case <-time.After(5 * time.Second):
+		close(loop.release)
+		t.Fatal("run did not return at the timeout; it waited on the check's in-flight call")
+	}
+	if len(report.Results) != 2 || !report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want the call loop timed out", report.Results)
+	}
+	if got := report.Results[1]; got.Name != "after" || got.Status != StatusOK {
+		t.Fatalf("after result = %+v, want the next check to have run", got)
+	}
+
+	// The check is still inside the call it had in flight at the timeout, or
+	// never started one. Release that call and every later one.
+	close(loop.release)
+	select {
+	case <-loop.stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("abandoned check still issuing calls 5s after its in-flight call returned (%d issued)", loop.issued.Load())
+	}
+	if got := loop.issued.Load(); got > 1 {
+		t.Fatalf("abandoned check issued %d calls, want at most the one in flight at the timeout", got)
+	}
+	d.Wait()
+}
+
+// TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
+// context is never canceled.
+func TestCheckContextCanceledNilSafe(t *testing.T) {
+	var nilCtx *CheckContext
+	if nilCtx.Canceled() {
+		t.Fatal("nil CheckContext reported canceled")
+	}
+	if (&CheckContext{}).Canceled() {
+		t.Fatal("CheckContext without Done reported canceled")
+	}
+}
+
+// fixDoneRecordingCheck fails fast and records whether its Fix was handed a
+// Done channel.
+type fixDoneRecordingCheck struct {
+	fixHadDone atomic.Bool
+}
+
+func (c *fixDoneRecordingCheck) Name() string { return "fix-done-recorder" }
+func (c *fixDoneRecordingCheck) Run(_ *CheckContext) *CheckResult {
+	return &CheckResult{Name: c.Name(), Status: StatusError, Message: "needs fix"}
+}
+func (c *fixDoneRecordingCheck) CanFix() bool { return true }
+func (c *fixDoneRecordingCheck) Fix(ctx *CheckContext) error {
+	c.fixHadDone.Store(ctx.Done != nil)
+	return nil
+}
+func (c *fixDoneRecordingCheck) WarmupEligible() bool { return false }
+
+// TestRunCheckTimeoutNeverCancelsFix: a bounded run hands Fix no Done channel,
+// so the runner does not interrupt a fix abandoned at the timeout
+// mid-mutation.
+func TestRunCheckTimeoutNeverCancelsFix(t *testing.T) {
+	d := &Doctor{CheckTimeout: time.Minute}
+	check := &fixDoneRecordingCheck{}
+	d.Register(check)
+
+	report := d.RunCollect(&CheckContext{}, true)
+	d.Wait()
+	if len(report.Results) != 1 || !report.Results[0].FixAttempted {
+		t.Fatalf("Results = %+v, want the fix attempted", report.Results)
+	}
+	if check.fixHadDone.Load() {
+		t.Fatal("Fix was handed a Done channel; the runner must not interrupt an abandoned fix")
+	}
+}
+
+// abandonStopCheck registers a stop with the runner and then blocks until
+// release closes, the shape of a check waiting on a subprocess.
+type abandonStopCheck struct {
+	registered chan struct{}
+	release    chan struct{}
+	stopped    atomic.Bool
+}
+
+func (c *abandonStopCheck) Name() string { return "abandon-stop" }
+func (c *abandonStopCheck) Run(ctx *CheckContext) *CheckResult {
+	release := ctx.onAbandon(func() { c.stopped.Store(true) })
+	defer release()
+	close(c.registered)
+	<-c.release
+	return &CheckResult{Name: c.Name(), Status: StatusOK}
+}
+func (c *abandonStopCheck) CanFix() bool              { return false }
+func (c *abandonStopCheck) Fix(_ *CheckContext) error { return nil }
+func (c *abandonStopCheck) WarmupEligible() bool      { return false }
+
+// TestRunCheckTimeoutCallsAbandonedCheckStop: the runner calls the stop an
+// abandoned check registered before it moves on. The doctor process exits as
+// soon as its last check is abandoned, so a stop that waited for another
+// goroutine could be lost.
+func TestRunCheckTimeoutCallsAbandonedCheckStop(t *testing.T) {
+	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
+	check := &abandonStopCheck{registered: make(chan struct{}), release: make(chan struct{})}
+	d.Register(check)
+	d.Register(&mockCheck{name: "after", status: StatusOK, msg: "ran"})
+
+	report := d.RunCollect(&CheckContext{}, false)
+	// A check that registers after the abandon has its stop called during
+	// registration, so either way the stop has run once registered is closed.
+	select {
+	case <-check.registered:
+	case <-time.After(5 * time.Second):
+		close(check.release)
+		t.Fatal("the check never started")
+	}
+	stopped := check.stopped.Load()
+	close(check.release)
+	d.Wait()
+	if !stopped {
+		t.Fatal("the runner moved on without calling the abandoned check's stop")
+	}
+	if len(report.Results) != 2 || !report.Results[0].TimedOut || report.Results[1].Name != "after" {
+		t.Fatalf("Results = %+v, want the check timed out and the next one run", report.Results)
+	}
+}
+
+// TestRunCheckTimeoutNeverCallsStopOfCheckThatFinished: a check that returns
+// within the timeout has its registrations released, and the runner never
+// calls them.
+func TestRunCheckTimeoutNeverCallsStopOfCheckThatFinished(t *testing.T) {
+	d := &Doctor{CheckTimeout: time.Minute}
+	check := &abandonStopCheck{registered: make(chan struct{}), release: make(chan struct{})}
+	close(check.release)
+	d.Register(check)
+
+	report := d.RunCollect(&CheckContext{}, false)
+	d.Wait()
+	if check.stopped.Load() {
+		t.Fatal("the runner called the stop of a check that finished in time")
+	}
+	if len(report.Results) != 1 || report.Results[0].TimedOut {
+		t.Fatalf("Results = %+v, want the check finished", report.Results)
+	}
+}
+
+// TestAbandonRunCallsRegisteredStops: abandoning a Run closes Done and calls
+// every stop still registered before abandonRun returns. A released stop is
+// not called, a stop registered afterwards is called at once, and a second
+// abandon does nothing.
+func TestAbandonRunCallsRegisteredStops(t *testing.T) {
+	a := newAbandonment()
+	ctx := &CheckContext{Done: a.done, abandon: a}
+	var calls []string
+	ctx.onAbandon(func() { calls = append(calls, "registered") })
+	release := ctx.onAbandon(func() { calls = append(calls, "released") })
+	release()
+
+	a.abandonRun()
+	if !ctx.Canceled() {
+		t.Fatal("Canceled() = false after the Run was abandoned")
+	}
+	if len(calls) != 1 || calls[0] != "registered" {
+		t.Fatalf("calls = %q after abandonRun returned, want only the registered stop", calls)
+	}
+	ctx.onAbandon(func() { calls = append(calls, "late") })()
+	a.abandonRun()
+	if len(calls) != 2 || calls[1] != "late" {
+		t.Fatalf("calls = %q, want the late stop called once at registration", calls)
+	}
+}
+
+// TestOnAbandonWithoutRunner: a context whose Done has no runner behind it
+// calls a registered stop once Done closes, never calls a released one, and a
+// context without Done never calls stop.
+func TestOnAbandonWithoutRunner(t *testing.T) {
+	done := make(chan struct{})
+	ctx := &CheckContext{Done: done}
+	stopped := make(chan struct{})
+	ctx.onAbandon(func() { close(stopped) })
+	var releasedCalled atomic.Bool
+	release := ctx.onAbandon(func() { releasedCalled.Store(true) })
+	release()
+	release()
+
+	close(done)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop not called after Done closed")
+	}
+	if releasedCalled.Load() {
+		t.Fatal("a released stop was called")
+	}
+
+	var nilCtx *CheckContext
+	for _, c := range []*CheckContext{nilCtx, {}} {
+		c.onAbandon(func() { t.Error("stop called for a context without Done") })()
+	}
+}
+
+// TestOnAbandonFollowsDerivedDone: a context a check derives from the
+// runner's with a Done of its own calls a registered stop once that Done
+// closes, when Canceled starts reporting true, though the runner never
+// abandons the Run.
+func TestOnAbandonFollowsDerivedDone(t *testing.T) {
+	a := newAbandonment()
+	derived := CheckContext{Done: a.done, abandon: a}
+	derivedDone := make(chan struct{})
+	derived.Done = derivedDone
+	stopped := make(chan struct{})
+	release := derived.onAbandon(func() { close(stopped) })
+	defer release()
+
+	close(derivedDone)
+	if !derived.Canceled() {
+		t.Fatal("Canceled() = false after the derived Done closed")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop not called after the derived context's Done closed")
+	}
+}

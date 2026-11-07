@@ -103,18 +103,21 @@ func TestCollectLiveWorktreeState_IncludesOwnCWD(t *testing.T) {
 func TestLiveSessionWorktreeDirs_CollectsAndDedups(t *testing.T) {
 	abs1 := t.TempDir()
 	abs2 := t.TempDir()
+	abs3 := t.TempDir()
 	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{
 		{ID: "s1", WorkerDir: abs1},
 		{ID: "s2", WorkDir: abs2},
-		{ID: "s3", WorkerDir: abs1},          // duplicate of s1 → deduped
-		{ID: "s4", WorkDir: "relative/path"}, // non-absolute → dropped
-		{ID: "s5"},                           // empty → dropped
+		{ID: "s3", WorkerDir: abs1},                        // duplicate of s1 → deduped
+		{ID: "s4", WorkDir: "relative/path"},               // non-absolute → dropped
+		{ID: "s5"},                                         // empty → dropped
+		{ID: "s6", WorkDir: abs2, LaunchTaskWorkDir: abs3}, // the task work_dir it was started in → kept
 	})
 	got := liveSessionWorktreeDirs(snapshot)
 
 	want := map[string]bool{
 		pathutil.NormalizePathForCompare(abs1): false,
 		pathutil.NormalizePathForCompare(abs2): false,
+		pathutil.NormalizePathForCompare(abs3): false,
 	}
 	for _, d := range got {
 		nd := pathutil.NormalizePathForCompare(d)

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 const testNonLivePID = 2147483647
@@ -658,28 +660,63 @@ func TestSweepOrphanAgeFenceBySentinelState(t *testing.T) {
 	}
 }
 
-// TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride is a focused
+// TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride is a focused
 // regression test for the main_test.go TMPDIR bug (ga-lygcyb): os.TempDir()
-// re-reads TMPDIR on every call, so the host root used to find legacy
-// fixture dirs from prior runs must be captured before TMPDIR is overridden
-// to the fresh, empty per-run root — capturing it afterward silently
-// returns the per-run root instead, and every legacy-dir sweep keyed off it
+// re-reads TMPDIR on every call, so the host roots used to find what prior
+// runs left behind must be captured before TMPDIR and GOTMPDIR are overridden
+// to the fresh, empty per-run root — capturing them afterward silently
+// returns the per-run root instead, and every startup sweep keyed off them
 // finds nothing.
-func TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride(t *testing.T) {
+func TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride(t *testing.T) {
 	hostRoot := t.TempDir()
+	hostGoTmp := t.TempDir()
+	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from both host roots
 	t.Setenv("TMPDIR", hostRoot)
-
-	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from hostRoot
+	t.Setenv("GOTMPDIR", hostGoTmp)
 
 	got, err := adoptPerRunTMPDIR(newRoot)
 	if err != nil {
 		t.Fatalf("adoptPerRunTMPDIR: %v", err)
 	}
-	if got != hostRoot {
-		t.Errorf("adoptPerRunTMPDIR(%q) host root = %q, want %q (TMPDIR in effect before the override)", newRoot, got, hostRoot)
+	if got.tmp != hostRoot {
+		t.Errorf("adoptPerRunTMPDIR(%q) host temp root = %q, want %q (TMPDIR in effect before the override)", newRoot, got.tmp, hostRoot)
+	}
+	if got.goTmp != hostGoTmp {
+		t.Errorf("adoptPerRunTMPDIR(%q) host GOTMPDIR = %q, want %q (GOTMPDIR in effect before the override)", newRoot, got.goTmp, hostGoTmp)
 	}
 	if gotEnv := os.Getenv("TMPDIR"); gotEnv != newRoot {
 		t.Errorf("TMPDIR after adoptPerRunTMPDIR = %q, want %q", gotEnv, newRoot)
+	}
+}
+
+// TestAdoptPerRunTMPDIRPinsGOTMPDIR pins that the per-run root replaces
+// GOTMPDIR as well as TMPDIR. t.TempDir() creates its directory under GOTMPDIR
+// when that is set, so a host GOTMPDIR left in place would put every test's
+// temp dir, and any Dolt server a test starts there, outside the per-run root
+// that the dolt leak guard watches.
+func TestAdoptPerRunTMPDIRPinsGOTMPDIR(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("GOTMPDIR", t.TempDir()) // a host GOTMPDIR outside the per-run root
+	newRoot := t.TempDir()
+
+	if _, err := adoptPerRunTMPDIR(newRoot); err != nil {
+		t.Fatalf("adoptPerRunTMPDIR: %v", err)
+	}
+	if got := os.Getenv("GOTMPDIR"); got != newRoot {
+		t.Fatalf("GOTMPDIR after adoptPerRunTMPDIR = %q, want the per-run root %q", got, newRoot)
+	}
+}
+
+// TestTempDirStaysUnderPerRunTempRoot pins the property the dolt leak guard
+// depends on, in this binary as TestMain set it up: t.TempDir() lands under
+// the per-run temp root whatever GOTMPDIR the environment passed in.
+func TestTempDirStaysUnderPerRunTempRoot(t *testing.T) {
+	if testTempRootAliveSentinel == nil {
+		t.Fatal("TestMain recorded no per-run temp root")
+	}
+	root := filepath.Dir(testTempRootAliveSentinel.Name())
+	if dir := t.TempDir(); !pathutil.PathWithin(root, dir) {
+		t.Fatalf("t.TempDir() = %q, outside the per-run temp root %q that the dolt leak guard watches", dir, root)
 	}
 }
 

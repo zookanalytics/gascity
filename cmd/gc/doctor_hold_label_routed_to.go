@@ -11,9 +11,13 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// holdLabelExternalValue is the one hold:<value> value that never implies a
-// routing gap: it names a human/out-of-system dependency, not an agent.
+// holdLabelExternalValue is a hold:<value> value that never implies a routing
+// gap: it names a human/out-of-system dependency, not an agent.
 const holdLabelExternalValue = "external"
+
+// holdLabelClearedValue is the other: `bd set-state <id> hold=cleared` releases
+// a hold and leaves hold:cleared behind, so it means "no hold", not an agent.
+const holdLabelClearedValue = "cleared"
 
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
 // gc.routed_to metadata is missing or names some route other than <value>'s
@@ -39,7 +43,7 @@ func (c *holdLabelRoutedToCheck) CanFix() bool { return true }
 func (c *holdLabelRoutedToCheck) WarmupEligible() bool { return false }
 
 // holdLabelValue returns the hold value carried by labels, if any
-// hold:<value> label is present and <value> is not "external".
+// hold:<value> label is present and <value> is not "external" or "cleared".
 func holdLabelValue(labels []string) (string, bool) {
 	for _, l := range labels {
 		val, ok := strings.CutPrefix(l, "hold:")
@@ -47,7 +51,7 @@ func holdLabelValue(labels []string) (string, bool) {
 			continue
 		}
 		val = strings.TrimSpace(val)
-		if val == "" || val == holdLabelExternalValue {
+		if val == "" || val == holdLabelExternalValue || val == holdLabelClearedValue {
 			continue
 		}
 		return val, true
@@ -103,7 +107,7 @@ func holdRouteWant(holdValue string, aliases map[string][]string) string {
 	return holdValue
 }
 
-func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+func (c *holdLabelRoutedToCheck) collect(ctx *doctor.CheckContext) (targets []holdRouteTarget, skipped []string) {
 	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
@@ -116,6 +120,10 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 	}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
+			continue
+		}
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
 			continue
 		}
 		store, err := c.newStore(sc.path)
@@ -156,8 +164,8 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 	return targets, skipped
 }
 
-func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	targets, skipped := c.collect(ctx)
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no hold:<value> labels are missing a matching gc.routed_to")
 	}
@@ -179,8 +187,8 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		details)
 }
 
-func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
-	targets, skipped := c.collect()
+func (c *holdLabelRoutedToCheck) Fix(ctx *doctor.CheckContext) error {
+	targets, skipped := c.collect(ctx)
 	for _, tgt := range targets {
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
 			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)

@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
@@ -61,7 +62,7 @@ func cmdSessionReleaseName(target string, stdout, stderr io.Writer, jsonOutput .
 	}
 	sessStore := cliSessionStore(store, cfg, cityPath)
 
-	released, err := session.ReleaseSessionNameClaim(sessStore, target)
+	released, err := session.ReleaseSessionNameClaim(beads.SessionStore{Store: sessStore}, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session release-name: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

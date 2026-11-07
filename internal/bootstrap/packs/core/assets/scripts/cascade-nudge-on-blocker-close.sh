@@ -6,16 +6,17 @@
 # work can resume: they poll, get nudged by hand, or miss the unblock.
 #
 # This order subscribes to bead.closed events. For each closed bead it
-# resolves the dependents linked by a `blocks` dependency and nudges the
-# assignee of every open or deferred dependent whose OTHER blocks-deps are
-# also all closed — a true ready-transition. A dependent still blocked by a
-# sibling is skipped, because "may be unblocked" is false until its last
-# blocker closes. Idempotent per (blocker, dependent) pair via dedup state in
-# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json (both city- and
-# pack-scoped, so multi-city installs never cross-pollinate). The last blocker
-# to close surfaces the dependent once per blocker still inside the lookback
-# window, so the nudge carries the dependent as its bead reference and the
-# queue collapses the copies into one delivery.
+# resolves the dependents linked by a `blocks` dependency and nudges every
+# open or deferred dependent that no blocker still holds once this one has
+# closed (see still_held): at the assignee when one holds the bead, else at
+# its gc.routed_to target (the graph.v2 claim shape leaves the assignee empty
+# until a session claims the step). A routed target may be a pool base, which
+# nudge_routed_target resolves to its active members. The assignee nudge is
+# queued with the dependent as its bead reference, so reminders about one
+# dependent collapse to one delivery. Idempotent: a given
+# (blocker, dependent) pair is nudged at most once. Dedup state lives in
+# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
+# both city- and pack-scoped — multi-city installs never cross-pollinate.
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
@@ -101,6 +102,76 @@ set_rig_args() {
     fi
 }
 
+# Nudge the session(s) named by a routed_to target. A multi-session pool
+# routes to the pool BASE (NormalizePoolRouteTarget collapses slot -> base),
+# which is the members' `template`, not a session name — `gc session nudge`
+# resolves a single session and cannot target a pool base. So enumerate the
+# pool's active members by template and nudge each; a target with no members
+# (a single-session agent, or an explicit slot name) is nudged directly.
+# Returns 0 if at least one nudge succeeded, non-zero otherwise. Mirrors
+# nudge_routed_target in nudge-on-route.sh with a per-call message. No --rig:
+# gc.routed_to is city-qualified and may name a rig other than the dependent
+# bead's, and the proven helper lists and nudges in default scope.
+nudge_routed_target() {
+    local target="$1"
+    local message="$2"
+    local members any member
+    members="$(gc session list --json --state active --template "$target" 2>/dev/null \
+        | jq -r '(.sessions // [])[] | .name // .id' 2>/dev/null)" || members=""
+    if [ -n "$members" ]; then
+        any=1
+        while IFS= read -r member; do
+            [ -n "$member" ] || continue
+            if gc session nudge "$member" "$message" >/dev/null 2>&1; then
+                any=0
+            fi
+        done <<MEMBERS
+$members
+MEMBERS
+        return "$any"
+    fi
+    gc session nudge "$target" "$message" >/dev/null 2>&1
+}
+
+# still_held reports what still holds dependent $1 once $2, the blocker whose
+# close is being handled, has closed. A `blocks` blocker holds by gc's
+# readiness rule (beads.DependencySatisfied over beads.ReadinessWorkOutcome):
+# while it is not closed, and, once closed, while it closed blocked
+# (gc.work_outcome=blocked) unless it is a formula step (gc.step_ref set)
+# whose gc.outcome is pass. A pinned blocker holds whichever read serves it:
+# the bd passthrough reports it "pinned", and the in-process class-binding
+# read folds it to "open". bd's own readiness counts it satisfied, so a
+# dependent only a pinned blocker holds goes unnudged; a seat parked on that
+# dependent still wakes, because the park reads the store's ready query (gc
+# itself never pins a bead, and a pinned bead never closes). It prints "self"
+# when $2's own blocked close holds the dependent, whether or not another
+# blocker does too; "other" when only another blocker holds it; and nothing
+# when no blocker is known to. Only a close that may have unblocked the
+# dependent is worth a nudge: while a blocker holds it, its assignee or routed
+# target has nothing to do, and a nudge to an asleep seat parked on it would
+# wake that seat for nothing (it wakes on its own once the dependent is
+# ready). A row this read cannot judge holds nothing: an external row (a
+# blocker outside the dependent's store, whose status this read does not
+# have), a row with no status, and $2 read before its close. A read that
+# fails, or that cannot be parsed, proves nothing either: the nudge goes out,
+# as it always has. Uses the dependent's rig args.
+still_held() {
+    _down="$(gc bd dep list "$1" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
+            --direction=down --type=blocks --json 2>/dev/null)" || return 0
+    printf '%s' "$_down" | jq -r --arg b "$2" '
+        def closed_blocked:
+            (.metadata // {}) as $m
+            | .status == "closed"
+              and $m["gc.work_outcome"] == "blocked"
+              and (($m["gc.step_ref"] // "") == "" or $m["gc.outcome"] != "pass");
+        def holds:
+            if .external == true or (.status // "") == "" then false
+            else .status != "closed" or closed_blocked end;
+        if any(.[]; .id == $b and closed_blocked) then "self"
+        elif any(.[]; .id != $b and holds) then "other"
+        else empty end' 2>/dev/null || true
+}
+
 # Pull recent bead.closed events. Best-effort: a read failure must not
 # crash the controller's order loop.
 EVENTS="$(gc events --type bead.closed --since "$LOOKBACK" 2>/dev/null)" || exit 0
@@ -125,16 +196,27 @@ while IFS= read -r blocker; do
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
-    # Dependents that are still open/deferred and have an assignee to nudge.
+    # Dependents that are still open/deferred and have somewhere to send the
+    # wake-up: an assigned dependent is nudged at its assignee; an unassigned
+    # one is nudged at its gc.routed_to target (the graph.v2 claim shape
+    # keeps the assignee empty until a session claims). The kind column
+    # dispatches the two deliveries and keeps every field non-empty, so the
+    # tab-separated read cannot collapse a column; a malformed row (metadata
+    # a string, gc.routed_to a number) is dropped alone, not the blocker's
+    # whole row set.
     ROWS="$(printf '%s' "$DEPS" \
         | jq -r '.[]
-                 | select((.status == "open" or .status == "deferred")
-                          and (.assignee != null and .assignee != ""))
-                 | [.id, .assignee] | @tsv' 2>/dev/null)" || ROWS=""
+                 | select(.status == "open" or .status == "deferred")
+                 | ((.assignee | strings) // "") as $assignee
+                 | ((.metadata | objects | .["gc.routed_to"] | strings) // "") as $route
+                 | if $assignee != "" then [.id, "assignee", $assignee]
+                   elif $route != "" then [.id, "route", $route]
+                   else empty end
+                 | @tsv' 2>/dev/null)" || ROWS=""
     [ -n "$ROWS" ] || continue
 
-    while IFS="$(printf '\t')" read -r dep_id assignee; do
-        if [ -z "$dep_id" ] || [ -z "$assignee" ]; then continue; fi
+    while IFS="$(printf '\t')" read -r dep_id dep_kind target; do
+        if [ -z "$dep_id" ] || [ -z "$dep_kind" ] || [ -z "$target" ]; then continue; fi
         key="$blocker|$dep_id"
         if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
@@ -142,36 +224,41 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         [ -z "$RIG_SUSPENDED" ] || continue
-
-        # Fire only on a TRUE ready-transition. A dependent with N blockers
-        # surfaces here when the FIRST of them closes, but "may be unblocked" is
-        # false until the LAST one does. Re-read the dependent's own blocks-deps
-        # (its rig scope is already in RIG_ARG from set_rig_args above) and skip
-        # unless every one is closed; the last blocker's own close event re-runs
-        # this order and finds the dependent ready.
-        DEP_BLOCKERS="$(gc bd dep list "$dep_id" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
-            --direction=down --type=blocks --json 2>/dev/null)" || DEP_BLOCKERS=""
-        # The dependent provably has at least one blocks edge — the just-closed
-        # blocker is what surfaced it — so an empty or unreadable result is an
-        # anomaly, not a ready dependent. Fail closed: skip without recording
-        # dedup state so a later eval retries, rather than sending a false
-        # "may be unblocked".
-        if [ -z "$DEP_BLOCKERS" ] || [ "$DEP_BLOCKERS" = "[]" ]; then continue; fi
-        still_open="$(printf '%s' "$DEP_BLOCKERS" \
-            | jq -r '[.[] | select(.status != "closed") | .id] | join(" ")' 2>/dev/null)" || still_open=""
-        if [ -n "$still_open" ]; then continue; fi
-
-        msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
-        # --reference-bead names the dependent so repeat cascade nudges for the
-        # same (assignee, dependent) collapse in the queue instead of stacking:
-        # the last blocker to close surfaces the dependent once per blocker still
-        # inside the lookback window, and the queue supersedes all but one.
-        # --delivery=queue makes this an async reminder whose exit status
-        # reflects the enqueue itself, not a live wake that can fail after it.
-        if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
-            --delivery=queue --reference-bead "$dep_id" "$assignee" "$msg" >/dev/null 2>&1; then
-            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-            NUDGED=$((NUDGED + 1))
+        # A dependent this blocker's own blocked close holds is not
+        # recorded, whether or not another blocker holds it too: this
+        # blocker's later close that passes is this same pair, and must
+        # still nudge. A dependent only another blocker holds has its pair
+        # recorded as handled, so the lookback's later runs do not read its
+        # blockers again: the close of its last blocker is its own
+        # (blocker, dependent) pair, and nudges.
+        case "$(still_held "$dep_id" "$blocker")" in
+            other)
+                STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+                continue
+                ;;
+            # Left unrecorded, so each later run in the lookback reads its
+            # blockers again: one dep list per such dependent per run.
+            self) continue ;;
+        esac
+        if [ "$dep_kind" = "assignee" ]; then
+            msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
+            # Queued, with the dependent as the nudge's bead reference: the
+            # queue keeps one reminder per (session, dependent), so two
+            # blockers of one dependent closing before one evaluation
+            # collapse to a single delivery, and the exit status is the
+            # enqueue's, so a delivery that fails after taking effect cannot
+            # leave the pair unrecorded and re-fire on every run in the
+            # lookback. The flags trail the message.
+            if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" --delivery=queue --reference-bead "$dep_id" >/dev/null 2>&1; then
+                STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+                NUDGED=$((NUDGED + 1))
+            fi
+        else
+            msg="blocker $blocker closed — routed dependent $dep_id may be ready to claim"
+            if nudge_routed_target "$target" "$msg"; then
+                STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+                NUDGED=$((NUDGED + 1))
+            fi
         fi
     done <<EOF
 $ROWS

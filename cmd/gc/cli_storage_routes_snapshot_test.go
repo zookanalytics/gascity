@@ -16,7 +16,7 @@ import (
 // load builds the snapshot anyway by content-hashing every pack directory;
 // reverting to it returns the same routes and passes every functional test,
 // only slower — the regression no other test catches. Same guard shape as
-// TestHostedCredentialProbeDeclinesTheRevisionSnapshot.
+// TestCityConfigLoadersDeclineTheRevisionSnapshot.
 func TestCLIStorageRoutesDeclineTheRevisionSnapshot(t *testing.T) {
 	const guarded = "cli_storage_routes.go"
 	const capturingCall = "config.LoadWithIncludes("

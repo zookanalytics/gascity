@@ -1191,6 +1191,86 @@ func TestFindSessionFileByIDForCandidatesPrefersEarlierSearchPath(t *testing.T) 
 	}
 }
 
+func writeSessionFileAt(t *testing.T, path string, modTime time.Time) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, modTime, modTime); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A session launched outside the work_dir its session bead records, such as a
+// pool session restarted in the per-bead worktree of the work it holds, has its
+// transcript filed under the launch directory's project folder.
+func TestFindSessionFileByIDFindsUUIDKeyInAnotherProjectFolder(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/home/user/workers/worker-1"
+	launchDir := workDir + "/worktrees/bead-1"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	writeSessionFileAt(t, filepath.Join(base, ProjectSlug(workDir), "6fc01b58-32a1-45ac-a1c8-54f6565ba9e3.jsonl"), now)
+	want := filepath.Join(base, ProjectSlug(launchDir), key+".jsonl")
+	writeSessionFileAt(t, want, now)
+
+	if got := FindSessionFileByID([]string{base}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want %q", got, want)
+	}
+	if got := FindSessionFileByIDInWorkDir([]string{base}, workDir, key); got != "" {
+		t.Fatalf("FindSessionFileByIDInWorkDir() = %q, want empty: the file is outside workDir's project folders", got)
+	}
+	if got := FindSessionFileByID([]string{base}, workDir, "11111111-2222-4333-8444-555555555555"); got != "" {
+		t.Fatalf("FindSessionFileByID(absent key) = %q, want empty", got)
+	}
+}
+
+func TestFindSessionFileByIDPrefersWorkDirFolderOverAnotherProjectFolder(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	workDir := "/home/user/project"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	want := filepath.Join(secondBase, ProjectSlug(workDir), key+".jsonl")
+	writeSessionFileAt(t, want, now.Add(-time.Hour))
+	writeSessionFileAt(t, filepath.Join(firstBase, ProjectSlug("/home/user/other"), key+".jsonl"), now)
+
+	if got := FindSessionFileByID([]string{firstBase, secondBase}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want the work_dir folder's file %q", got, want)
+	}
+}
+
+func TestFindSessionFileByIDAnotherProjectFolderPrefersEarlierSearchPathThenNewest(t *testing.T) {
+	firstBase := t.TempDir()
+	secondBase := t.TempDir()
+	workDir := "/home/user/project"
+	const key = "ea9b3ec4-3e4e-4617-95df-3c609a4ad9a4"
+	now := time.Now()
+	writeSessionFileAt(t, filepath.Join(firstBase, ProjectSlug("/home/user/a"), key+".jsonl"), now.Add(-time.Hour))
+	want := filepath.Join(firstBase, ProjectSlug("/home/user/b"), key+".jsonl")
+	writeSessionFileAt(t, want, now)
+	writeSessionFileAt(t, filepath.Join(secondBase, ProjectSlug("/home/user/c"), key+".jsonl"), now.Add(time.Hour))
+
+	if got := FindSessionFileByID([]string{firstBase, secondBase}, workDir, key); got != want {
+		t.Fatalf("FindSessionFileByID() = %q, want newest in the earliest search path %q", got, want)
+	}
+}
+
+// Only a UUID names one session wherever its file sits; any other key is
+// looked up in workDir's project folders alone.
+func TestFindSessionFileByIDNonUUIDKeyStaysInWorkDirFolders(t *testing.T) {
+	base := t.TempDir()
+	workDir := "/home/user/project"
+	writeSessionFileAt(t, filepath.Join(base, ProjectSlug("/home/user/other"), "session-123.jsonl"), time.Now())
+
+	if got := FindSessionFileByID([]string{base}, workDir, "session-123"); got != "" {
+		t.Fatalf("FindSessionFileByID(non-UUID key) = %q, want empty", got)
+	}
+}
+
 func TestFindSessionFileUsesClaudeProjectPathAlias(t *testing.T) {
 	skipUnlessDarwinClaudePathAliases(t)
 
@@ -2760,4 +2840,43 @@ func mustTime(s string) time.Time {
 		panic(err)
 	}
 	return t
+}
+
+func TestBuildDagPreservesParallelToolResults(t *testing.T) {
+	entries := []*Entry{
+		{UUID: "root", Type: "user"},
+		{UUID: "call-a", ParentUUID: "root", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"a","name":"Bash"}]}`)},
+		{UUID: "call-b", ParentUUID: "call-a", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"b","name":"Read"}]}`)},
+		{UUID: "result-a", ParentUUID: "call-a", Type: "user", Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"a","content":"done a"}]}`)},
+		{UUID: "result-b", ParentUUID: "call-b", Type: "user", Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"b","content":"done b"}]}`)},
+		{UUID: "answer", ParentUUID: "result-b", Type: "assistant", Message: json.RawMessage(`{"role":"assistant","content":[{"type":"text","text":"done"}]}`)},
+	}
+	for i, e := range entries {
+		e.Timestamp = time.Unix(int64(i), 0)
+	}
+	for n := 3; n <= len(entries); n++ {
+		t.Run(fmt.Sprintf("prefix-%d", n), func(t *testing.T) {
+			dag := BuildDag(entries[:n])
+			if len(dag.ActiveBranch) != n {
+				t.Fatalf("retained %d entries, want %d", len(dag.ActiveBranch), n)
+			}
+			for i, e := range dag.ActiveBranch {
+				if e.UUID != entries[i].UUID {
+					t.Fatalf("entry %d=%s, want %s", i, e.UUID, entries[i].UUID)
+				}
+			}
+			if n >= 5 && len(dag.OrphanedToolUseIDs) != 0 {
+				t.Fatalf("closed tools reported open: %v", dag.OrphanedToolUseIDs)
+			}
+		})
+	}
+	// A result belonging to a discarded invocation must not enter the chosen history.
+	other := &Entry{UUID: "other", ParentUUID: "root", Type: "assistant", Timestamp: time.Unix(1, 0), Message: json.RawMessage(`{"role":"assistant","content":[{"type":"tool_use","id":"unrelated","name":"Bash"}]}`)}
+	result := &Entry{UUID: "other-result", ParentUUID: "other", Type: "user", Timestamp: time.Unix(2, 0), Message: json.RawMessage(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"unrelated","content":"discarded"}]}`)}
+	dag := BuildDag(append(append([]*Entry{}, entries...), other, result))
+	for _, e := range dag.ActiveBranch {
+		if e.UUID == "other-result" || e.UUID == "other" {
+			t.Fatalf("discarded branch leaked: %s", e.UUID)
+		}
+	}
 }

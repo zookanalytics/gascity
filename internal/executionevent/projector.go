@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -118,7 +118,7 @@ func EmitCurrent(recorder events.Recorder, graphStore beads.GraphStore, convoySt
 			// durably mark the step, or a dropped emit becomes a permanent miss.
 			continue
 		}
-		if graphStore.Store != nil {
+		if graphStore != (beads.GraphStore{}) {
 			// The fact is durable; record that the step was emitted. A failed mark
 			// leaves the step unmarked, so the next tick re-emits it — the same
 			// at-least-once tolerance the snapshot facts already carry.
@@ -211,7 +211,7 @@ func (s StepDefinition) definedEvent(actor string) events.Event {
 // input convoy, the supplied work store exclusively owns that convoy's tracks
 // edges. A graph run without an input convoy is valid and projects only steps.
 func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, rootID string) (Projection, error) {
-	if graphStore.Store == nil {
+	if graphStore == (beads.GraphStore{}) {
 		return Projection{}, fmt.Errorf("%w: nil graph store", ErrNotGraphV2Root)
 	}
 	if !eventexport.IsOpaqueRef(rootID) {
@@ -253,7 +253,7 @@ func ProjectCurrent(graphStore beads.GraphStore, convoyStore beads.WorkStore, ro
 // unreadable, non-exact, or ambiguous links produce no anchor while preserving
 // the rest of the execution snapshot.
 func currentRunAnchors(store beads.WorkStore, root beads.Bead, work []WorkAssociation) []RunAnchor {
-	if len(work) == 0 || store.Store == nil {
+	if len(work) == 0 || store == (beads.WorkStore{}) {
 		return nil
 	}
 	declaredLaunchID := root.Metadata[beadmeta.SourceBeadIDMetadataKey]
@@ -296,7 +296,7 @@ func currentWorkAssociations(store beads.WorkStore, rootID, convoyID string) ([]
 	if !eventexport.IsOpaqueRef(convoyID) {
 		return nil, fmt.Errorf("%w: %q", ErrInvalidConvoyReference, convoyID)
 	}
-	if store.Store == nil {
+	if store == (beads.WorkStore{}) {
 		return nil, fmt.Errorf("listing tracks membership for convoy %q: nil work store", convoyID)
 	}
 	dependencies, err := store.DepList(convoyID, "down")
@@ -452,7 +452,7 @@ func LifecycleEvent(eventType string, root, step beads.Bead, actor string) (even
 // EmitLifecycle records a validated lifecycle fact for a graph.v2 step. The
 // root is loaded from graphStore so a v1 or unrelated parent can never produce
 // a lifecycle event by metadata resemblance alone.
-func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType string, step beads.Bead, actor string) bool {
+func EmitLifecycle(recorder events.Recorder, graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) bool {
 	if recorder == nil {
 		return false
 	}
@@ -464,8 +464,8 @@ func EmitLifecycle(recorder events.Recorder, graphStore beads.Store, eventType s
 	return true
 }
 
-func lifecycleEventFromStore(graphStore beads.Store, eventType string, step beads.Bead, actor string) (events.Event, bool) {
-	if graphStore == nil {
+func lifecycleEventFromStore(graphStore beads.GraphStore, eventType string, step beads.Bead, actor string) (events.Event, bool) {
+	if graphStore == (beads.GraphStore{}) {
 		return events.Event{}, false
 	}
 	rootID := step.Metadata[beadmeta.RootBeadIDMetadataKey]
@@ -480,8 +480,9 @@ func lifecycleEventFromStore(graphStore beads.Store, eventType string, step bead
 }
 
 // EmitCompleted is the sole close-side lifecycle entry point. step is a
-// committed close: the snapshot a local close or its writer's bead.closed
-// carried, or a live read that returned the row closed. Inferences (a row
+// committed close: the snapshot the controller's own cache write carried, or a
+// live read that returned the row closed. Any other writer's bead.closed is a
+// claim and reaches here only through such a read. Inferences (a row
 // absent from a scan) must be confirmed by such a read first.
 //
 // It records at most one fact per key: a fact this index already holds, from
@@ -489,7 +490,7 @@ func lifecycleEventFromStore(graphStore beads.Store, eventType string, step bead
 // re-inferred close is idempotent. The key is recorded unconfirmed, exactly as
 // the delta pass records its own facts, and an unloaded index stays unloaded,
 // so its first warm still reads the journal.
-func (idx *CompletedFactIndex) EmitCompleted(recorder events.Recorder, graphStore beads.Store, step beads.Bead, actor string) bool {
+func (idx *CompletedFactIndex) EmitCompleted(recorder events.Recorder, graphStore beads.GraphStore, step beads.Bead, actor string) bool {
 	if recorder == nil || !strings.EqualFold(strings.TrimSpace(step.Status), "closed") {
 		return false
 	}
@@ -531,7 +532,7 @@ func ReconcileCompletedStores(recorder events.Provider, graphStores []beads.Grap
 	}
 	hasStore := false
 	for _, graphStore := range graphStores {
-		if graphStore.Store != nil {
+		if graphStore != (beads.GraphStore{}) {
 			hasStore = true
 			break
 		}
@@ -696,7 +697,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 	}
 	emitted := 0
 	for _, graphStore := range graphStores {
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			continue
 		}
 		// One batched read for every named root this store might hold, rather
@@ -710,7 +711,7 @@ func (idx *CompletedFactIndex) ReconcileRoots(recorder events.Provider, graphSto
 			continue
 		}
 		sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
-		emitted += reconcileRoots(recorder, graphStore, roots, idx, actor)
+		emitted += reconcileRoots(recorder, graphStore, roots, idx, nil, actor)
 	}
 	return emitted
 }
@@ -890,20 +891,69 @@ type CompletionBackstop struct {
 	VisitStamped bool
 	// sweepVisitsStamped latches VisitStamped for the life of one sweep.
 	sweepVisitsStamped bool
-	// sweepStoreSignature latches an ORDER-SENSITIVE identity of the store fan at
-	// sweep start. The caller re-resolves its store set every chunk, and the
-	// cursor is an INDEX into it: if any position's store changes mid-sweep — a
-	// store added, removed, replaced, or reordered, even when the total COUNT is
-	// unchanged (completionReconcileInputs sorts the rig tail, so a rig add+remove
+	// sweepStores latches a copy of the store fan, in order, at sweep start; a
+	// copy, because the caller may reuse its slice. The caller re-resolves its
+	// store set every chunk, and the cursor is an INDEX into it: if any
+	// position's store changes mid-sweep — a store added, removed, replaced, or
+	// reordered, even when the total COUNT is unchanged
+	// (completionReconcileInputs sorts the rig tail, so a rig add+remove
 	// reorders it at equal length) — the held roots no longer correspond to the
 	// store at the cursor, so the sweep restarts rather than reconciling one
 	// store's roots against another store. A length-only latch missed the
-	// equal-length reorder; see storeFanSignature.
-	sweepStoreSignature string
+	// equal-length reorder; sameStoreFan compares the fans.
+	sweepStores []beads.GraphStore
 	// index is this sweep's idempotency record, loaded once per SWEEP rather
 	// than once per chunk. Re-reading the whole journal per chunk would make the
 	// chunking that keeps the sweep bounded cost more than the sweep it bounds.
 	index CompletedFactIndex
+	// emptyListings carries the closed roots whose step listing came back empty
+	// from one sweep to the next, so a root with no steps converges without a
+	// single empty answer stamping it.
+	emptyListings emptyListingRecord
+}
+
+// emptyListingKey names one root at one position of the store fan.
+type emptyListingKey struct {
+	store int
+	root  string
+}
+
+// emptyListingRecord remembers which closed roots the last complete sweep
+// listed with no step rows. An empty listing is the true answer for a closed
+// root whose member rows are gone or carry no gc.step_id, and it is also what a
+// wedged store answering empty-with-nil returns for a root that has steps. One
+// answer cannot tell the two apart, so an empty listing converges a root only
+// when the previous sweep, over the same store fan, listed that root empty too.
+type emptyListingRecord struct {
+	// previous holds the roots the last complete sweep listed empty, and fan
+	// a copy of the store fan that sweep ran over.
+	previous map[emptyListingKey]struct{}
+	fan      []beads.GraphStore
+	// current holds the roots this sweep has listed empty so far.
+	current map[emptyListingKey]struct{}
+}
+
+// confirm records that key listed empty in this sweep, over the store fan
+// fan, and reports whether the previous complete sweep listed it empty over
+// the same fan (sameStoreFan).
+func (r *emptyListingRecord) confirm(fan []beads.GraphStore, key emptyListingKey) bool {
+	if r.current == nil {
+		r.current = map[emptyListingKey]struct{}{}
+	}
+	r.current[key] = struct{}{}
+	if !sameStoreFan(r.fan, fan) {
+		return false
+	}
+	_, confirmed := r.previous[key]
+	return confirmed
+}
+
+// completeSweep makes this sweep's empty listings the record the next sweep
+// confirms against.
+func (r *emptyListingRecord) completeSweep(fan []beads.GraphStore) {
+	r.previous = r.current
+	r.fan = slices.Clone(fan)
+	r.current = nil
 }
 
 // CompletionBackstopResult is one chunk's outcome.
@@ -938,7 +988,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 		result.SweepComplete = true
 		return result
 	}
-	b.prepareSweep(storeFanSignature(graphStores))
+	b.prepareSweep(graphStores)
 	if !b.index.warm(recorder) {
 		result.WarmFailed = true
 		return result
@@ -948,7 +998,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			return result
 		}
 		graphStore := graphStores[b.storeIndex]
-		if graphStore.Store == nil {
+		if graphStore == (beads.GraphStore{}) {
 			b.advanceStore()
 			continue
 		}
@@ -977,7 +1027,11 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 			}
 		}
 		chunk := remaining[:budget]
-		result.Emitted += reconcileRoots(recorder, graphStore, chunk, &b.index, actor)
+		storeIndex := b.storeIndex
+		confirmEmpty := func(rootID string) bool {
+			return b.emptyListings.confirm(b.sweepStores, emptyListingKey{store: storeIndex, root: rootID})
+		}
+		result.Emitted += reconcileRoots(recorder, graphStore, chunk, &b.index, confirmEmpty, actor)
 		result.RootsVisited += len(chunk)
 		if len(chunk) > 0 {
 			b.afterRootID = chunk[len(chunk)-1].ID
@@ -988,6 +1042,7 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 	}
 	b.storeIndex = 0
 	b.afterRootID = ""
+	b.emptyListings.completeSweep(b.sweepStores)
 	result.SweepComplete = true
 	return result
 }
@@ -996,18 +1051,18 @@ func (b *CompletionBackstop) Pass(recorder events.Provider, graphStores []beads.
 // re-derives the completion record — nothing feeds this index between sweeps, so
 // a warm one would only know the facts it emitted itself and would re-emit
 // everything the delta lane or the close path recorded — and latches the sweep's
-// VisitStamped choice and store-fan signature. Mid-sweep, a changed store fan (a
+// VisitStamped choice and a copy of its store fan. Mid-sweep, a changed store fan (a
 // store added, removed, replaced, or reordered, even at unchanged length) means
 // the cursor's store index no longer names the store its held roots came from, so
 // the sweep restarts against the current fan.
-func (b *CompletionBackstop) prepareSweep(storeSignature string) {
+func (b *CompletionBackstop) prepareSweep(graphStores []beads.GraphStore) {
 	if b.storeIndex == 0 && b.afterRootID == "" && !b.storeRootsLoaded {
 		b.index.Invalidate()
 		b.sweepVisitsStamped = b.VisitStamped
-		b.sweepStoreSignature = storeSignature
+		b.sweepStores = slices.Clone(graphStores)
 		return
 	}
-	if b.sweepStoreSignature == storeSignature {
+	if sameStoreFan(b.sweepStores, graphStores) {
 		return
 	}
 	b.storeIndex = 0
@@ -1015,8 +1070,9 @@ func (b *CompletionBackstop) prepareSweep(storeSignature string) {
 	b.storeRoots = nil
 	b.storeRootsLoaded = false
 	b.skippedConverged = 0
+	b.emptyListings.current = nil
 	b.sweepVisitsStamped = b.VisitStamped
-	b.sweepStoreSignature = storeSignature
+	b.sweepStores = slices.Clone(graphStores)
 }
 
 // ensureStoreRoots lists graphStore's graph.v2 workflow roots and holds the ones
@@ -1081,44 +1137,41 @@ func (b *CompletionBackstop) advanceStore() {
 	b.skippedConverged = 0
 }
 
-// storeFanSignature builds an order-sensitive identity for a resolved store fan.
-// The sweep cursor is an INDEX into this slice, so a mid-sweep change to which
-// store sits at any position — one added, removed, or replaced, even when the
-// total count is unchanged — must restart the sweep. Pointer identity of each
-// embedded store, taken in slice order, captures exactly that: two fans with the
-// same stores in the same order share a signature, and any reorder or
-// replacement diverges. This identity guarantee holds for pointer-backed stores,
-// which every production Store is (*BdStore, *CachingStore, *MemStore). A nil
-// store and a store whose concrete value is not a pointer (no stable address to
-// compare) get fixed markers ("nil"/"np"), so such entries are compared by shape
-// and position only: two DISTINCT non-pointer stores at the same index share the
-// "np" marker and would NOT diverge — acceptable only because no production fan
-// holds one.
-func storeFanSignature(graphStores []beads.GraphStore) string {
-	var b strings.Builder
-	for i, graphStore := range graphStores {
-		if i > 0 {
-			b.WriteByte('|')
-		}
-		if graphStore.Store == nil {
-			b.WriteString("nil")
-			continue
-		}
-		v := reflect.ValueOf(graphStore.Store)
-		if v.Kind() == reflect.Pointer && !v.IsNil() {
-			fmt.Fprintf(&b, "%d", v.Pointer())
-			continue
-		}
-		b.WriteString("np")
+// sameStoreFan reports whether a and b are one store fan: the same physical
+// stores (beads.SameStore) at the same positions, a zero handle matching only a
+// zero handle. The sweep cursor is an INDEX into the fan, so a mid-sweep change
+// to which store sits at any position — one added, removed, or replaced, even
+// when the total count is unchanged — must restart the sweep, while a fan the
+// caller re-resolved to the same stores must not. Every production store is a
+// comparable pointer (*BdStore, *CachingStore, *MemStore); a store whose
+// dynamic type is not comparable is the same as nothing, so a fan holding one
+// restarts the sweep on every Pass, and no production fan holds one.
+func sameStoreFan(a, b []beads.GraphStore) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	return b.String()
+	for i := range a {
+		zeroA, zeroB := a[i] == (beads.GraphStore{}), b[i] == (beads.GraphStore{})
+		if zeroA || zeroB {
+			if zeroA != zeroB {
+				return false
+			}
+			continue
+		}
+		if !beads.SameStore(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // reconcileRoots projects the closed steps of the supplied roots and records the
 // completion facts the journal is missing. The index is updated as it goes so
 // one pass cannot emit the same fact twice across stores. Each root's converged
-// stamp is written or cleared from the signals its step pass gathered.
-func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, actor string) int {
+// stamp is written or cleared from the signals its step pass gathered, and
+// confirmEmpty decides a closed root that listed no step rows (see
+// applyConvergenceStamp).
+func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots []beads.Bead, completed *CompletedFactIndex, confirmEmpty func(rootID string) bool, actor string) int {
 	emitted := 0
 	for _, root := range roots {
 		if root.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindWorkflow ||
@@ -1131,7 +1184,7 @@ func reconcileRoots(recorder events.Recorder, graphStore beads.GraphStore, roots
 		}
 		emittedForRoot, unconfirmedForRoot, everyStepClosed := reconcileRootSteps(recorder, root, rows, completed, actor)
 		emitted += emittedForRoot
-		applyConvergenceStamp(graphStore, root, len(rows), emittedForRoot, unconfirmedForRoot, everyStepClosed)
+		applyConvergenceStamp(graphStore, root, len(rows), emittedForRoot, unconfirmedForRoot, everyStepClosed, confirmEmpty)
 	}
 	return emitted
 }
@@ -1180,29 +1233,47 @@ func reconcileRootSteps(recorder events.Recorder, root beads.Bead, rows []stepRo
 // applyConvergenceStamp writes or clears root's converged stamp from the signals
 // reconcileRootSteps gathered. Both writes are best-effort: a failed stamp
 // re-proves and a failed clear re-heals on the next sweep.
-func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCount, emittedForRoot, unconfirmedForRoot int, everyStepClosed bool) {
+//
+// confirmEmpty answers for a closed root whose listing held no step rows: it
+// reports whether the previous sweep listed the same root empty. A caller that
+// keeps no record across passes supplies nil, and an empty listing then never
+// stamps.
+func applyConvergenceStamp(graphStore beads.GraphStore, root beads.Bead, rowCount, emittedForRoot, unconfirmedForRoot int, everyStepClosed bool, confirmEmpty func(rootID string) bool) {
 	stamped := strings.TrimSpace(root.Metadata[beadmeta.CompletionFactsConvergedMetadataKey]) != ""
-	// VERIFIED convergence only: this pass emitted NOTHING for the root AND every
-	// surviving witness was JOURNAL-CONFIRMED (read back by the warm index), not a
-	// self-added phantom. A key this process merely add()ed for a best-effort
-	// Record that may have been silently dropped is unconfirmed and blocks the
-	// stamp (unconfirmedForRoot > 0) until a later journal read confirms the fact
-	// really landed — otherwise a dropped append would stamp a PERMANENT fact loss
-	// (the review's critical). A pass that emitted stamps nothing either: its
-	// Record calls are fire-and-forget, so the root converges a sweep later,
-	// forever after. rowCount > 0 keeps a transiently empty step listing (a store
-	// wedge answering empty-with-nil) from vacuously proving convergence. The stamp
-	// only ever applies to a closed root.
-	converged := emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && rowCount > 0 &&
-		strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+	closed := strings.EqualFold(strings.TrimSpace(root.Status), "closed")
+	var converged bool
+	if rowCount == 0 && closed {
+		// A closed root that lists no step rows has no fact to emit, now or later:
+		// its member rows are gone, or they carry no gc.step_id and never qualify
+		// as steps. A wedged store answering empty-with-nil gives the same answer
+		// for a root that has steps, so one empty listing proves nothing either
+		// way. It never clears a stamp, and it stamps a root only when the previous
+		// sweep listed the root empty too.
+		if stamped || confirmEmpty == nil {
+			return
+		}
+		converged = confirmEmpty(root.ID)
+	} else {
+		// VERIFIED convergence only: this pass emitted NOTHING for the root AND
+		// every surviving witness was JOURNAL-CONFIRMED (read back by the warm
+		// index), not a self-added phantom. A key this process merely add()ed for a
+		// best-effort Record that may have been silently dropped is unconfirmed and
+		// blocks the stamp (unconfirmedForRoot > 0) until a later journal read
+		// confirms the fact really landed — otherwise a dropped append would stamp
+		// a PERMANENT fact loss (the review's critical). A pass that emitted stamps
+		// nothing either: its Record calls are fire-and-forget, so the root
+		// converges a sweep later, forever after. The stamp only ever applies to a
+		// closed root.
+		converged = emittedForRoot == 0 && unconfirmedForRoot == 0 && everyStepClosed && closed
+	}
 	switch {
 	case converged && !stamped:
 		_ = graphStore.SetMetadata(root.ID, beadmeta.CompletionFactsConvergedMetadataKey, time.Now().UTC().Format(time.RFC3339))
 	case stamped && !converged:
 		// A stamped root this pass could still emit for — one with an unconfirmed
-		// witness, open steps, or an invisible listing — carries a STALE stamp (a
-		// hand-reopened step, a vacuous stamp from a past wedge, or a false stamp a
-		// since-fixed phantom left behind), OR a root that has REOPENED
+		// witness or open steps — carries a STALE stamp (a hand-reopened step, a
+		// stamp a wedge left by answering empty on two consecutive sweeps, or a
+		// false stamp a since-fixed phantom left behind), OR a root that has REOPENED
 		// (root.Status != closed) while its step rows stayed closed (a converged
 		// root re-driven/retried). The stamp only ever applies to a closed root, so
 		// a stamped non-closed root is always stale. Clear it so the sweeps resume

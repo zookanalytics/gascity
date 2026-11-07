@@ -5,6 +5,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/spf13/cobra"
 )
@@ -16,20 +17,38 @@ import (
 // answer" and "the nudge never reached anyone" call for opposite responses.
 // These outcomes are that distinction, reported per nudge id.
 //
-// The two below cover a nudge still live in the queue. A nudge that has left
-// the queue is classified by nudgequeue.OutcomeForState, which answers
-// delivered, dropped, or unknown for a state it cannot classify.
+// The first two cover a nudge still live in the queue. A nudge that has left
+// the queue is classified by nudgeOutcomeForShadowState over
+// nudgequeue.ClassifyTerminalState, which answers delivered, dropped, or
+// unknown for a state that carries no delivery outcome.
 const (
 	// nudgeOutcomePending: accepted and still waiting for a delivery boundary.
 	nudgeOutcomePending = "pending"
 	// nudgeOutcomeInFlight: claimed by a delivery pass, not yet acknowledged.
 	nudgeOutcomeInFlight = "in_flight"
 	// nudgeOutcomeDelivered: handed to the target's runtime.
-	nudgeOutcomeDelivered = nudgequeue.OutcomeDelivered
+	nudgeOutcomeDelivered = "delivered"
 	// nudgeOutcomeDropped: terminalized without delivery — dead-lettered,
 	// expired, withdrawn or superseded. Reason carries which.
-	nudgeOutcomeDropped = nudgequeue.OutcomeDropped
+	nudgeOutcomeDropped = "dropped"
+	// nudgeOutcomeUnknown: the shadow state carries no delivery outcome this
+	// build understands. Reported as-is rather than guessed at.
+	nudgeOutcomeUnknown = "unknown"
 )
+
+// nudgeOutcomeForShadowState maps a shadow bead's lifecycle state onto the
+// outcome gc nudge show reports. A superseded nudge reads as dropped: the
+// entry that replaced it carries its delivery.
+func nudgeOutcomeForShadowState(state string) string {
+	switch nudgequeue.ClassifyTerminalState(state) {
+	case nudgequeue.OutcomeDelivered:
+		return nudgeOutcomeDelivered
+	case nudgequeue.OutcomeFailed, nudgequeue.OutcomeSuperseded:
+		return nudgeOutcomeDropped
+	default:
+		return nudgeOutcomeUnknown
+	}
+}
 
 // nudgeOutcomeReport is the resolved fate of a single queued nudge. State is
 // the underlying record ("pending"/"in_flight"/"dead" for a live queue entry,
@@ -165,7 +184,7 @@ func resolveQueuedNudgeOutcome(cityPath, nudgeID string) (nudgeOutcomeReport, bo
 	if store.Store == nil {
 		return nudgeOutcomeReport{}, false, nil
 	}
-	shadow, ok, err := nudgeFrontDoor(store).FindIncludingTerminal(nudgeID)
+	shadow, ok, err := nudgeShadows(store).FindIncludingTerminal(nudgeID)
 	if err != nil {
 		return nudgeOutcomeReport{}, false, err
 	}
@@ -174,7 +193,7 @@ func resolveQueuedNudgeOutcome(cityPath, nudgeID string) (nudgeOutcomeReport, bo
 	}
 	return nudgeOutcomeReport{
 		NudgeID:   nudgeID,
-		Outcome:   nudgequeue.OutcomeForState(shadow.State),
+		Outcome:   nudgeOutcomeForShadowState(shadow.State),
 		State:     shadow.State,
 		Reason:    shadowNudgeReason(shadow),
 		Agent:     shadow.Agent,
@@ -196,7 +215,7 @@ func shadowNudgeReason(shadow nudgequeue.NudgeShadow) string {
 }
 
 func loadNudgeQueueState(cityPath string) (nudgeQueueState, error) {
-	return nudgequeue.LoadState(cityPath)
+	return openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 }
 
 func renderNudgeOutcome(cityPath string, report nudgeOutcomeReport, jsonOutput bool, stdout, stderr io.Writer) int {

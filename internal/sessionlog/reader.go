@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -23,6 +24,11 @@ type Session struct {
 	// Entries that aren't relevant for display (file-history-snapshot,
 	// progress hooks) are filtered out.
 	Messages []*Entry
+
+	// DetachedUsage holds per-invocation usage parsed from the whole transcript
+	// for providers that record usage apart from assistant messages (Codex).
+	// Consumers associate it against the full message list before paging.
+	DetachedUsage []TailUsage
 
 	// OrphanedToolUseIDs contains tool_use IDs with no matching result.
 	OrphanedToolUseIDs map[string]bool
@@ -42,6 +48,9 @@ type Session struct {
 type SessionDiagnostics struct {
 	MalformedLineCount int
 	MalformedTail      bool
+	// DroppedRecordCount counts records the transcript writer reported it
+	// could not record (gc ACP captures under backpressure).
+	DroppedRecordCount int
 }
 
 // PaginationInfo describes the pagination state of a session response.
@@ -156,7 +165,9 @@ func ReadProviderFile(provider, path string, tailCompactions int) (*Session, err
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -238,7 +249,9 @@ func ReadProviderFileRaw(provider, path string, tailCompactions int) (*Session, 
 		sess *Session
 		err  error
 	)
-	switch ProviderFamily(provider) {
+	switch transcriptFamily(provider, path) {
+	case acpCaptureFamily:
+		sess, err = ReadACPCaptureFile(path, tailCompactions)
 	case "auggie":
 		sess, err = ReadAuggieFile(path, tailCompactions)
 	case "amp":
@@ -451,6 +464,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		raw := make([]byte, len(line))
 		copy(raw, line)
 		e.Raw = raw
+		attachClaudeAPIErrorEvent(&e)
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
@@ -640,7 +654,28 @@ func FindProviderFallbackSessionFile(searchPaths []string, provider, workDir str
 // FindSessionFileByID resolves a Claude-style session log path using the
 // known session ID. This is the safest lookup when multiple sessions share
 // the same working directory.
+//
+// It looks first in the project folders derived from workDir. A session can
+// start in a directory other than the work_dir its session bead records, and
+// Claude files the transcript under the directory the session started in. So
+// when those folders miss and sessionID is a UUID, it looks for the file in
+// every project folder under each search path. Only a UUID names one session
+// wherever its file sits, so any other ID stays within workDir's folders.
 func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string {
+	if path := FindSessionFileByIDInWorkDir(searchPaths, workDir, sessionID); path != "" {
+		return path
+	}
+	if workDir == "" || !isCanonicalUUID(strings.TrimSpace(sessionID)) {
+		return ""
+	}
+	return findSessionFileInAnyProject(searchPaths, safeSessionLogFileName(sessionID))
+}
+
+// FindSessionFileByIDInWorkDir resolves a Claude-style session log path using
+// the known session ID, looking only in the project folders derived from
+// workDir: the folders a Claude process started in workDir files its sessions
+// under.
+func FindSessionFileByIDInWorkDir(searchPaths []string, workDir, sessionID string) string {
 	if workDir == "" || sessionID == "" {
 		return ""
 	}
@@ -649,6 +684,64 @@ func FindSessionFileByID(searchPaths []string, workDir, sessionID string) string
 		return ""
 	}
 	return findSessionFileByIDForCandidates(searchPaths, claudeProjectSlugCandidates(workDir), fileName)
+}
+
+// findSessionFileInAnyProject looks for fileName in every project folder under
+// each search path, at the cost of one directory read per search path and one
+// stat per project folder. The earliest search path holding the file wins, and
+// within it the most recently modified copy.
+func findSessionFileInAnyProject(searchPaths []string, fileName string) string {
+	if fileName == "" {
+		return ""
+	}
+	for _, base := range searchPaths {
+		entries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		var bestPath string
+		var bestTime int64
+		for _, e := range entries {
+			if !e.IsDir() && e.Type()&os.ModeSymlink == 0 {
+				continue
+			}
+			path := filepath.Join(base, e.Name(), fileName)
+			info, err := os.Stat(path)
+			if err != nil || info.IsDir() {
+				continue
+			}
+			if mt := info.ModTime().UnixNano(); bestPath == "" || mt > bestTime {
+				bestTime = mt
+				bestPath = path
+			}
+		}
+		if bestPath != "" {
+			return bestPath
+		}
+	}
+	return ""
+}
+
+// isCanonicalUUID reports whether s has the canonical 8-4-4-4-12 hexadecimal
+// UUID layout.
+func isCanonicalUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func findSessionFileByIDForCandidates(searchPaths, slugs []string, fileName string) string {
@@ -1674,12 +1767,16 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		slug := ProjectSlug(path)
-		if seenSlugs[slug] {
-			continue
+		// Current Claude versions replace every UTF-16 code unit outside
+		// [A-Za-z0-9] with "-", underscores included. Keep the legacy
+		// spelling as a candidate for transcripts written earlier.
+		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
+			if seenSlugs[slug] {
+				continue
+			}
+			seenSlugs[slug] = true
+			slugs = append(slugs, slug)
 		}
-		seenSlugs[slug] = true
-		slugs = append(slugs, slug)
 	}
 	return slugs
 }
@@ -1710,6 +1807,27 @@ func addDarwinClaudePathAliases(path string, add func(string)) {
 	case strings.HasPrefix(path, "/private/var/"):
 		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
+}
+
+// claudeSanitizedProjectSlug is the project directory name current Claude
+// Code versions write: every UTF-16 code unit outside [A-Za-z0-9] becomes "-"
+// (Claude is a JavaScript program, so a character outside the Basic
+// Multilingual Plane becomes two).
+func claudeSanitizedProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		n := utf16.RuneLen(r)
+		if n < 1 {
+			n = 1
+		}
+		b.WriteString(strings.Repeat("-", n))
+	}
+	return b.String()
 }
 
 // ProjectSlug converts an absolute path to the project directory slug

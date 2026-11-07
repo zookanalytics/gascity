@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -202,10 +201,12 @@ type forceLifecycleProvider struct {
 	// moments and the gap between them is what used to make this test flaky:
 	// enqueuePreparedStartWaveForCity runs the provider Start, then commits
 	// the session's creating -> active transition, and only then releases the
-	// tracker. A stop that lands in the gap is rejected by the session state
-	// machine ("state \"creating\" does not accept command \"suspend\""), so
-	// the late runtime survives a shutdown the test expected to tear it down.
-	// Waiting on the tracker puts the second sweep strictly after the commit.
+	// tracker. A sweep stop that lands in the gap now tears the runtime down
+	// through Manager.Suspend's sweep-only creating latitude, writing nothing
+	// to the row, which stays its start's; this test still waits out the gap
+	// so the second sweep stops a committed row, the ordinary path (a sweep
+	// stop of a row still reading creating is
+	// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
 	awaitAsyncStart func() bool
 }
 
@@ -272,8 +273,9 @@ func (p *forceLifecycleProvider) ListRunning(prefix string) ([]string, error) {
 		}
 		// Provider Start has returned; the session's creating -> active commit
 		// has not necessarily landed yet. Wait for the whole async-start
-		// goroutine so the second sweep stops a session the state machine will
-		// actually accept a stop for.
+		// goroutine so the second sweep stops a committed row, the ordinary
+		// path (a sweep stop of a row still reading creating is
+		// TestCityRuntimeForceShutdownStopsALateStartItCanceled's).
 		if awaitAsyncStart != nil && !awaitAsyncStart() {
 			p.record("asyncStartWaitTimedOut")
 		}
@@ -309,6 +311,7 @@ var (
 // live. It also confirms the owned+enumerated gate lets the teardown through
 // on the force path.
 func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	clk := &clock.Fake{Time: time.Date(2026, 4, 26, 12, 1, 30, 0, time.UTC)}
 	session, err := store.Create(beads.Bead{
@@ -360,7 +363,7 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		sp,
 		store,
 		"test-city",
-		"",
+		testCity,
 		clk,
 		events.Discard,
 		time.Minute,
@@ -403,111 +406,5 @@ func TestCityRuntimeForceShutdownTearsDownAfterLateAsyncSweep(t *testing.T) {
 		// The four assertions above all print ev; this one did not, so the only
 		// assertion that ever fires was the only undiagnosable one (ga-0q686).
 		t.Fatalf("force shutdown missed the late async-started runtime (events: %v)", ev)
-	}
-}
-
-// TestCityRuntimeForceShutdownStopsMidCreateSession pins the guarantee the
-// late-async-sweep test above can only reach by luck. That test races the
-// async start's commit against shutdown, so it exercises the mid-create path
-// only when the commit loses; when the commit wins, the bead is already active
-// and the stop takes the kill branch instead. Here the bead is held mid-create
-// outright, with no async machinery at all, so the stop path has exactly one
-// route to take.
-//
-// The route used to dead-end: an unmarked bead goes to the suspend branch, and
-// suspend rejects start-pending and creating as illegal transitions before
-// reaching the provider, leaving the runtime alive with the error swallowed by
-// a best-effort stderr. That is what made the sweep test flaky under load
-// (gc-04375). The stop path now routes mid-create targets to the teardown-only
-// kill lever instead, so the runtime dies while the bead keeps the start
-// request the reconciler still owns.
-//
-// Both subcases here seed a live runtime, because that is the only shape force
-// shutdown can reach: it stops what ListRunning reports, so a mid-create bead
-// with no runtime never becomes a stop target on this path. The no-runtime
-// shape — start-pending's ordinary one — is covered where the routing
-// decision is actually made, in
-// TestStopTargetThroughWorkerBoundaryRoutesMidCreateToKill.
-func TestCityRuntimeForceShutdownStopsMidCreateSession(t *testing.T) {
-	for _, state := range []string{"start-pending", "creating"} {
-		t.Run(state, func(t *testing.T) {
-			store := beads.NewMemStore()
-			meta := creatingMeta(map[string]string{
-				"session_name":         "worker",
-				"template":             "worker",
-				"generation":           "1",
-				"continuation_epoch":   "1",
-				"instance_token":       "tok-worker",
-				"pending_create_claim": "true",
-			})
-			meta["state"] = state
-			session, err := store.Create(beads.Bead{
-				ID:       "gc-worker",
-				Title:    "worker",
-				Type:     sessionBeadType,
-				Labels:   []string{sessionBeadLabel},
-				Metadata: meta,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			sp := runtime.NewFake()
-			// The provider start landed; the commit that would mark the
-			// bead active never did.
-			if err := sp.Start(context.Background(), "worker", runtime.Config{}); err != nil {
-				t.Fatalf("seeding runtime: %v", err)
-			}
-			_ = sessiontest.SeedBead(t, session)
-
-			cfg := &config.City{
-				Daemon: config.DaemonConfig{ShutdownTimeout: "500ms"},
-				Agents: []config.Agent{{Name: "worker"}},
-			}
-			forceStop := &atomic.Bool{}
-			forceStop.Store(true)
-			stderr := &bytes.Buffer{}
-			cr := &CityRuntime{
-				cfg:                 cfg,
-				sp:                  sp,
-				rec:                 events.Discard,
-				standaloneCityStore: store,
-				asyncStartLimiter:   newAsyncStartLimiter(maxParallelStartsPerTick(cfg)),
-				forceStopShutdown:   forceStop,
-				logPrefix:           "gc test",
-				stdout:              ioDiscard{},
-				stderr:              stderr,
-			}
-			markOwnedForTest(cr)
-
-			cr.shutdown()
-
-			if sp.IsRunning("worker") {
-				t.Errorf("force shutdown left the %s session running", state)
-			}
-			if sp.CountCalls("Stop", "worker") == 0 {
-				t.Errorf("force shutdown never asked the provider to stop the %s session", state)
-			}
-			if strings.Contains(stderr.String(), "gc stop: stopping worker") {
-				t.Errorf("force shutdown reported a stop failure for the %s session: %s", state, stderr.String())
-			}
-			// The bead stays mid-create for the reconciler to reap: an
-			// in-flight create may still be running, so recording a suspend
-			// here would claim a lifecycle the session never had. The start
-			// request has to survive with it — the reconciler reads raw
-			// start-pending and pending_create_claim as "still queued to
-			// start", and clearing either under an in-flight create races
-			// that create's own commit and rollback.
-			b, err := store.Get(session.ID)
-			if err != nil {
-				t.Fatalf("get bead: %v", err)
-			}
-			if got := b.Metadata["state"]; got != state {
-				t.Errorf("bead state = %q after force shutdown, want it left at %q", got, state)
-			}
-			if got := b.Metadata["pending_create_claim"]; got != "true" {
-				t.Errorf("pending_create_claim = %q after force shutdown, want it left at %q", got, "true")
-			}
-		})
 	}
 }

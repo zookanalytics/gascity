@@ -56,8 +56,8 @@ func (f executorIdentityResidueFinding) describe() string {
 	return fmt.Sprintf("%s bead %s carries stale executor-identity stamp residue (%s)", f.label, f.beadID, strings.Join(f.keys, ", "))
 }
 
-func (c *executorIdentityResidueCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
-	findings, skipped := c.collect()
+func (c *executorIdentityResidueCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+	findings, skipped := c.collect(ctx)
 	if len(findings) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no stale executor-identity stamp residue found")
 	}
@@ -85,8 +85,8 @@ func (c *executorIdentityResidueCheck) Run(_ *doctor.CheckContext) *doctor.Check
 		details)
 }
 
-func (c *executorIdentityResidueCheck) Fix(_ *doctor.CheckContext) error {
-	findings, skipped := c.collect()
+func (c *executorIdentityResidueCheck) Fix(ctx *doctor.CheckContext) error {
+	findings, skipped := c.collect(ctx)
 	var errs []error
 	for _, f := range findings {
 		if len(f.keys) == 0 {
@@ -124,13 +124,19 @@ func (c *executorIdentityResidueCheck) Fix(_ *doctor.CheckContext) error {
 	return errors.Join(errs...)
 }
 
-func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityResidueFinding, skipped []string) {
+// collect opens the city and every non-suspended, path-bearing rig store,
+// builds the session-identity index, and scans each store for residue. It
+// stops reading once the doctor runner abandons the check.
+func (c *executorIdentityResidueCheck) collect(ctx *doctor.CheckContext) (findings []executorIdentityResidueFinding, skipped []string) {
 	if c.newStore == nil {
 		return nil, nil
 	}
 	type residueScope struct {
 		label string
 		store beads.Store
+		// sessionless marks a rig store proven relic-free (S4b): it holds
+		// no session bead to union into the identity index.
+		sessionless bool
 	}
 	var scopes []residueScope
 	var cityStore beads.Store
@@ -155,7 +161,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 				skipped = append(skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
 				continue
 			}
-			scopes = append(scopes, residueScope{label: label, store: store})
+			scopes = append(scopes, residueScope{label: label, store: store, sessionless: splitRigGraphRelicFree(cliStorageRoutes(c.cityPath), rig.Name)})
 		}
 	}
 	if len(scopes) == 0 {
@@ -180,6 +186,10 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 		skipped = append(skipped, "all scopes skipped: session-identity index unavailable: city bead store did not open")
 		return nil, skipped
 	}
+	if ctx.Canceled() {
+		skipped = append(skipped, fmt.Sprintf("all scopes skipped: %v", doctor.ErrCheckAbandoned))
+		return nil, skipped
+	}
 	sessionStore := cliSessionStore(cityStore, c.cfg, c.cityPath)
 	sessionIdentities, err := buildExecutorRouteIdentityIndex(sessionStore)
 	if err != nil {
@@ -188,15 +198,21 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	}
 
 	for _, sc := range scopes {
+		if ctx.Canceled() {
+			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
+			continue
+		}
 		identities := sessionIdentities
 		// Union in a DISTINCT scope store's own session beads, so a rig that
-		// does hold session records still contributes them. Interface identity
-		// is the right test -- production stores are pointer-backed
-		// CachingStores -- and it keeps the default single-store city from
-		// scanning the same rows twice. The union is built into the scope's own
-		// index rather than into the shared one, so one scope's session beads
-		// can never leak into the next scope's verdict.
-		if sc.store != sessionStore {
+		// does hold session records still contributes them. The stores are
+		// compared by the engine they serve, which keeps the default
+		// single-store city from scanning the same rows twice: there the
+		// session store is the city store rebuilt with an emitter under its
+		// policy layer (withMainStoreEmission), a different value over the same
+		// engine. The union is built into the scope's own index rather than
+		// into the shared one, so one scope's session beads can never leak into
+		// the next scope's verdict.
+		if !sc.sessionless && !sameStoreEngine(sc.store, sessionStore) {
 			scopeIdentities, idxErr := buildExecutorRouteIdentityIndex(sc.store)
 			if idxErr != nil {
 				skipped = append(skipped, fmt.Sprintf("%s skipped: listing session beads: %v", sc.label, idxErr))
@@ -205,7 +221,7 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 			scopeIdentities.backfill(sessionIdentities)
 			identities = scopeIdentities
 		}
-		scopeFindings, listErr := c.collectStoreFindings(sc.store, sc.label, identities)
+		scopeFindings, listErr := c.collectStoreFindings(ctx, sc.store, sc.label, identities)
 		findings = append(findings, scopeFindings...)
 		if listErr != nil {
 			skipped = append(skipped, fmt.Sprintf("%s skipped: listing beads: %v", sc.label, listErr))
@@ -214,7 +230,13 @@ func (c *executorIdentityResidueCheck) collect() (findings []executorIdentityRes
 	return findings, skipped
 }
 
-func (c *executorIdentityResidueCheck) collectStoreFindings(store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+// collectStoreFindings scans store's open beads for stale executor-identity
+// stamps, judged against routeIdentities. It issues no scan once the doctor
+// runner abandons the check.
+func (c *executorIdentityResidueCheck) collectStoreFindings(ctx *doctor.CheckContext, store beads.Store, label string, routeIdentities executorRouteIdentityIndex) ([]executorIdentityResidueFinding, error) {
+	if ctx.Canceled() {
+		return nil, doctor.ErrCheckAbandoned
+	}
 	items, err := store.List(beads.ListQuery{Status: "open", AllowScan: true, Live: true})
 	if err != nil {
 		return nil, err
@@ -287,7 +309,14 @@ func (idx executorRouteIdentityIndex) backfill(other executorRouteIdentityIndex)
 // legitimate identity and this check's Fix() deletes state.
 func buildExecutorRouteIdentityIndex(store beads.Store) (executorRouteIdentityIndex, error) {
 	idx := make(executorRouteIdentityIndex)
-	all, listErr := sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+	// Relic leg (S4 debt) for a scope store unioned beside the sessions
+	// store: it holds session beads only as pre-split rows.
+	var all []session.Info
+	listErr := beads.RelicRead(func() error {
+		var err error
+		all, err = sessionFrontDoor(store).ListAll(session.ListAllOptions{IncludeClosed: true})
+		return err
+	})
 	if listErr != nil && !beads.IsPartialResult(listErr) {
 		return nil, fmt.Errorf("listing session beads: %w", listErr)
 	}
@@ -418,4 +447,11 @@ func staleSessionNameStamp(cfg *config.City, bd beads.Bead, routeIdentities exec
 		return false
 	}
 	return !routeIdentities.legitimate(routedTo, sessionName)
+}
+
+// sameStoreEngine reports whether two stores serve the same bead engine, looking
+// through the layers gc wraps an engine in (storeEngine). Two stores with no
+// such layers compare as themselves.
+func sameStoreEngine(a, b beads.Store) bool {
+	return storeEngine(a) == storeEngine(b)
 }

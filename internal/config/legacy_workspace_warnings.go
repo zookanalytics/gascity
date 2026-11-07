@@ -60,8 +60,8 @@ func IsLegacyWorkspaceFieldWarning(warning string) bool {
 // "<source>: workspace.<field> is deprecated:" and includes the
 // suggested replacement.
 //
-// This function runs alongside ValidateSemantics during config load
-// and contributes to Provenance.Warnings. Output ordering matches the
+// This function runs with the deployment-layer checks during config load
+// (validateDeploymentLayer) and contributes to Provenance.Warnings. Output ordering matches the
 // declaration order below so warning text is stable across runs.
 //
 // Detection rules per field:

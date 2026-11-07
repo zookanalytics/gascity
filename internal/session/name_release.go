@@ -45,13 +45,10 @@ type ReleasedNameClaim struct {
 // there is to stop that session first. The refusal is all-or-nothing: no bead
 // is modified when any holder is live, so a partial release cannot leave the
 // name half-owned.
-func ReleaseSessionNameClaim(store beads.Store, target string) ([]ReleasedNameClaim, error) {
+func ReleaseSessionNameClaim(store beads.SessionStore, target string) ([]ReleasedNameClaim, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, fmt.Errorf("releasing session name claim: target must not be empty")
-	}
-	if store == nil {
-		return nil, nil
 	}
 
 	candidates, err := ExactMetadataSessionCandidates(store, true,

@@ -46,33 +46,31 @@ func TestDarwinProcessRecordUsesOneKinfoIdentity(t *testing.T) {
 	}
 }
 
-func TestDarwinKinfoMissingErrorsRequireGoneProbe(t *testing.T) {
+func TestDarwinProcessRecordReportsSessionLeader(t *testing.T) {
+	const eprocControllingTerminal = 0x1 // EPROC_CTTY
 	for _, test := range []struct {
-		name     string
-		kinfoErr error
-		probeErr error
-		wantGone bool
+		name string
+		flag int32
+		want bool
 	}{
-		{name: "EIO corroborated by ESRCH", kinfoErr: unix.EIO, probeErr: unix.ESRCH, wantGone: true},
-		{name: "EIO with live PID", kinfoErr: unix.EIO},
-		{name: "EIO with denied probe", kinfoErr: unix.EIO, probeErr: unix.EPERM},
-		{name: "ENOENT corroborated by ESRCH", kinfoErr: unix.ENOENT, probeErr: unix.ESRCH, wantGone: true},
-		{name: "ENOENT with live PID", kinfoErr: unix.ENOENT},
-		{name: "ENOENT with denied probe", kinfoErr: unix.ENOENT, probeErr: unix.EPERM},
-		{name: "unrelated error stays indeterminate", kinfoErr: unix.EACCES, probeErr: unix.ESRCH},
+		{name: "session leader", flag: eprocSessionLeader, want: true},
+		{name: "session leader with a controlling terminal", flag: eprocControllingTerminal | eprocSessionLeader, want: true},
+		{name: "member with a controlling terminal", flag: eprocControllingTerminal},
+		{name: "member", flag: 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := darwinKinfoErrorMeansGone(999, test.kinfoErr, func(int) error { return test.probeErr }); got != test.wantGone {
-				t.Fatalf("darwinKinfoErrorMeansGone(%v, probe=%v) = %t, want %t", test.kinfoErr, test.probeErr, got, test.wantGone)
+			process := unix.KinfoProc{
+				Proc:  unix.ExternProc{P_pid: 42, P_starttime: unix.Timeval{Sec: 123, Usec: 456}},
+				Eproc: unix.Eproc{Ppid: 11, Pgid: 42, Flag: test.flag},
+			}
+			record, ok := darwinProcessRecord(process)
+			if !ok {
+				t.Fatal("valid KinfoProc was rejected")
+			}
+			if record.SessionLeader != test.want {
+				t.Fatalf("SessionLeader = %t for e_flag %#x, want %t", record.SessionLeader, test.flag, test.want)
 			}
 		})
-	}
-
-	if !darwinKinfoErrorMeansGone(999, unix.ESRCH, func(int) error {
-		t.Fatal("direct ESRCH should not require a liveness probe")
-		return nil
-	}) {
-		t.Fatal("direct ESRCH was not classified as a vanished process")
 	}
 }
 

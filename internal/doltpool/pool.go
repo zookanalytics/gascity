@@ -118,6 +118,24 @@ func Open(host, port, user, password, database string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenPrivate returns a fresh single-connection *sql.DB for the given Dolt
+// endpoint, outside the registry, which the caller closes. It is the
+// explicit fresh-dial path for a caller that must not share a pooled session:
+// cmd/gc's storage maintenance window lists a server's sessions and counts
+// every session but its own, so its own must not sit in a pool other reads
+// leave idle connections in. One-shot use only, never per operation: a fresh
+// dial per call is the churn the registry exists to prevent.
+func OpenPrivate(host, port, user, password, database string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", formatDSN(host, port, user, password, database))
+	if err != nil {
+		return nil, fmt.Errorf("opening private dolt connection to %s:%s/%s: %w", host, port, database, err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
+	return db, nil
+}
+
 // OpenSocket returns a shared *sql.DB for a Dolt Unix-socket endpoint.
 func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
 	k := key("unix", socket, user, password, database)
@@ -140,6 +158,40 @@ func OpenSocket(socket, user, password, database string) (*sql.DB, error) {
 	return db, nil
 }
 
+// OpenDedicated returns a new *sql.DB for one statement that outlasts the
+// pool's read deadline, such as a CREATE INDEX, which sends nothing back
+// until it finishes. The handle stays out of the registry, holds a single
+// connection, and waits up to wait for each reply. The caller owns it and
+// must Close it.
+func OpenDedicated(host, port, user, password, database string, wait time.Duration) (*sql.DB, error) {
+	return openDedicated(dedicatedConfig("tcp", net.JoinHostPort(host, port), user, password, database, wait))
+}
+
+// OpenDedicatedSocket is OpenDedicated for a Dolt Unix-socket endpoint.
+func OpenDedicatedSocket(socket, user, password, database string, wait time.Duration) (*sql.DB, error) {
+	return openDedicated(dedicatedConfig("unix", socket, user, password, database, wait))
+}
+
+func dedicatedConfig(network, addr, user, password, database string, wait time.Duration) *mysql.Config {
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd, cfg.Net, cfg.Addr, cfg.DBName = user, password, network, addr, database
+	cfg.Timeout = connTimeout
+	cfg.ReadTimeout = wait
+	cfg.WriteTimeout = writeTimeout
+	cfg.AllowNativePasswords = true
+	cfg.ParseTime = true
+	return cfg
+}
+
+func openDedicated(cfg *mysql.Config) (*sql.DB, error) {
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("opening dedicated dolt connection %s/%s: %w", cfg.Addr, cfg.DBName, err)
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}
+
 // configurePool applies the per-endpoint caps to a new pooled handle. TCP and
 // Unix-socket pools share it so neither can drift from the other: the socket
 // path once skipped the idle bound, so its idle connections lived until
@@ -152,8 +204,12 @@ func configurePool(db *sql.DB) {
 	db.SetConnMaxIdleTime(connMaxIdleTime)
 }
 
-// Shutdown closes all pooled connections and empties the registry. Call
-// once on process exit; subsequent Open calls recreate pools on demand.
+// Shutdown closes all pooled connections and empties the registry. Call it on
+// process exit; subsequent Open calls recreate pools on demand. A one-shot
+// process may also call it mid-run to close its own idle sessions before it
+// judges a server's sessions (cmd/gc's storage maintenance window), provided
+// no caller still holds a handle Open returned: a held handle is closed under
+// it.
 func Shutdown() {
 	registry.mu.Lock()
 	defer registry.mu.Unlock()

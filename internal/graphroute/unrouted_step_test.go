@@ -3,6 +3,7 @@ package graphroute
 import (
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 )
@@ -38,7 +39,7 @@ func TestDecorateGraphWorkflowRecipe_NamelessPoolRouteLeavesStepUnrouted(t *test
 
 	// routedTo and sessionName both empty -> defaultRoute is
 	// {QualifiedName: "", MetadataOnly: true}: the cook-shaped binding.
-	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "", "", nil, "test-city", cfg, deps); err != nil {
+	if err := DecorateGraphWorkflowRecipe(r, nil, "src-1", "city", "test-city", "city:test", "", "", beads.SessionStore{}, "test-city", cfg, deps); err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipe: %v", err)
 	}
 	work := r.Steps[1]
@@ -74,7 +75,7 @@ func TestDecorateGraphWorkflowRecipe_EmptyDefaultBindingStillAllowed(t *testing.
 	}
 	deps := Deps{Resolver: testAgentResolver{}}
 
-	if err := DecorateGraphWorkflowRecipeWithDefaultBinding(r, nil, "", "", "", "", GraphRouteBinding{}, nil, "test-city", cfg, deps); err != nil {
+	if err := DecorateGraphWorkflowRecipeWithDefaultBinding(r, nil, "", "", "", "", GraphRouteBinding{}, beads.SessionStore{}, "test-city", cfg, deps); err != nil {
 		t.Fatalf("DecorateGraphWorkflowRecipeWithDefaultBinding: %v", err)
 	}
 	if got := r.Steps[1].Metadata["gc.routed_to"]; got != "frontend/worker" {

@@ -5,10 +5,13 @@ go_library(
     srcs = [
         "cmdline_darwin.go",
         "cmdline_other.go",
+        "environ_darwin.go",
         "listener.go",
         "pidutil.go",
         "procargs2.go",
         "subreaper.go",
+        "zombie_darwin.go",
+        "zombie_other.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
     visibility = ["//:__subpackages__"],
@@ -27,16 +30,28 @@ go_test(
     name = "pidutil_test",
     srcs = [
         "cmdline_portable_test.go",
+        "environ_darwin_test.go",
         "listener_test.go",
         "pidutil_test.go",
         "procargs2_test.go",
         "starttime_portable_test.go",
         "subreaper_test.go",
         "testenv_import_test.go",
+        "vanish_darwin_test.go",
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/testenv",
+    ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

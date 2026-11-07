@@ -31,7 +31,8 @@ func (s *DoltliteReadStore) ReadyGraphOnly(query ...ReadyQuery) ([]Bead, error) 
 		q.Limit = rq.Limit
 	}
 	depWhere, depArgs := doltliteWispDepGate()
-	return s.queryIssuesOrderedInTables(q, []doltliteTableSet{doltliteWispTables}, depWhere, depArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
+	rows, err := s.queryIssuesOrderedInTables(q, []doltliteTableSet{doltliteWispTables}, depWhere, depArgs, q.Limit, "ORDER BY COALESCE(i.priority, 2) ASC, i.created_at ASC, i.id ASC")
+	return rq.Fields.project(rows), err
 }
 
 // doltliteWispDepGate returns the blocking-dependency predicate for the wisp

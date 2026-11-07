@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // seedConvoys builds a store with convoyCount convoys, each tracking
@@ -25,7 +26,7 @@ func seedConvoys(tb testing.TB, convoyCount, membersEach int) (*beads.MemStore, 
 			if err != nil {
 				tb.Fatalf("create member: %v", err)
 			}
-			if err := TrackItem(store, convoy.ID, m.ID, store); err != nil {
+			if err := TrackItemIn(MemberClasses{Convoy: beadstest.Work(store), Work: []beads.WorkStore{beadstest.Work(store)}}, convoy.ID, m.ID); err != nil {
 				tb.Fatalf("track member: %v", err)
 			}
 		}
@@ -47,7 +48,7 @@ func BenchmarkConvoyMembers(b *testing.B) {
 		b.Run(fmt.Sprintf("per-convoy/%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				for _, id := range ids {
-					if _, err := Members(store, id, true); err != nil {
+					if _, err := MembersIn(MemberClasses{Convoy: beadstest.Work(store)}, id, true); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -56,7 +57,7 @@ func BenchmarkConvoyMembers(b *testing.B) {
 
 		b.Run(fmt.Sprintf("batched/%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				if _, err := MembersBatch(store, ids, true); err != nil {
+				if _, err := MembersBatch(beadstest.Work(store), ids, true); err != nil {
 					b.Fatal(err)
 				}
 			}

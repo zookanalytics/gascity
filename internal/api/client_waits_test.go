@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -57,21 +58,22 @@ func TestRouteMissingClassification(t *testing.T) {
 func TestWaitInfoWireRoundTrip(t *testing.T) {
 	cases := map[string]session.WaitInfo{
 		"full": {
-			ID:              "gc-wait-1",
-			SessionID:       "gc-sess-1",
-			SessionName:     "worker",
-			Kind:            "deps",
-			State:           "ready",
-			DepIDs:          []string{"gc-1", "gc-2"},
-			DepMode:         "all",
-			RegisteredEpoch: "3",
-			DeliveryAttempt: "2",
-			NudgeID:         "wait-gc-wait-1-3-2",
-			ExpiresAt:       "2026-05-16T09:30:00Z",
-			Note:            "Continue.",
-			Status:          "open",
-			CreatedAt:       time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC),
-			Labels:          []string{session.WaitBeadLabel, "session:gc-sess-1"},
+			ID:                     "gc-wait-1",
+			SessionID:              "gc-sess-1",
+			SessionName:            "worker",
+			Kind:                   "deps",
+			State:                  "ready",
+			DepIDs:                 []string{"gc-1", "gc-2"},
+			DepMode:                "all",
+			RegisteredEpoch:        "3",
+			RegisteredResetPending: true,
+			DeliveryAttempt:        "2",
+			NudgeID:                "wait-gc-wait-1-3-2",
+			ExpiresAt:              "2026-05-16T09:30:00Z",
+			Note:                   "Continue.",
+			Status:                 "open",
+			CreatedAt:              time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC),
+			Labels:                 []string{session.WaitBeadLabel, "session:gc-sess-1"},
 		},
 		"nil-deps-zero-created": {
 			ID:        "gc-wait-2",
@@ -172,5 +174,115 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 	sort.SliceStable(got, func(i, j int) bool { return got[i].CreatedAt.Before(got[j].CreatedAt) })
 	if got[0].ID != "w-early" || got[1].ID != "w-late" {
 		t.Fatalf("post-sort order = [%s %s], want [w-early w-late]", got[0].ID, got[1].ID)
+	}
+}
+
+// TestWaitTypedRungCarriesRegisteredResetPending drives the real /v0/waits and
+// /v0/wait/{id} handlers through the typed client: a wait registered during a
+// pending reset reads back flagged on both, and an unflagged wait does not, as
+// the legacy /beads rung and the local store read them (WaitInfoFromBead).
+func TestWaitTypedRungCarriesRegisteredResetPending(t *testing.T) {
+	created := time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+	flagged := subSecondWaitBead("w-flagged", created)
+	flagged.Metadata["registered_epoch"] = "2"
+	flagged.Metadata["registered_reset_pending"] = "true"
+	unflagged := subSecondWaitBead("w-unflagged", created.Add(time.Second))
+	unflagged.Metadata["registered_epoch"] = "2"
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{flagged, unflagged}, nil)
+	ts := httptest.NewServer(newTestCityHandler(t, state))
+	t.Cleanup(ts.Close)
+	c := NewCityScopedClient(ts.URL, state.CityName())
+
+	want := map[string]bool{"w-flagged": true, "w-unflagged": false}
+	list, err := c.ListWaits("", "")
+	if err != nil {
+		t.Fatalf("ListWaits: %v", err)
+	}
+	if len(list.Body.Waits) != len(want) {
+		t.Fatalf("wait count = %d, want %d", len(list.Body.Waits), len(want))
+	}
+	for _, w := range list.Body.Waits {
+		if w.RegisteredResetPending != want[w.ID] {
+			t.Errorf("ListWaits %s: RegisteredResetPending = %v, want %v", w.ID, w.RegisteredResetPending, want[w.ID])
+		}
+	}
+	for id, flag := range want {
+		got, err := c.GetWait(id)
+		if err != nil {
+			t.Fatalf("GetWait(%s): %v", id, err)
+		}
+		if got.Body.RegisteredResetPending != flag {
+			t.Errorf("GetWait %s: RegisteredResetPending = %v, want %v", id, got.Body.RegisteredResetPending, flag)
+		}
+	}
+}
+
+// inProcessCityClient returns a city-scoped Client whose requests h serves
+// in-process, so a test drives the real read routes without opening a loopback
+// listener. It sends no X-GC-Request header, so mutating routes refuse it.
+// example.com is the host wrapTestSupervisorMiddleware allows.
+func inProcessCityClient(t *testing.T, h http.Handler, cityName string) *Client {
+	t.Helper()
+	transport := rtFunc(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		return rec.Result(), nil
+	})
+	const baseURL = "http://example.com"
+	cw, err := genclient.NewClientWithResponses(baseURL, genclient.WithHTTPClient(&http.Client{Transport: transport}))
+	if err != nil {
+		t.Fatalf("genclient.NewClientWithResponses: %v", err)
+	}
+	return &Client{cw: cw, baseURL: baseURL, cityName: cityName}
+}
+
+// TestListWaitsViaBeadsReportsCapAtBound drives the legacy leg through the real
+// /beads handler on both sides of session.SessionWaitLookupLimit. Exactly the
+// limit is a complete read. One wait more is a capped read that keeps the newest
+// SessionWaitLookupLimit waits, the same bound the /waits handler reports.
+func TestListWaitsViaBeadsReportsCapAtBound(t *testing.T) {
+	limit := session.SessionWaitLookupLimit
+	base := time.Date(2026, 3, 2, 4, 5, 6, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		seeded     int
+		wantCapped bool
+	}{
+		{name: "exactly-the-limit", seeded: limit, wantCapped: false},
+		{name: "one-past-the-limit", seeded: limit + 1, wantCapped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Wait i is created i seconds after base, so w-0000 is the oldest.
+			seed := make([]beads.Bead, 0, tc.seeded)
+			for i := 0; i < tc.seeded; i++ {
+				seed = append(seed, subSecondWaitBead(fmt.Sprintf("w-%04d", i), base.Add(time.Duration(i)*time.Second)))
+			}
+			state := newFakeState(t)
+			state.stores["myrig"] = beads.NewMemStoreFrom(tc.seeded, seed, nil)
+			c := inProcessCityClient(t, newTestCityHandler(t, state), state.CityName())
+
+			cr, err := c.ListWaitsViaBeads()
+			if err != nil {
+				t.Fatalf("ListWaitsViaBeads: %v", err)
+			}
+			if cr.Body.Capped != tc.wantCapped {
+				t.Errorf("Capped = %v, want %v", cr.Body.Capped, tc.wantCapped)
+			}
+			if got := len(cr.Body.Waits); got != limit {
+				t.Fatalf("wait count = %d, want %d", got, limit)
+			}
+			kept := make(map[string]bool, len(cr.Body.Waits))
+			for _, w := range cr.Body.Waits {
+				kept[w.ID] = true
+			}
+			if newest := fmt.Sprintf("w-%04d", tc.seeded-1); !kept[newest] {
+				t.Errorf("newest wait %s missing from the read", newest)
+			}
+			if kept["w-0000"] == tc.wantCapped {
+				t.Errorf("oldest wait w-0000 kept = %v, want %v (a capped read drops it)", kept["w-0000"], !tc.wantCapped)
+			}
+		})
 	}
 }

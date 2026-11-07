@@ -22,7 +22,6 @@ go_test(
     embed = [":orderdiscovery"],
     deps = [
         "//internal/config",
-        "//internal/orders",
         "//internal/testenv",
     ],
 )
