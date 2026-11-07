@@ -1,6 +1,6 @@
 ---
 name: A running pool session's work_dir across a cap change (gc-wye0uw)
-description: Traces how pool session lx-wisp-xri6c came to run under its pool's template identity and which two writes moved it to slot 1 while it ran. Records the decisions that a pool hands out the template identity only while its cap is one, that a running session is not restarted when its identity moves, and that its recorded work_dir keeps naming the directory its process runs in until it stops. Also records the cap-lowering case the change does not cover.
+description: Traces how a pool session came to run under its pool's template identity and which two writes moved it to slot 1 while it ran. Records the decisions that a pool hands out the template identity only while its cap is one, that a running session is not restarted when its identity moves, and that its recorded work_dir keeps naming the directory its process runs in until it stops. Also records the cap-lowering case the change does not cover.
 ---
 
 # gc-wye0uw: a running pool session's work_dir across a cap change
@@ -8,14 +8,14 @@ description: Traces how pool session lx-wisp-xri6c came to run under its pool's 
 ## What happened
 
 Times are UTC on 2026-10-09. Sources: the session bead's write history
-(`gc bd history lx-wisp-xri6c --events`), the supervisor log, and the city
+(`gc bd history <session> --events`), the supervisor log, and the city
 repo's history of `city.toml`.
 
 | Time | Event |
 |---|---|
 | 05:10:17 | City commit 124cc03 drops the host-migration freeze patch that held the gascity polecat pool at 0 sessions. A second patch, `max_active_sessions = 1`, stays in force. |
-| 05:11:36 | lx-wisp-9f7hn is created under the template identity `gascity/gc-toolkit.polecat`, in the template's directory. It drains at 05:15:39 unchanged. |
-| 05:15:45 | lx-wisp-xri6c is created under the same template identity. It starts at 05:16:03 in `.../polecats/gc-toolkit.polecat`. |
+| 05:11:36 | An earlier session is created under the template identity `gascity/gc-toolkit.polecat`, in the template's directory. It drains at 05:15:39 unchanged. |
+| 05:15:45 | The session this record follows is created under the same template identity. It starts at 05:16:03 in `.../polecats/gc-toolkit.polecat`. |
 | 05:21:29 | City commit 0385848 removes the cap, so the pool returns to its pack default of 5. |
 | 05:22:52 | Write 1 moves the session to slot 1: `agent_name` becomes `gascity/gc-toolkit.polecat-1`, `pool_slot` becomes 1, `alias` is cleared and the template name moves to `alias_history`, and the drift hashes are rebaselined. `work_dir` does not change. |
 | 05:33:40 | The session claims gc-7s8mo itself (`current_claim_bead_id`). |
@@ -100,7 +100,7 @@ writes only the two work_dir keys and never the trigger, so it is not write 2.
   repair moves a singleton's recorded slot dir to the template dir. Recording
   the directory a session started in (gc-07kwpp, `worker_dir`) would give the
   binding and the readers an identity-free answer. Filed as gc-esr4il.
-- **`canonical_instance_name`.** lx-wisp-xri6c kept the template name there.
+- **`canonical_instance_name`.** The session kept the template name there.
   The S19 canonical identity record is written at create and adoption. It is
   read only by `concretePoolPreparedIdentity`, and only when the desired
   instance name is empty, which a realized pool session never has.
