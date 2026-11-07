@@ -4815,9 +4815,11 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 			slotDir := filepath.Join(cityPath, ".gc", "workspaces", "worker-1")
 
 			// tick realizes the pool's requests and then syncs the session
-			// beads, the order the controller runs them in.
+			// beads, the order the controller runs them in. assigned is the
+			// tick's assigned-work snapshot, which buildDesiredState hands the
+			// realize through the build params.
 			var stderr bytes.Buffer
-			tick := func(demand func(open []sessionpkg.Info) PoolDesiredState) map[string]TemplateParams {
+			tick := func(assigned []beads.Bead, demand func(open []sessionpkg.Info) PoolDesiredState) map[string]TemplateParams {
 				t.Helper()
 				snapshot, err := loadSessionBeadSnapshot(store)
 				if err != nil {
@@ -4825,6 +4827,7 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 				}
 				bp := newAgentBuildParams("test-city", cityPath, cfg, sp, clk.Now(), store, &stderr)
 				bp.sessionBeads = snapshot
+				bp.assignedWorkBeads = assigned
 				desired := map[string]TemplateParams{}
 				realizePoolDesiredSessions(bp, &cfg.Agents[0], demand(snapshot.OpenInfos()), desired, &stderr)
 				syncSessionBeads(cityPath, store, desired, sp, allConfiguredDS(desired), cfg, clk, &stderr, true)
@@ -4874,7 +4877,7 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 
 			// Capped at one session, the pool's only session takes the
 			// template identity and the template's work dir.
-			tick(func([]sessionpkg.Info) PoolDesiredState {
+			tick(nil, func([]sessionpkg.Info) PoolDesiredState {
 				return PoolDesiredState{Template: "worker", Requests: []SessionRequest{{Template: "worker", Tier: "new", WorkBeadID: "wb-1"}}}
 			})
 			created := onlySession()
@@ -4894,7 +4897,8 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 			// The cap rises while the session is awake. Its identity moves to
 			// slot 1 at once; its work_dir stays where the process runs.
 			cfg.Agents[0].MaxActiveSessions = intPtr(5)
-			tick(claimed(workBead("wb-1", "worker", created.ID, "in_progress", 2)))
+			first := workBead("wb-1", "worker", created.ID, "in_progress", 2)
+			tick([]beads.Bead{first}, claimed(first))
 			moved := onlySession()
 			if got := moved.Metadata["agent_name"]; got != "worker-1" {
 				t.Fatalf("raised agent_name = %q, want slot identity %q", got, "worker-1")
@@ -4906,7 +4910,8 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 
 			// The awake session finishes wb-1 and claims wb-2 itself. The
 			// binding moves the trigger to wb-2 but not the work_dir.
-			desired := tick(claimed(workBead("wb-2", "worker", created.ID, "in_progress", 2)))
+			next := workBead("wb-2", "worker", created.ID, "in_progress", 2)
+			desired := tick([]beads.Bead{next}, claimed(next))
 			if got := onlySession().Metadata[beadmeta.TriggerBeadIDMetadataKey]; got != "wb-2" {
 				t.Fatalf("trigger bead = %q, want wb-2", got)
 			}
@@ -4928,7 +4933,7 @@ func TestPoolCapRaiseKeepsLiveSessionWorkDirUntilItStops(t *testing.T) {
 			prepared, _, err := buildPreparedStartWithWorkDirResolver(startCandidate{
 				info: sessiontest.SeedBead(t, stopped),
 				tp:   tp,
-			}, cityPath, cfg, store, nil)
+			}, cityPath, cfg, store, nil, dispatchOptionSources{})
 			if err != nil {
 				t.Fatalf("preparing the next start: %v", err)
 			}
