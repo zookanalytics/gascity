@@ -95,10 +95,9 @@ and the [provider hook configs](../internal/hooks/config/README.md).
   ([invariants](architecture/invariants.md)).
 - **Running state is queried live.** No PID, lock or state file tracks a
   running process; the system itself is asked.
-- **A session start is never config drift.** The reconcile tick writes a
-  session's overlay files, and strips Gas City's own entries from them,
-  before it fingerprints the session's configuration, so the files session
-  start stages never read as a change.
+- **A session start is never config drift.** The files Gas City stages into
+  a session's work dir never read as a change to the configuration the
+  session started with ([fingerprints](architecture/session.md#fingerprint-versioning)).
 
 ## Decisions
 
