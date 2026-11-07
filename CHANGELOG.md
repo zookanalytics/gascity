@@ -811,6 +811,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it for every agent on the harness in `city.toml` (`[providers.codex]` with
   `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
   agent with the same `option_defaults` line in its `agent.toml` (#7944).
+
+- **Builtin `codex` sessions start with `--no-daemon`, which needs codex-cli
+  0.156.0 or later.** Older releases reject the flag, and the session exits as
+  it starts. The launch command of every `builtin:codex` session changes, so
+  each running session restarts once after the upgrade. Codex refuses the flag
+  twice: a provider or agent that sets it again must set it in `args`, which
+  replaces the builtin's, not in `args_append`.
+
 - **Restart claude sessions started under gc 1.4.x once.** gc 1.5.0 gives
   every new claude session a `session_key` (#5396) and accepts the id
   claude's SessionStart hook reports (#3954, #5421), so `gc session logs`
@@ -1221,6 +1229,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --inject` stays.
 
 ### Fixed
+
+- **Codex sessions run their commands with their own environment while a
+  shared Codex background server is running.** codex-cli 0.156.0 and later
+  attach the TUI to a running background app server unless the launch rules
+  that out, and the server then runs the session's commands in its own
+  environment. Those commands had none of the session's `GC_*` variables, so
+  `gc hook --claim` failed with "agent not specified" and every other command
+  that reads the session's identity ran without it. The reasoning-effort
+  flag that builtin `codex` passed by default happened to rule the server out,
+  so the problem appeared once that default was dropped (#7944). Builtin
+  `codex` sessions now start and resume with `--no-daemon`, so each session
+  runs its own app server. A provider with its own `resume_command` resumes
+  from that template, which needs the flag too.
 
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a

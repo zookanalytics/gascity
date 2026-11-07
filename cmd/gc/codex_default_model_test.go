@@ -88,6 +88,49 @@ func TestResolveTemplate_CodexBuiltinExplicitModelAndEffortStillEmitFlags(t *tes
 	}
 }
 
+// A builtin:codex session must run its own app server. Without --no-daemon a
+// codex TUI attaches to any shared background server already running and runs
+// the session's commands in that server's environment, without the session's
+// GC_* identity. Codex refuses the flag twice, so it must appear exactly once,
+// also next to the -c override an effort choice adds.
+func TestResolveTemplate_CodexBuiltinRunsWithoutSharedDaemon(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		optionDefaults map[string]string
+		want           string
+	}{
+		{
+			name: "no choice",
+			want: "codex --no-daemon --dangerously-bypass-approvals-and-sandbox",
+		},
+		{
+			name:           "explicit model and effort",
+			optionDefaults: map[string]string{"model": "gpt-6.1-sol", "effort": "xhigh"},
+			want:           "codex --no-daemon --dangerously-bypass-approvals-and-sandbox --model gpt-6.1-sol -c model_reasoning_effort=xhigh",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tp := resolveCodexBuiltinTemplate(t, tc.optionDefaults)
+			if tp.Command != tc.want {
+				t.Fatalf("command = %q, want %q", tp.Command, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveResumeCommand_CodexBuiltinKeepsNoDaemon(t *testing.T) {
+	tp := resolveCodexBuiltinTemplate(t, nil)
+	if tp.ResolvedProvider == nil {
+		t.Fatal("resolveTemplate(codex) returned no resolved provider")
+	}
+
+	got := resolveResumeCommand(tp.Command, "def-456", tp.ResolvedProvider)
+	want := "codex resume def-456 --no-daemon --dangerously-bypass-approvals-and-sandbox"
+	if got != want {
+		t.Fatalf("resume command = %q, want %q", got, want)
+	}
+}
+
 func TestBuildPreparedStart_CodexWithoutChoiceOmitsModelAndEffort(t *testing.T) {
 	candidate, cfg, store := newOptionSessionWithWork(t, codexEffortResolvedProvider(), "codex", nil)
 

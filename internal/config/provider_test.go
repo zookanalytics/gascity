@@ -927,9 +927,8 @@ func TestPathCheckBinary(t *testing.T) {
 }
 
 // TestProviderSessionCreateTransportBuiltinGolden pins every builtin's
-// default transport and template launch command to the values recorded
-// before ACPOmittedArgs existed, so the omitted-args transport rule moves
-// only city-declared wrappers, never a builtin.
+// default transport and template launch command, so the omitted-args
+// transport rule moves only city-declared wrappers, never a builtin.
 func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
 	golden := map[string]struct{ transport, launch string }{
 		"amp":         {"", "amp --dangerously-allow-all --no-ide"},
@@ -937,7 +936,7 @@ func TestProviderSessionCreateTransportBuiltinGolden(t *testing.T) {
 		"auggie":      {"", "auggie --allow-indexing"},
 		"cerebras":    {"acp", "opencode acp --model cerebras/gpt-oss-120b"},
 		"claude":      {"", "claude --dangerously-skip-permissions --effort max"},
-		"codex":       {"", "codex --dangerously-bypass-approvals-and-sandbox"},
+		"codex":       {"", "codex --no-daemon --dangerously-bypass-approvals-and-sandbox"},
 		"copilot":     {"", "copilot --yolo"},
 		"cursor":      {"", "cursor-agent -f --trust"},
 		"gemini":      {"", "gemini --approval-mode yolo"},

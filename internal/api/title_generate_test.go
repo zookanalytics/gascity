@@ -194,7 +194,8 @@ func TestGenerateTitle_BuiltinProviderArgOrder(t *testing.T) {
 		{
 			name: "codex",
 			spec: config.BuiltinProviders()["codex"],
-			want: []string{"--model", "o4-mini", "exec", titlePrompt + "summarize this"},
+			// codex exec ignores the root --no-daemon the builtin args carry.
+			want: []string{"--no-daemon", "--model", "o4-mini", "exec", titlePrompt + "summarize this"},
 		},
 		{
 			name: "gemini",

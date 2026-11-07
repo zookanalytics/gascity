@@ -100,6 +100,14 @@ effort from your own Codex configuration; Gas City passes no `--model` or
 is logged in (a ChatGPT-account login serves a different set than an API key),
 so pin a model only when you know the account can use it.
 
+Gas City starts `codex` with `--no-daemon`, so each session runs its own Codex
+app server, and every command the agent runs inherits that session's
+environment, its `GC_*` identity included. A shared Codex background server
+running on the same machine does not change that. The flag needs codex-cli
+0.156.0 or later. To pass more arguments on every launch, use `args_append`. A
+provider or agent that sets `args` replaces `--no-daemon`, so its list must
+carry the flag again.
+
 ```toml
 # Custom endpoint (an OpenAI-compatible proxy / Azure OpenAI / vLLM)
 [upstreams.openai-proxy]

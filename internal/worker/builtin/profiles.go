@@ -329,6 +329,16 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 	"codex": {
 		DisplayName: "Codex CLI",
 		Command:     "codex",
+		// --no-daemon keeps the session's app server inside its own codex
+		// process. Without it, codex-cli 0.156.0 and later attach the TUI to
+		// a shared background server whenever one is running, and that server
+		// runs the session's commands in its own environment, so they lose
+		// the session's GC_* identity. Releases before 0.156.0 reject the
+		// flag. codex resume accepts it after the session key, and codex exec
+		// ignores it, so resumes and the one-shot calls that prepend Args
+		// still run. Codex refuses the flag twice, so a provider that passes
+		// it again sets args, which replace these, rather than args_append.
+		Args: []string{"--no-daemon"},
 		// OpenAI serving-env binding (Codex reads these for a custom endpoint +
 		// API key). Codex auth is the API key; no separate auth-token var.
 		UpstreamBaseURLEnv: "OPENAI_BASE_URL",

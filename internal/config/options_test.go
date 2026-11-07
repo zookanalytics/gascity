@@ -1104,12 +1104,22 @@ func TestBuiltinProviders_ClaudeHasNilArgsAndOptionDefaults(t *testing.T) {
 	}
 }
 
-func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
+func TestBuiltinProviders_CodexArgsAndOptionDefaults(t *testing.T) {
 	builtins := BuiltinProviders()
 	codex := builtins["codex"]
 
-	if codex.Args != nil {
-		t.Errorf("codex Args should be nil, got %v", codex.Args)
+	// Args holds only --no-daemon, which keeps codex off a shared background
+	// server. No option manages it, so normalization never strips it; every
+	// schema-managed flag comes from OptionDefaults.
+	if !reflect.DeepEqual(codex.Args, []string{"--no-daemon"}) {
+		t.Errorf("codex Args = %v, want [--no-daemon]", codex.Args)
+	}
+	for _, seq := range CollectAllSchemaFlags(codex.OptionsSchema) {
+		for _, arg := range seq {
+			if arg == "--no-daemon" {
+				t.Errorf("codex schema flag %v manages --no-daemon", seq)
+			}
+		}
 	}
 	if codex.OptionDefaults == nil {
 		t.Fatal("codex OptionDefaults should not be nil")
