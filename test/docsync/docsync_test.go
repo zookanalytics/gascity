@@ -689,11 +689,13 @@ func TestMintNavigationPagesExist(t *testing.T) {
 // exist without a docs.json navigation entry. The docs/ tree publishes to
 // docs.gascityhall.com via Mintlify, so every other .md/.mdx must appear in
 // the navigation. Keep this list tiny: a file belongs here only if it is
-// docs-workspace meta (not a published page and not an engineering doc).
+// neither a published page nor an engineering doc: docs-workspace meta, or a
+// file a tool reads at a fixed path under docs/.
 // Engineering docs (plans, design notes, internal runbooks) do NOT belong in
 // docs/ at all — move them under engdocs/ instead of adding an exemption.
 var docsPublishExemptions = map[string]bool{
-	"README.md": true, // contributor README for the docs workspace itself
+	"README.md":      true, // contributor README for the docs workspace itself
+	"review-arch.md": true, // the arch review's guidance, read at this path; it points the review at engdocs/architecture.md
 }
 
 // collectDocsMarkdownFiles returns every .md/.mdx file under docs/, as paths
