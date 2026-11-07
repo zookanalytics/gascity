@@ -155,7 +155,7 @@ func TestCodexLaunchArgsCommandsAreRecognizedAsManaged(t *testing.T) {
 }
 
 // TestCodexHookTrustHashMatchesCodex pins the trust hash to the values
-// codex-cli 0.160.1 reported as currentHash through app-server hooks/list for
+// codex-cli 0.164.0 reported as currentHash through app-server hooks/list for
 // the same hooks declared in a -c override.
 func TestCodexHookTrustHashMatchesCodex(t *testing.T) {
 	str := func(s string) *string { return &s }
@@ -179,22 +179,22 @@ func TestCodexHookTrustHashMatchesCodex(t *testing.T) {
 			name:    "managed session start",
 			event:   "SessionStart",
 			matcher: str("startup"),
-			handler: codexHookHandler{Type: "command", Command: pathPrefix + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart "${GC_BIN:-gc}" --city '/Users/gc/Code/loomington' prime --hook --hook-format codex`},
-			want:    "sha256:e79271fc8cb559ab41ece0ac95b5e1fd79fc9b4e1d6af2a41af8359937ae6b16",
+			handler: codexHookHandler{Type: "command", Command: pathPrefix + `GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart "${GC_BIN:-gc}" --city '/city' prime --hook --hook-format codex`},
+			want:    "sha256:9d9a5617d455eb8ad0f82d63c5872a574e8c74565877f3d069d16df75e1218bc",
 		},
 		{
 			name:    "pre compact keeps an empty matcher",
 			event:   "PreCompact",
 			matcher: str(""),
-			handler: codexHookHandler{Type: "command", Command: pathPrefix + `"${GC_BIN:-gc}" --city '/Users/gc/Code/loomington' handoff --auto --hook-format codex "context cycle"`},
-			want:    "sha256:c6171ec900feb7367bf88622f14428ff6ddd7d957aacd57d64ac7d6dc8c6c35b",
+			handler: codexHookHandler{Type: "command", Command: pathPrefix + `"${GC_BIN:-gc}" --city '/city' handoff --auto --hook-format codex "context cycle"`},
+			want:    "sha256:b650876691d17ff9d732d70a3b302d950dd84095189a1475585049232d37a5a6",
 		},
 		{
 			name:    "prompt submit drops its matcher",
 			event:   "UserPromptSubmit",
 			matcher: str(""),
-			handler: codexHookHandler{Type: "command", Command: pathPrefix + `"${GC_BIN:-gc}" --city '/Users/gc/Code/loomington' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`},
-			want:    "sha256:7402b928ac531cbc25d071800d0208a3eae9d6181e1da2db7580715eed888721",
+			handler: codexHookHandler{Type: "command", Command: pathPrefix + `"${GC_BIN:-gc}" --city '/city' hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject --hook-format codex`},
+			want:    "sha256:788a111816909e6c24205ef7084231ae445446645de46a405af701e7de04533b",
 		},
 		{
 			name:    "escaped characters and a zero timeout",
