@@ -120,7 +120,7 @@ func newestHistory(ctx context.Context, path string, active activeLog, filter Fi
 			continue
 		}
 		ring := newEventRing(limit)
-		if err := readSegmentInto(ctx, src, filter, ring); err != nil {
+		if err := readSegmentEach(ctx, src, filter, ring.take); err != nil {
 			return out, len(out), err
 		}
 		read[window] = struct{}{}
@@ -153,18 +153,99 @@ func countHistory(ctx context.Context, path string, active activeLog, filter Fil
 		if _, ok := read[window]; ok || !segmentOverlaps(src, filter) {
 			continue
 		}
-		if err := readSegmentInto(ctx, src, filter, ring); err != nil {
+		if err := readSegmentEach(ctx, src, filter, ring.take); err != nil {
 			return nil, 0, err
 		}
 		read[window] = struct{}{}
 	}
 	if active.f != nil {
 		ring.ascending = false
-		if err := readLinesInto(ctx, active.reader(), filter, ring); err != nil {
+		if err := readLinesEach(ctx, active.reader(), filter, ring.take); err != nil {
 			return nil, 0, err
 		}
 	}
 	return ring.events(), ring.seen, nil
+}
+
+// ReadFilteredHistoryEach calls fn, in seq order, for every event matching
+// filter in the whole retained history at path: the .gz archives and the
+// in-flight events.jsonl.rotating-* segments, then the active log. It holds
+// one event at a time however long the history is, so a caller that folds the
+// history, such as a projection's cold replay, needs memory for its fold and
+// not for the log.
+//
+// It reads the history ReadFilteredHistoryTail reads with count, the log as of
+// the moment the active log is opened: that file is read through the one
+// descriptor up to its size at the open, and older events come only from the
+// segments whose seq window ends below its first seq, so a rotation during the
+// read neither drops an event that existed at the open nor adds a later one.
+// The segments are read in seq order and a seq that is not above the last one
+// taken from them is skipped, so an archive and its not-yet-removed rotating
+// twin deliver each event once; the active log's lines follow in file order.
+// Malformed lines are skipped.
+//
+// It stops at fn's first error and returns it, and stops after Filter.Limit
+// events when that is positive. It returns ctx's error when ctx is done,
+// checked before each segment and every historyTailCtxCheckLines lines.
+func ReadFilteredHistoryEach(ctx context.Context, path string, filter Filter, fn func(Event) error) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	active, err := openActiveLog(path)
+	if err != nil {
+		return err
+	}
+	defer active.close()
+	sources, err := olderSegments(ctx, path, active, filter.AfterSeq)
+	if err != nil {
+		return err
+	}
+	var fnErr error
+	delivered := 0
+	visit := func(e Event) bool {
+		if fnErr = fn(e); fnErr != nil {
+			return false
+		}
+		delivered++
+		return !limitReached(delivered, filter)
+	}
+	var lastSegmentSeq uint64
+	tookSegmentEvent := false
+	visitSegment := func(e Event) bool {
+		if tookSegmentEvent && e.Seq <= lastSegmentSeq {
+			return true
+		}
+		tookSegmentEvent, lastSegmentSeq = true, e.Seq
+		return visit(e)
+	}
+	stopped := func() bool { return fnErr != nil || limitReached(delivered, filter) }
+	read := make(map[eventSeqWindow]struct{}, len(sources))
+	for _, src := range sources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		window := eventSeqWindow{first: src.firstSeq, last: src.lastSeq}
+		if _, ok := read[window]; ok || !segmentOverlaps(src, filter) {
+			continue
+		}
+		if err := readSegmentEach(ctx, src, filter, visitSegment); err != nil {
+			return err
+		}
+		if stopped() {
+			return fnErr
+		}
+		read[window] = struct{}{}
+	}
+	if active.f == nil {
+		return nil
+	}
+	if err := readLinesEach(ctx, active.reader(), filter, visit); err != nil {
+		if ctx.Err() != nil {
+			return err
+		}
+		return fmt.Errorf("reading events: %w", err)
+	}
+	return fnErr
 }
 
 // activeLog is the active log as opened by one read.
@@ -385,14 +466,21 @@ func (r *eventRing) push(e Event) {
 	r.oldest = (r.oldest + 1) % r.max
 }
 
+// take pushes e and reports that the read goes on: the ring never stops a read.
+func (r *eventRing) take(e Event) bool {
+	r.push(e)
+	return true
+}
+
 func (r *eventRing) events() []Event {
 	out := make([]Event, 0, len(r.buf))
 	out = append(out, r.buf[r.oldest:]...)
 	return append(out, r.buf[:r.oldest]...)
 }
 
-// readSegmentInto streams one segment forward into ring.
-func readSegmentInto(ctx context.Context, src backfillSource, filter Filter, ring *eventRing) error {
+// readSegmentEach streams one segment forward, calling visit for each event
+// that matches filter until visit returns false.
+func readSegmentEach(ctx context.Context, src backfillSource, filter Filter, visit func(Event) bool) error {
 	sr, err := openSegmentReader(src)
 	if err != nil {
 		return fmt.Errorf("reading event segment %q: %w", filepath.Base(src.path), err)
@@ -401,7 +489,7 @@ func readSegmentInto(ctx context.Context, src backfillSource, filter Filter, rin
 		return nil // reaped by retention between listing and open
 	}
 	defer sr.close()
-	if err := readLinesInto(ctx, sr.br, filter, ring); err != nil {
+	if err := readLinesEach(ctx, sr.br, filter, visit); err != nil {
 		if ctx.Err() != nil {
 			return err
 		}
@@ -410,9 +498,10 @@ func readSegmentInto(ctx context.Context, src backfillSource, filter Filter, rin
 	return nil
 }
 
-// readLinesInto pushes every event line of br that matches filter into ring.
-// Malformed lines are skipped.
-func readLinesInto(ctx context.Context, br *bufio.Reader, filter Filter, ring *eventRing) error {
+// readLinesEach calls visit, in file order, for every event line of br that
+// matches filter, and returns nil once visit returns false. Malformed lines are
+// skipped.
+func readLinesEach(ctx context.Context, br *bufio.Reader, filter Filter, visit func(Event) bool) error {
 	for lines := 1; ; lines++ {
 		if lines%historyTailCtxCheckLines == 0 {
 			if err := ctx.Err(); err != nil {
@@ -422,8 +511,8 @@ func readLinesInto(ctx context.Context, br *bufio.Reader, filter Filter, ring *e
 		line, err := readLineContext(ctx, br)
 		if len(line) > 0 {
 			var e Event
-			if json.Unmarshal(trimLine(line), &e) == nil && matchesFilter(e, filter) {
-				ring.push(e)
+			if json.Unmarshal(trimLine(line), &e) == nil && matchesFilter(e, filter) && !visit(e) {
+				return nil
 			}
 		}
 		if errors.Is(err, io.EOF) {

@@ -1,6 +1,8 @@
 package runproj
 
 import (
+	"context"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -9,12 +11,13 @@ import (
 // preserving first-seen (creation) order. BuildRunSummary groups by first-seen
 // order (mirroring the JS Map insertion order of the dashboard's listBeads
 // read), so a plain Fold map — whose Go iteration order is random — would make a
-// live run view flicker between requests. The per-city tailer drives a Projector
-// instead: a cold ColdLoad over the full log, then incremental Apply of newly
-// tailed events, and Beads() hands BuildRunSummary a deterministic slice.
+// live run view flicker between requests. A Projector keeps every bead: a
+// ColdLoad over the full log, then incremental Apply of newly appended events,
+// and Beads() hands BuildRunSummary a deterministic slice. The per-city run
+// tailer drives a RunProjector, which keeps only the run beads and maintains the
+// summary as it folds.
 //
-// A Projector is not safe for concurrent use; the tailer mutates it from its
-// single loop goroutine and publishes the built summary under its own lock.
+// A Projector is not safe for concurrent use.
 type Projector struct {
 	beads        map[string]beads.Bead
 	order        []string
@@ -38,20 +41,20 @@ func NewProjector() *Projector {
 	return &Projector{beads: make(map[string]beads.Bead)}
 }
 
-// ColdLoad folds the entire event log at path into the projector. It reads via
-// events.ReadFilteredWithInFlight so the replay spans rotated .gz archives AND
-// any in-flight events.jsonl.rotating-* file the recorder has not yet gzipped —
-// otherwise a cold start that lands in a rotation's compression window would
-// miss those pre-rotation events until the next rotation's catch-up. Safe to
-// call once on a fresh projector before the incremental tail begins; Apply is
-// seq-idempotent so the transient .gz/rotating overlap folds cleanly.
+// ColdLoad folds the event log's whole retained history at path into the
+// projector: its rotated .gz archives, any in-flight events.jsonl.rotating-*
+// file the recorder has not yet gzipped, and the active log
+// (events.ReadFilteredHistoryEach), so a cold start that lands in a rotation's
+// compression window still folds the pre-rotation events. It folds each event
+// as it reads it, so the replay holds the fold, never the history. On an error
+// the projector keeps the events folded before it. Safe to call once on a
+// fresh projector before the incremental tail begins; Apply is seq-idempotent,
+// so a tail that re-reads folded events changes nothing.
 func (p *Projector) ColdLoad(path string) error {
-	evts, err := events.ReadFilteredWithInFlight(path, events.Filter{})
-	if err != nil {
-		return err
-	}
-	p.Apply(evts)
-	return nil
+	return events.ReadFilteredHistoryEach(context.Background(), path, events.Filter{}, func(e events.Event) error {
+		p.apply(&e)
+		return nil
+	})
 }
 
 // Apply folds a chronological event slice, upserting bead.created/updated/closed
@@ -62,33 +65,38 @@ func (p *Projector) ColdLoad(path string) error {
 // than swallowed, so a silent projection starve is observable to the caller.
 func (p *Projector) Apply(evts []events.Event) (changed bool) {
 	for i := range evts {
-		e := &evts[i]
-		if e.Seq > p.lastSeq {
-			p.lastSeq = e.Seq
+		if p.apply(&evts[i]) {
+			changed = true
 		}
-		if !beadEventTypes[e.Type] {
-			continue
-		}
-		b, ok := decodeBead(*e)
-		if !ok {
-			p.decodeMisses++
-			continue
-		}
-		if e.Type == events.BeadDeleted {
-			if _, exists := p.beads[b.ID]; exists {
-				delete(p.beads, b.ID)
-				p.removeOrder(b.ID)
-				changed = true
-			}
-			continue
-		}
-		if _, exists := p.beads[b.ID]; !exists {
-			p.order = append(p.order, b.ID)
-		}
-		p.beads[b.ID] = b
-		changed = true
 	}
 	return changed
+}
+
+func (p *Projector) apply(e *events.Event) (changed bool) {
+	if e.Seq > p.lastSeq {
+		p.lastSeq = e.Seq
+	}
+	if !beadEventTypes[e.Type] {
+		return false
+	}
+	b, ok := decodeBead(*e)
+	if !ok {
+		p.decodeMisses++
+		return false
+	}
+	if e.Type == events.BeadDeleted {
+		if _, exists := p.beads[b.ID]; exists {
+			delete(p.beads, b.ID)
+			p.removeOrder(b.ID)
+			return true
+		}
+		return false
+	}
+	if _, exists := p.beads[b.ID]; !exists {
+		p.order = append(p.order, b.ID)
+	}
+	p.beads[b.ID] = b
+	return true
 }
 
 // Beads returns the folded beads in first-seen order — the deterministic input

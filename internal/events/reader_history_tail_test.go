@@ -498,3 +498,167 @@ func TestReadFilteredEachStreams(t *testing.T) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 }
+
+// historyEach collects what ReadFilteredHistoryEach hands over.
+func historyEach(ctx context.Context, t *testing.T, path string, f Filter) []Event {
+	t.Helper()
+	var got []Event
+	if err := ReadFilteredHistoryEach(ctx, path, f, func(e Event) error {
+		got = append(got, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("ReadFilteredHistoryEach(%+v): %v", f, err)
+	}
+	return got
+}
+
+// ReadFilteredHistoryEach hands over exactly the in-flight-aware full scan, in
+// seq order, across archives, a rotating twin, an in-flight rotating segment
+// and the active log, for every filter; a positive Limit keeps the first Limit
+// of them.
+func TestReadFilteredHistoryEachMatchesFullScan(t *testing.T) {
+	path := seedHistoryTailLayout(t)
+	for name, f := range map[string]Filter{
+		"none":          {},
+		"rare subject":  {Subject: "s7"},
+		"after seq":     {AfterSeq: 50},
+		"before seq":    {BeforeSeq: 100},
+		"all by type":   {Type: string(BeadCreated)},
+		"no match":      {Type: "no.such.type"},
+		"any of types":  {Types: []string{"no.such.type", string(BeadCreated)}},
+		"none of types": {Types: []string{"no.such.type"}},
+	} {
+		want, err := ReadFilteredWithInFlight(path, f)
+		if err != nil {
+			t.Fatalf("%s: reference scan: %v", name, err)
+		}
+		if got := historyEach(context.Background(), t, path, f); !reflect.DeepEqual(seqsOf(got), seqsOf(want)) {
+			t.Errorf("%s: got %v, want %v", name, seqsOf(got), seqsOf(want))
+		}
+		for _, limit := range []int{1, 39, 41, 81, 200} {
+			limited := f
+			limited.Limit = limit
+			wantLimited := want
+			if len(wantLimited) > limit {
+				wantLimited = wantLimited[:limit]
+			}
+			if got := historyEach(context.Background(), t, path, limited); !reflect.DeepEqual(seqsOf(got), seqsOf(wantLimited)) {
+				t.Errorf("%s limit=%d: got %v, want %v", name, limit, seqsOf(got), seqsOf(wantLimited))
+			}
+		}
+	}
+}
+
+// A rotation at any point of the read leaves the streamed history complete:
+// it is the log as of the moment the active log was opened (archive 1..20 and
+// active 21..30), whenever the rotations land.
+func TestReadFilteredHistoryEachReturnsTheLogAsOfTheOpen(t *testing.T) {
+	type step func(t *testing.T, path string)
+	rotate := func(ts int, first, last uint64) step {
+		return func(t *testing.T, path string) { rotateActive(t, path, historyStamp(ts), first, last) }
+	}
+	appendNew := func(first, last uint64) step {
+		return func(t *testing.T, path string) { writeJSONLEvents(t, path, seqRange(first, last)...) }
+	}
+	for name, tc := range map[string]struct {
+		beforeList, afterList []step
+	}{
+		"no rotation":                        {},
+		"rotation before the listing":        {beforeList: []step{rotate(5, 21, 35)}},
+		"rotation after the listing":         {afterList: []step{rotate(5, 21, 35)}},
+		"two rotations before the listing":   {beforeList: []step{rotate(5, 21, 35), rotate(6, 36, 40)}},
+		"rotation and new events after it":   {afterList: []step{rotate(5, 21, 30), appendNew(31, 45)}},
+		"rotations before and after listing": {beforeList: []step{rotate(5, 21, 35)}, afterList: []step{rotate(6, 36, 40)}},
+	} {
+		dir := t.TempDir()
+		writeHistoryArchive(t, dir, historyStamp(0), 1, 20)
+		path := filepath.Join(dir, "events.jsonl")
+		writeJSONLEvents(t, path, seqRange(21, 30)...)
+		orig := readRotationDir
+		listed := false
+		readRotationDir = func(d string) ([]os.DirEntry, error) {
+			if listed {
+				return orig(d)
+			}
+			listed = true
+			for _, s := range tc.beforeList {
+				s(t, path)
+			}
+			entries, err := orig(d)
+			for _, s := range tc.afterList {
+				s(t, path)
+			}
+			return entries, err
+		}
+		got := historyEach(context.Background(), t, path, Filter{})
+		readRotationDir = orig
+		if want := seqRange(1, 30); !reflect.DeepEqual(seqsOf(got), want) {
+			t.Errorf("%s: got %v, want %v", name, seqsOf(got), want)
+		}
+	}
+}
+
+// A stray segment whose window overlaps another one delivers no seq twice,
+// as in the full scan, while an active log that breaks seq order is handed
+// over line by line in file order, as the full scan reads it.
+func TestReadFilteredHistoryEachSegmentDedupAndActiveFileOrder(t *testing.T) {
+	dir := t.TempDir()
+	writeHistoryArchive(t, dir, historyStamp(0), 1, 20)
+	writeJSONLEvents(t, filepath.Join(dir, formatRotatingBasename(historyStamp(1), 5, 19)), seqRange(5, 19)...)
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, path, 21, 22, 25, 23, 24)
+	want, err := ReadFilteredWithInFlight(path, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control := append(seqRange(1, 22), 25, 23, 24); !reflect.DeepEqual(seqsOf(want), control) {
+		t.Fatalf("control: the full scan gives %v, want %v", seqsOf(want), control)
+	}
+	if got := historyEach(context.Background(), t, path, Filter{}); !reflect.DeepEqual(seqsOf(got), seqsOf(want)) {
+		t.Fatalf("got %v, want %v", seqsOf(got), seqsOf(want))
+	}
+}
+
+// ReadFilteredHistoryEach hands each event over as it reads it: an error from
+// fn on the first event stops the read before a later, unreadable archive is
+// opened, and a done ctx stops it before anything is read, or inside a
+// segment once the cancellation lands there.
+func TestReadFilteredHistoryEachStreamsAndStops(t *testing.T) {
+	dir := t.TempDir()
+	writeHistoryArchive(t, dir, historyStamp(0), 1, 10)
+	if err := os.WriteFile(filepath.Join(dir, formatArchiveBasename(historyStamp(1), 11, 20)), []byte("not a gzip stream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "events.jsonl")
+	writeJSONLEvents(t, path, seqRange(21, 25)...)
+	if err := ReadFilteredHistoryEach(context.Background(), path, Filter{}, func(Event) error { return nil }); err == nil {
+		t.Fatal("control: the read did not reach the unreadable archive")
+	}
+
+	stop := errors.New("stop")
+	calls := 0
+	err := ReadFilteredHistoryEach(context.Background(), path, Filter{}, func(Event) error {
+		calls++
+		return stop
+	})
+	if !errors.Is(err, stop) || calls != 1 {
+		t.Fatalf("err = %v after %d calls, want fn's error after 1", err, calls)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	calls = 0
+	if err := ReadFilteredHistoryEach(ctx, path, Filter{}, func(Event) error { calls++; return nil }); !errors.Is(err, context.Canceled) || calls != 0 {
+		t.Fatalf("err = %v after %d calls, want context.Canceled before any event", err, calls)
+	}
+
+	// Err calls: 1 at entry, 2 before the archive, 3 at line 4096 of it.
+	big := t.TempDir()
+	writeHistoryArchive(t, big, historyStamp(0), 1, 3*historyTailCtxCheckLines)
+	inside := newCancelOnNthErr(3)
+	calls = 0
+	err = ReadFilteredHistoryEach(inside, filepath.Join(big, "events.jsonl"), Filter{}, func(Event) error { calls++; return nil })
+	if !errors.Is(err, context.Canceled) || calls == 0 || calls >= 3*historyTailCtxCheckLines {
+		t.Fatalf("err = %v after %d calls, want context.Canceled part way through the archive", err, calls)
+	}
+}
