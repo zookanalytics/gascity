@@ -225,8 +225,8 @@ func TestRunDetailStreamFirstFrameReflectsBuildRacingConnect(t *testing.T) {
 	runDetailStreamAfterPrecheck = func() {
 		once.Do(func() {
 			appendEvents(t, logPath, runDetailStepEvent(2, "run1.1", "run1", "preflight", "in_progress"))
-			proj := runproj.NewProjector()
-			if err := proj.ColdLoad(logPath); err != nil {
+			proj := runproj.NewRunProjector()
+			if err := proj.ColdLoad(context.Background(), logPath); err != nil {
 				t.Errorf("cold load in seam: %v", err)
 				return
 			}

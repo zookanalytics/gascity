@@ -1,6 +1,7 @@
 package dashboardbff
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -122,10 +123,10 @@ func TestFirstDemandColdLoadTimeoutRetriesAfterReady(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
-	readRunColdLoad = func(proj *runproj.Projector, path string) error {
+	readRunColdLoad = func(ctx context.Context, proj *runproj.RunProjector, path string) error {
 		close(started)
 		<-release
-		return previousLoad(proj, path)
+		return previousLoad(ctx, proj, path)
 	}
 	t.Cleanup(func() {
 		readRunColdLoad = previousLoad

@@ -268,16 +268,17 @@ func captureTailCursor(path string) *tailState {
 }
 
 // loop cold-replays the event log, publishes the bead-derived summary, then
-// tails newly appended events and republishes on each change. All folding and
-// summary-building happens on loop-owned locals; only the publish takes the lock.
+// tails newly appended events and republishes on each change to a run bead.
+// All folding and summary-building happens on loop-owned locals; only the
+// publish takes the lock.
 // readRunColdLoad is indirected so a test can hold the cold replay in flight and
 // prove RunProjection serves a non-blocking warming snapshot.
-var readRunColdLoad = func(proj *runproj.Projector, path string) error {
-	return proj.ColdLoad(path)
+var readRunColdLoad = func(ctx context.Context, proj *runproj.RunProjector, path string) error {
+	return proj.ColdLoad(ctx, path)
 }
 
 func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
-	proj := runproj.NewProjector()
+	proj := runproj.NewRunProjector()
 
 	// Capture the active log size and identity BEFORE the cold replay so the tail
 	// resumes from exactly there. Any event appended during (or just after) the
@@ -288,7 +289,12 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 	// captureTailCursor reads the size and identity from one stat so a rotation
 	// cannot pair the old file's offset with the fresh file's identity.
 	st := captureTailCursor(t.eventsPath)
-	loadErr := readRunColdLoad(proj, t.eventsPath)
+	loadErr := readRunColdLoad(ctx, proj, t.eventsPath)
+	if ctx.Err() != nil {
+		// Shut down, or replaced by a tailer for the city's new path, during
+		// the replay: there is nothing to publish.
+		return
+	}
 	if loadErr != nil {
 		log.Printf("run-tailer: city %q cold replay failed: %v", t.name, loadErr)
 	}
@@ -409,7 +415,7 @@ func (t *cityRunTailer) sync(ctx context.Context) bool {
 // flagged: the view goes blank while every request still returns 200. Logging
 // the miss delta makes that loud. Called only from the single loop goroutine, so
 // st.loggedDecodeMisses needs no lock.
-func (t *cityRunTailer) logDecodeMisses(proj *runproj.Projector, st *tailState) {
+func (t *cityRunTailer) logDecodeMisses(proj *runproj.RunProjector, st *tailState) {
 	total := proj.DecodeMisses()
 	if total <= st.loggedDecodeMisses {
 		return
@@ -431,7 +437,7 @@ var readRotationCatchUp = events.ReadFilteredWithInFlight
 var readTailEvents = events.ReadFrom
 
 // foldNext performs one tail poll: it folds newly appended events into the
-// projector and republishes when a bead snapshot changed. It handles active-log
+// projector and republishes when a run bead changed. It handles active-log
 // rotation by file identity: when the recorder renames the active file to an
 // archive and opens a fresh one, the events written to the old active file in
 // the poll window before the rename live only in the archive, so a bare offset
@@ -440,7 +446,7 @@ var readTailEvents = events.ReadFrom
 // one poll. On a detected rotation it first catches up across archives by
 // sequence, then re-tails the fresh active file from the top; the seq filter
 // drops the overlap the catch-up already folded.
-func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
+func (t *cityRunTailer) foldNext(proj *runproj.RunProjector, st *tailState) {
 	info, statErr := livefile.Stat(t.eventsPath)
 	if statErr != nil && st.activeInfo != nil {
 		// Once an active file has existed, an unavailable path can be the
@@ -600,22 +606,22 @@ func eventsAfter(evts []events.Event, afterSeq uint64) []events.Event {
 	return out
 }
 
-// build projects the folded beads into a bead-derived RunSummary, advances the
-// monotonic thrash marks against the prior generation, and publishes both under
-// the lock. It returns the advanced marks for the loop to carry forward.
-func (t *cityRunTailer) build(proj *runproj.Projector, prevMarks map[string]runproj.LaneProgressMark, loadErr error) map[string]runproj.LaneProgressMark {
-	// Apply the run-bead filter at the projection boundary, mirroring the
-	// frontend's runBeadFilter (summary.ts). The pure runproj builders
-	// assume already-filtered input, so folding the raw event log straight in —
-	// it also carries message, session, and gc:-labeled control beads that can
-	// share a run root — would let unrelated beads distort lane status, counts,
-	// recent changes, and detail nodes. Filtering once here feeds the same clean
-	// slice to both the summary and the detail projection. FilterRunBeads returns
-	// a fresh first-seen-ordered slice of the immutable-after-decode bead values,
-	// so the published snapshot is safe to read concurrently.
-	beadSlice := runproj.FilterRunBeads(proj.Beads())
-	summary, censusLanes := runproj.BuildRunSummaryWithAllLanes(beadSlice)
-	census := runproj.CountCanonicalRunStatuses(beadSlice, censusLanes)
+// build takes the projector's bead-derived RunSummary, census and run beads,
+// advances the monotonic thrash marks against the prior generation, and
+// publishes them with the fold cursor under the lock. It returns the advanced
+// marks for the loop to carry forward.
+func (t *cityRunTailer) build(proj *runproj.RunProjector, prevMarks map[string]runproj.LaneProgressMark, loadErr error) map[string]runproj.LaneProgressMark {
+	// The projector holds only the beads the run-bead filter admits, mirroring
+	// the frontend's runBeadFilter (summary.ts): the event log also carries
+	// message, session, and gc:-labeled control beads that can share a run root,
+	// and they would distort lane status, counts, recent changes, and detail
+	// nodes. Summary rebuilds only the runs whose beads changed since the last
+	// build. Beads returns a fresh first-seen-ordered slice of the
+	// immutable-after-decode bead values, so the published snapshot is safe to
+	// read concurrently, and the summary and the detail projection read the
+	// same clean slice.
+	summary, census := proj.Summary()
+	beadSlice := proj.Beads()
 
 	inFlight := make([]runproj.RunLane, 0, len(summary.Lanes)+len(summary.BlockedLanes))
 	inFlight = append(inFlight, summary.Lanes...)

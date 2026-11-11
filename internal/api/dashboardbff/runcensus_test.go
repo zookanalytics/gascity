@@ -61,7 +61,7 @@ func TestRunProjectionSourceReturnsImmediatelyWhileColdLoadIsPending(t *testing.
 	var releaseOnce sync.Once
 	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
 	previous := readRunColdLoad
-	readRunColdLoad = func(*runproj.Projector, string) error {
+	readRunColdLoad = func(context.Context, *runproj.RunProjector, string) error {
 		close(started)
 		<-release
 		return nil
@@ -177,8 +177,8 @@ func TestRunCensusSourceUsesIncrementalTailAfterColdLoad(t *testing.T) {
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run-one", "test-formula", ""))
 
 	state := captureTailCursor(logPath)
-	projector := runproj.NewProjector()
-	if err := projector.ColdLoad(logPath); err != nil {
+	projector := runproj.NewRunProjector()
+	if err := projector.ColdLoad(context.Background(), logPath); err != nil {
 		t.Fatalf("cold load: %v", err)
 	}
 	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
@@ -210,9 +210,56 @@ func TestRunCensusSourceUsesIncrementalTailAfterColdLoad(t *testing.T) {
 	}
 }
 
+// A tail poll that folds only beads outside the run filter, such as a session
+// bead, publishes nothing: the run beads and summary it would publish are the
+// ones already published. A poll that folds a run bead publishes it.
+func TestRunTailerRepublishesOnlyForRunBeadChanges(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run-one", "test-formula", ""))
+
+	state := captureTailCursor(logPath)
+	projector := runproj.NewRunProjector()
+	if err := projector.ColdLoad(context.Background(), logPath); err != nil {
+		t.Fatalf("cold load: %v", err)
+	}
+	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
+	state.marks = tailer.build(projector, nil, nil)
+	close(tailer.readyCh)
+	publishedSeq := func() uint64 {
+		tailer.mu.RLock()
+		defer tailer.mu.RUnlock()
+		return tailer.lastSeq
+	}
+	if got := publishedSeq(); got != 1 {
+		t.Fatalf("published seq after the cold load = %d, want 1", got)
+	}
+
+	appendEvents(t, logPath, runCensusBeadEvent(2, beads.Bead{ID: "worker-session", Title: "worker", Type: "session", Status: "open"}))
+	tailer.foldNext(projector, state)
+	if projector.LastSeq() != 2 {
+		t.Fatalf("tail cursor = %d, want 2", projector.LastSeq())
+	}
+	if got := publishedSeq(); got != 1 {
+		t.Fatalf("a session bead republished the projection at seq %d, want it left at 1", got)
+	}
+
+	appendEvents(t, logPath, runCensusBeadEvent(3, beads.Bead{
+		ID: "run-one.step", Title: "step", Type: "task", Status: "in_progress",
+		Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "run-one"},
+	}))
+	tailer.foldNext(projector, state)
+	if got := publishedSeq(); got != 3 {
+		t.Fatalf("a run bead published seq %d, want 3", got)
+	}
+	if census := tailer.runCensus(context.Background()); census.StatusCounts.Active != 1 {
+		t.Fatalf("census after the run bead = %+v, want one active run", census.StatusCounts)
+	}
+}
+
 func TestRunProjectionSourceKeepsColdLoadFailurePartialAfterIncrementalBuild(t *testing.T) {
 	tailer := &cityRunTailer{name: "alpha", readyCh: make(chan struct{})}
-	projector := runproj.NewProjector()
+	projector := runproj.NewRunProjector()
 	tailer.build(projector, nil, errors.New("cold replay failed"))
 
 	projector.Apply([]events.Event{
@@ -248,8 +295,8 @@ func TestRunCensusSourceMarksIncrementalDecodeMissPartial(t *testing.T) {
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run-one", "test-formula", ""))
 
 	state := captureTailCursor(logPath)
-	projector := runproj.NewProjector()
-	if err := projector.ColdLoad(logPath); err != nil {
+	projector := runproj.NewRunProjector()
+	if err := projector.ColdLoad(context.Background(), logPath); err != nil {
 		t.Fatalf("cold load: %v", err)
 	}
 	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}

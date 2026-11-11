@@ -1,6 +1,7 @@
 package runproj
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -92,26 +93,31 @@ func CountCanonicalRunStatuses(beadList []beads.Bead, lanes []RunLane) Canonical
 		if found {
 			rootPtr = &root
 		}
-		switch CanonicalRunStatusForLane(lane, rootPtr, startedByRun[lane.ID]) {
-		case CanonicalRunStatusPending:
-			counts.Pending++
-		case CanonicalRunStatusActive:
-			counts.Active++
-		case CanonicalRunStatusWaiting:
-			counts.Waiting++
-		case CanonicalRunStatusCanceling:
-			counts.Canceling++
-		case CanonicalRunStatusCompleted:
-			counts.Completed++
-		case CanonicalRunStatusFailed:
-			counts.Failed++
-		case CanonicalRunStatusCanceled:
-			counts.Canceled++
-		case CanonicalRunStatusSkipped:
-			counts.Skipped++
-		}
+		counts.add(CanonicalRunStatusForLane(lane, rootPtr, startedByRun[lane.ID]))
 	}
 	return counts
+}
+
+// add counts one run in status.
+func (c *CanonicalRunStatusCounts) add(status CanonicalRunStatus) {
+	switch status {
+	case CanonicalRunStatusPending:
+		c.Pending++
+	case CanonicalRunStatusActive:
+		c.Active++
+	case CanonicalRunStatusWaiting:
+		c.Waiting++
+	case CanonicalRunStatusCanceling:
+		c.Canceling++
+	case CanonicalRunStatusCompleted:
+		c.Completed++
+	case CanonicalRunStatusFailed:
+		c.Failed++
+	case CanonicalRunStatusCanceled:
+		c.Canceled++
+	case CanonicalRunStatusSkipped:
+		c.Skipped++
+	}
 }
 
 func canonicalStartedMembersByRun(beadList []beads.Bead, lanes []RunLane) map[string]int {
@@ -122,36 +128,38 @@ func canonicalStartedMembersByRun(beadList []beads.Bead, lanes []RunLane) map[st
 		counts[lanes[i].ID] = 0
 	}
 	for i := range beadList {
-		bead := beadList[i]
-		status := strings.TrimSpace(bead.Status)
-		if status != "in_progress" && status != "closed" {
-			continue
-		}
-		candidates := make(map[string]struct{}, 4)
-		for _, rootID := range []string{
-			bead.ParentID,
-			bead.Metadata[beadmeta.RootBeadIDMetadataKey],
-			strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]),
-		} {
+		for _, rootID := range startedRunRefs(beadList[i]) {
 			if _, ok := roots[rootID]; ok {
-				candidates[rootID] = struct{}{}
-			}
-		}
-		for offset, char := range bead.ID {
-			if char != '.' {
-				continue
-			}
-			if rootID := bead.ID[:offset]; rootID != "" {
-				if _, ok := roots[rootID]; ok {
-					candidates[rootID] = struct{}{}
-				}
-			}
-		}
-		for rootID := range candidates {
-			if bead.ID != rootID {
 				counts[rootID]++
 			}
 		}
 	}
 	return counts
+}
+
+// startedRunRefs returns the distinct run ids a started bead counts toward:
+// its parent, its gc.root_bead_id, its molecule id (each possibly empty) and
+// every non-empty dotted prefix of its own id, never the bead itself. A bead
+// that has not started (neither in_progress nor closed) counts toward none.
+func startedRunRefs(bead beads.Bead) []string {
+	status := strings.TrimSpace(bead.Status)
+	if status != "in_progress" && status != "closed" {
+		return nil
+	}
+	var refs []string
+	add := func(rootID string) {
+		if rootID == bead.ID || slices.Contains(refs, rootID) {
+			return
+		}
+		refs = append(refs, rootID)
+	}
+	add(bead.ParentID)
+	add(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	add(strings.TrimSpace(bead.Metadata[beadmeta.MoleculeIDMetadataKey]))
+	for offset, char := range bead.ID {
+		if char == '.' && offset > 0 {
+			add(bead.ID[:offset])
+		}
+	}
+	return refs
 }

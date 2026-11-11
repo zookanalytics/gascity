@@ -61,42 +61,44 @@ func buildRunSummary(beadList []beads.Bead, opts ...BuildOption) (RunSummary, []
 	}
 
 	sortedLanes, laneIssues := buildAllRunLanes(beadList, cfg.feedScopes)
+	summary := summarizeLanes(sortedLanes, recentChanges(laneIssues))
+	if cfg.partial {
+		summary.LanesPartial = true
+	}
+	return summary, sortedLanes
+}
 
-	// gascity-dashboard-4xcv: blocked lanes are split out of Active.
+// summarizeLanes sorts newest-first lanes into the summary's buckets: blocked
+// lanes are split out of the active ones, and the completed ones are counted
+// in full but carried only up to maxHistoricalLanes.
+func summarizeLanes(sortedLanes []RunLane, recent []RunChange) RunSummary {
 	activeLanes := make([]RunLane, 0)
-	completedLanes := make([]RunLane, 0)
 	blockedLanes := make([]RunLane, 0)
+	historicalLanes := make([]RunLane, 0)
+	totalHistorical := 0
 	for _, lane := range sortedLanes {
 		switch lane.Phase {
 		case "complete":
-			completedLanes = append(completedLanes, lane)
+			totalHistorical++
+			if len(historicalLanes) < maxHistoricalLanes {
+				historicalLanes = append(historicalLanes, lane)
+			}
 		case "blocked":
 			blockedLanes = append(blockedLanes, lane)
 		default:
 			activeLanes = append(activeLanes, lane)
 		}
 	}
-
-	totalHistorical := len(completedLanes)
-	historicalLanes := completedLanes
-	if len(historicalLanes) > maxHistoricalLanes {
-		historicalLanes = historicalLanes[:maxHistoricalLanes]
-	}
-
-	summary := RunSummary{
+	return RunSummary{
 		TotalActive:     len(activeLanes),
 		TotalHistorical: totalHistorical,
 		RunCounts:       runCounts(activeLanes, len(activeLanes), len(blockedLanes)),
 		Lanes:           activeLanes,
 		HistoricalLanes: historicalLanes,
 		BlockedLanes:    blockedLanes,
-		RecentChanges:   recentChanges(laneIssues),
+		RecentChanges:   recent,
 		Census:          runCensusUnavailable(),
 	}
-	if cfg.partial {
-		summary.LanesPartial = true
-	}
-	return summary, sortedLanes
 }
 
 func buildAllRunLanes(beadList []beads.Bead, feedScopes map[string]RunFeedScope) ([]RunLane, []runIssue) {
@@ -549,21 +551,28 @@ func recentChanges(issues []runIssue) []RunChange {
 // compareLanes orders lanes newest-first, then by id. Port of TS compareLanes.
 // Returns <0 if a sorts before b.
 func compareLanes(a, b RunLane) int {
-	aTime := int64(0)
-	if a.UpdatedAt.Status == "available" {
-		aTime = parseTimestamp(a.UpdatedAt.At)
+	return compareLaneKeys(laneUpdatedMillis(a), a.ID, laneUpdatedMillis(b), b.ID)
+}
+
+// laneUpdatedMillis is a lane's sort time: its update time in Unix
+// milliseconds, or 0 when it has none.
+func laneUpdatedMillis(lane RunLane) int64 {
+	if lane.UpdatedAt.Status != "available" {
+		return 0
 	}
-	bTime := int64(0)
-	if b.UpdatedAt.Status == "available" {
-		bTime = parseTimestamp(b.UpdatedAt.At)
-	}
+	return parseTimestamp(lane.UpdatedAt.At)
+}
+
+// compareLaneKeys orders two lanes by their sort times, newest first, then by
+// id. Returns <0 if a sorts before b.
+func compareLaneKeys(aTime int64, aID string, bTime int64, bID string) int {
 	if delta := bTime - aTime; delta != 0 {
 		if delta < 0 {
 			return -1
 		}
 		return 1
 	}
-	return strings.Compare(a.ID, b.ID)
+	return strings.Compare(aID, bID)
 }
 
 // externalReference resolves the external PR/issue reference. Port of TS

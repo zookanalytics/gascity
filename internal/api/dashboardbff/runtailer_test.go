@@ -200,7 +200,7 @@ func TestRunTailerManagerRebindsChangedEventsPath(t *testing.T) {
 
 func TestRunTailerLogsColdLoadFailureOnce(t *testing.T) {
 	previousLoad := readRunColdLoad
-	readRunColdLoad = func(*runproj.Projector, string) error {
+	readRunColdLoad = func(context.Context, *runproj.RunProjector, string) error {
 		return errors.New("cold disk unavailable")
 	}
 	t.Cleanup(func() { readRunColdLoad = previousLoad })
@@ -344,9 +344,9 @@ func TestRunTailerRotationCatchUp(t *testing.T) {
 	rec.Record(runMoleculeEvent(0, "run1", "mol-adopt-pr-v2", "worker-1"))
 
 	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	proj := runproj.NewProjector()
+	proj := runproj.NewRunProjector()
 	st := captureTailCursor(logPath)
-	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+	if loadErr := proj.ColdLoad(context.Background(), logPath); loadErr != nil {
 		t.Fatalf("cold load: %v", loadErr)
 	}
 	st.marks = tl.build(proj, nil, nil)
@@ -424,9 +424,9 @@ func TestRunTailerRotationCatchUpInFlightArchive(t *testing.T) {
 	// tailer mid-run when a rotation happens.
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
 	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	proj := runproj.NewProjector()
+	proj := runproj.NewRunProjector()
 	st := captureTailCursor(logPath)
-	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+	if loadErr := proj.ColdLoad(context.Background(), logPath); loadErr != nil {
 		t.Fatalf("cold load: %v", loadErr)
 	}
 	st.marks = tl.build(proj, nil, nil)
@@ -487,8 +487,8 @@ func TestRunTailerStartupCursorRotationRaceDoesNotSkip(t *testing.T) {
 		runMoleculeEvent(3, "run3", "mol-bugflow-v1", "worker-3"),
 	)
 	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	proj := runproj.NewProjector()
-	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+	proj := runproj.NewRunProjector()
+	if loadErr := proj.ColdLoad(context.Background(), logPath); loadErr != nil {
 		t.Fatalf("cold load: %v", loadErr)
 	}
 	st := captureTailCursor(logPath)
@@ -528,8 +528,8 @@ func TestRunTailerRotationDuringActiveReadDoesNotCommitUnverifiedCursor(t *testi
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "test-formula", ""))
 
 	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	projector := runproj.NewProjector()
-	if err := projector.ColdLoad(logPath); err != nil {
+	projector := runproj.NewRunProjector()
+	if err := projector.ColdLoad(context.Background(), logPath); err != nil {
 		t.Fatalf("cold load: %v", err)
 	}
 	state := captureTailCursor(logPath)
@@ -591,8 +591,8 @@ func TestRunTailerRotationCatchUpErrorRetriesNextPoll(t *testing.T) {
 	// Warm tailer that folded run1 (cursor past seq 1).
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
 	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	proj := runproj.NewProjector()
-	if loadErr := proj.ColdLoad(logPath); loadErr != nil {
+	proj := runproj.NewRunProjector()
+	if loadErr := proj.ColdLoad(context.Background(), logPath); loadErr != nil {
 		t.Fatalf("cold load: %v", loadErr)
 	}
 	st := captureTailCursor(logPath)
@@ -691,8 +691,8 @@ func TestRunTailerReadErrorPreservesCursorAndMarksProjectionIncomplete(t *testin
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "mol-adopt-pr-v2", "worker-1"))
 
 	tl := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	proj := runproj.NewProjector()
-	if err := proj.ColdLoad(logPath); err != nil {
+	proj := runproj.NewRunProjector()
+	if err := proj.ColdLoad(context.Background(), logPath); err != nil {
 		t.Fatalf("cold load: %v", err)
 	}
 	st := captureTailCursor(logPath)
@@ -772,8 +772,8 @@ func TestRunTailerSuccessfulEmptyRetryClearsIncrementalFailure(t *testing.T) {
 	writeEventLog(t, logPath, runMoleculeEvent(1, "run1", "test-formula", ""))
 
 	tailer := &cityRunTailer{name: "alpha", eventsPath: logPath, readyCh: make(chan struct{})}
-	projector := runproj.NewProjector()
-	if err := projector.ColdLoad(logPath); err != nil {
+	projector := runproj.NewRunProjector()
+	if err := projector.ColdLoad(context.Background(), logPath); err != nil {
 		t.Fatalf("cold load: %v", err)
 	}
 	state := captureTailCursor(logPath)
