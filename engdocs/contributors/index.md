@@ -33,9 +33,6 @@ description: The shortest path for new contributors to get productive in Gas Cit
   PR — what the contributor is owed and how credit is recorded
 - [Maintainer Environment](maintainer-environment.md) for maintainers on the
   shared build hosts or the internal bd ledger — contributors can skip it
-- [Beads Version Bump Anchors](beads-version-bump-anchors.md) when moving the
-  `github.com/steveyegge/beads` pin — the version lives in a dozen files, and
-  four of them fail in places that never mention beads
 - [Upstream sync 2026-10-07](upstream-sync-2026-10-07.md) — the carried-commit
   ledger for the fork: every commit kept, dropped, reworked or regenerated when
   rebasing onto upstream, with the upstream evidence behind each drop
@@ -56,6 +53,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
   API read routing, Dolt 2.6): four drops, the shed of the convoy-pour carry
   down to its load-context gate, the storeclass baseline as a new
   regenerated artifact, and the cutover notes
+- [Upstream sync 2026-11-10](upstream-sync-2026-11-10.md) — the 121-commit
+  catch-up and the carry reduction: three drops upstream covers, eighteen
+  commits shed on the operator's ruling, four trimmed, 92 carried commits
+  down to 71, and every message rewritten as a conventional commit
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 

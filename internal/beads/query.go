@@ -3,7 +3,6 @@ package beads
 import (
 	"context"
 	"errors"
-	"slices"
 	"sort"
 	"time"
 )
@@ -103,10 +102,9 @@ type ListQuery struct {
 	Assignees []string
 	ParentID  string
 	// ParentIDs matches beads whose parent_id is any of the listed ids — a
-	// batched form of ParentID for graph/subtree walks. An empty entry names no
-	// parent. A store that cannot push the list into its backend returns a
-	// superset, which ApplyListQuery/Matches then cut exactly, so the result is
-	// exact. It counts as a filter, so a ParentIDs query needs no AllowScan.
+	// batched form of ParentID for graph/subtree walks. Backends that do not
+	// recognize it should ignore it (returning a superset); callers that need
+	// exact results must filter the returned beads by parent in memory.
 	ParentIDs []string
 	// IDs matches beads whose id is any of the listed ids — the IN-list form of
 	// a batch of Gets. It exists so a lane that already knows WHICH beads it
@@ -261,7 +259,6 @@ func (q ListQuery) HasFilter() bool {
 		q.Assignee != "" ||
 		len(q.Assignees) > 0 ||
 		q.ParentID != "" ||
-		len(q.ParentIDs) > 0 ||
 		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
 		!q.CreatedBefore.IsZero() ||
@@ -322,9 +319,6 @@ func (q ListQuery) Matches(b Bead) bool {
 		}
 	}
 	if q.ParentID != "" && b.ParentID != q.ParentID {
-		return false
-	}
-	if len(q.ParentIDs) > 0 && (b.ParentID == "" || !slices.Contains(q.ParentIDs, b.ParentID)) {
 		return false
 	}
 	if len(q.IDs) > 0 {

@@ -12,7 +12,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/beads/queryindex"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -357,6 +356,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				return orderInapplicableBackend(cityPath, cfg, a)
 			})))
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
+		register(doctor.NewOrderDispatchFloorCheck(cfg, cityPath,
+			doctor.WithOrderDispatchFloorInapplicableFunc(func(a orders.Order) (string, bool) {
+				return orderInapplicableBackend(cityPath, cfg, a)
+			})))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
@@ -484,7 +487,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Data checks.
 	if cfgErr == nil && cfg != nil {
 		register(doctor.NewBDSplitStoreCheck(cityPath))
-		register(doctor.NewBdConfigParseCheck(cityPath))
 		if storeOK {
 			registerCityStoreCheck(doctor.NewBeadsStoreCheck(cityPath, openStoreResultForCity(cityPath)))
 			registerCityStoreCheck(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
@@ -494,6 +496,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
+			registerCityStoreCheck(newStorageSplitCheck(cfg, cityPath))
 			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
@@ -581,11 +584,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// looks healthy to every other backup check while its recovery point ages
 	// out — the only surviving backup can be weeks stale before anyone notices.
 	register(doctor.NewBdBackupFreshnessCheckForConfig(cityPath, cfg, cfgErr))
-	// Binary freshness: merged fixes that are not executing. `gc start`'s
-	// DetectBinaryDrift catches a supervisor running a different image than the
-	// on-disk binary; it cannot see the case where the two agree and both are
-	// days behind origin/main, which reports clean everywhere else (gc-0qbf5).
-	register(doctor.NewBinaryFreshnessCheckForConfig(cfg, cfgErr))
 	// Backup coverage on the proxied default. Every per-scope backup check
 	// goes quiet on a bd-owned proxy root — gc can register nothing there —
 	// so one city-level line asks each proxied scope's bd (`bd backup status`)
@@ -644,17 +642,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		registerCityStoreCheck(doctor.NewCustomTypesCheck(cityPath, "city", doctorScopeBdBinary(cityPath, cityPath)))
 		registerCityStoreCheck(newHoldLabelConventionsCheck(cityPath, "city", storeFactory))
 	}
-	// Query indexes on each bead store whose Dolt server gc owns. The
-	// self-test verdict is shared, so one doctor run tests each Dolt version
-	// once.
-	indexVerdicts := &queryindex.Verdicts{}
-	registerBeadStoreIndexesCheck := func(scopeRoot, label string) {
-		if cfgErr != nil || cfg == nil || gcDoltSkip() || !blockedRepairScopeEligible(cityPath, cfg, scopeRoot) {
-			return
-		}
-		register(storeGate.Check(newBeadStoreIndexesCheck(cityPath, scopeRoot, label, cfg.MetadataIndexKeys(), indexVerdicts), []string{scopeRoot}, []string{label}))
-	}
-	registerBeadStoreIndexesCheck(cityPath, "city")
 
 	// Per-rig checks. Skip effectively-suspended rigs — opening their
 	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
@@ -670,7 +657,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigSSHKeepaliveCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
-			register(doctor.NewRigBdConfigParseCheck(rig))
 			rigScope := []string{rig.Path}
 			rigLabel := []string{rig.Name}
 			if storeOK {
@@ -680,9 +666,6 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			if storeOK {
 				register(storeGate.Check(doctor.NewCustomTypesCheck(rig.Path, rig.Name, doctorScopeBdBinary(cityPath, rig.Path)), rigScope, rigLabel))
 				register(storeGate.Check(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory), rigScope, rigLabel))
-			}
-			if !opts.SkipRigDoltChecks {
-				registerBeadStoreIndexesCheck(rig.Path, rig.Name)
 			}
 			// Dolt-backup registration catches the silent gap left by
 			// `gc rig add` before the rig is eligible for mol-dog backup

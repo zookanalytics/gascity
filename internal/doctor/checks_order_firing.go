@@ -40,21 +40,6 @@ const (
 	// exists to be a good citizen against the data plane rather than to
 	// protect the check — the wall time it saves is the whole point.
 	orderFiringLastRunConcurrency = 8
-
-	// orderFiringStaleFloor is the minimum staleness yardstick the
-	// overdue/critical thresholds are measured against. Short-cadence orders
-	// (the 1m beads-health / dolt-health / gate-sweep sweeps) ride the
-	// supervisor's ~30s dispatch tick, so a single slipped tick plus
-	// event-read lag can push a 1m order's age past a naive
-	// 1.5×interval = 90s overdue threshold — a persistent false "overdue"
-	// on an otherwise-healthy town. Flooring the yardstick gives short
-	// intervals absolute slack for that jitter (overdue ~7m30s, critical
-	// ~15m for a 1m order) while still catching a genuinely stalled sweep
-	// well inside ~10 minutes. Orders whose real interval already exceeds
-	// the floor are unaffected, so long-cadence strictness is preserved.
-	// The displayed "expected every X" always shows the real interval,
-	// never the floor.
-	orderFiringStaleFloor = 5 * time.Minute
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an
@@ -96,6 +81,9 @@ func WithOrderFiringCurrentInapplicableFunc(fn OrderFiringCurrentInapplicableFun
 }
 
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
+// An order's cadence is its interval, or the dispatch floor when that is
+// longer: the dispatcher starts a bounded number of orders per pass, so a short
+// interval in a large ring cannot be met (see OrderDispatchFloorCheck).
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
@@ -139,36 +127,16 @@ func (c *OrderFiringCurrentCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// The order-history resolver opens the beads/Dolt store and does not accept
 	// a context. Keep that potentially blocking I/O from wedging the complete
-	// doctor run; the gc process exits after printing this failed check. The
-	// inner run gets its own Done, closed when this check stops waiting for it
-	// or the runner abandons the check, so it issues no further lookup.
-	abandoned := make(chan struct{})
-	var runCtx CheckContext
-	var runnerDone <-chan struct{}
-	if ctx != nil {
-		runCtx = *ctx
-		runnerDone = ctx.Done
-	}
-	runCtx.Done = abandoned
+	// doctor run; the gc process exits after printing this failed check.
 	results := make(chan *CheckResult, 1)
 	go func() {
-		results <- c.run(&runCtx)
+		results <- c.run(ctx)
 	}()
 
 	select {
 	case result := <-results:
 		return result
-	case <-runnerDone:
-		close(abandoned)
-		return &CheckResult{
-			Name:     c.Name(),
-			Status:   StatusError,
-			Severity: SeverityAdvisory,
-			TimedOut: true,
-			Message:  ErrCheckAbandoned.Error(),
-		}
 	case <-time.After(timeout):
-		close(abandoned)
 		// A timed-out lookup is inconclusive, not proof of a stale/never-fired
 		// order (#4895): the query being slow says nothing about whether orders
 		// are actually firing. SeverityBlocking is CheckSeverity's zero value, so
@@ -258,7 +226,14 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
 	// the expected intervals — and therefore which orders need a lookup — are
 	// identical to what the loop derives for itself.
-	lastRunFor := c.prefetchedLastRunFunc(ctx, c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
+	// The dispatcher starts a bounded number of orders per pass, so an order
+	// can fire no more often than the dispatch floor however short its
+	// interval (order-dispatch-floor reports that configuration). Judging it
+	// against its bare interval instead would call a healthy order stale, or
+	// never fired, merely for waiting its turn in the ring.
+	floor, _, _ := orderDispatchFloor(c.cfg, len(orderDispatchRing(allOrders, suspendedRigs)))
+
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, floor, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -278,7 +253,8 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, now)
+		cadence := max(expected, floor)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, cadence, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -288,7 +264,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, cadence, lastFired, startedAt)
+		if cadence > expected {
+			detail += fmt.Sprintf(" (interval %s; the %s dispatch floor sets its cadence)",
+				formatDispatchFloorDuration(expected), formatDispatchFloorDuration(floor))
+		}
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -669,7 +649,7 @@ func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Ti
 // orders need an authoritative lookup. Orders whose expected interval cannot be
 // computed are skipped: the loop reports that as its own error without ever
 // reaching the lookup.
-func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, floor time.Duration, now time.Time) []orders.Order {
 	if c.lastRun == nil {
 		return nil
 	}
@@ -685,7 +665,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), max(expected, floor), now) {
 			continue
 		}
 		pending = append(pending, order)
@@ -696,19 +676,15 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 // prefetchedLastRunFunc resolves pending in parallel and returns a resolver
 // serving those results. A lookup the pre-pass did not anticipate still falls
 // through to the live resolver, so the classification loop can never silently
-// lose an answer. Once ctx is canceled no lookup reaches the live resolver; it
-// answers ErrCheckAbandoned instead.
-func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(ctx *CheckContext, pending []orders.Order) OrderFiringCurrentLastRunFunc {
+// lose an answer.
+func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(pending []orders.Order) OrderFiringCurrentLastRunFunc {
 	if c.lastRun == nil {
 		return nil
 	}
-	prefetched := c.prefetchLastRuns(ctx, pending)
+	prefetched := c.prefetchLastRuns(pending)
 	return func(order orders.Order) (time.Time, error) {
 		if result, ok := prefetched[order.ScopedName()]; ok {
 			return result.at, result.err
-		}
-		if ctx.Canceled() {
-			return time.Time{}, ErrCheckAbandoned
 		}
 		return c.lastRun(order)
 	}
@@ -720,10 +696,8 @@ func (c *OrderFiringCurrentCheck) prefetchedLastRunFunc(ctx *CheckContext, pendi
 // alone exceed the check budget, while the check's own timeout means a slow
 // fan-out reports a blocking failure that says nothing about order firing
 // (ga-klv). Results (values AND errors) are handed back verbatim so the
-// classification loop behaves exactly as it did when it called inline. A lookup
-// that gets its turn after ctx is canceled is not issued; it records
-// ErrCheckAbandoned.
-func (c *OrderFiringCurrentCheck) prefetchLastRuns(ctx *CheckContext, pending []orders.Order) map[string]orderFiringLastRunResult {
+// classification loop behaves exactly as it did when it called inline.
+func (c *OrderFiringCurrentCheck) prefetchLastRuns(pending []orders.Order) map[string]orderFiringLastRunResult {
 	out := make(map[string]orderFiringLastRunResult, len(pending))
 	if c.lastRun == nil || len(pending) == 0 {
 		return out
@@ -742,10 +716,7 @@ func (c *OrderFiringCurrentCheck) prefetchLastRuns(ctx *CheckContext, pending []
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			at, err := time.Time{}, ErrCheckAbandoned
-			if !ctx.Canceled() {
-				at, err = c.lastRun(order)
-			}
+			at, err := c.lastRun(order)
 			mu.Lock()
 			out[order.ScopedName()] = orderFiringLastRunResult{at: at, err: err}
 			mu.Unlock()
@@ -795,17 +766,10 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
-	// Measure staleness against a floored yardstick so short-cadence orders
-	// get absolute slack for supervisor tick jitter; the displayed cadence
-	// below stays the real interval, not the floor. See orderFiringStaleFloor.
-	staleRef := expected
-	if staleRef < orderFiringStaleFloor {
-		staleRef = orderFiringStaleFloor
-	}
 	switch {
-	case age >= staleRef*3:
+	case age >= expected*3:
 		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= staleRef+staleRef/2:
+	case age >= expected+expected/2:
 		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
 	default:
 		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))

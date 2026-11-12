@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 )
 
 const testNonLivePID = 2147483647
@@ -52,8 +53,8 @@ func TestCmdGCTempRootPrefixKeepsControllerSocketLegacy(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
 	sockPath := filepath.Join(root, "gc-testscript-1234567890", "script-controller", "ctrl-city", ".gc", "controller.sock")
-	if len(sockPath) > controllerSocketPathLimit {
-		t.Fatalf("controller test socket path length = %d, want <= %d: %s", len(sockPath), controllerSocketPathLimit, sockPath)
+	if len(sockPath) > localsocket.PathLimit {
+		t.Fatalf("controller test socket path length = %d, want <= %d: %s", len(sockPath), localsocket.PathLimit, sockPath)
 	}
 }
 
@@ -660,29 +661,27 @@ func TestSweepOrphanAgeFenceBySentinelState(t *testing.T) {
 	}
 }
 
-// TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride is a focused
+// TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride is a focused
 // regression test for the main_test.go TMPDIR bug (ga-lygcyb): os.TempDir()
-// re-reads TMPDIR on every call, so the host roots used to find what prior
-// runs left behind must be captured before TMPDIR and GOTMPDIR are overridden
-// to the fresh, empty per-run root — capturing them afterward silently
-// returns the per-run root instead, and every startup sweep keyed off them
+// re-reads TMPDIR on every call, so the host root used to find legacy
+// fixture dirs from prior runs must be captured before TMPDIR is overridden
+// to the fresh, empty per-run root — capturing it afterward silently
+// returns the per-run root instead, and every legacy-dir sweep keyed off it
 // finds nothing.
-func TestAdoptPerRunTMPDIRCapturesHostRootsBeforeOverride(t *testing.T) {
+func TestAdoptPerRunTMPDIRCapturesHostRootBeforeOverride(t *testing.T) {
 	hostRoot := t.TempDir()
-	hostGoTmp := t.TempDir()
-	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from both host roots
 	t.Setenv("TMPDIR", hostRoot)
-	t.Setenv("GOTMPDIR", hostGoTmp)
+	// adoptPerRunTMPDIR also rewrites GOTMPDIR; restore it when the test ends.
+	t.Setenv("GOTMPDIR", os.Getenv("GOTMPDIR"))
+
+	newRoot := t.TempDir() // simulates the per-run testTempRoot, distinct from hostRoot
 
 	got, err := adoptPerRunTMPDIR(newRoot)
 	if err != nil {
 		t.Fatalf("adoptPerRunTMPDIR: %v", err)
 	}
-	if got.tmp != hostRoot {
-		t.Errorf("adoptPerRunTMPDIR(%q) host temp root = %q, want %q (TMPDIR in effect before the override)", newRoot, got.tmp, hostRoot)
-	}
-	if got.goTmp != hostGoTmp {
-		t.Errorf("adoptPerRunTMPDIR(%q) host GOTMPDIR = %q, want %q (GOTMPDIR in effect before the override)", newRoot, got.goTmp, hostGoTmp)
+	if got != hostRoot {
+		t.Errorf("adoptPerRunTMPDIR(%q) host root = %q, want %q (TMPDIR in effect before the override)", newRoot, got, hostRoot)
 	}
 	if gotEnv := os.Getenv("TMPDIR"); gotEnv != newRoot {
 		t.Errorf("TMPDIR after adoptPerRunTMPDIR = %q, want %q", gotEnv, newRoot)

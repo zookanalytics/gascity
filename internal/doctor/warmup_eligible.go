@@ -18,10 +18,6 @@ func (c *BdBackupStateCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
-func (c *BdConfigParseCheck) WarmupEligible() bool { return false }
-
-// WarmupEligible returns false; this check is not part of the
-// `gc start` warm-up scan.
 func (c *BeadsRoleCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
@@ -143,6 +139,10 @@ func (c *NestedWorktreePruneCheck) WarmupEligible() bool { return false }
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
 func (c *NamedAlwaysMinConflictCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
+func (c *OrderDispatchFloorCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.

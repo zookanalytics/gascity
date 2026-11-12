@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -39,7 +38,7 @@ func TestLoadSessionModelDoctorBeadsAvoidsBroadOpenWorkScan(t *testing.T) {
 		t.Fatalf("Update(session closed): %v", err)
 	}
 
-	got, err := loadSessionModelDoctorBeads(nil, store, store)
+	got, err := loadSessionModelDoctorBeads(store, store)
 	if err != nil {
 		t.Fatalf("loadSessionModelDoctorBeads: %v", err)
 	}
@@ -86,7 +85,7 @@ func TestLoadSessionModelDoctorBeadsReadsSessionUnionFromSessionStore(t *testing
 		t.Fatalf("Create(session): %v", err)
 	}
 
-	got, err := loadSessionModelDoctorBeads(nil, workStore, sessStore)
+	got, err := loadSessionModelDoctorBeads(workStore, sessStore)
 	if err != nil {
 		t.Fatalf("loadSessionModelDoctorBeads: %v", err)
 	}
@@ -262,23 +261,5 @@ func TestSessionModelDoctorExemptsHumanRoutedTarget(t *testing.T) {
 	out := stdout.String() + stderr.String()
 	if strings.Contains(out, "stale-routed-config") {
 		t.Fatalf("doctor falsely flagged reserved route target \"human\" as stale config for %s:\n%s", bead.ID, out)
-	}
-}
-
-// TestSessionModelDoctorCheckStopsOnceAbandoned: abandoned while its first
-// session listing is in flight, the check issues none of its other listings.
-func TestSessionModelDoctorCheckStopsOnceAbandoned(t *testing.T) {
-	cityDir := t.TempDir()
-
-	full := newDoctorAbandonProbe()
-	(&sessionModelDoctorCheck{cityPath: cityDir, newStore: full.newStore(beads.NewMemStoreFrom(0, nil, nil))}).Run(&doctor.CheckContext{})
-	if got := full.reads.Load(); got != 4 {
-		t.Fatalf("unabandoned run made %d reads, want two session and two work listings", got)
-	}
-
-	probe := newDoctorAbandonProbe()
-	(&sessionModelDoctorCheck{cityPath: cityDir, newStore: probe.newStore(beads.NewMemStoreFrom(0, nil, nil))}).Run(probe.ctx())
-	if got := probe.reads.Load(); got != 1 {
-		t.Fatalf("abandoned run made %d reads, want only the first session listing", got)
 	}
 }

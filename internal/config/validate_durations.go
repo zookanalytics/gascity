@@ -85,6 +85,7 @@ func validateDeploymentDurations(cfg *City, source string) []string {
 	d.check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	d.check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	d.check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	d.checkPositive("[daemon]", "drift_deferral_escalate_after", cfg.Daemon.DriftDeferralEscalateAfter)
 	d.check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	d.check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
 	d.check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)

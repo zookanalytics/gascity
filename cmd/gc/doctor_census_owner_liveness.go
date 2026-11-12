@@ -50,19 +50,19 @@ func (c *censusOwnerLivenessCheck) Fix(_ *doctor.CheckContext) error { return ni
 // Run scans the city and each non-suspended, path-bearing rig's
 // resource-census ledger for owner_bead references that no longer resolve
 // in that scope's bead store.
-func (c *censusOwnerLivenessCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+func (c *censusOwnerLivenessCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var findings []string
 	var skipped []string
 
 	live := c.liveBeadPrefixes()
-	c.scanScope(ctx, &findings, &skipped, live, "city", c.cityPath)
+	c.scanScope(&findings, &skipped, live, "city", c.cityPath)
 	if c.cfg != nil {
 		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
 		for _, rig := range c.cfg.Rigs {
 			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) || strings.TrimSpace(rig.Path) == "" {
 				continue
 			}
-			c.scanScope(ctx, &findings, &skipped, live, "rig "+rig.Name, rig.Path)
+			c.scanScope(&findings, &skipped, live, "rig "+rig.Name, rig.Path)
 		}
 	}
 
@@ -165,9 +165,7 @@ func normalizeCensusBeadPrefix(prefix string) string {
 // Rows whose owner_bead falls outside live — the set of bead ID prefixes
 // this city owns — are dropped before the store is opened, so a ledger that
 // references only foreign ids costs no store access and reports nothing.
-//
-// It stops issuing store calls once the doctor runner abandons the check.
-func (c *censusOwnerLivenessCheck) scanScope(ctx *doctor.CheckContext, findings, skipped *[]string, live map[string]struct{}, label, path string) {
+func (c *censusOwnerLivenessCheck) scanScope(findings, skipped *[]string, live map[string]struct{}, label, path string) {
 	if c.newStore == nil || strings.TrimSpace(path) == "" {
 		return
 	}
@@ -199,10 +197,6 @@ func (c *censusOwnerLivenessCheck) scanScope(ctx *doctor.CheckContext, findings,
 	}
 	sort.Strings(ids)
 
-	if ctx.Canceled() {
-		*skipped = append(*skipped, fmt.Sprintf("%s skipped: %v", label, doctor.ErrCheckAbandoned))
-		return
-	}
 	store, err := c.newStore(path)
 	if err != nil {
 		*skipped = append(*skipped, fmt.Sprintf("%s skipped: opening bead store: %v", label, err))
@@ -210,10 +204,6 @@ func (c *censusOwnerLivenessCheck) scanScope(ctx *doctor.CheckContext, findings,
 	}
 
 	for _, id := range ids {
-		if ctx.Canceled() {
-			*skipped = append(*skipped, fmt.Sprintf("%s skipped: %v", label, doctor.ErrCheckAbandoned))
-			return
-		}
 		_, err := store.Get(id)
 		switch {
 		case err == nil:

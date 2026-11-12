@@ -4,8 +4,6 @@
 package doctor
 
 import (
-	"context"
-	"errors"
 	"io"
 	"sync"
 )
@@ -69,17 +67,12 @@ type CheckContext struct {
 	// Done, when non-nil, is closed once the runner abandons this Run at the
 	// per-check timeout. Nothing reads an abandoned check's result, so a check
 	// that issues many store or subprocess calls should stop issuing new ones
-	// once it closes (see Canceled). Nil for unbounded runs. The runner never
-	// sets it for Fix, so it does not interrupt an abandoned fix mid-mutation.
+	// once it closes (see Canceled). Nil for unbounded runs.
 	Done <-chan struct{}
 	// abandon is set with Done by the runner, which abandons the Run through
 	// it. onAbandon follows it only while Done is the channel it closes.
 	abandon *abandonment
 }
-
-// ErrCheckAbandoned is what a check reports for the work it skipped because
-// the runner abandoned it (see Canceled).
-var ErrCheckAbandoned = errors.New("check abandoned at its timeout")
 
 // Canceled reports whether the runner has abandoned the check execution this
 // context belongs to. A nil context, or one without Done, is never canceled.
@@ -131,18 +124,6 @@ func (c *CheckContext) onAbandon(stop func()) (release func()) {
 			releaseStop()
 			close(finished)
 		})
-	}
-}
-
-// runContext returns a context that is canceled once the runner abandons the
-// check (see onAbandon), for the subprocesses a check starts. The caller calls
-// cancel when the context is no longer needed.
-func (c *CheckContext) runContext() (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(context.Background())
-	release := c.onAbandon(cancel)
-	return ctx, func() {
-		release()
-		cancel()
 	}
 }
 

@@ -1276,69 +1276,6 @@ func TestRunCheckTimeoutSignalsAbandonedCheck(t *testing.T) {
 	d.Wait()
 }
 
-// callLoopCheck walks a series of blocking calls, the shape of a check that
-// reads one store per scope and pool template. Each call blocks until release
-// closes, after which a check that ignored cancellation would issue calls
-// without end. stopped closes when Run returns.
-type callLoopCheck struct {
-	release chan struct{}
-	stopped chan struct{}
-	issued  atomic.Int64
-}
-
-func (c *callLoopCheck) Name() string { return "call-loop" }
-func (c *callLoopCheck) Run(ctx *CheckContext) *CheckResult {
-	defer close(c.stopped)
-	for !ctx.Canceled() {
-		c.issued.Add(1)
-		<-c.release
-	}
-	return &CheckResult{Name: c.Name(), Status: StatusOK}
-}
-func (c *callLoopCheck) CanFix() bool              { return false }
-func (c *callLoopCheck) Fix(_ *CheckContext) error { return nil }
-func (c *callLoopCheck) WarmupEligible() bool      { return false }
-
-// TestRunCheckTimeoutStopsAbandonedCallLoop: a check still issuing calls when
-// the per-check timeout fires is abandoned without being waited on, and once
-// the call it had in flight returns it issues no more, so it stops loading the
-// store while the checks after it run.
-func TestRunCheckTimeoutStopsAbandonedCallLoop(t *testing.T) {
-	d := &Doctor{CheckTimeout: 25 * time.Millisecond}
-	loop := &callLoopCheck{release: make(chan struct{}), stopped: make(chan struct{})}
-	d.Register(loop)
-	d.Register(&mockCheck{name: "after", status: StatusOK, msg: "ran"})
-
-	reports := make(chan *Report, 1)
-	go func() { reports <- d.RunCollect(&CheckContext{}, false) }()
-	var report *Report
-	select {
-	case report = <-reports:
-	case <-time.After(5 * time.Second):
-		close(loop.release)
-		t.Fatal("run did not return at the timeout; it waited on the check's in-flight call")
-	}
-	if len(report.Results) != 2 || !report.Results[0].TimedOut {
-		t.Fatalf("Results = %+v, want the call loop timed out", report.Results)
-	}
-	if got := report.Results[1]; got.Name != "after" || got.Status != StatusOK {
-		t.Fatalf("after result = %+v, want the next check to have run", got)
-	}
-
-	// The check is still inside the call it had in flight at the timeout, or
-	// never started one. Release that call and every later one.
-	close(loop.release)
-	select {
-	case <-loop.stopped:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("abandoned check still issuing calls 5s after its in-flight call returned (%d issued)", loop.issued.Load())
-	}
-	if got := loop.issued.Load(); got > 1 {
-		t.Fatalf("abandoned check issued %d calls, want at most the one in flight at the timeout", got)
-	}
-	d.Wait()
-}
-
 // TestCheckContextCanceledNilSafe: an unbounded run leaves Done nil, and a nil
 // context is never canceled.
 func TestCheckContextCanceledNilSafe(t *testing.T) {

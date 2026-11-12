@@ -48,6 +48,7 @@ skill-collision
 skill-dangling-sink
 order-firing-current
 order-outcome-healthy
+order-dispatch-floor
 codex-hooks-drift
 rig-pack-coverage
 pack-runtimes
@@ -74,7 +75,6 @@ agent-sessions
 zombie-sessions
 orphan-sessions
 bd-split-store
-bd-config-parse
 beads-store
 v2-routed-to-namespace
 executor-identity-residue
@@ -83,6 +83,7 @@ run-target-routed-to-backfill
 route-recovery-quarantine
 cross-store-gates
 storage-rigs
+storage-split
 dangling-blocking-edges
 hold-label-routed-to
 pool-idle-routed-work
@@ -113,7 +114,6 @@ events-log-size
 bd-backup-size
 bd-backup-state
 bd-backup-freshness
-binary-freshness
 worktree-disk-size
 nested-worktree-prune
 custom-types:city

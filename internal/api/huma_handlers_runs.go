@@ -95,12 +95,15 @@ const runProjectionFreshness = "Run reads are a projection of the city event log
 	"From then on these reads agree with GET /bead/{id}, which serves the same supervisor view."
 
 // RunProjectionSyncSource folds everything already appended to the city's
-// event log into the warm projection before it returns. A handler that just
-// wrote run state through the supervisor's cache — whose bead.* events are
-// recorded synchronously — calls it so the caller's next point read reflects
-// that write (read-your-writes) instead of waiting for the next poll. The bool
-// is false when the projection could not be synced (unknown city, tailer not
-// running, ctx done); the projection then catches up on its own.
+// event log into its running warm projection before it returns. A handler that
+// just wrote run state through the supervisor's cache — whose bead.* events
+// are recorded synchronously — calls it so the caller's next point read
+// reflects that write (read-your-writes) instead of waiting for the next poll.
+// It starts no projection: a city with none running has nothing to be stale,
+// and the projection a later read starts replays the log, the write included.
+// The bool is false when the projection could not be synced (unknown city,
+// ctx done, its tailer stopped); a running projection then catches up on its
+// own.
 type RunProjectionSyncSource interface {
 	SyncRunProjection(context.Context, string) bool
 }
@@ -414,9 +417,10 @@ func (s *Server) humaHandleRunCancel(ctx context.Context, input *RunCancelInput)
 // syncRunProjectionAfterWrite gives the caller read-your-writes on the run
 // projection after a write this handler made through the supervisor's cache:
 // the write's bead.* events are already in the event log, and this folds them
-// before the response goes out. It costs no store call — one stat and a read of
-// the newly appended log bytes — and is a no-op for a source that cannot sync
-// (the legacy on-disk fold re-reads the log whenever it changed).
+// into a running projection before the response goes out. It costs no store
+// call — one stat and a read of the newly appended log bytes, or nothing when
+// no projection is running — and is a no-op for a source that cannot sync (the
+// legacy on-disk fold re-reads the log whenever it changed).
 func (s *Server) syncRunProjectionAfterWrite(ctx context.Context) {
 	source, ok := s.runCensusSource.(RunProjectionSyncSource)
 	if !ok {
@@ -653,9 +657,8 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 			unique = append(unique, holder)
 		}
 	}
-	sessions := s.state.SessionsBeadStore()
-	store := sessions.Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		for _, holder := range unique {
 			fail(holder, errors.New("no session store configured"))
 		}
@@ -691,7 +694,7 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			mgr := s.sessionManager(sessions)
+			mgr := s.sessionManager(store)
 			info, err := mgr.Get(id)
 			if err != nil {
 				results[i] = err

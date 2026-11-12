@@ -1111,12 +1111,9 @@ func resolveOwningStoreDir(beadID string, cfg *config.City, cityPath string, ope
 // suspended rig is a question about that rig's bead, so that rig's store is
 // still read.
 func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(string) (beads.Store, error)) func(string) (beads.Store, error) {
-	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	asleep := byIDSuspendedStoreRoots(cfg, cityPath, beadID)
 	if len(asleep) == 0 {
 		return openStore
-	}
-	if rd := rigDirForBead(cfg, beadID); rd != "" {
-		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
 	}
 	return func(dir string) (beads.Store, error) {
 		if len(asleep[normalizePathForCompare(dir)]) > 0 {
@@ -1124,6 +1121,20 @@ func byIDStoreOpener(cfg *config.City, cityPath, beadID string, openStore func(s
 		}
 		return openStore(dir)
 	}
+}
+
+// byIDSuspendedStoreRoots is suspendedRigStoreRoots less the store root of the
+// rig beadID's prefix routes to: the suspended stores a by-id probe of beadID
+// leaves unopened.
+func byIDSuspendedStoreRoots(cfg *config.City, cityPath, beadID string) map[string][]string {
+	asleep := suspendedRigStoreRoots(cfg, cityPath)
+	if len(asleep) == 0 {
+		return asleep
+	}
+	if rd := rigDirForBead(cfg, beadID); rd != "" {
+		delete(asleep, normalizePathForCompare(resolveStoreScopeRoot(cityPath, rd)))
+	}
+	return asleep
 }
 
 // refuseBindingRigCollision restores the uniqueness contract to the one case

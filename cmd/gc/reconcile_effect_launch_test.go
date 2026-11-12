@@ -614,7 +614,7 @@ func taskWorkDirLaunchKit(t *testing.T) (k *txKit, leaf *startHookLeaf, reads *s
 	return k, leaf, reads, holderDir, taskDir
 }
 
-// Kills a launch that chooses its work dir twice (SESSION-START-027): its
+// Kills a launch that chooses its work dir twice (SESSION-START-028): its
 // PreWake chooses the task work_dir, probes the key's transcript there and
 // records it, and the launch runs there, though a session opens in the
 // directory holding the worktree before the launch, where a second choice

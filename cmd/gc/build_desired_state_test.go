@@ -3430,52 +3430,6 @@ mode = "always"
 	}
 }
 
-func TestBuildDesiredState_SharedBareNameSpawnsEachAgentWithItsOwnPrompt(t *testing.T) {
-	// Two imports each define a pool named "dog". A spawned session renders
-	// the prompt of the agent it was built from, and its hook re-prime gets
-	// that agent's qualified name, so the shared bare name never decides which
-	// prompt a session receives.
-	cityPath := t.TempDir()
-	writeSharedDogPacks(t, cityPath, "scope = \"city\"\nmin_active_sessions = 1\nmax_active_sessions = 2\n")
-	writePrimeFixtureFiles(t, cityPath, map[string]string{
-		"city.toml": `
-[workspace]
-provider = "claude"
-
-[providers.claude]
-base = "builtin:claude"
-`,
-		".gc/site.toml": "workspace_name = \"test-city\"\n",
-	})
-
-	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
-	if err != nil {
-		t.Fatalf("LoadWithIncludes: %v", err)
-	}
-
-	dsResult := buildDesiredState(cfg.EffectiveCityName(), cityPath, time.Now().UTC(), cfg, runtime.NewFake(), beads.NewMemStore(), io.Discard)
-
-	byTemplate := make(map[string]TemplateParams)
-	for _, tp := range dsResult.State {
-		byTemplate[tp.TemplateName] = tp
-	}
-	for _, tc := range []struct{ template, want, wantNot string }{
-		{"bd.dog", "dolt maintenance dog", "warrant executor dog"},
-		{"toolkit.dog", "warrant executor dog", "dolt maintenance dog"},
-	} {
-		tp, ok := byTemplate[tc.template]
-		if !ok {
-			t.Fatalf("desired state has no %s session; keys=%v", tc.template, mapKeys(dsResult.State))
-		}
-		if !strings.Contains(tp.Prompt, tc.want) || strings.Contains(tp.Prompt, tc.wantNot) {
-			t.Errorf("%s session prompt = %q, want its own %q and not %q", tc.template, tp.Prompt, tc.want, tc.wantNot)
-		}
-		if got := tp.Env["GC_TEMPLATE"]; got != tc.template {
-			t.Errorf("%s session GC_TEMPLATE = %q, want the qualified %q", tc.template, got, tc.template)
-		}
-	}
-}
-
 func TestBuildDesiredState_TransitiveFalseSkipsNestedImportedNamedSessions(t *testing.T) {
 	cityPath := t.TempDir()
 	for path, contents := range map[string]string{
@@ -5735,6 +5689,78 @@ func TestBuildDesiredState_MaxOneCanonicalBeadIsIdempotent(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "collapsing phantom pool identity") {
 		t.Fatalf("stderr = %q, want no normalization diagnostic for canonical bead", stderr.String())
+	}
+}
+
+// TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused
+// covers the restart outage end to end: a min=1, max=1 pool whose only row was
+// stopped by a restart request (asleep, reset committed, no sleep reason)
+// keeps that row desired under the same session id on every tick, so its
+// reset-pending wake can start it, instead of stalling the floor's fresh
+// create on the row's own name until the session sweep closes it.
+func TestBuildDesiredState_MinFloorCanonicalPoolRowAfterRestartHandoffIsReused(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 10, 30, 5, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			Dir:               "rig",
+			StartCommand:      "true",
+			ScaleCheck:        "printf 0",
+			MinActiveSessions: intPtr(1),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	sp := runtime.NewFake()
+
+	var warmup bytes.Buffer
+	first := buildDesiredState("test-city", cityPath, now, cfg, sp, store, &warmup)
+	if len(first.State) != 1 {
+		t.Fatalf("warm-up tick: desired = %d, want 1; stderr=%q", len(first.State), warmup.String())
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("warm-up tick: session beads = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if err := store.SetMetadataBatch(row.ID, restartHandoff("", true, finalizeFacts{Now: now.Add(time.Minute)})); err != nil {
+		t.Fatal(err)
+	}
+
+	for tick := 1; tick <= 2; tick++ {
+		var stderr bytes.Buffer
+		result := buildDesiredState("test-city", cityPath, now.Add(time.Duration(tick+1)*time.Minute), cfg, sp, store, &stderr)
+		tp, ok := result.State[row.Metadata["session_name"]]
+		if !ok {
+			t.Fatalf("tick %d: desired state missing handed-off row %s (%q); keys=%v stderr=%q",
+				tick, row.ID, row.Metadata["session_name"], mapKeys(result.State), stderr.String())
+		}
+		if got := tp.Env["GC_SESSION_ID"]; got != row.ID {
+			t.Fatalf("tick %d: desired GC_SESSION_ID = %q, want handed-off row %s", tick, got, row.ID)
+		}
+		for _, stall := range []string{"slot stalled on its own runtime name", "is held by session"} {
+			if strings.Contains(stderr.String(), stall) {
+				t.Fatalf("tick %d: stderr contains %q: %s", tick, stall, stderr.String())
+			}
+		}
+		after, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+		if err != nil {
+			t.Fatalf("tick %d: List: %v", tick, err)
+		}
+		open := 0
+		for _, b := range after {
+			if b.Status != "closed" {
+				open++
+			}
+		}
+		if open != 1 {
+			t.Fatalf("tick %d: open session beads = %d, want 1 (the handed-off row reused)", tick, open)
+		}
 	}
 }
 

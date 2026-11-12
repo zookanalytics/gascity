@@ -28,6 +28,7 @@ go_test(
         "convoy_test.go",
         "members_batch_bench_test.go",
         "members_batch_test.go",
+        "membership_on_test.go",
         "testenv_import_test.go",
     ],
     embed = [":convoy"],

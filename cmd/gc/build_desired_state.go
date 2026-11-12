@@ -2018,7 +2018,7 @@ func collectAssignedWorkBeadsWithStores(
 			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
-			logAssignedWorkReadErr(err)
+			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
@@ -2090,21 +2090,11 @@ func collectAssignedWorkBeadsWithStores(
 			readyAssigned[storeScopedBeadKey{StoreRef: r.ref, ID: id}] = true
 		}
 		for _, err := range r.errs {
-			logAssignedWorkReadErr(err)
+			log.Printf("collectAssignedWorkBeads: %v", err)
 			partial = true
 		}
 	}
 	return result, resultStores, resultStoreRefs, readyAssigned, partial
-}
-
-// logAssignedWorkReadErr logs a failed assigned-work read. A read refused
-// because its pass was stopped (errDemandReadStopped) is not a failure and is
-// not logged; the caller still marks the collection partial.
-func logAssignedWorkReadErr(err error) {
-	if errors.Is(err, errDemandReadStopped) {
-		return
-	}
-	log.Printf("collectAssignedWorkBeads: %v", err)
 }
 
 func assignedWorkReadyLimit(cfg *config.City) int {
@@ -3117,9 +3107,7 @@ func readyForControllerDemandQuery(store beads.Store, query beads.ReadyQuery) ([
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return handles.Live.Ready(query)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -3383,9 +3371,7 @@ func (c *readyDemandCache) controllerDemandReady(store beads.Store, leg string) 
 	if errors.Is(err, beads.ErrCacheUnavailable) {
 		return c.liveSnapshot(store, leg)
 	}
-	if _, hasExplicitHandles := store.(interface {
-		Handles() beads.StoreHandles
-	}); !hasExplicitHandles {
+	if !beads.HasExplicitHandles(store) {
 		return rows, err
 	}
 	if err != nil && !beads.IsPartialResult(err) {
@@ -5568,11 +5554,12 @@ func selectOrPlanPoolSessionBeadAvoiding(
 		}
 	}
 	// Reuse an existing active/creating session bead. Skip drained and
-	// closed. Asleep is skipped too, with one carve-out: a
-	// lifecycle=one_shot session whose sleep reason is freeable and which
-	// holds no assigned work is reused through the wake path — see
-	// reusablePoolSessionInfo. Nothing in the reconciler closes orphaned
-	// asleep beads; an earlier version of this comment claimed it did.
+	// closed. Asleep is skipped too, with two carve-outs, each only when the
+	// row holds no assigned work: a lifecycle=one_shot session whose sleep
+	// reason is freeable, and a restart handoff still waiting for its fresh
+	// start, are reused through the wake path — see reusablePoolSessionInfo.
+	// Nothing in the reconciler closes orphaned asleep beads; an earlier
+	// version of this comment claimed it did.
 	for _, candidate := range reusablePoolSessionInfosForRequest(bp, cfgAgent, template, request, decisionTime, used) {
 		if desiredName := strings.TrimSpace(candidate.SessionNameMetadata); desiredName != "" {
 			if at, runsElsewhere := elsewhere[candidate.ID]; runsElsewhere {

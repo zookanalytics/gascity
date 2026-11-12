@@ -31,6 +31,7 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -255,9 +256,9 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, errSupervisorLockHeld
 		}
 		return nil, fmt.Errorf("locking supervisor lock: %w", err)
@@ -369,20 +370,6 @@ const supervisorHardExitCodeRepeatedShutdown = 130
 // unit lists this code in RestartPreventExitStatus so the duplicate exits once
 // with a clear diagnostic instead of crash-looping on the shared port forever.
 const supervisorExitCodePortInUse = 3
-
-// supervisorExitCodeAlreadyRunning is returned when another supervisor already
-// holds the city. Only one supervisor may own the control socket, so a second
-// one can never make progress: it will meet the same holder on every attempt.
-// The generated systemd unit lists this code in RestartPreventExitStatus so
-// the duplicate exits once with a clear diagnostic instead of crash-looping
-// forever — 83439 restarts over five days in gc-f1081, ended only by a host
-// reboot, because a bare exit 1 is not covered by RestartPreventExitStatus and
-// the unit sets no start-limit ceiling.
-//
-// This mirrors the treatment supervisorExitCodePortInUse already gives the
-// duplicate-port collision: a duplicate supervisor is a terminal condition,
-// not a retryable one.
-const supervisorExitCodeAlreadyRunning = 4
 
 // supervisorAddrInUse reports whether err indicates the listen address was
 // already bound (EADDRINUSE) — the signature of a second supervisor competing
@@ -1169,6 +1156,15 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 				payload["supervisor_unit"] = ownership.Unit
 			}
 		}
+		// api_url is the supervisor API base URL from supervisor.toml — the
+		// endpoint the CLI itself dials (supervisorAPIBaseURL) — reported
+		// whether or not the supervisor is running. It is absent, with a
+		// warning on stderr, when supervisor.toml cannot be read.
+		if apiURL, err := supervisorAPIBaseURL(); err != nil {
+			fmt.Fprintf(stderr, "gc supervisor status: warning: resolving API URL: %v\n", err) //nolint:errcheck
+		} else {
+			payload["api_url"] = apiURL
+		}
 		addSupervisorSupervisionJSON(payload, supervisionWarning)
 		if err := writeCLIJSONLine(stdout, payload); err != nil {
 			return 1
@@ -1513,9 +1509,8 @@ func runSupervisor(stdout, stderr io.Writer) int {
 	markProgramShadowLongLived()
 
 	if pid := supervisorAlive(); pid != 0 {
-		state, exePath := classifySupervisorHolder(pid)
-		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor", pid, state, exePath)) //nolint:errcheck
-		return supervisorExitCodeAlreadyRunning
+		fmt.Fprintf(stderr, "gc supervisor: supervisor already running (PID %d)\n", pid) //nolint:errcheck
+		return 1
 	}
 
 	// Ensure ~/.gc/ exists. doSupervisorStart does this when invoked

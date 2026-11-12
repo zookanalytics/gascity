@@ -225,7 +225,8 @@
               "storage-vouch-bd",
               "storage-remote-stage-mark",
               "storage-remote-stage-unmark",
-              "nudge-show",
+              "storage-snapshot",
+              "storage-snapshot-restore",
               "session-release-name"
             ]
           },

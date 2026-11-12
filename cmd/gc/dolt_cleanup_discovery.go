@@ -333,15 +333,10 @@ func statConfigPathState(cfg string) string {
 	return procPathStateLive
 }
 
-// discoverActiveTestRoots returns the test roots named in the argv of live
-// processes other than dolt sql-servers: Go or Gas City test-prefixed roots
-// under /tmp and tempDir, and Go t.TempDir() roots under /var/tmp/gotmp,
-// goTmpDir, and homeDir's ~/.gotmp (see activeTestRootFromPath). goTmpDir is
-// the Go temp root the caller's test runs use, normally its GOTMPDIR.
-func discoverActiveTestRoots(homeDir, tempDir, goTmpDir string) []string {
+func discoverActiveTestRoots(homeDir, tempDir string) []string {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return discoverActiveTestRootsFromPS(homeDir, tempDir, goTmpDir)
+		return discoverActiveTestRootsFromPS(homeDir, tempDir)
 	}
 	seen := map[string]struct{}{}
 	var roots []string
@@ -362,7 +357,7 @@ func discoverActiveTestRoots(homeDir, tempDir, goTmpDir string) []string {
 			continue
 		}
 		for _, arg := range argv {
-			root, ok := activeTestRootFromPath(arg, homeDir, tempDir, goTmpDir)
+			root, ok := activeTestRootFromPath(arg, homeDir, tempDir)
 			if !ok {
 				continue
 			}
@@ -376,7 +371,7 @@ func discoverActiveTestRoots(homeDir, tempDir, goTmpDir string) []string {
 	return roots
 }
 
-func discoverActiveTestRootsFromPS(homeDir, tempDir, goTmpDir string) []string {
+func discoverActiveTestRootsFromPS(homeDir, tempDir string) []string {
 	lines, err := psLStartCommandLines()
 	if err != nil {
 		return nil
@@ -389,7 +384,7 @@ func discoverActiveTestRootsFromPS(homeDir, tempDir, goTmpDir string) []string {
 			continue
 		}
 		for _, arg := range argv {
-			root, ok := activeTestRootFromPath(arg, homeDir, tempDir, goTmpDir)
+			root, ok := activeTestRootFromPath(arg, homeDir, tempDir)
 			if !ok {
 				continue
 			}
@@ -403,7 +398,7 @@ func discoverActiveTestRootsFromPS(homeDir, tempDir, goTmpDir string) []string {
 	return roots
 }
 
-func activeTestRootFromPath(path, homeDir, tempDir, goTmpDir string) (string, bool) {
+func activeTestRootFromPath(path, homeDir, tempDir string) (string, bool) {
 	clean := filepath.Clean(path)
 	for _, root := range []string{"/tmp", tempDir} {
 		if testRoot, ok := activeTestRootUnder(clean, root, testConfigPathPrefixes()); ok {
@@ -412,7 +407,7 @@ func activeTestRootFromPath(path, homeDir, tempDir, goTmpDir string) (string, bo
 	}
 	// Mirror isTestConfigPath's fleet GOTMPDIR roots: a root that is
 	// reapable when orphaned must also be protectable while its test runs.
-	for _, root := range []string{"/var/tmp/gotmp", goTmpDir} {
+	for _, root := range []string{"/var/tmp/gotmp", os.Getenv("GOTMPDIR")} {
 		if testRoot, ok := activeTestRootUnder(clean, root, []string{"Test"}); ok {
 			return testRoot, true
 		}

@@ -227,17 +227,14 @@ func (c *ProxiedBackupCoverageCheck) Run(cc *CheckContext) *CheckResult {
 }
 
 // askBd runs the status reader for each scope, at most
-// proxiedBackupCoverageParallelism at a time and all under one deadline, which
-// also ends when the runner abandons the check. A scope the deadline reaches
-// first answers with the context's error.
+// proxiedBackupCoverageParallelism at a time and all under one deadline. A
+// scope the deadline reaches first answers with the context's error.
 func (c *ProxiedBackupCoverageCheck) askBd(cc *CheckContext, scopes []proxiedBackupScope) []proxiedBackupAnswer {
 	answers := make([]proxiedBackupAnswer, len(scopes))
 	if len(scopes) == 0 {
 		return answers
 	}
-	parent, cancelParent := cc.runContext()
-	defer cancelParent()
-	ctx, cancel := context.WithTimeout(parent, c.deadline)
+	ctx, cancel := context.WithTimeout(context.Background(), c.deadline)
 	defer cancel()
 	sem := make(chan struct{}, proxiedBackupCoverageParallelism)
 	var wg sync.WaitGroup

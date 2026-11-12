@@ -6,8 +6,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 const (
@@ -45,15 +46,25 @@ const testOrphanSweepMinAge = time.Hour
 const testOrphanSweepFreeSentinelMinAge = 2 * time.Minute
 
 // holdAliveSentinel creates <dir>/.gc-test-alive.lock and takes an exclusive
-// flock on it. The caller must keep the returned file referenced for as long
-// as the dir must stay protected: the runtime finalizes unreachable os.Files,
-// which closes the descriptor and releases the lock.
+// kernel lock on it. The caller must keep the returned file referenced for as
+// long as the dir must stay protected: the runtime finalizes unreachable
+// os.Files, which closes the descriptor and releases the lock.
+//
+// Closing the file is the release path on both platforms, so the lock handle
+// is deliberately not returned: flock is released when the last descriptor for
+// the open file closes, and a Windows byte-range lock is released with its
+// handle.
 func holdAliveSentinel(dir string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_CREATE|os.O_RDWR, 0o644)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening alive sentinel in %q: %w", dir, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	}); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("locking alive sentinel in %q: %w", dir, err)
 	}
@@ -62,9 +73,10 @@ func holdAliveSentinel(dir string) (*os.File, error) {
 
 // aliveSentinelHeld probes <dir>'s alive sentinel. exists reports whether the
 // sentinel file is present; held reports whether some process still holds its
-// flock. Probe failures are reported as held so the sweep stays conservative.
+// lock. Probe failures are reported as held so the sweep stays conservative.
 func aliveSentinelHeld(dir string) (exists, held bool) {
-	f, err := os.OpenFile(filepath.Join(dir, testAliveSentinelName), os.O_RDWR, 0)
+	path := filepath.Join(dir, testAliveSentinelName)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, false
@@ -72,10 +84,15 @@ func aliveSentinelHeld(dir string) (exists, held bool) {
 		return true, true
 	}
 	defer f.Close() //nolint:errcheck
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		return true, true
 	}
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = lock.Release()
 	return true, false
 }
 
@@ -207,38 +224,25 @@ func sweepOrphanPIDPrefixedDirs(root, prefix string) {
 	}
 }
 
-// hostTempRoots are the temp roots the test binary inherited, captured by
-// adoptPerRunTMPDIR before it points TMPDIR and GOTMPDIR at the per-run root.
-// Earlier and concurrent runs leave their temp dirs, test roots, and Dolt
-// stores under these roots, so every startup sweep that looks for them must
-// read these values rather than os.TempDir() or GOTMPDIR at call time.
-type hostTempRoots struct {
-	// tmp is os.TempDir() as inherited: TMPDIR, or the platform default
-	// when TMPDIR is unset.
-	tmp string
-	// goTmp is the inherited GOTMPDIR, empty when it was unset.
-	goTmp string
-}
-
 // adoptPerRunTMPDIR points TMPDIR and GOTMPDIR at newTMPDIR for the rest of
-// the test binary's life and returns the host temp roots that were in effect
-// beforehand, so callers can sweep what prior runs left there. os.TempDir()
-// re-reads TMPDIR on every call, so the host roots must be captured before
-// this override — capturing them afterward would instead return newTMPDIR's
-// own fresh, empty directory (ga-lygcyb).
+// the test binary's life and returns the host temp root that was in effect
+// beforehand, so callers can sweep legacy fixture dirs left there by prior
+// runs. os.TempDir() re-reads TMPDIR on every call, so the host root must be
+// captured before this override — capturing it afterward would instead
+// return newTMPDIR's own fresh, empty directory (ga-lygcyb).
 //
 // t.TempDir() creates its directory under GOTMPDIR when that is set and under
 // TMPDIR otherwise. Pinning TMPDIR alone would let every test's temp dir, and
 // any Dolt server a test starts in one, escape the per-run root that the dolt
 // leak guard watches and the startup sweep classifies by owner PID.
-func adoptPerRunTMPDIR(newTMPDIR string) (hostTempRoots, error) {
-	host := hostTempRoots{tmp: os.TempDir(), goTmp: os.Getenv("GOTMPDIR")}
+func adoptPerRunTMPDIR(newTMPDIR string) (hostTmpRoot string, err error) {
+	hostTmpRoot = os.TempDir()
 	for _, key := range []string{"TMPDIR", "GOTMPDIR"} {
 		if err := os.Setenv(key, newTMPDIR); err != nil {
-			return hostTempRoots{}, fmt.Errorf("setting %s to the per-run temp root: %w", key, err)
+			return "", fmt.Errorf("setting %s to the per-run temp root: %w", key, err)
 		}
 	}
-	return host, nil
+	return hostTmpRoot, nil
 }
 
 // sweepLegacyCmdGCFixtureDirs removes stale legacy fixture dirs for the five

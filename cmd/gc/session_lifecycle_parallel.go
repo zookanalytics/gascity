@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -240,36 +241,14 @@ func wakeFairnessTime(c startCandidate) time.Time {
 	return time.Time{}
 }
 
-// sortCandidatesByWakeFairness orders a tick's wake candidates least-recently-woken
-// first, then interleaves them round-robin across logical templates so one
-// template's backlog can't fill the whole wake budget and starve other templates
-// (gc-unpyk). A lone template keeps strict least-recently-woken order. Callers must
-// only sort within a dependency wave (every candidate's deps are satisfied).
-func sortCandidatesByWakeFairness(candidates []startCandidate, cfg *config.City) {
-	type rankedCandidate struct {
-		candidate startCandidate
-		wokeAt    time.Time
-		round     int // 0-based index within its own template, oldest first
-	}
-	ranked := make([]rankedCandidate, len(candidates))
-	for i, c := range candidates {
-		ranked[i] = rankedCandidate{candidate: c, wokeAt: wakeFairnessTime(c)}
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		return ranked[i].wokeAt.Before(ranked[j].wokeAt)
+// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
+// budget-limited tick rotates wakes across sessions instead of always deferring
+// the same back-of-order sessions. Stable on the original order for ties. Callers
+// must only sort within a dependency wave (every candidate's deps are satisfied).
+func sortCandidatesByWakeFairness(candidates []startCandidate) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
 	})
-	perTemplate := make(map[string]int, len(ranked))
-	for i := range ranked {
-		template := ranked[i].candidate.logicalTemplate(cfg)
-		ranked[i].round = perTemplate[template]
-		perTemplate[template]++
-	}
-	sort.SliceStable(ranked, func(i, j int) bool {
-		return ranked[i].round < ranked[j].round
-	})
-	for i := range ranked {
-		candidates[i] = ranked[i].candidate
-	}
 }
 
 func (c startCandidate) logicalTemplate(cfg *config.City) string {
@@ -688,6 +667,9 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// admitted counts the starts handed out by start and not yet finished, for
+	// busy. It is read without mu, from the controller's tick.
+	admitted atomic.Int64
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -700,7 +682,20 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.admitted.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.admitted.Add(-1)
+			t.wg.Done()
+		})
+	}, true
+}
+
+// busy reports whether any start handed out by start (an async session start
+// or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
+func (t *asyncStartTracker) busy() bool {
+	return t != nil && t.admitted.Load() > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -2249,6 +2244,11 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -3087,17 +3087,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -3118,12 +3112,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
@@ -5135,13 +5129,11 @@ func executePlannedStartsTraced(
 			ready = append(ready, candidate)
 		}
 		// Fairness: spend a budget-limited tick on the least-recently-woken
-		// candidates first, then round-robin across templates so one
-		// template's backlog can't spend the whole tick's wake budget (gc-unpyk).
-		// The wave order is a stable dependency topo-sort, so without this the
-		// same back-of-order sessions are deferred_by_wake_budget every tick.
-		// Sorting within the dependency wave is safe: every candidate here
-		// already has its dependencies satisfied.
-		sortCandidatesByWakeFairness(ready, cfg)
+		// candidates first. The wave order is a stable dependency topo-sort, so
+		// without this the same back-of-order sessions are deferred_by_wake_budget
+		// every tick. Sorting within the dependency wave is safe: every
+		// candidate here already has its dependencies satisfied.
+		sortCandidatesByWakeFairness(ready)
 		// Probe rotation: among sessions on a refusing endpoint, the ones
 		// refused least this episode go first, so a poisoned oldest session
 		// cannot monopolize the half-open probe.

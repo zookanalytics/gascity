@@ -63,9 +63,18 @@ func (c *v2SessionMigrationCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (c *v2SessionMigrationCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check. It stops reading legs once the doctor runner
-// abandons the check, closing the ones it no longer reads.
-func (c *v2SessionMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+// v2SessionCensus is one read of the boot census over the legs.
+type v2SessionCensus struct {
+	m       v2SessionMigration
+	rows    []session.Info
+	details []string
+	// notChecked counts the legs not read; faulted, those of them a fault
+	// left unread rather than a backend with no read-only open.
+	notChecked, faulted int
+}
+
+// census reads every leg and tallies what v2's boot census would refuse.
+func (c *v2SessionMigrationCheck) census() v2SessionCensus {
 	var rows []session.Info
 	var details []string
 	seen, notChecked, faulted := map[string]bool{}, 0, 0
@@ -78,15 +87,6 @@ func (c *v2SessionMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckRes
 				cause = "open failed"
 			}
 			details = append(details, fmt.Sprintf("leg %s: not checked (%s): %s", leg.ref, cause, leg.notChecked))
-			continue
-		}
-		if ctx.Canceled() {
-			// An unread leg may hide a row v2 refuses, so it grades as a
-			// fault, the way a failed read does.
-			_ = closeBeadStoreHandle(leg.store)
-			notChecked++
-			faulted++
-			details = append(details, fmt.Sprintf("leg %s: not checked: %v", leg.ref, doctor.ErrCheckAbandoned))
 			continue
 		}
 		infos, err := sessionFrontDoor(leg.store).ListAll(session.ListAllOptions{Live: true})
@@ -112,6 +112,13 @@ func (c *v2SessionMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckRes
 	}
 	m := tallyV2SessionMigration(c.cfg, c.cityName, rows)
 	details = append(details, v2SessionMigrationSamples(c.cfg, c.cityName, m, rows)...)
+	return v2SessionCensus{m: m, rows: rows, details: details, notChecked: notChecked, faulted: faulted}
+}
+
+// Run implements doctor.Check.
+func (c *v2SessionMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	census := c.census()
+	m, rows, details, notChecked, faulted := census.m, census.rows, census.details, census.notChecked, census.faulted
 	flagged := 0
 	for _, n := range m.UnknownStates {
 		flagged += n

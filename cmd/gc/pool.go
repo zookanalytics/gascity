@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -89,6 +90,14 @@ func runShellCommand(command, dir string, timeout time.Duration, env map[string]
 	}
 	out, err := cmd.Output()
 	if err != nil {
+		// cmd.Output() leaves the failed command's stderr on the ExitError, but
+		// the error renders only "exit status N". Keep the reason in the text.
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+				return "", fmt.Errorf("running command %q: %w: %s", command, err, stderr)
+			}
+		}
 		return "", fmt.Errorf("running command %q: %w", command, err)
 	}
 	return string(out), nil
@@ -318,7 +327,6 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		SessionSetupScript: src.SessionSetupScript,
 		OverlayDir:         src.OverlayDir,
 		SourceDir:          src.SourceDir,
-		Declaration:        src.Declaration,
 		// InheritedDefaultSlingFormula: deep-copied below with other pointer fields.
 		IdleTimeout:            src.IdleTimeout,
 		MaxSessionAge:          src.MaxSessionAge,

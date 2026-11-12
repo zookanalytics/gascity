@@ -23,14 +23,6 @@ import (
 // packFile is the expected filename inside a pack directory.
 const packFile = "pack.toml"
 
-// agentsDirName is the directory under a pack root that holds one
-// subdirectory per agent in the v2 convention layout.
-const agentsDirName = "agents"
-
-// agentFile is the per-agent config filename under agents/<name>/ in a
-// pack laid out by the v2 convention.
-const agentFile = "agent.toml"
-
 // currentPackSchema is the supported pack schema version.
 const currentPackSchema = 2
 
@@ -62,7 +54,6 @@ type PackConfig struct {
 	Providers     map[string]ProviderSpec     `toml:"providers,omitempty"`
 	Upstreams     map[string]UpstreamSpec     `toml:"upstreams,omitempty"`
 	Runtimes      map[string]PackRuntimeEntry `toml:"runtimes,omitempty"`
-	Beads         PackBeadsConfig             `toml:"beads,omitempty"`
 	Formulas      FormulasConfig              `toml:"formulas,omitempty" jsonschema:"-"`
 	Patches       PackPatches                 `toml:"patches,omitempty"`
 	Doctor        []PackDoctorEntry           `toml:"doctor,omitempty"`
@@ -188,7 +179,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			if err := mergeCityRuntimes(cfg, cachedPackRuntimes(cache, topoDir)); err != nil {
 				return fmt.Errorf("rig %q pack %q: %w", rig.Name, ref, err)
 			}
-			mergeCityMetadataIndexes(cfg, cachedPackMetadataIndexes(cache, topoDir))
 			skills := cachedPackSkills(cache, topoDir)
 			if packName == "" && len(skills) > 0 {
 				return fmt.Errorf("rig %q pack %q: discovered skills require [pack].name for binding", rig.Name, ref)
@@ -296,7 +286,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				commands := cachedPackCommands(cache, impDir)
 				doctors := cachedPackDoctors(cache, impDir)
 				runtimes := cachedPackRuntimes(cache, impDir)
-				metadataIndexes := cachedPackMetadataIndexes(cache, impDir)
 				skills := cachedPackSkills(cache, impDir)
 				if !imp.ImportIsTransitive() {
 					warnings = cachedPackLocalWarnings(cache, impDir)
@@ -314,7 +303,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 					commands = filterCommandsByPackDir(commands, impDir)
 					doctors = filterDoctorsByPackDir(doctors, impDir)
 					runtimes = filterRuntimesByPackDir(runtimes, impDir)
-					metadataIndexes = filterMetadataIndexesByPackDir(metadataIndexes, impDir)
 					providers = cachedPackLocalProviders(cache, impDir)
 					upstreams = cachedPackLocalUpstreams(cache, impDir)
 					topoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -453,7 +441,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 				if err := mergeCityRuntimes(cfg, runtimes); err != nil {
 					return fmt.Errorf("rig %q import %q: %w", rig.Name, bindingName, err)
 				}
-				mergeCityMetadataIndexes(cfg, metadataIndexes)
 
 				if len(providers) > 0 {
 					if cfg.Providers == nil {
@@ -678,7 +665,6 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		if err := mergeCityRuntimes(cfg, cachedPackRuntimes(cache, topoDir)); err != nil {
 			return nil, nil, nil, fmt.Errorf("city pack %q: %w", ref, err)
 		}
-		mergeCityMetadataIndexes(cfg, cachedPackMetadataIndexes(cache, topoDir))
 
 		// Merge pack providers (additive, first wins).
 		if len(providers) > 0 {
@@ -749,7 +735,6 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			commands := cachedPackCommands(cache, impDir)
 			doctors := cachedPackDoctors(cache, impDir)
 			runtimes := cachedPackRuntimes(cache, impDir)
-			metadataIndexes := cachedPackMetadataIndexes(cache, impDir)
 			skills := cachedPackSkills(cache, impDir)
 			webhooks := cachedPackWebhooks(cache, impDir)
 			mcpTopoDirs := topoDirs
@@ -772,7 +757,6 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 				commands = filterCommandsByPackDir(commands, impDir)
 				doctors = filterDoctorsByPackDir(doctors, impDir)
 				runtimes = filterRuntimesByPackDir(runtimes, impDir)
-				metadataIndexes = filterMetadataIndexesByPackDir(metadataIndexes, impDir)
 				providers = cachedPackLocalProviders(cache, impDir)
 				upstreams = cachedPackLocalUpstreams(cache, impDir)
 				topoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -866,7 +850,6 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 			if err := mergeCityRuntimes(cfg, runtimes); err != nil {
 				return nil, nil, nil, fmt.Errorf("city import %q: %w", bindingName, err)
 			}
-			mergeCityMetadataIndexes(cfg, metadataIndexes)
 			// Bootstrap-managed implicit imports own their skill
 			// materialization through the compat path; explicit user
 			// imports (including [imports.core]) contribute skills like
@@ -1132,7 +1115,6 @@ type packLoadResult struct {
 	commands       []DiscoveredCommand
 	doctors        []DiscoveredDoctor
 	runtimes       []DiscoveredRuntime
-	indexKeys      []DiscoveredMetadataIndex
 	skills         []DiscoveredSkillCatalog
 	localWarnings  []string
 	warnings       []string
@@ -1150,7 +1132,6 @@ func parsePackConfigWithMetadata(data []byte, source string) (PackConfig, toml.M
 		return PackConfig{}, md, nil, err
 	}
 	normalizePackAgentDefaultsAlias(&cfg, md)
-	declareAgentTables(cfg.Agents, source)
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
 	return cfg, md, warnings, nil
@@ -1304,7 +1285,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	var includedCommands []DiscoveredCommand
 	var includedDoctors []DiscoveredDoctor
 	var includedRuntimes []DiscoveredRuntime
-	var includedMetadataIndexes []DiscoveredMetadataIndex
 	var includedSkills []DiscoveredSkillCatalog
 	var inheritedWarnings []string
 	includedProviders := make(map[string]ProviderSpec)
@@ -1334,7 +1314,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, cachedPackCommands(cache, incTopoDir)...)
 		includedDoctors = append(includedDoctors, cachedPackDoctors(cache, incTopoDir)...)
 		includedRuntimes = append(includedRuntimes, cachedPackRuntimes(cache, incTopoDir)...)
-		includedMetadataIndexes = append(includedMetadataIndexes, cachedPackMetadataIndexes(cache, incTopoDir)...)
 		includedSkills = append(includedSkills, cachedPackSkills(cache, incTopoDir)...)
 
 		// Merge providers: included first, no overwrite.
@@ -1389,7 +1368,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		impCommands := cachedPackCommands(cache, impDir)
 		impDoctors := cachedPackDoctors(cache, impDir)
 		impRuntimes := cachedPackRuntimes(cache, impDir)
-		impMetadataIndexes := cachedPackMetadataIndexes(cache, impDir)
 		impSkills := cachedPackSkills(cache, impDir)
 		impWebhooks := cachedPackWebhooks(cache, impDir)
 
@@ -1412,7 +1390,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 			impCommands = filterCommandsByPackDir(impCommands, impDir)
 			impDoctors = filterDoctorsByPackDir(impDoctors, impDir)
 			impRuntimes = filterRuntimesByPackDir(impRuntimes, impDir)
-			impMetadataIndexes = filterMetadataIndexesByPackDir(impMetadataIndexes, impDir)
 			impProviders = cachedPackLocalProviders(cache, impDir)
 			impUpstreams = cachedPackLocalUpstreams(cache, impDir)
 			impTopoDirs = cachedPackLocalTopoDirs(cache, impDir)
@@ -1493,7 +1470,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		includedCommands = append(includedCommands, impCommands...)
 		includedDoctors = append(includedDoctors, impDoctors...)
 		includedRuntimes = append(includedRuntimes, impRuntimes...)
-		includedMetadataIndexes = append(includedMetadataIndexes, impMetadataIndexes...)
 		includedSkills = append(includedSkills, impSkills...)
 
 		for name, spec := range impProviders {
@@ -1544,10 +1520,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	}
 	doctors = append(doctors, legacyDoctors...)
 	localRuntimes, err := packLocalRuntimes(&tc, topoDir)
-	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, nil, err
-	}
-	localMetadataIndexes, err := packLocalMetadataIndexes(&tc, topoDir)
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
@@ -1627,7 +1599,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 	includedCommands = append(includedCommands, commands...)
 	includedDoctors = append(includedDoctors, doctors...)
 	includedRuntimes = append(includedRuntimes, localRuntimes...)
-	includedMetadataIndexes = append(includedMetadataIndexes, localMetadataIndexes...)
 	includedSkills = append(includedSkills, skills...)
 
 	// Apply pack-level patches to the merged agent list.
@@ -1718,7 +1689,6 @@ func loadPackWithCacheOptionsLocked(fs fsys.FS, topoPath, topoDir, cityRoot, rig
 		commands:       includedCommands,
 		doctors:        includedDoctors,
 		runtimes:       includedRuntimes,
-		indexKeys:      includedMetadataIndexes,
 		skills:         includedSkills,
 		localWarnings:  append([]string(nil), packWarnings...),
 		warnings:       appendUnique(append([]string(nil), inheritedWarnings...), packWarnings...),
@@ -1749,7 +1719,6 @@ func clonePackLoadResult(in *packLoadResult) *packLoadResult {
 		commands:       deepCopyCommands(in.commands),
 		doctors:        deepCopyDoctors(in.doctors),
 		runtimes:       append([]DiscoveredRuntime(nil), in.runtimes...),
-		indexKeys:      append([]DiscoveredMetadataIndex(nil), in.indexKeys...),
 		skills:         deepCopySkills(in.skills),
 		localWarnings:  append([]string(nil), in.localWarnings...),
 		warnings:       append([]string(nil), in.warnings...),

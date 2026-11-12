@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package integration
 
@@ -490,15 +490,10 @@ func TestBdStoreEphemeralMetadataClauseMatchesGoFilter(t *testing.T) {
 	}
 }
 
-// TestBdStoreParentIDsListReadsTheParentChildEdges proves the ParentIDs and IDs
-// pushdowns against a real bd and Dolt. A ParentIDs list sends one edge read
-// naming every parent and reads the children by id, never every row, and
-// answers exactly what bd's own one-parent filter answers for each listed
-// parent. bd list reads the wisp plane for the ids, so the wisp leg runs only
-// when the id read leaves a child out. An IDs list reaches bd list as --id, in
-// chunks when it is long, and an id --id cannot carry is read alone through a
-// quoted bd query.
-func TestBdStoreParentIDsListReadsTheParentChildEdges(t *testing.T) {
+// TestBdStoreIDsListReadsByID proves the IDs pushdown against a real bd and
+// Dolt. An IDs list reaches bd list as --id, in chunks when it is long, and an
+// id --id cannot carry is read alone through a quoted bd query.
+func TestBdStoreIDsListReadsByID(t *testing.T) {
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
 
@@ -560,71 +555,6 @@ func TestBdStoreParentIDsListReadsTheParentChildEdges(t *testing.T) {
 		t.Fatalf("Close(%s): %v", childOfTwo, err)
 	}
 	missing := "pq-missing"
-
-	// wispLeg marks the one case whose id read leaves a child out: without
-	// --all, bd list does not return the closed child of two.
-	cases := []struct {
-		name          string
-		parents       []string
-		includeClosed bool
-		want          []string
-		wispLeg       bool
-	}{
-		{name: "two parents", parents: []string{two, one}, includeClosed: true, want: []string{childOfOne, childOfTwo}},
-		{name: "open children only", parents: []string{one, two}, want: []string{childOfOne}, wispLeg: true},
-		{name: "lone parent", parents: []string{one}, includeClosed: true, want: []string{childOfOne}},
-		{name: "missing parent beside a real one", parents: []string{one, missing}, includeClosed: true, want: []string{childOfOne}},
-		{name: "lone missing parent", parents: []string{missing}, includeClosed: true},
-		{name: "children of a child", parents: []string{childOfOne}, includeClosed: true, want: []string{grandchild}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resetSent()
-			got, err := store.List(beads.ListQuery{
-				ParentIDs:     tc.parents,
-				IncludeClosed: tc.includeClosed,
-				TierMode:      beads.TierBoth,
-			})
-			if err != nil {
-				t.Fatalf("List(ParentIDs=%v): %v", tc.parents, err)
-			}
-			gotIDs := make([]string, 0, len(got))
-			for _, b := range got {
-				gotIDs = append(gotIDs, b.ID)
-			}
-			if !sameIDSet(gotIDs, tc.want) {
-				t.Fatalf("List(ParentIDs=%v) = %v, want %v", tc.parents, gotIDs, tc.want)
-			}
-			commands := sentSoFar()
-			if len(commands) == 0 || !strings.HasPrefix(commands[0], "dep list ") || !strings.Contains(commands[0], "--direction=up --type=parent-child") {
-				t.Fatalf("first bd command = %q, want the parent-child edge read; all: %q", commands, commands)
-			}
-			for _, c := range commands {
-				if strings.HasPrefix(c, "list ") && !strings.Contains(c, " --id=") {
-					t.Fatalf("bd list %q read without an id filter; all: %q", c, commands)
-				}
-			}
-			if queried := slices.ContainsFunc(commands, func(c string) bool { return strings.HasPrefix(c, "query ") }); queried != tc.wispLeg {
-				t.Fatalf("wisp leg sent = %v, want %v; all: %q", queried, tc.wispLeg, commands)
-			}
-
-			// Control: bd's own filter, asked about one parent at a time,
-			// answers the same beads.
-			var perParent []string
-			for _, parent := range tc.parents {
-				rows, err := store.List(beads.ListQuery{ParentID: parent, IncludeClosed: tc.includeClosed, TierMode: beads.TierBoth})
-				if err != nil {
-					t.Fatalf("List(ParentID=%s): %v", parent, err)
-				}
-				for _, b := range rows {
-					perParent = append(perParent, b.ID)
-				}
-			}
-			if !sameIDSet(gotIDs, perParent) {
-				t.Fatalf("List(ParentIDs=%v) = %v, but bd's one-parent filter answers %v", tc.parents, gotIDs, perParent)
-			}
-		})
-	}
 
 	t.Run("ids", func(t *testing.T) {
 		resetSent()
@@ -742,11 +672,11 @@ func requireRealBDAtLeast(t *testing.T, minVersion, feature string) {
 }
 
 // TestBdStoreIDReadsSelectIssuesTableRows proves the id reads against
-// issues-table rows on a real bd and Dolt: the parent-child edge read and the
-// --id read alone return issues-table children, and a wisp child beside them,
-// with no read of every row and no wisp read. It needs bd 1.3.1: once a
-// workspace holds an issues-table bead, bd 1.0.4 auto-imports issues.jsonl on
-// its next command, and BdStore refuses that as a silent fallback.
+// issues-table rows on a real bd and Dolt: the --id read alone returns
+// issues-table rows, and a wisp row beside them, with no read of every row
+// and no wisp read. It needs bd 1.3.1: once a workspace holds an issues-table
+// bead, bd 1.0.4 auto-imports issues.jsonl on its next command, and BdStore
+// refuses that as a silent fallback.
 func TestBdStoreIDReadsSelectIssuesTableRows(t *testing.T) {
 	requireDoltIntegration(t)
 	requireRealBDAtLeast(t, "v1.3.1-0", "a server-mode workspace that holds issues-table beads without auto-importing issues.jsonl")
@@ -796,8 +726,7 @@ func TestBdStoreIDReadsSelectIssuesTableRows(t *testing.T) {
 		query beads.ListQuery
 		want  []string
 	}{
-		{name: "parents, both tiers", query: beads.ListQuery{ParentIDs: []string{two, one}, IncludeClosed: true, TierMode: beads.TierBoth}, want: []string{childOfOne, childOfTwo, wispOfOne}},
-		{name: "parents, issues tier", query: beads.ListQuery{ParentIDs: []string{one, two}, IncludeClosed: true}, want: []string{childOfOne, childOfTwo}},
+		{name: "ids, both tiers", query: beads.ListQuery{IDs: []string{wispOfOne, childOfTwo, childOfOne}, IncludeClosed: true, TierMode: beads.TierBoth}, want: []string{childOfOne, childOfTwo, wispOfOne}},
 		{name: "ids", query: beads.ListQuery{IDs: []string{childOfTwo, childOfOne}, IncludeClosed: true}, want: []string{childOfOne, childOfTwo}},
 	}
 	for _, tc := range cases {

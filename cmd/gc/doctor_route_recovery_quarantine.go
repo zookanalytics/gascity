@@ -54,7 +54,7 @@ type quarantinedRoute struct {
 	reason string
 }
 
-func (c *routeRecoveryQuarantineCheck) collect(ctx *doctor.CheckContext) (found []quarantinedRoute, skipped []string) {
+func (c *routeRecoveryQuarantineCheck) collect() (found []quarantinedRoute, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -66,10 +66,6 @@ func (c *routeRecoveryQuarantineCheck) collect(ctx *doctor.CheckContext) (found 
 	}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
-			continue
-		}
-		if ctx.Canceled() {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
 			continue
 		}
 		store, err := c.newStore(sc.path)
@@ -100,8 +96,8 @@ func (c *routeRecoveryQuarantineCheck) collect(ctx *doctor.CheckContext) (found 
 	return found, skipped
 }
 
-func (c *routeRecoveryQuarantineCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	found, skipped := c.collect(ctx)
+func (c *routeRecoveryQuarantineCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	found, skipped := c.collect()
 	if len(found) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no beads are quarantined by route recovery")
 	}
@@ -133,8 +129,8 @@ func (c *routeRecoveryQuarantineCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		details)
 }
 
-func (c *routeRecoveryQuarantineCheck) Fix(ctx *doctor.CheckContext) error {
-	found, skipped := c.collect(ctx)
+func (c *routeRecoveryQuarantineCheck) Fix(_ *doctor.CheckContext) error {
+	found, skipped := c.collect()
 	for _, q := range found {
 		if err := q.store.SetMetadataBatch(q.beadID, map[string]string{
 			beadmeta.RouteQuarantineMetadataKey:       "",

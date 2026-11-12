@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -364,61 +363,5 @@ func TestV2SessionScopeLegGradesItsGap(t *testing.T) {
 				t.Errorf("notChecked = %q, want the metadata read error", leg.notChecked)
 			}
 		})
-	}
-}
-
-// v2SessionLegCloseRecorder counts CloseStore calls on a leg's store.
-type v2SessionLegCloseRecorder struct {
-	beads.Store
-	closed *atomic.Int32
-}
-
-func (s v2SessionLegCloseRecorder) CloseStore() error { //nolint:unparam // must satisfy the CloseStore() error store interface closeBeadStoreHandle asserts
-	s.closed.Add(1)
-	return nil
-}
-
-// TestV2SessionMigrationCheckStopsReadingLegsOnceAbandoned: abandoned while its
-// first leg's read is in flight, the check reads no other leg and still closes
-// every leg's store. The legs it never read grade as faults: under v2 they may
-// hide a row the boot refuses, so the result is an error there, and a warning
-// under legacy.
-func TestV2SessionMigrationCheckStopsReadingLegsOnceAbandoned(t *testing.T) {
-	run := func(mode string, probe *doctorAbandonProbe, ctx *doctor.CheckContext) (int32, *doctor.CheckResult) {
-		cfg := *chatCity("always")
-		cfg.Daemon.SessionReconciler = mode
-		var closed atomic.Int32
-		var legs []v2SessionLeg
-		for _, ref := range []string{"binding:infra", "city", "rig:fixture"} {
-			legs = append(legs, v2SessionLeg{ref: ref, store: v2SessionLegCloseRecorder{Store: probe.wrap(censusStore()), closed: &closed}})
-		}
-		r := (&v2SessionMigrationCheck{cfg: &cfg, cityName: "test-city", lookupEnv: noEnv, openLegs: func() []v2SessionLeg { return legs }}).Run(ctx)
-		return closed.Load(), r
-	}
-
-	full := newDoctorAbandonProbe()
-	if closed, _ := run("", full, &doctor.CheckContext{}); closed != 3 || full.reads.Load() == 0 || full.reads.Load()%3 != 0 {
-		t.Fatalf("unabandoned run made %d reads and closed %d leg stores, want the same reads on each of three legs, all closed", full.reads.Load(), closed)
-	}
-	perLeg := full.reads.Load() / 3
-
-	for _, tc := range []struct {
-		mode string
-		want doctor.CheckStatus
-	}{
-		{mode: config.SessionReconcilerLegacy, want: doctor.StatusWarning},
-		{mode: config.SessionReconcilerV2, want: doctor.StatusError},
-	} {
-		probe := newDoctorAbandonProbe()
-		closed, r := run(tc.mode, probe, probe.ctx())
-		if got := probe.reads.Load(); got != perLeg {
-			t.Fatalf("%s: abandoned run made %d reads, want only the first leg's %d", tc.mode, got, perLeg)
-		}
-		if closed != 3 {
-			t.Fatalf("%s: abandoned run closed %d leg stores, want all three", tc.mode, closed)
-		}
-		if r.Status != tc.want {
-			t.Errorf("%s: abandoned run graded %v (%s), want %v: two legs were never read", tc.mode, r.Status, r.Message, tc.want)
-		}
 	}
 }

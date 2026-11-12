@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 217,
+  "next_id": 218,
   "permanent_ids": [
     {
       "name": "help",
@@ -2704,21 +2704,6 @@
       "exclusion": "hidden-private"
     },
     {
-      "path": "gc nudge show",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "nudge-show",
-      "owner": "immediate",
-      "id": 215
-    },
-    {
       "path": "gc nudge status",
       "aliases": [],
       "conditional_modes": [],
@@ -3853,7 +3838,7 @@
       "notice_policy": "eligible",
       "classification": "session-release-name",
       "owner": "immediate",
-      "id": 216
+      "id": 217
     },
     {
       "path": "gc session rename",
@@ -4235,6 +4220,36 @@
       "classification": "storage-repair-sequence",
       "owner": "immediate",
       "id": 209
+    },
+    {
+      "path": "gc storage snapshot",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-snapshot",
+      "owner": "immediate",
+      "id": 215
+    },
+    {
+      "path": "gc storage snapshot restore",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-snapshot-restore",
+      "owner": "immediate",
+      "id": 216
     },
     {
       "path": "gc storage status",

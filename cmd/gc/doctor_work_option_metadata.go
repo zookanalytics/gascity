@@ -69,7 +69,7 @@ type workOptionMigrationTarget struct {
 	sessionCleanup *workOptionSessionCleanup
 }
 
-func (c *workOptionMetadataMigrationCheck) collect(ctx *doctor.CheckContext) (targets []workOptionMigrationTarget, skipped []string) {
+func (c *workOptionMetadataMigrationCheck) collect() (targets []workOptionMigrationTarget, skipped []string) {
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		suspState, _ := loadSuspensionState(fsys.OSFS{}, c.cityPath)
@@ -90,10 +90,6 @@ func (c *workOptionMetadataMigrationCheck) collect(ctx *doctor.CheckContext) (ta
 	seenSessionBead := map[string]bool{}
 	for _, sc := range scopes {
 		if c.newStore == nil || strings.TrimSpace(sc.path) == "" {
-			continue
-		}
-		if ctx.Canceled() {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
 			continue
 		}
 		store, err := c.newStore(sc.path)
@@ -117,10 +113,6 @@ func (c *workOptionMetadataMigrationCheck) collect(ctx *doctor.CheckContext) (ta
 				beadID:     b.ID,
 				migrations: migrations,
 			})
-		}
-		if ctx.Canceled() {
-			skipped = append(skipped, fmt.Sprintf("%s skipped: %v", sc.label, doctor.ErrCheckAbandoned))
-			continue
 		}
 		sessStore := cliSessionStore(store, c.cfg, c.cityPath)
 		sessions, err := loadSessionBeads(sessStore)
@@ -205,8 +197,8 @@ func workOptionSessionCleanupMigration(b beads.Bead) *workOptionSessionCleanup {
 	return cleanup
 }
 
-func (c *workOptionMetadataMigrationCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
-	targets, skipped := c.collect(ctx)
+func (c *workOptionMetadataMigrationCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
+	targets, skipped := c.collect()
 	if len(targets) == 0 && len(skipped) == 0 {
 		return okCheck(c.Name(), "no live beads use legacy work option metadata")
 	}
@@ -250,8 +242,8 @@ func describeWorkOptionSessionCleanup(cleanup workOptionSessionCleanup) string {
 	return legacyPerDispatchModelSourceKey
 }
 
-func (c *workOptionMetadataMigrationCheck) Fix(ctx *doctor.CheckContext) error {
-	targets, skipped := c.collect(ctx)
+func (c *workOptionMetadataMigrationCheck) Fix(_ *doctor.CheckContext) error {
+	targets, skipped := c.collect()
 	for _, tgt := range targets {
 		kvs := make(map[string]string, len(tgt.migrations)*2)
 		for _, migration := range tgt.migrations {

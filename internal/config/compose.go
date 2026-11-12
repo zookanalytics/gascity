@@ -337,11 +337,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		if len(packDoctors) > 0 {
 			root.PackDoctors = appendDiscoveredDoctors(root.PackDoctors, packDoctors...)
 		}
-		packMetadataIndexes, err := packLocalMetadataIndexes(&pc, cityRoot)
-		if err != nil {
-			return nil, nil, fmt.Errorf("city pack.toml: %w", err)
-		}
-		mergeCityMetadataIndexes(root, packMetadataIndexes)
 
 		if root.PackSkillsDir == "" || root.PackMCPDir == "" {
 			skillsDir, mcpDir := DiscoverPackAttachmentRoots(fs, cityRoot)
@@ -742,13 +737,6 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	populateAgentLocalAssetDirs(fs, root, cityRoot)
-
-	// Resolve "<pack>//<subpath>" agent path references against the imported
-	// pack closure now that PackDirs is populated. Unknown/ambiguous packs
-	// fail here rather than rendering an empty prompt at spawn.
-	if err := resolvePackQualifiedAgentPaths(root); err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", path, err)
-	}
 
 	// Load namepool files for pool agents.
 	loadNamepools(fs, root, cityRoot)
@@ -1699,6 +1687,16 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 				func() bool { return base.ProgramStatus.HoldMidTurn != nil },
 				func() { result.ProgramStatus.HoldMidTurn = cloneBoolPtr(frag.ProgramStatus.HoldMidTurn) },
 			},
+			{
+				"decide_startup",
+				func() bool { return base.ProgramStatus.DecideStartup != nil },
+				func() { result.ProgramStatus.DecideStartup = cloneBoolPtr(frag.ProgramStatus.DecideStartup) },
+			},
+			{
+				"decide_settle",
+				func() bool { return base.ProgramStatus.DecideSettle != nil },
+				func() { result.ProgramStatus.DecideSettle = cloneBoolPtr(frag.ProgramStatus.DecideSettle) },
+			},
 		}
 		for _, bf := range bindingFields {
 			if fragMeta.IsDefined("providers", name, "program_status", bf.key) {
@@ -1868,12 +1866,6 @@ func adjustFragmentPath(p, fragDir, cityRoot string) string {
 	if p == "" {
 		return p
 	}
-	// "<pack>//<subpath>" references survive composition unchanged; they
-	// resolve against the imported pack closure in
-	// resolvePackQualifiedAgentPaths once PackDirs is populated.
-	if _, _, ok := splitPackQualifiedPath(p); ok {
-		return p
-	}
 	if strings.HasPrefix(p, "//") {
 		return strings.TrimPrefix(p, "//")
 	}
@@ -1917,16 +1909,7 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
-	declareAgentTables(cfg.Agents, source)
 	return &cfg, md, warnings, nil
-}
-
-// declareAgentTables sets the Declaration of each agent parsed from the
-// [[agent]] tables of file: the file and the table's position in it.
-func declareAgentTables(agents []Agent, file string) {
-	for i := range agents {
-		agents[i].Declaration = fmt.Sprintf("%s ([[agent]] %d)", file, i+1)
-	}
 }
 
 // LoadRootPackDefaultRigImports loads the canonical city.toml

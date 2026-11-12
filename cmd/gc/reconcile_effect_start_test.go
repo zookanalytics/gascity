@@ -545,7 +545,7 @@ func TestAdoptProbesTheRecordedLaunchWorkDir(t *testing.T) {
 }
 
 // Kills a v2 launch dir choice that is not the dir legacy's prepare launches
-// in (SESSION-START-027). PreWake probes the session key's transcript in its
+// in (SESSION-START-028). PreWake probes the session key's transcript in its
 // choice and clears a key whose transcript is absent, so choosing a task
 // work_dir that legacy refuses would drop the conversation the session keeps
 // in its own work dir. On each route that resolves a task work_dir, refused or
@@ -647,7 +647,7 @@ func prepareChosenRow(t *testing.T, r effectReads, w *World, row session.Info, t
 	return prepared, launch.dir
 }
 
-// Kills a v2 prepare that chooses its launch dir again (SESSION-START-027):
+// Kills a v2 prepare that chooses its launch dir again (SESSION-START-028):
 // the PreWake chose the dir, probed the transcript there and recorded it, so
 // the prepare that launches the row launches there, even when the open
 // sessions change in between and a second choice would differ. Probe and

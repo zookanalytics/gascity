@@ -156,24 +156,13 @@ func (c *Client) GetWait(id string) (CachedRead[session.WaitInfo], error) {
 // WaitInfoFromBead projection inside internal/api (serialization at the edge),
 // returning the same typed shape as ListWaits. The server never changes here —
 // the generic /beads endpoint keeps serving the label read indefinitely.
-//
-// The label read is bounded the way session.Store.ListWaits bounds the /waits
-// handler's: it asks for one bead past session.SessionWaitLookupLimit, reports
-// Capped when that bead arrives, and keeps the newest SessionWaitLookupLimit.
-// Only the extra bead proves the cap cut the read short, so a city with exactly
-// SessionWaitLookupLimit waits reads as complete.
 func (c *Client) ListWaitsViaBeads() (CachedRead[WaitList], error) {
-	cr, err := c.ListBeads(ListBeadsOpts{Label: session.WaitBeadLabel, Limit: session.SessionWaitLookupLimit + 1})
+	cr, err := c.ListBeads(ListBeadsOpts{Label: session.WaitBeadLabel, Limit: 1000})
 	if err != nil {
 		return CachedRead[WaitList]{}, err
 	}
-	rows := cr.Body.Beads
-	capped := len(rows) > session.SessionWaitLookupLimit
-	if capped {
-		rows = rows[:session.SessionWaitLookupLimit]
-	}
-	waits := make([]session.WaitInfo, 0, len(rows))
-	for _, b := range rows {
+	waits := make([]session.WaitInfo, 0, len(cr.Body.Beads))
+	for _, b := range cr.Body.Beads {
 		if b.Status == "closed" {
 			continue
 		}
@@ -183,7 +172,7 @@ func (c *Client) ListWaitsViaBeads() (CachedRead[WaitList], error) {
 		waits = append(waits, session.WaitInfoFromBead(b))
 	}
 	return CachedRead[WaitList]{
-		Body:       WaitList{Waits: waits, Capped: capped, Partial: cr.Body.Partial, PartialErrors: cr.Body.PartialErrors},
+		Body:       WaitList{Waits: waits, Partial: cr.Body.Partial, PartialErrors: cr.Body.PartialErrors},
 		AgeSeconds: cr.AgeSeconds,
 		Refresh:    cr.Refresh,
 	}, nil

@@ -51,14 +51,14 @@ func (c *v2DemandMigrationsCheck) Fix(ctx *doctor.CheckContext) error {
 	if out == nil {
 		out = io.Discard
 	}
-	c.sweep(ctx, true, out)
+	c.sweep(true, out)
 	return nil
 }
 
 // Run implements doctor.Check.
-func (c *v2DemandMigrationsCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
+func (c *v2DemandMigrationsCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	var log bytes.Buffer
-	s := c.sweep(ctx, false, &log)
+	s := c.sweep(false, &log)
 	perRepair, total := map[string]int{}, 0
 	var details, parts []string
 	for k, n := range s.counts {
@@ -112,11 +112,8 @@ type demandMigrationSweep struct {
 // as runBackstopDemandRepairs does, without the two writers that stay lane
 // steps (the session stamp and the control-dispatcher route repair). With fix
 // false each repair writes into a recordingWriteStore per row and the writes
-// are counted; with fix true the repairs get the real stores. Once the doctor
-// runner abandons the check it issues no further store read: it starts no
-// further phase, and the two work collections read through reads that refuse
-// each read from then on.
-func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stderr io.Writer) demandMigrationSweep {
+// are counted; with fix true the repairs get the real stores.
+func (c *v2DemandMigrationsCheck) sweep(fix bool, stderr io.Writer) demandMigrationSweep {
 	s := demandMigrationSweep{counts: map[demandMigrationKey]int{}}
 	city, err := c.newStore(c.cityPath)
 	if err != nil {
@@ -135,10 +132,6 @@ func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stde
 			continue
 		}
 		rigs[rig.Name] = store
-	}
-	if ctx.Canceled() {
-		s.problems = append(s.problems, doctor.ErrCheckAbandoned.Error())
-		return s
 	}
 	sessionsStore := cliSessionStore(city, c.cfg, c.cityPath)
 	sessions, err := loadSessionBeadSnapshot(sessionsStore)
@@ -159,19 +152,11 @@ func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stde
 		}
 		return out
 	}
-	// The collections issue many reads across the legs, so both read through
-	// reads: a check abandoned mid-collection stops at that collection's next
-	// read, not at the next phase.
-	reads := stoppableDemandReads{demandReads: legacyDemandReads{}, stopped: ctx.Canceled}
-	if ctx.Canceled() {
-		s.problems = append(s.problems, doctor.ErrCheckAbandoned.Error())
-		return s
-	}
 	// The sweep leads with the city WORK store, so it names the sessions store
 	// the closed named-session index reads: on a split city closed named
 	// sessions live only in the binding.
 	assigned, assignedStores, assignedRefs, _, assignedPartial := collectAssignedWorkBeadsWithStores(c.cityPath, c.cfg, city, rigs, suspended, sessions,
-		newReadyDemandCacheWithReads(reads).withSessionsStore(beads.SessionStore{Store: sessionsStore}))
+		newReadyDemandCache().withSessionsStore(beads.SessionStore{Store: sessionsStore}))
 	s.assigned = assigned
 	if assignedPartial {
 		s.problems = append(s.problems, "assigned collection partial")
@@ -179,11 +164,7 @@ func (c *v2DemandMigrationsCheck) sweep(ctx *doctor.CheckContext, fix bool, stde
 	repairPoolSlotWorkDirClobber(c.cfg, assigned, writes(demandMigrationRepairs[0], assignedStores, assignedRefs), stderr)
 	canonicalizeLegacyBoundAssignedWork(c.cfg, assigned, writes(demandMigrationRepairs[1], assignedStores, assignedRefs), sessions, stderr)
 
-	if ctx.Canceled() {
-		s.problems = append(s.problems, doctor.ErrCheckAbandoned.Error())
-		return s
-	}
-	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, reads)
+	routed, routedStores, routedRefs, routedPartial := collectOpenUnassignedRoutedWork(c.cityPath, c.cfg, city, rigs, suspended, stderr, nil, nil)
 	if routedPartial {
 		s.problems = append(s.problems, "unassigned routed collection partial")
 	}

@@ -45,8 +45,7 @@ type Doctor struct {
 	// abandoned so one wedged check (e.g. a store read stuck behind a saturated
 	// data plane, or a fix script blocked on I/O) cannot stall the entire
 	// doctor run and hide every check registered after it. A timed-out Run is
-	// reported as a timed-out advisory error, and its CheckContext.Done is
-	// closed so it can stop issuing I/O; a timed-out fix is reported as an
+	// reported as a timed-out advisory error; a timed-out fix is reported as an
 	// unconfirmed remediation. Call Wait before releasing resources that a
 	// timed execution may still be using.
 	CheckTimeout time.Duration

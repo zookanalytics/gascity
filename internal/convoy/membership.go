@@ -98,7 +98,45 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 	if err := classes.requireConvoyHandle(); err != nil {
 		return nil, fmt.Errorf("listing members of convoy %s: %w", convoyID, err)
 	}
-	store := classes.Convoy
+	return membersFrom(classes.Convoy, convoyID, includeClosed, classes.memberResolver)
+}
+
+// MembersOn is MembersIn over one read-only leg of a convoy federation (a
+// storeref plan leg): the convoy's own store is the only class it spans, as
+// MembersIn's is when the caller names the convoy's class alone. A member is
+// resolved with one read of the leg; a read failure carries the convoy class
+// as provenance, and an absent member is an unresolved placeholder, as
+// MembersIn reports them.
+func MembersOn(leg beads.FederatedReader, convoyID string, includeClosed bool) ([]beads.Bead, error) {
+	if beads.IsNilStore(leg) {
+		return nil, fmt.Errorf("listing members of convoy %s: %w", convoyID, ErrNoConvoyClass)
+	}
+	return membersFrom(leg, convoyID, includeClosed, func([]string) func(id string) (beads.Bead, error) {
+		return func(id string) (beads.Bead, error) {
+			item, err := leg.Get(id)
+			switch {
+			case err == nil:
+				return item, nil
+			case errors.Is(err, beads.ErrNotFound):
+				return beads.Bead{}, fmt.Errorf("resolving %s across convoy: %w", id, err)
+			default:
+				return beads.Bead{}, fmt.Errorf("reading %s from the convoy class store: %w", id, err)
+			}
+		}
+	})
+}
+
+// convoyReads are the reads a convoy's own store answers for its membership.
+type convoyReads interface {
+	Get(id string) (beads.Bead, error)
+	List(query beads.ListQuery) ([]beads.Bead, error)
+	DepList(id, direction string) ([]beads.Dep, error)
+}
+
+// membersFrom is MembersIn's and MembersOn's walk: the legacy children and the
+// tracks edges read from store, the tracked members resolved by the resolver
+// that resolverFor builds over their ids.
+func membersFrom(store convoyReads, convoyID string, includeClosed bool, resolverFor func(ids []string) func(id string) (beads.Bead, error)) ([]beads.Bead, error) {
 	legacyChildren, err := store.List(beads.ListQuery{
 		ParentID:      convoyID,
 		IncludeClosed: includeClosed,
@@ -111,7 +149,7 @@ func MembersIn(classes MemberClasses, convoyID string, includeClosed bool) ([]be
 	if err != nil {
 		return nil, fmt.Errorf("listing convoy %s dependencies: %w", convoyID, err)
 	}
-	return assembleMembers(legacyChildren, deps, includeClosed, classes.memberResolver(trackedIDs(deps)))
+	return assembleMembers(legacyChildren, deps, includeClosed, resolverFor(trackedIDs(deps)))
 }
 
 // memberResolver returns resolveMembers for ids in the shape assembleMembers
@@ -308,6 +346,20 @@ func HasTrack(store beads.WorkStore, convoyID, itemID string) (bool, error) {
 // parameter that is accepted but never read would let a caller believe a class
 // participated when it did not.
 func TrackingConvoysForItem(store beads.WorkStore, itemID string) ([]beads.Bead, error) {
+	return trackingConvoys(store, itemID)
+}
+
+// TrackingConvoysOn is TrackingConvoysForItem over one read-only leg of a
+// convoy federation (a storeref plan leg), with the same answer and errors.
+func TrackingConvoysOn(leg beads.FederatedReader, itemID string) ([]beads.Bead, error) {
+	if beads.IsNilStore(leg) {
+		return nil, fmt.Errorf("listing dependents of item %s: %w", itemID, ErrNoConvoyClass)
+	}
+	return trackingConvoys(leg, itemID)
+}
+
+// trackingConvoys is TrackingConvoysForItem's walk over store.
+func trackingConvoys(store convoyReads, itemID string) ([]beads.Bead, error) {
 	deps, err := store.DepList(itemID, "up")
 	if err != nil {
 		return nil, fmt.Errorf("listing dependents of item %s: %w", itemID, err)

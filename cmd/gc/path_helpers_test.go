@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -191,14 +190,6 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 type doltLeakGuardedTestingM struct {
 	m        testscript.TestingM
 	tempRoot string
-	// hostRoots are the temp roots the binary inherited. TestMain points
-	// TMPDIR and GOTMPDIR at tempRoot before the guard runs, so the startup
-	// sweeps read other runs' test roots and leftover Dolt store dirs from
-	// here, never from the environment.
-	hostRoots hostTempRoots
-	// orphanSweepLsof is the open-file scan the startup store-dir sweep
-	// hands doltorphan.Sweep. Nil runs the real lsof -w.
-	orphanSweepLsof func(context.Context) ([]byte, error)
 	// sourceRoot is the package directory the test binary runs in. A managed
 	// dolt provider handed a city root of "" or "." resolves it to this
 	// directory, so the server and its data_dir land in the source checkout
@@ -229,7 +220,7 @@ func (g *doltLeakGuardedTestingM) diagWriter() io.Writer {
 	return os.Stderr
 }
 
-func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, hostRoots hostTempRoots, cleanupPaths ...string) *doltLeakGuardedTestingM {
+func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
 	// A failure here must not be fatal: os.Getwd only fails in exotic cases
 	// (an unlinked cwd), and losing the second root degrades the guard to its
 	// previous tempRoot-only behavior rather than breaking every test run.
@@ -241,7 +232,6 @@ func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, hostRoot
 	return &doltLeakGuardedTestingM{
 		m:            m,
 		tempRoot:     tempRoot,
-		hostRoots:    hostRoots,
 		sourceRoot:   sourceRoot,
 		checkoutRoot: checkoutRootForTestSource(sourceRoot),
 		cleanupPaths: cleanupPaths,
@@ -287,7 +277,7 @@ func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
 }
 
 func (g *doltLeakGuardedTestingM) Run() int {
-	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, g.sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses, doltLeakGuardGraceInitialInterval, doltLeakGuardGraceMaxElapsedTime)
+	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses, doltLeakGuardGraceInitialInterval, doltLeakGuardGraceMaxElapsedTime)
 }
 
 func (g *doltLeakGuardedTestingM) runWith(
@@ -446,7 +436,7 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: %s stale scan failed: %v\n", label, err) //nolint:errcheck
 		return true
 	}
-	activeRoots := cmdGCTestActiveRoots(discoverActiveTestRoots, g.hostRoots, g.tempRoot)
+	activeRoots := cmdGCTestActiveRoots(g.tempRoot)
 	tempParent := filepath.Dir(filepath.Clean(g.tempRoot))
 	var leaked []DoltProcInfo
 	for _, proc := range procs {
@@ -468,19 +458,15 @@ func (g *doltLeakGuardedTestingM) sweepStaleCmdGCTestDoltProcesses(label string)
 }
 
 // sweepOrphanDoltStoreDirs runs the symptom-based fallback sweep
-// (internal/doltorphan.Sweep) over the inherited host temp root, removing
-// stray dolt store directories regardless of what created them (ga-ntbpyb.2
-// acceptance criterion 2). It composes with, but does not replace,
+// (internal/doltorphan.Sweep) over os.TempDir(), removing stray dolt store
+// directories regardless of what created them (ga-ntbpyb.2 acceptance
+// criterion 2). It composes with, but does not replace,
 // sweepStaleCmdGCTestDoltProcesses above: that reaps stale *processes* by
 // config-path heuristics; this catches the *directory* left behind when a
 // process is already gone by the time any process-level sweep runs (e.g. a
 // SIGKILLed test binary whose pid was later reused).
-//
-// The sweep reads g.hostRoots.tmp, not os.TempDir(), which returns the fresh
-// per-run root by the time the guard runs. That root holds only this run's
-// dirs, none old enough to clear the sweep's age gate.
-func (g *doltLeakGuardedTestingM) sweepOrphanDoltStoreDirs() {
-	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: g.hostRoots.tmp, RunLsof: g.orphanSweepLsof})
+func sweepOrphanDoltStoreDirs() {
+	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: os.TempDir()})
 	for _, dir := range result.Removed {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: startup sweep removed orphaned dolt store dir %s\n", dir) //nolint:errcheck
 	}
@@ -489,13 +475,8 @@ func (g *doltLeakGuardedTestingM) sweepOrphanDoltStoreDirs() {
 	}
 }
 
-// cmdGCTestActiveRoots returns the test roots that discover finds in use by
-// live processes under the host temp roots, plus currentRoot, cleaned and
-// deduplicated. Other runs' test roots sit under the roots the binary
-// inherited; by the time the guard runs, os.TempDir() and GOTMPDIR name
-// currentRoot.
-func cmdGCTestActiveRoots(discover func(homeDir, tempDir, goTmpDir string) []string, hostRoots hostTempRoots, currentRoot string) []string {
-	roots := discover("", hostRoots.tmp, hostRoots.goTmp)
+func cmdGCTestActiveRoots(currentRoot string) []string {
+	roots := discoverActiveTestRoots("", os.TempDir())
 	if currentRoot != "" {
 		roots = append(roots, currentRoot)
 	}

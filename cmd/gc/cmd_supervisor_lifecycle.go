@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/tailfile"
 	"github.com/spf13/cobra"
 )
 
@@ -696,8 +698,7 @@ func startBareSupervisor(stdout, stderr io.Writer, jsonOut, joinRunning bool) in
 		if joinRunning {
 			return 0
 		}
-		state, exePath := classifySupervisorHolder(pid)
-		fmt.Fprint(stderr, supervisorAlreadyRunningMessage("gc supervisor start", pid, state, exePath)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc supervisor start: supervisor already running (PID %d)\n", pid) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	// The real probe, not supervisorAliveHook: tests stub the hook to model
@@ -1676,16 +1677,10 @@ func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, supervisorLogsTeeDisabledWarning(goruntime.GOOS, logPath, numLines, follow)) //nolint:errcheck // best-effort stderr
 	}
 
-	args := []string{"-n", fmt.Sprintf("%d", numLines)}
-	if follow {
-		args = append(args, "-f")
-	}
-	args = append(args, logPath)
-
-	cmd := exec.Command("tail", args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	err := tailfile.Tail(context.Background(), logPath, numLines, follow, stdout, func() {
+		fmt.Fprintf(stderr, "gc supervisor logs: %s: file truncated\n", logPath) //nolint:errcheck // best-effort stderr
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor logs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1813,11 +1808,6 @@ type supervisorServiceData struct {
 	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
 	// so a duplicate install does not crash-loop on the shared port.
 	PortInUseExitCode int
-	// AlreadyRunningExitCode is the exit code the supervisor returns when
-	// another supervisor already holds the city; the systemd unit lists it in
-	// RestartPreventExitStatus alongside PortInUseExitCode so a duplicate does
-	// not crash-loop against a holder it can never displace.
-	AlreadyRunningExitCode int
 }
 
 type supervisorServiceEnvVar struct {
@@ -1842,16 +1832,15 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		return nil, err
 	}
 	return &supervisorServiceData{
-		GCPath:                 gcPath,
-		LogPath:                supervisorLogPath(),
-		GCHome:                 home,
-		XDGRuntimeDir:          xdgRuntimeDir,
-		LaunchdLabel:           supervisorLaunchdLabel(),
-		SafeName:               sanitizeServiceName(filepath.Base(home)),
-		Path:                   searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
-		ExtraEnv:               extraEnv,
-		PortInUseExitCode:      supervisorExitCodePortInUse,
-		AlreadyRunningExitCode: supervisorExitCodeAlreadyRunning,
+		GCPath:            gcPath,
+		LogPath:           supervisorLogPath(),
+		GCHome:            home,
+		XDGRuntimeDir:     xdgRuntimeDir,
+		LaunchdLabel:      supervisorLaunchdLabel(),
+		SafeName:          sanitizeServiceName(filepath.Base(home)),
+		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
+		ExtraEnv:          extraEnv,
+		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
 
@@ -2155,14 +2144,10 @@ func supervisorSystemdServiceName() string {
 // supervisorLaunchdTemplate has no equivalent of systemd's
 // RestartPreventExitStatus: launchd's KeepAlive dict below has no
 // per-exit-code / LastExitStatus key, so a duplicate supervisor that exits
-// with either terminal duplicate-instance code — supervisorExitCodePortInUse
-// or supervisorExitCodeAlreadyRunning (see cmd_supervisor.go) — is still
+// with supervisorExitCodePortInUse (see cmd_supervisor.go) is still
 // "Crashed" (any nonzero exit) and gets restarted regardless of exit code.
 // The port-in-use message is worded accordingly on darwin (see
-// supervisorPortInUseMessage) instead of falsely claiming "without restart";
-// the already-running message avoids the same claim by construction, since
-// its loud form is only reachable behind a procfs read (see
-// supervisorAlreadyRunningMessage).
+// supervisorPortInUseMessage) instead of falsely claiming "without restart".
 // Real macOS duplicate-instance suppression is a different mechanism and is
 // tracked separately: gc-s53wv.
 const supervisorLaunchdTemplate = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2224,11 +2209,9 @@ KillMode=process
 ExecStart={{systemdpath .GCPath}} supervisor run
 Restart=always
 RestartSec=5s
-# Terminal duplicate-instance exits. A supervisor that loses the shared API
-# port, or that finds another supervisor already holding the city, can never
-# make progress by restarting — it meets the same holder every time. Both
-# would just crash-loop forever (see ga-ceq, gc-f1081), so don't restart them.
-RestartPreventExitStatus={{.PortInUseExitCode}} {{.AlreadyRunningExitCode}}
+# A duplicate supervisor that loses the shared API port exits with this code.
+# Restarting it would just crash-loop forever (see ga-ceq), so don't.
+RestartPreventExitStatus={{.PortInUseExitCode}}
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 Environment=GC_HOME="{{.GCHome}}"

@@ -3012,16 +3012,11 @@ func (s *BdStore) DeleteBatch(ids []string) error {
 
 // List returns beads matching the query via bd list and bd query.
 //
-// A query scoped to ParentIDs reads the parent-child edges that target the
-// parents, then only the children those edges name, by id; see listChildren.
 // An IDs query reads only those ids (bdIDReads). IDs whose every entry is
 // empty name no bead, so they read nothing.
 func (s *BdStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("bd list: %w", ErrQueryRequiresScan)
-	}
-	if len(query.ParentIDs) > 0 {
-		return s.listChildren(query)
 	}
 	if len(query.IDs) > 0 && len(distinctNonEmpty(query.IDs)) == 0 {
 		return []Bead{}, nil

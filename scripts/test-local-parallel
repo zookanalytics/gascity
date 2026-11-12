@@ -71,7 +71,9 @@ gc_local_parallel_on_signal() {
   trap - "$sig"
   kill -"$sig" $$
 }
-trap 'gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
+# Ignore SIGPIPE during cleanup: a leftover writer hitting a closed stdout
+# must not turn a suite that already passed into exit 141.
+trap 'trap "" PIPE; gc_harness_terminate_supervised "$gc_local_parallel_drain_ticks"; push_gate_release_slot "$gate_fd"' EXIT
 trap 'gc_local_parallel_on_signal INT' INT
 trap 'gc_local_parallel_on_signal TERM' TERM
 trap 'gc_local_parallel_on_signal HUP' HUP
@@ -287,16 +289,6 @@ export TEST_LOCAL_NICE="$nice_prefix"
 sweep_min_age_seconds="$(gc_harness_duration_seconds "$go_test_timeout")" || sweep_min_age_seconds=3600
 gc_harness_sweep_stale_orphans "$sweep_min_age_seconds"
 
-# Reclaim go's leaked compile/link temp before adding load of our own. go
-# deletes its per-invocation work dir only on a clean exit, so a run the
-# watchdog above, a signal, or an OOM kill ends leaks go-build*/go-link* under
-# $GOTMPDIR — or under /var/tmp when the run set no GOTMPDIR — and nothing else
-# sweeps them. Same age floor as the process sweep, so an in-flight build is
-# never in scope; a bare session reports no GOTMPDIR, so fall back to the shim's
-# on-disk root.
-gc_harness_sweep_stale_build_dirs "$sweep_min_age_seconds" \
-  "${gotmpdir_val:-/var/tmp/gotmp}" /var/tmp
-
 echo "Running ${#jobspecs[@]} ${mode} job(s) with LOCAL_TEST_JOBS=${local_jobs} inner_p=${inner_p}"
 
 set +e
@@ -312,6 +304,7 @@ set +e
 # fan-out is addressable as one tree; the background job it becomes is still a
 # subshell, so the gate-FD severing above keeps its original scope.
 run_fan_out() {
+  rm -f "$LOCAL_TEST_LOG_DIR"/*.failed
   if [[ -n "$gate_fd" ]]; then
     eval "exec ${gate_fd}>&-"
   fi
@@ -368,12 +361,38 @@ run_fan_out() {
     echo "[$label] ok"
   else
     status=$?
-    echo "[$label] failed with exit ${status}; log: ${log}" >&2
-    sed -n '"'"'1,240p'"'"' "$log" >&2
+    : >"$LOCAL_TEST_LOG_DIR/${safe_label}.failed"
+    echo "[$label] FAILED (exit ${status}); log: ${log}" >&2
     exit "$status"
   fi
 ' _
 }
+
+# Each failed job leaves a .failed marker next to its log. Name every one and
+# show what broke: its `--- FAIL:` lines, or the log tail when it has none (a
+# build failure, a panic, or a timeout fails before any test reports).
+report_failed_jobs() {
+  local dir="$1" marker job job_log found=0
+  echo "" >&2
+  echo "=== FAILED JOBS ===" >&2
+  for marker in "$dir"/*.failed; do
+    [[ -e "$marker" ]] || continue
+    found=1
+    job="$(basename "$marker" .failed)"
+    job_log="$dir/${job}.log"
+    echo "  ${job} (log: ${job_log})" >&2
+    if grep -q '^--- FAIL:' "$job_log" 2>/dev/null; then
+      grep -A2 '^--- FAIL:' "$job_log" | head -n 40 | sed 's/^/    /' >&2 || true
+    elif [[ -f "$job_log" ]]; then
+      tail -n 40 "$job_log" | sed 's/^/    /' >&2 || true
+    fi
+  done
+  if [[ "$found" -eq 0 ]]; then
+    echo "  (no job left a failure marker; the fan-out itself failed)" >&2
+  fi
+  echo "Logs: ${dir}" >&2
+}
+
 # No watchdog deadline here: each shard runner owns its own, sized to its own
 # go test budget. A second global one would only fire late and less precisely.
 gc_harness_run_supervised "${mode} fan-out" "" 0 -- run_fan_out
@@ -386,7 +405,7 @@ if [[ "$status" -eq 0 ]]; then
   fi
   echo "All ${mode} jobs passed"
 else
-  echo "One or more ${mode} jobs failed; logs are in ${log_dir}" >&2
+  report_failed_jobs "$log_dir"
 fi
 
 exit "$status"
