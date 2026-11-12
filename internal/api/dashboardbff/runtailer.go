@@ -178,6 +178,19 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 	return t
 }
 
+// running returns the city's started tailer for eventsPath, and starts
+// nothing. A city no read has asked for, a tailer the manager has not started
+// yet, and a tailer bound to another root's log all report false.
+func (m *runTailerManager) running(name, eventsPath string) (*cityRunTailer, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.cities[name]
+	if !ok || !t.started || t.eventsPath != eventsPath {
+		return nil, false
+	}
+	return t, true
+}
+
 // ── Per-city tailer ───────────────────────────────────────────────────────
 
 type cityRunTailer struct {
@@ -368,16 +381,11 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 // synchronously (a POST /runs/{id}/cancel through the supervisor's cache) reads
 // its own write on the next GET instead of waiting out runTailPollInterval. It
 // costs one stat and a read of the bytes appended since the last fold — no
-// store access — and concurrent requests share one fold. It reports false
-// when the tailer is not running or ctx ended first; the projection then
-// catches up on its next poll as before.
+// store access — and concurrent requests share one fold. Its caller holds a
+// started tailer (runTailerManager.running), and a cold replay still in
+// progress is waited out first. It reports false when the loop exited or ctx
+// ended first; a loop still running folds the events on its next poll.
 func (t *cityRunTailer) sync(ctx context.Context) bool {
-	t.mgr.mu.Lock()
-	started := t.started
-	t.mgr.mu.Unlock()
-	if !started {
-		return false
-	}
 	select {
 	case <-t.readyCh:
 	case <-t.doneCh:
@@ -1375,19 +1383,30 @@ func (t *cityRunTailer) writeRunDetailReadError(w http.ResponseWriter, runID str
 }
 
 // cityRunTailer resolves the exact registered city name to its run tailer,
-// returning false for an unknown city. The resolver is authoritative and
-// returns the path directly, so registry-valid dots and underscores are safe
-// here; the deep-link grammar (ValidCityName) now mirrors the registry, so
-// both paths agree. Starting the fold loop is lazy.
+// returning false for an unknown city. Starting the fold loop is lazy: the
+// city's first read starts it.
 func (p *Plane) cityRunTailer(name string) (*cityRunTailer, bool) {
-	if name == "" || p.deps.Resolver == nil {
-		return nil, false
-	}
-	path, ok := p.deps.Resolver.CityPath(name)
+	eventsPath, ok := p.resolveCityEventsPath(name)
 	if !ok {
 		return nil, false
 	}
-	return p.runTailers.ensure(name, cityEventsPath(path)), true
+	return p.runTailers.ensure(name, eventsPath), true
+}
+
+// resolveCityEventsPath resolves the exact registered city name to its event
+// log path, returning false for an unknown city. The resolver is authoritative
+// and returns the path directly, so registry-valid dots and underscores are
+// safe here; the deep-link grammar (ValidCityName) mirrors the registry, so
+// both paths agree.
+func (p *Plane) resolveCityEventsPath(name string) (string, bool) {
+	if name == "" || p.deps.Resolver == nil {
+		return "", false
+	}
+	path, ok := p.deps.Resolver.CityPath(name)
+	if !ok {
+		return "", false
+	}
+	return cityEventsPath(path), true
 }
 
 // cityEventsPath is the single source of truth for a city's append-only event
