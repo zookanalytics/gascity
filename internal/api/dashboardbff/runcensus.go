@@ -91,15 +91,23 @@ func (p *Plane) ForgetRunProjectionMiss(_ context.Context, cityName, runID strin
 	tailer.unknownRuns.forget(runID)
 }
 
-// SyncRunProjection folds the city's event log through its current end into
-// the warm projection before it returns, giving a caller that just recorded
-// bead events (a run cancel) read-your-writes on the next point read. It
-// reports false when the city is unknown, its tailer is not running, or ctx
-// ended first; the projection then catches up on its next poll.
+// SyncRunProjection gives a caller that just recorded bead events (a run
+// cancel) read-your-writes on the city's next run read, and starts no tailer.
+// When the city's tailer is running, it folds the event log through its
+// current end into the warm projection before it returns, after waiting out a
+// cold replay still in progress. When none is running, there is no warm
+// projection to be stale: it returns true at once, and a tailer that starts
+// later replays the log, the caller's events included. It reports false when
+// the city is unknown, or when ctx ended or the tailer stopped before its
+// fold; a tailer still running folds the events on its next poll.
 func (p *Plane) SyncRunProjection(ctx context.Context, cityName string) bool {
-	tailer, ok := p.cityRunTailer(cityName)
+	eventsPath, ok := p.resolveCityEventsPath(cityName)
 	if !ok {
 		return false
+	}
+	tailer, running := p.runTailers.running(cityName, eventsPath)
+	if !running {
+		return true
 	}
 	return tailer.sync(ctx)
 }

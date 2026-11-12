@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -294,40 +295,147 @@ func TestRunProjectionSyncFoldsAppendedEventsBeforeTheNextPoll(t *testing.T) {
 		t.Fatalf("census = %+v, want the cold replay ready", census)
 	}
 
-	closedRoot := beads.Bead{
-		ID: "run-1", Title: "test-formula", Status: "closed", Type: "molecule",
-		Metadata: beads.StringMap{
-			"gc.formula_contract": "graph.v2", "gc.kind": "run", "gc.formula": "test-formula",
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
-		},
-	}
-	payload, _ := json.Marshal(struct {
-		Bead beads.Bead `json:"bead"`
-	}{closedRoot})
-	appendEvents(t, logPath, events.Event{Seq: 2, Type: events.BeadClosed, Payload: payload})
+	appendEvents(t, logPath, canceledRunRootEvent("run-1"))
 
-	rootStatus := func() string {
-		projection, ok := p.RunProjection(t.Context(), "alpha")
-		if !ok {
-			t.Fatal("RunProjection reported a registered city as unknown")
-		}
-		for _, b := range projection.Beads {
-			if b.ID == "run-1" {
-				return b.Status
-			}
-		}
-		return ""
-	}
-	if got := rootStatus(); got != "open" {
+	if got := alphaRunStatus(t, p, "run-1"); got != "open" {
 		t.Fatalf("before sync root status = %q, want the stale open row (no poll has run)", got)
 	}
 	if !p.SyncRunProjection(t.Context(), "alpha") {
 		t.Fatal("SyncRunProjection = false, want the running tailer to fold")
 	}
-	if got := rootStatus(); got != "closed" {
+	if got := alphaRunStatus(t, p, "run-1"); got != "closed" {
 		t.Fatalf("after sync root status = %q, want closed", got)
 	}
 	if p.SyncRunProjection(t.Context(), "ghost") {
 		t.Fatal("SyncRunProjection = true for an unknown city")
 	}
+}
+
+// Every run cancel syncs the projection, and a city's pack cancels runs whether
+// or not anything reads them. A city with no running tailer has no warm
+// projection to catch up, so the sync starts no tailer and waits on no cold
+// replay, and the tailer a later read starts replays the cancel's events.
+func TestRunProjectionSyncStartsNoTailer(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, ".gc", "events.jsonl")
+	writeEventLog(t, logPath, runMoleculeEvent(1, "run-1", "test-formula", "worker-1"))
+
+	// A cold replay holds here until released, so a sync that started one and
+	// waited on it would hang.
+	var coldLoads atomic.Int32
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseLoad := func() { releaseOnce.Do(func() { close(release) }) }
+	previous := readRunColdLoad
+	readRunColdLoad = func(proj *runproj.Projector, path string) error {
+		coldLoads.Add(1)
+		<-release
+		return previous(proj, path)
+	}
+	t.Cleanup(func() { readRunColdLoad = previous })
+
+	p := New(Deps{Resolver: fakeResolver{paths: map[string]string{"alpha": dir}}})
+	p.Start(t.Context())
+	t.Cleanup(func() {
+		releaseLoad()
+		p.Stop()
+	})
+
+	appendEvents(t, logPath, canceledRunRootEvent("run-1"))
+	synced := make(chan bool, 1)
+	go func() { synced <- p.SyncRunProjection(t.Context(), "alpha") }()
+	select {
+	case ok := <-synced:
+		if !ok {
+			t.Fatal("SyncRunProjection = false with no tailer running, want true: the tailer a later read starts replays the log")
+		}
+	case <-time.After(hangBudget):
+		t.Fatal("SyncRunProjection waited on a cold replay with no tailer running")
+	}
+	if got := lenTailers(p); got != 0 {
+		t.Fatalf("tailers after a sync with none running = %d, want 0", got)
+	}
+	if got := coldLoads.Load(); got != 0 {
+		t.Fatalf("cold replays after a sync with none running = %d, want 0", got)
+	}
+
+	releaseLoad()
+	if census, _ := p.RunCensus(t.Context(), "alpha"); !census.Ready {
+		t.Fatalf("census = %+v, want the first read's cold replay ready", census)
+	}
+	if got := alphaRunStatus(t, p, "run-1"); got != "closed" {
+		t.Fatalf("root status after the first read's replay = %q, want closed", got)
+	}
+}
+
+// A city registered again at another root keeps its old root's tailer until a
+// read replaces it. A sync neither replaces that tailer nor starts one for the
+// new log, and the read that replaces it replays the new log whole.
+func TestRunProjectionSyncLeavesARelocatedCitysTailerToTheNextRead(t *testing.T) {
+	oldDir := t.TempDir()
+	writeEventLog(t, cityEventsPath(oldDir), runMoleculeEvent(1, "run-1", "test-formula", "worker-1"))
+	newDir := t.TempDir()
+	writeEventLog(t, cityEventsPath(newDir),
+		runMoleculeEvent(1, "run-2", "test-formula", "worker-1"),
+		canceledRunRootEvent("run-2"))
+
+	resolver := &mutableStreamResolver{path: oldDir}
+	p := New(Deps{Resolver: resolver})
+	p.Start(t.Context())
+	t.Cleanup(p.Stop)
+	if census, _ := p.RunCensus(t.Context(), "alpha"); !census.Ready {
+		t.Fatalf("census = %+v, want the old root's cold replay ready", census)
+	}
+	alphaTailer := func() *cityRunTailer {
+		p.runTailers.mu.Lock()
+		defer p.runTailers.mu.Unlock()
+		return p.runTailers.cities["alpha"]
+	}
+	oldTailer := alphaTailer()
+
+	resolver.setPath(newDir)
+	if !p.SyncRunProjection(t.Context(), "alpha") {
+		t.Fatal("SyncRunProjection = false for a relocated city, want true: the read that replaces its tailer replays the new log")
+	}
+	if alphaTailer() != oldTailer {
+		t.Fatal("SyncRunProjection replaced the relocated city's tailer, want it left to the next read")
+	}
+
+	if census, _ := p.RunCensus(t.Context(), "alpha"); !census.Ready {
+		t.Fatalf("census = %+v, want the new root's cold replay ready", census)
+	}
+	if got := alphaRunStatus(t, p, "run-2"); got != "closed" {
+		t.Fatalf("relocated root status = %q, want closed", got)
+	}
+}
+
+// canceledRunRootEvent is the bead.closed event a run cancel records for a run
+// root created at seq 1.
+func canceledRunRootEvent(id string) events.Event {
+	payload, _ := json.Marshal(struct {
+		Bead beads.Bead `json:"bead"`
+	}{beads.Bead{
+		ID: id, Title: "test-formula", Status: "closed", Type: "molecule",
+		Metadata: beads.StringMap{
+			"gc.formula_contract": "graph.v2", "gc.kind": "run", "gc.formula": "test-formula",
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+		},
+	}})
+	return events.Event{Seq: 2, Type: events.BeadClosed, Payload: payload}
+}
+
+// alphaRunStatus reads a bead's status from city alpha's run projection, or ""
+// when the projection holds no such bead.
+func alphaRunStatus(t *testing.T, p *Plane, id string) string {
+	t.Helper()
+	projection, ok := p.RunProjection(t.Context(), "alpha")
+	if !ok {
+		t.Fatal("RunProjection reported a registered city as unknown")
+	}
+	for _, b := range projection.Beads {
+		if b.ID == id {
+			return b.Status
+		}
+	}
+	return ""
 }
