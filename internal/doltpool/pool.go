@@ -28,8 +28,13 @@ import (
 // supervisor doctor budget (≤0.8×@@max_connections, plan item 2.7) can
 // reason about.
 const (
-	maxOpenConns    = 5
-	maxIdleConns    = 2
+	maxOpenConns = 5
+	// maxIdleConns matches maxOpenConns so a pool keeps every connection a
+	// burst of concurrent callers hands back. database/sql closes a returned
+	// connection once the idle list holds maxIdleConns, so an idle cap below
+	// the open cap closes the difference after every burst and the next burst
+	// dials it again. connMaxIdleTime still closes a connection nothing reuses.
+	maxIdleConns    = maxOpenConns
 	connMaxLifetime = time.Hour
 	// connMaxIdleTime must stay STRICTLY BELOW the server's idle reaper so
 	// the CLIENT closes an idle pooled connection before the server does.

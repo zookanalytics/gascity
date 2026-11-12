@@ -1,9 +1,13 @@
 package doltpool
 
 import (
+	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,6 +111,93 @@ func TestPoolCapsConfigured(t *testing.T) {
 	if got := db.Stats().MaxOpenConnections; got != maxOpenConns {
 		t.Fatalf("MaxOpenConnections = %d, want %d", got, maxOpenConns)
 	}
+}
+
+// TestPoolKeepsEveryConnectionABurstReturns pins that a pooled handle keeps
+// every connection a burst of maxOpenConns concurrent callers hands back, so
+// the next burst reuses them instead of dialing. database/sql closes a returned
+// connection once the idle list is full, so an idle cap below the open cap
+// closes the difference after every burst and the next burst dials it again;
+// against Dolt each of those dials is a connection setup and teardown for a
+// handful of queries.
+func TestPoolKeepsEveryConnectionABurstReturns(t *testing.T) {
+	connector := &countingConnector{}
+	db := sql.OpenDB(connector)
+	t.Cleanup(func() { _ = db.Close() })
+	configurePool(db)
+
+	burst := func() {
+		t.Helper()
+		ctx := context.Background()
+		held := make([]*sql.Conn, 0, maxOpenConns)
+		for range maxOpenConns {
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("Conn: %v", err)
+			}
+			held = append(held, conn)
+		}
+		for _, conn := range held {
+			if err := conn.Close(); err != nil {
+				t.Fatalf("returning a connection to the pool: %v", err)
+			}
+		}
+	}
+
+	burst()
+	stats := db.Stats()
+	if closed := connector.closed.Load(); closed != 0 || stats.MaxIdleClosed != 0 {
+		t.Fatalf("pool closed %d of the %d connections the burst returned (MaxIdleClosed = %d), want 0",
+			closed, maxOpenConns, stats.MaxIdleClosed)
+	}
+	if stats.Idle != maxOpenConns {
+		t.Fatalf("Idle = %d after the burst, want %d", stats.Idle, maxOpenConns)
+	}
+
+	burst()
+	if dials := connector.dials.Load(); dials != maxOpenConns {
+		t.Fatalf("two bursts dialed %d connections, want %d: the second burst must reuse the first one's", dials, maxOpenConns)
+	}
+}
+
+// countingConnector is a driver.Connector that counts the connections a pool
+// dials and closes, so the pool's limits can be asserted without a listener or
+// a byte of MySQL wire protocol.
+type countingConnector struct {
+	dials  atomic.Int64
+	closed atomic.Int64
+}
+
+func (c *countingConnector) Connect(context.Context) (driver.Conn, error) {
+	c.dials.Add(1)
+	return &countingConn{connector: c}, nil
+}
+
+func (c *countingConnector) Driver() driver.Driver { return countingDriver{} }
+
+// countingDriver exists only because driver.Connector requires one; nothing
+// opens a connection through a DSN here.
+type countingDriver struct{}
+
+func (countingDriver) Open(string) (driver.Conn, error) {
+	return nil, errors.New("doltpool: the counting fixture has no DSN driver")
+}
+
+type countingConn struct {
+	connector *countingConnector
+}
+
+func (c *countingConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("doltpool: the counting fixture runs no statements")
+}
+
+func (c *countingConn) Close() error {
+	c.connector.closed.Add(1)
+	return nil
+}
+
+func (c *countingConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("doltpool: the counting fixture runs no transactions")
 }
 
 func TestShutdownEmptiesRegistryAndAllowsReopen(t *testing.T) {
