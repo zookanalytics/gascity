@@ -501,12 +501,12 @@ var cityLevelOrderSources = []struct {
 	},
 }
 
-// orderExecsByRig lists the exec of each registration of the named order, by
+// watchExecsByRig lists the exec of each registration of the watch order, by
 // the rig it is bound to, with "" for a city-wide registration.
-func orderExecsByRig(aa []orders.Order, name string) map[string][]string {
+func watchExecsByRig(aa []orders.Order) map[string][]string {
 	execs := map[string][]string{}
 	for _, a := range aa {
-		if a.Name == name {
+		if a.Name == "watch" {
 			execs[a.Rig] = append(execs[a.Rig], a.Exec)
 		}
 	}
@@ -547,7 +547,7 @@ interval = "5m"
 			if err != nil {
 				t.Fatalf("ScanAll returned error: %v", err)
 			}
-			execs := orderExecsByRig(aa, "watch")
+			execs := watchExecsByRig(aa)
 			if len(execs) != 2 || strings.Join(execs[""], ",") != "scripts/rig.sh" || strings.Join(execs["beta"], ",") != "scripts/watch.sh" {
 				t.Fatalf("watch registered as %v (rig: execs), want alpha's own scripts/rig.sh once city-wide, the city-level scripts/watch.sh on beta, and nothing on alpha", execs)
 			}
@@ -598,7 +598,7 @@ interval = "5m"
 			if err != nil {
 				t.Fatalf("ScanAll returned error: %v", err)
 			}
-			execs := orderExecsByRig(aa, "watch")
+			execs := watchExecsByRig(aa)
 			if len(execs) != 2 || strings.Join(execs[""], ",") != "scripts/alpha.sh" || strings.Join(execs["gamma"], ",") != "scripts/watch.sh" {
 				t.Fatalf("watch registered as %v (rig: execs), want alpha's scripts/alpha.sh once city-wide, the city-level scripts/watch.sh on gamma, and nothing on alpha or beta", execs)
 			}
@@ -651,7 +651,7 @@ enabled = false
 			if strings.Join(skipped, ",") != "alpha" {
 				t.Fatalf("skipped rigs = %v, want [alpha]", skipped)
 			}
-			execs := orderExecsByRig(aa, "watch")
+			execs := watchExecsByRig(aa)
 			if len(execs) != 1 || strings.Join(execs["beta"], ",") != "scripts/watch.sh" {
 				t.Fatalf("watch registered as %v (rig: execs), want the city-level scripts/watch.sh on beta alone and nothing on alpha, whose scan failed", execs)
 			}
