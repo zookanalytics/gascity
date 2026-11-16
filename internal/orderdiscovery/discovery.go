@@ -108,19 +108,19 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		}
 	}
 
-	// An order that declares scope = "rig" in a pack imported at city scope
-	// instantiates once per configured rig, the way an agent or named
-	// session declaring the same in that pack does (config's
-	// expandCityImportedAgentsForRigs): the declaration would otherwise be
-	// validated and then silently dropped, registering the order once,
-	// city-wide, against the city store. A rig that imports the pack itself
-	// is skipped, since its own scan in the loop above decides that pack's
+	// An order the city scan registers that declares scope = "rig", from a
+	// pack imported at city scope or from the city's own orders/,
+	// instantiates once per configured rig and never city-wide, the way a
+	// city import's agent and an inline named session declaring the same do
+	// (config's expandCityImportedAgentsForRigs and
+	// ExpandGenericRigNamedSessions). A rig that imports the pack itself is
+	// skipped, since its own scan in the loop above decides that pack's
 	// orders for it. So is a rig whose own layers define an order of the
 	// same name, enabled or not, from another copy of the pack or in its own
 	// orders/: within one rig a local order replaces a pack's, a disabled one
 	// included, and a rig holds one instance of a name. An order that
 	// declares nothing keeps its contract: once, city-wide.
-	cityOrders, cityRigScoped := splitCityImportedRigScopedOrders(cityOrders, cfg.PackDirs)
+	cityOrders, cityRigScoped := splitRigScopedOrders(cityOrders)
 	rigHeld := rigOrderNames(rigOrders, rigDisabled)
 	for _, rig := range cfg.Rigs {
 		for _, o := range cityRigScoped {
@@ -270,12 +270,12 @@ func formulaLayerRoot(layer string) orders.ScanRoot {
 	}
 }
 
-// splitCityImportedRigScopedOrders partitions the city-level scan into the
-// orders that stay city-wide and those a city-imported pack declared with
-// scope = "rig", recognized by a Source under one of the pack dirs' orders/.
-func splitCityImportedRigScopedOrders(cityOrders []orders.Order, packDirs []string) (city, rigScoped []orders.Order) {
+// splitRigScopedOrders partitions the city-level scan into the orders that
+// stay city-wide and those that declare scope = "rig", whichever city-level
+// root defined them.
+func splitRigScopedOrders(cityOrders []orders.Order) (city, rigScoped []orders.Order) {
 	for _, o := range cityOrders {
-		if o.IsRigScoped() && orderUnderPackDirs(o.Source, packDirs) {
+		if o.IsRigScoped() {
 			rigScoped = append(rigScoped, o)
 			continue
 		}

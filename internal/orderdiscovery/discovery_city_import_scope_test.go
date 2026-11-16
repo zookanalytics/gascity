@@ -352,13 +352,20 @@ interval = "5m"
 	}
 }
 
-// The per-rig expansion covers the orders of a pack imported at city scope.
-// An order in the city's own orders/ is not one of them: it registers once,
-// city-wide, whatever scope it declares.
-func TestScanAllCityLocalRigScopedOrderRegistersOnceCityWide(t *testing.T) {
+// The city's own orders/ is a city-level root like a city import: an order
+// there that declares scope = "rig" instantiates once per configured rig and
+// never registers city-wide, the way an inline [[named_session]] declaring
+// the same in the city's config does (config's ExpandGenericRigNamedSessions).
+// An order there that declares nothing registers once, city-wide.
+func TestScanAllCityLocalRigScopedOrderExpandsPerRig(t *testing.T) {
 	cityPath, _ := orderDiscoveryCity(t)
-	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "local-sweep", `[order]
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "local-watch", `[order]
 scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "local-sweep", `[order]
 exec = "scripts/sweep.sh"
 trigger = "cooldown"
 interval = "5m"
@@ -370,8 +377,134 @@ interval = "5m"
 	if err != nil {
 		t.Fatalf("ScanAll returned error: %v", err)
 	}
-	if len(aa) != 1 || aa[0].Name != "local-sweep" || aa[0].Rig != "" {
-		t.Fatalf("orders = %#v, want local-sweep registered once, city-wide", aa)
+	registered := map[string]map[string]int{}
+	for _, a := range aa {
+		if registered[a.Name] == nil {
+			registered[a.Name] = map[string]int{}
+		}
+		registered[a.Name][a.Rig]++
+	}
+	if got := registered["local-watch"]; len(got) != 2 || got["alpha"] != 1 || got["beta"] != 1 {
+		t.Errorf("rig-scoped order in the city's orders/ registered as %v (rig: count), want one instance each on alpha and beta and none city-wide", got)
+	}
+	if got := registered["local-sweep"]; len(got) != 1 || got[""] != 1 {
+		t.Errorf("unscoped order in the city's orders/ registered as %v (rig: count), want once city-wide", got)
+	}
+}
+
+// Within the city scope a local order replaces a city import's order of the
+// same name, and the local definition's declaration decides how it
+// registers: a local scope = "rig" definition runs on each rig in place of
+// the pack's, never once city-wide.
+func TestScanAllCityLocalRigScopedOrderReplacingACityImportsExpandsPerRig(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/city.sh"
+trigger = "cooldown"
+interval = "1m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		PackDirs:      []string{packDir},
+		Rigs:          []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 2 || strings.Join(execs["alpha"], ",") != "scripts/city.sh" || strings.Join(execs["beta"], ",") != "scripts/city.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want the city's own scripts/city.sh once each on alpha and beta and none city-wide", execs)
+	}
+}
+
+// A rig whose own orders/ defines the name keeps its own order in place of
+// the copy of a city-local rig-scoped order, as it does in place of a city
+// import's copy.
+func TestScanAllCityLocalRigScopedOrderYieldsToRigLocalOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "alpha")
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/city.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+		},
+		Rigs: []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 2 || strings.Join(execs["alpha"], ",") != "scripts/rig.sh" || strings.Join(execs["beta"], ",") != "scripts/city.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want alpha's own scripts/rig.sh alone and the city's scripts/city.sh on beta", execs)
+	}
+}
+
+// A city-level order that declares scope = "rig" has no city-wide instance to
+// fall back to: in a city with no rigs, one from a city import or from the
+// city's own orders/ registers nowhere, as a named session that declares the
+// same at city level has no instance.
+func TestScanAllCityLevelRigScopedOrderWithNoRigsRegistersNowhere(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "pack-watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "local-watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		PackDirs:      []string{packDir},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 0 {
+		t.Fatalf("orders = %#v, want none: a rig-scoped order in a city with no rigs has no instance", aa)
 	}
 }
 

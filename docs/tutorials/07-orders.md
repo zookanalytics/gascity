@@ -304,13 +304,14 @@ rig-scoped orders appear once per importing rig (mirroring `scope` on
 was scanned from, so its formula must resolve from that pack rather than from any
 one rig's local `orders/` directory.
 
-The mirror holds for a pack imported at city scope too: an order there that
-declares `scope = "rig"` explicitly instantiates once per configured rig, as an
-agent or named session declaring the same does, while an order that declares
-nothing registers once, city-wide. A rig that defines an order of the same name
-itself, through its own import of the pack or in its own `orders/`, keeps that
-order in place of the copy, so a definition there with `enabled = false` turns
-the order off on that rig.
+The mirror holds at city level too, for a pack imported at city scope and for
+the city's own `orders/`: an order there that declares `scope = "rig"`
+explicitly instantiates once per configured rig and never city-wide, as a named
+session declaring the same does, while an order that declares nothing
+registers once, city-wide. A rig that defines an order of the same name
+itself, in its own `orders/` or through a pack it imports, keeps that order in
+place of the copy, so a definition there with `enabled = false` turns the order
+off on that rig.
 
 ## Disabling and skipping orders
 
