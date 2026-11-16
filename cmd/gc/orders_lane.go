@@ -401,14 +401,12 @@ func (cr *CityRuntime) stageOrderDispatcherLocked(lane *ordersLane, next orderDi
 	return summary
 }
 
-// scanOrderSet scans the order set, through the orderSetScan seam when set. The
-// registrations the scan drops for their rig scope are logged through
-// cr.unboundRigScoped, which every supervisor scan shares.
+// scanOrderSet scans the order set, through the orderSetScan seam when set.
 func (cr *CityRuntime) scanOrderSet(cityRoot string, cfg *config.City, cmdName string) (orderSetSnapshot, error) {
 	if cr.orderSetScan != nil {
 		return cr.orderSetScan(cityRoot, cfg, cmdName)
 	}
-	return scanOrderSetSnapshotFSWith(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName, &cr.unboundRigScoped)
+	return scanOrderSetSnapshotFS(fsys.OSFS{}, cityRoot, cfg, cr.stderr, cmdName)
 }
 
 // tryInstallPendingOrderDispatcher installs a staged dispatcher now if no pass
