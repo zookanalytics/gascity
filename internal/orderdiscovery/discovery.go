@@ -15,7 +15,9 @@ import (
 )
 
 // RigScanErrorHandler handles a failed rig-exclusive order scan.
-// Returning nil skips that rig and continues scanning remaining rigs.
+// Returning nil skips that rig and continues scanning remaining rigs. A
+// skipped rig registers no order from the scan, including a copy of a
+// city-level order that declares scope = "rig".
 type RigScanErrorHandler func(rigName string, err error) error
 
 // OverrideErrorHandler handles a failed [orders.ApplyOverrides] call, whose
@@ -84,6 +86,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 
 	var promotedCityOrders, rigOrders []orders.Order
 	rigDefined := make(map[string]map[string]bool)
+	scanFailed := make(map[string]bool)
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
@@ -96,6 +99,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
 					return nil, handlerErr
 				}
+				scanFailed[rigName] = true
 				continue
 			}
 			return nil, fmt.Errorf("rig %s: %w", rigName, err)
@@ -125,8 +129,13 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	// or in its own orders/: within one rig a local order replaces a pack's.
 	// A disabled definition there turns the order off on that rig, and one
 	// that declares scope = "city" runs once, city-wide, under the dedup
-	// above, with no copy on the rig.
+	// above, with no copy on the rig. A rig whose scan failed and was skipped
+	// gets no copy either: the scan read none of its definitions, so a copy
+	// could run an order the rig replaces or turns off.
 	for _, rig := range cfg.Rigs {
+		if scanFailed[rig.Name] {
+			continue
+		}
 		for _, o := range cityRigScoped {
 			if orderUnderPackDirs(o.Source, cfg.RigPackDirs[rig.Name]) || rigDefined[rig.Name][o.Name] {
 				continue

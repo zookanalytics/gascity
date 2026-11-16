@@ -606,6 +606,59 @@ interval = "5m"
 	}
 }
 
+// A rig whose own order scan fails is skipped when the scan error handler
+// returns nil, and the skip covers the copy of a city-level rig-scoped order
+// too. The failed scan read none of the rig's definitions, so a copy could
+// run an order the rig turns off, as the disabled watch beside the malformed
+// order file in alpha's orders/ does here.
+func TestScanAllCityLevelRigScopedOrderSkipsRigWhoseScanFailed(t *testing.T) {
+	for _, src := range cityLevelOrderSources {
+		t.Run(src.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			rigLayer := orderDiscoveryRigLayer(t, "alpha")
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+					Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+				},
+				Rigs: []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+			}
+			src.write(t, cityPath, cfg, "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+			rigOrdersDir := filepath.Join(filepath.Dir(rigLayer), "orders")
+			writeOrderDiscoveryFile(t, rigOrdersDir, "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+enabled = false
+`)
+			writeOrderDiscoveryFile(t, rigOrdersDir, "bad", "not toml")
+
+			var skipped []string
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{
+				OnRigScanError: func(rigName string, _ error) error {
+					skipped = append(skipped, rigName)
+					return nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			if strings.Join(skipped, ",") != "alpha" {
+				t.Fatalf("skipped rigs = %v, want [alpha]", skipped)
+			}
+			execs := orderExecsByRig(aa, "watch")
+			if len(execs) != 1 || strings.Join(execs["beta"], ",") != "scripts/watch.sh" {
+				t.Fatalf("watch registered as %v (rig: execs), want the city-level scripts/watch.sh on beta alone and nothing on alpha, whose scan failed", execs)
+			}
+		})
+	}
+}
+
 // A city-level order that declares scope = "rig" has no city-wide instance to
 // fall back to: in a city with no rigs, one from a city import or from the
 // city's own orders/ registers nowhere, as a named session that declares the
