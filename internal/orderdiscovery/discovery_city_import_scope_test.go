@@ -2,6 +2,7 @@ package orderdiscovery
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -92,5 +93,226 @@ interval = "5m"
 	}
 	if len(watch) != 2 || watch["alpha"] != 1 || watch["beta"] != 1 {
 		t.Fatalf("rig-scoped order imported at both scopes registered as %v, want exactly one instance per rig", watch)
+	}
+}
+
+// A pack imported at city scope and by every rig expands to no copy: each
+// rig's own scan already holds the rig-scoped order, so no rig gets a second
+// one and none is left registered city-wide.
+func TestScanAllRigScopedOrderImportedAtCityAndByEveryRigRegistersOncePerRig(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}, "beta": {cityLayer}},
+		},
+		PackDirs:    []string{packDir},
+		RigPackDirs: map[string][]string{"alpha": {packDir}, "beta": {packDir}},
+		Rigs:        []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	watch := map[string]int{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			watch[a.Rig]++
+		}
+	}
+	if len(watch) != 2 || watch["alpha"] != 1 || watch["beta"] != 1 {
+		t.Fatalf("rig-scoped order imported at city scope and by every rig registered as %v, want one instance per rig and none city-wide", watch)
+	}
+}
+
+// Only an explicit scope = "rig" expands. Scope defaults to rig-scoped when
+// it is empty, but an empty field is not a declaration: most orders never
+// mention scope, and a split keyed on !IsCityScoped() would fan every one of
+// them out per rig.
+func TestScanAllCityImportedOrderWithoutRigDeclarationStaysCityWide(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "no-scope-key", `[order]
+exec = "scripts/heartbeat.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "declares-city", `[order]
+scope = "city"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		PackDirs:      []string{packDir},
+		Rigs:          []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	registered := map[string]map[string]int{}
+	for _, a := range aa {
+		if registered[a.Name] == nil {
+			registered[a.Name] = map[string]int{}
+		}
+		registered[a.Name][a.Rig]++
+	}
+	for _, name := range []string{"no-scope-key", "declares-city"} {
+		if got := registered[name]; len(got) != 1 || got[""] != 1 {
+			t.Errorf("order %q registered as %v, want once city-wide", name, got)
+		}
+	}
+}
+
+// The per-rig expansion covers the orders of a pack imported at city scope.
+// An order in the city's own orders/ is not one of them: it registers once,
+// city-wide, whatever scope it declares.
+func TestScanAllCityLocalRigScopedOrderRegistersOnceCityWide(t *testing.T) {
+	cityPath, _ := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "local-sweep", `[order]
+scope = "rig"
+exec = "scripts/sweep.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "alpha"}, {Name: "beta"}}}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 || aa[0].Name != "local-sweep" || aa[0].Rig != "" {
+		t.Fatalf("orders = %#v, want local-sweep registered once, city-wide", aa)
+	}
+}
+
+// Each rig's copy is its own instance to [[orders.overrides]]: an override
+// naming one rig reaches that rig's copy alone, the env it merges included,
+// and rig = "*" reaches every copy.
+func TestScanAllOverridesReachEachRigsCopyOfACityImportedOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+
+[order.env]
+WATCH_MODE = "lenient"
+`)
+
+	interval := "1m"
+	timeout := "90s"
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		PackDirs:      []string{packDir},
+		Rigs:          []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "watch", Rig: "alpha", Interval: &interval, Env: map[string]string{"WATCH_MODE": "strict"}},
+				{Name: "watch", Rig: "*", Timeout: &timeout},
+			},
+		},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	intervals := map[string]string{}
+	modes := map[string]string{}
+	timeouts := map[string]string{}
+	for _, a := range aa {
+		if a.Name != "watch" {
+			continue
+		}
+		intervals[a.Rig] = a.Interval
+		modes[a.Rig] = a.Env["WATCH_MODE"]
+		timeouts[a.Rig] = a.Timeout
+	}
+	if len(intervals) != 2 {
+		t.Fatalf("watch registered on %v, want one copy each on alpha and beta", intervals)
+	}
+	if intervals["alpha"] != "1m" || modes["alpha"] != "strict" {
+		t.Errorf("alpha's copy: interval %q, WATCH_MODE %q, want the override's 1m and strict", intervals["alpha"], modes["alpha"])
+	}
+	if intervals["beta"] != "5m" || modes["beta"] != "lenient" {
+		t.Errorf("beta's copy: interval %q, WATCH_MODE %q, want the definition's 5m and lenient, untouched by alpha's override", intervals["beta"], modes["beta"])
+	}
+	if timeouts["alpha"] != "90s" || timeouts["beta"] != "90s" {
+		t.Errorf("timeouts = %v, want rig = \"*\" to set 90s on both copies", timeouts)
+	}
+}
+
+// A rigless [[orders.overrides]] entry targets the city-wide instance, and a
+// city import's rig-scoped order has none, so the entry matches nothing. The
+// error names the rigs the order runs on, which is what the entry has to
+// name, and a scan that goes on past it leaves every copy as defined.
+func TestScanAllRiglessOverrideOfACityImportedRigScopedOrderNamesItsRigs(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{City: []string{cityLayer}},
+		PackDirs:      []string{packDir},
+		Rigs:          []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{{Name: "watch", Enabled: &disabled}},
+		},
+	}
+
+	_, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err == nil {
+		t.Fatal("ScanAll returned no error for a rigless override of an order that has no city-wide instance")
+	}
+	for _, want := range []string{`"watch"`, `rig = "alpha"`, `rig = "beta"`} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %s", err, want)
+		}
+	}
+
+	var overrideErr error
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnOverrideError: func(err error) error {
+			overrideErr = err
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll with an override handler returned error: %v", err)
+	}
+	if overrideErr == nil {
+		t.Fatal("override handler was not called for the unmatched rigless override")
+	}
+	enabled := map[string]bool{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			enabled[a.Rig] = a.IsEnabled()
+		}
+	}
+	if len(enabled) != 2 || !enabled["alpha"] || !enabled["beta"] {
+		t.Fatalf("watch copies = %v (rig: enabled), want both alpha and beta present and enabled", enabled)
 	}
 }

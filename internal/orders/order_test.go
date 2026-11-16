@@ -856,3 +856,23 @@ func TestValidateCronBadTZ(t *testing.T) {
 		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }
+
+// IsRigScoped keys on the literal "rig" and nothing else. Discovery expands a
+// city import's order per rig on it, so treating an unscoped order as a
+// declaration would fan most of the order set out per rig, including the
+// builtin orders that never mention scope.
+func TestIsRigScopedOnlyOnExplicitDeclaration(t *testing.T) {
+	for _, tc := range []struct {
+		scope string
+		want  bool
+	}{
+		{scope: "rig", want: true},
+		{scope: "", want: false},
+		{scope: "city", want: false},
+	} {
+		a := Order{Name: "sweep", Scope: tc.scope}
+		if got := a.IsRigScoped(); got != tc.want {
+			t.Errorf("Order{Scope: %q}.IsRigScoped() = %v, want %v", tc.scope, got, tc.want)
+		}
+	}
+}
