@@ -93,7 +93,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, disabled, err := orders.ScanRootsWithDisabledNames(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
+		aa, definedNames, err := orders.ScanRootsWithDefinedNames(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
@@ -104,7 +104,11 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			}
 			return nil, fmt.Errorf("rig %s: %w", rigName, err)
 		}
-		rigDefined[rigName] = definedOrderNames(aa, disabled)
+		defined := make(map[string]bool, len(definedNames))
+		for _, name := range definedNames {
+			defined[name] = true
+		}
+		rigDefined[rigName] = defined
 		for i := range aa {
 			if aa[i].IsCityScoped() {
 				// Keep the first occurrence (rigs are scanned in deterministic
@@ -127,8 +131,9 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	// loop above decides that pack's orders for it. So is a rig whose own
 	// layers define an order of the same name, from another copy of the pack
 	// or in its own orders/: within one rig a local order replaces a pack's.
-	// A disabled definition there turns the order off on that rig, and one
-	// that declares scope = "city" runs once, city-wide, under the dedup
+	// A definition there that is disabled, or that [orders] skip filters out
+	// through one of its skip_aliases, turns the order off on that rig, and
+	// one that declares scope = "city" runs once, city-wide, under the dedup
 	// above, with no copy on the rig. A rig whose scan failed and was skipped
 	// gets no copy either: the scan read none of its definitions, so a copy
 	// could run an order the rig replaces or turns off.
@@ -295,20 +300,6 @@ func splitRigScopedOrders(cityOrders []orders.Order) (city, rigScoped []orders.O
 		city = append(city, o)
 	}
 	return city, rigScoped
-}
-
-// definedOrderNames returns the order names one rig scan defines: those of
-// the orders it returns, whatever scope they declare, and the names whose
-// highest-priority definition is disabled, which the scan leaves out.
-func definedOrderNames(scanned []orders.Order, disabled []string) map[string]bool {
-	names := make(map[string]bool, len(scanned)+len(disabled))
-	for _, o := range scanned {
-		names[o.Name] = true
-	}
-	for _, name := range disabled {
-		names[name] = true
-	}
-	return names
 }
 
 // orderUnderPackDirs reports whether an order file was scanned from the

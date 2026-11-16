@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -155,10 +156,12 @@ enabled = false
 	}
 }
 
-// The highest-priority definition decides whether a name is reported
-// disabled: a disabled definition over an enabled one is, and an enabled
-// definition over a disabled one is scanned instead.
-func TestScanRootsWithDisabledNamesReportsDisabledWinners(t *testing.T) {
+// Every name the roots define is reported, in discovery order, whether or not
+// the scan returns its order. The highest-priority definition decides: a
+// disabled one over an enabled one leaves its order out, as skip naming the
+// order or one of its skip_aliases does, and an enabled one over a disabled
+// one is scanned.
+func TestScanRootsWithDefinedNamesReportsEveryDefinedName(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/low/orders/digest.toml"] = []byte(`
 [order]
@@ -184,16 +187,28 @@ enabled = false
 formula = "mol-cleanup"
 trigger = "manual"
 `)
+	fs.Files["/high/orders/bench.toml"] = []byte(`
+[order]
+formula = "mol-bench"
+trigger = "manual"
+`)
+	fs.Files["/high/orders/export.toml"] = []byte(`
+[order]
+exec = "scripts/export.sh"
+trigger = "cooldown"
+interval = "15m"
+skip_aliases = ["old-export"]
+`)
 
-	scanned, disabled, err := ScanRootsWithDisabledNames(fs, []ScanRoot{{Dir: "/low/orders"}, {Dir: "/high/orders"}}, nil)
+	scanned, defined, err := ScanRootsWithDefinedNames(fs, []ScanRoot{{Dir: "/low/orders"}, {Dir: "/high/orders"}}, []string{"bench", "old-export"})
 	if err != nil {
-		t.Fatalf("ScanRootsWithDisabledNames: %v", err)
+		t.Fatalf("ScanRootsWithDefinedNames: %v", err)
 	}
 	if len(scanned) != 1 || scanned[0].Name != "cleanup" {
 		t.Errorf("scanned = %v, want cleanup alone", scanned)
 	}
-	if len(disabled) != 1 || disabled[0] != "digest" {
-		t.Errorf("disabled = %v, want [digest]", disabled)
+	if want := []string{"cleanup", "digest", "bench", "export"}; !slices.Equal(defined, want) {
+		t.Errorf("defined = %v, want %v", defined, want)
 	}
 }
 

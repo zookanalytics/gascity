@@ -606,6 +606,49 @@ interval = "5m"
 	}
 }
 
+// A rig's own definition that [orders] skip filters out through one of its
+// skip_aliases turns the order off on that rig, as a disabled one does: the
+// rig gets no copy of the city-level rig-scoped order in its place. The
+// city-level definition carries no such alias, so the skip list leaves it in
+// place for a rig that defines nothing.
+func TestScanAllCityLevelRigScopedOrderYieldsToRigDefinitionSkippedByAlias(t *testing.T) {
+	for _, src := range cityLevelOrderSources {
+		t.Run(src.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			rigLayer := orderDiscoveryRigLayer(t, "alpha")
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+					Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+				},
+				Rigs:   []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+				Orders: config.OrdersConfig{Skip: []string{"legacy-watch"}},
+			}
+			src.write(t, cityPath, cfg, "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+			writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+skip_aliases = ["legacy-watch"]
+`)
+
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			execs := watchExecsByRig(aa)
+			if len(execs) != 1 || strings.Join(execs["beta"], ",") != "scripts/watch.sh" {
+				t.Fatalf("watch registered as %v (rig: execs), want the city-level scripts/watch.sh on beta alone and nothing on alpha, whose own definition the skip list filters out", execs)
+			}
+		})
+	}
+}
+
 // A rig whose own order scan fails is skipped when the scan error handler
 // returns nil, and the skip covers the copy of a city-level rig-scoped order
 // too. The failed scan read none of the rig's definitions, so a copy could

@@ -38,16 +38,17 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
-	scanned, _, err := ScanRootsWithDisabledNames(fs, roots, skip)
+	scanned, _, err := ScanRootsWithDefinedNames(fs, roots, skip)
 	return scanned, err
 }
 
-// ScanRootsWithDisabledNames is ScanRoots that also returns, in discovery
-// order, the name of each order whose highest-priority definition in the
-// roots is disabled. The scan leaves such an order out, but the roots still
-// define its name, so a definition of that name from outside the roots must
-// not stand in for it.
-func ScanRootsWithDisabledNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, []string, error) {
+// ScanRootsWithDefinedNames is ScanRoots that also returns, in discovery
+// order, every order name the roots define. That includes each name the scan
+// leaves out, because its highest-priority definition is disabled or because
+// skip names it or one of that definition's skip_aliases: the roots still
+// define the name, so a definition of it from outside the roots must not
+// stand in for it.
+func ScanRootsWithDefinedNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, []string, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -82,11 +83,9 @@ func ScanRootsWithDisabledNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]
 
 	// Collect results, excluding disabled and skipped orders.
 	var result []Order
-	var disabled []string
 	for _, name := range order {
 		a := found[name]
 		if !a.IsEnabled() {
-			disabled = append(disabled, name)
 			continue
 		}
 		if skipSet[name] || hasSkippedAlias(a, skipSet) {
@@ -94,7 +93,7 @@ func ScanRootsWithDisabledNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]
 		}
 		result = append(result, a)
 	}
-	return result, disabled, nil
+	return result, order, nil
 }
 
 func hasSkippedAlias(a Order, skipSet map[string]bool) bool {
