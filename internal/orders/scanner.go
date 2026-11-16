@@ -38,6 +38,16 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+	scanned, _, err := ScanRootsWithDisabledNames(fs, roots, skip)
+	return scanned, err
+}
+
+// ScanRootsWithDisabledNames is ScanRoots that also returns, in discovery
+// order, the name of each order whose highest-priority definition in the
+// roots is disabled. The scan leaves such an order out, but the roots still
+// define its name, so a definition of that name from outside the roots must
+// not stand in for it.
+func ScanRootsWithDisabledNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, []string, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -56,7 +66,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 				legacyFindings = append(legacyFindings, legacyErr.findings...)
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		for _, a := range discovered {
 			name := a.Name
@@ -67,14 +77,16 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		}
 	}
 	if len(legacyFindings) > 0 {
-		return nil, legacyOrderLayoutError{findings: legacyFindings}
+		return nil, nil, legacyOrderLayoutError{findings: legacyFindings}
 	}
 
 	// Collect results, excluding disabled and skipped orders.
 	var result []Order
+	var disabled []string
 	for _, name := range order {
 		a := found[name]
 		if !a.IsEnabled() {
+			disabled = append(disabled, name)
 			continue
 		}
 		if skipSet[name] || hasSkippedAlias(a, skipSet) {
@@ -82,7 +94,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		}
 		result = append(result, a)
 	}
-	return result, nil
+	return result, disabled, nil
 }
 
 func hasSkippedAlias(a Order, skipSet map[string]bool) bool {

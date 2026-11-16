@@ -96,6 +96,181 @@ interval = "5m"
 	}
 }
 
+// Within one rig a local order replaces a pack's of the same name, and that
+// holds for the copy a city import adds: a rig whose own orders/ defines the
+// name keeps its own order and gets no copy, so the rig does not hold two
+// instances under one scoped name.
+func TestScanAllCityImportedRigScopedOrderYieldsToRigLocalOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "alpha")
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+		},
+		PackDirs: []string{packDir},
+		Rigs:     []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 2 || strings.Join(execs["alpha"], ",") != "scripts/rig.sh" || strings.Join(execs["beta"], ",") != "scripts/pack.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want alpha's own scripts/rig.sh alone and the city import's scripts/pack.sh on beta", execs)
+	}
+}
+
+// A local definition with enabled = false replaces the pack's within the rig
+// too, so a rig turns a city import's order off for itself the way it turns
+// off a pack order it imports: the scan leaves the disabled order out, and
+// the rig gets no copy in its place.
+func TestScanAllCityImportedRigScopedOrderYieldsToRigLocalDisabledOrder(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigLayer := orderDiscoveryRigLayer(t, "alpha")
+	packDir := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+enabled = false
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+		},
+		PackDirs: []string{packDir},
+		Rigs:     []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 1 || strings.Join(execs["beta"], ",") != "scripts/pack.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want the city import's scripts/pack.sh on beta alone and nothing on alpha, whose own definition is disabled", execs)
+	}
+}
+
+// A rig that imports the same pack from another directory, such as another
+// version of it, holds its own instance of the order, and the city import's
+// copy yields to that instance as it does to one from the same directory.
+func TestScanAllCityImportedRigScopedOrderYieldsToRigImportFromAnotherDir(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	cityPack := filepath.Join(t.TempDir(), "review-pack")
+	rigPack := filepath.Join(t.TempDir(), "review-pack")
+	for dir, exec := range map[string]string{cityPack: "scripts/v1.sh", rigPack: "scripts/v2.sh"} {
+		writeOrderDiscoveryFile(t, filepath.Join(dir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "`+exec+`"
+trigger = "cooldown"
+interval = "5m"
+`)
+	}
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{cityPack},
+		RigPackDirs: map[string][]string{"alpha": {rigPack}},
+		Rigs:        []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 2 || strings.Join(execs["alpha"], ",") != "scripts/v2.sh" || strings.Join(execs["beta"], ",") != "scripts/v1.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want alpha's own import alone and the city import's copy on beta", execs)
+	}
+}
+
+// When the rig's own copy of the pack disables the order, the rig's import
+// still decides it: the city import's copy stays off that rig.
+func TestScanAllCityImportedRigScopedOrderYieldsToDisabledRigImportFromAnotherDir(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	cityPack := filepath.Join(t.TempDir(), "review-pack")
+	rigPack := filepath.Join(t.TempDir(), "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(cityPack, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/v1.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	writeOrderDiscoveryFile(t, filepath.Join(rigPack, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/v2.sh"
+trigger = "cooldown"
+interval = "5m"
+enabled = false
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{cityPack},
+		RigPackDirs: map[string][]string{"alpha": {rigPack}},
+		Rigs:        []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == "watch" {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	if len(execs) != 1 || strings.Join(execs["beta"], ",") != "scripts/v1.sh" {
+		t.Fatalf("watch registered as %v (rig: execs), want the city import's copy on beta alone and nothing on alpha, whose own import disables it", execs)
+	}
+}
+
 // A pack imported at city scope and by every rig expands to no copy: each
 // rig's own scan already holds the rig-scoped order, so no rig gets a second
 // one and none is left registered city-wide.

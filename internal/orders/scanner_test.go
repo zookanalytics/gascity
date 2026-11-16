@@ -155,6 +155,48 @@ enabled = false
 	}
 }
 
+// The highest-priority definition decides whether a name is reported
+// disabled: a disabled definition over an enabled one is, and an enabled
+// definition over a disabled one is scanned instead.
+func TestScanRootsWithDisabledNamesReportsDisabledWinners(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/low/orders/digest.toml"] = []byte(`
+[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+`)
+	fs.Files["/high/orders/digest.toml"] = []byte(`
+[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	fs.Files["/low/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+enabled = false
+`)
+	fs.Files["/high/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+`)
+
+	scanned, disabled, err := ScanRootsWithDisabledNames(fs, []ScanRoot{{Dir: "/low/orders"}, {Dir: "/high/orders"}}, nil)
+	if err != nil {
+		t.Fatalf("ScanRootsWithDisabledNames: %v", err)
+	}
+	if len(scanned) != 1 || scanned[0].Name != "cleanup" {
+		t.Errorf("scanned = %v, want cleanup alone", scanned)
+	}
+	if len(disabled) != 1 || disabled[0] != "digest" {
+		t.Errorf("disabled = %v, want [digest]", disabled)
+	}
+}
+
 func TestScanFormulaLayer(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/pack/orders/health.toml"] = []byte(`

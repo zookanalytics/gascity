@@ -307,7 +307,10 @@ one rig's local `orders/` directory.
 The mirror holds for a pack imported at city scope too: an order there that
 declares `scope = "rig"` explicitly instantiates once per configured rig, as an
 agent or named session declaring the same does, while an order that declares
-nothing registers once, city-wide.
+nothing registers once, city-wide. A rig that defines an order of the same name
+itself, through its own import of the pack or in its own `orders/`, keeps that
+order in place of the copy, so a definition there with `enabled = false` turns
+the order off on that rig.
 
 ## Disabling and skipping orders
 
