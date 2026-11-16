@@ -56,6 +56,14 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	if err != nil {
 		return nil, err
 	}
+	// An order the city scan registers that declares scope = "rig", from a
+	// pack imported at city scope or from the city's own orders/,
+	// instantiates once per configured rig and never city-wide, the way a
+	// city import's agent and an inline named session declaring the same do
+	// (config's expandCityImportedAgentsForRigs and
+	// ExpandGenericRigNamedSessions). An order that declares nothing keeps
+	// its contract: once, city-wide.
+	cityOrders, cityRigScoped := splitRigScopedOrders(cityOrders)
 
 	rigNames := make(map[string]struct{}, len(cfg.FormulaLayers.Rigs)+len(cfg.RigPackDirs))
 	for rigName := range cfg.FormulaLayers.Rigs {
@@ -67,14 +75,15 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 
 	// City-scoped orders register exactly once regardless of how many rigs
 	// import the pack, so dedup them across the rig loop by name. Seed the set
-	// with city-level orders so a city-local order of the same name wins.
+	// with the city scan's city-wide orders, so such an order wins over a
+	// rig's order of the same name.
 	cityScopedSeen := make(map[string]bool, len(cityOrders))
 	for _, o := range cityOrders {
 		cityScopedSeen[o.Name] = true
 	}
 
 	var promotedCityOrders, rigOrders []orders.Order
-	rigDisabled := make(map[string][]string)
+	rigDefined := make(map[string]map[string]bool)
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
@@ -91,7 +100,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			}
 			return nil, fmt.Errorf("rig %s: %w", rigName, err)
 		}
-		rigDisabled[rigName] = disabled
+		rigDefined[rigName] = definedOrderNames(aa, disabled)
 		for i := range aa {
 			if aa[i].IsCityScoped() {
 				// Keep the first occurrence (rigs are scanned in deterministic
@@ -108,23 +117,18 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		}
 	}
 
-	// An order the city scan registers that declares scope = "rig", from a
-	// pack imported at city scope or from the city's own orders/,
-	// instantiates once per configured rig and never city-wide, the way a
-	// city import's agent and an inline named session declaring the same do
-	// (config's expandCityImportedAgentsForRigs and
-	// ExpandGenericRigNamedSessions). A rig that imports the pack itself is
-	// skipped, since its own scan in the loop above decides that pack's
-	// orders for it. So is a rig whose own layers define an order of the
-	// same name, enabled or not, from another copy of the pack or in its own
-	// orders/: within one rig a local order replaces a pack's, a disabled one
-	// included, and a rig holds one instance of a name. An order that
-	// declares nothing keeps its contract: once, city-wide.
-	cityOrders, cityRigScoped := splitRigScopedOrders(cityOrders)
-	rigHeld := rigOrderNames(rigOrders, rigDisabled)
+	// Each configured rig gets a copy of each city-level order that declares
+	// scope = "rig", unless the rig's own layers decide that order for it. A
+	// rig that imports the pack itself is skipped, since its own scan in the
+	// loop above decides that pack's orders for it. So is a rig whose own
+	// layers define an order of the same name, from another copy of the pack
+	// or in its own orders/: within one rig a local order replaces a pack's.
+	// A disabled definition there turns the order off on that rig, and one
+	// that declares scope = "city" runs once, city-wide, under the dedup
+	// above, with no copy on the rig.
 	for _, rig := range cfg.Rigs {
 		for _, o := range cityRigScoped {
-			if orderUnderPackDirs(o.Source, cfg.RigPackDirs[rig.Name]) || rigHeld[rig.Name][o.Name] {
+			if orderUnderPackDirs(o.Source, cfg.RigPackDirs[rig.Name]) || rigDefined[rig.Name][o.Name] {
 				continue
 			}
 			rigOrders = append(rigOrders, cloneOrderForRig(o, rig.Name))
@@ -284,26 +288,18 @@ func splitRigScopedOrders(cityOrders []orders.Order) (city, rigScoped []orders.O
 	return city, rigScoped
 }
 
-// rigOrderNames indexes the order names each rig's own layers define, by rig
-// name, then order name: the rig's registrations, and the names whose
-// definition in those layers is disabled.
-func rigOrderNames(rigOrders []orders.Order, rigDisabled map[string][]string) map[string]map[string]bool {
-	held := make(map[string]map[string]bool)
-	hold := func(rig, name string) {
-		if held[rig] == nil {
-			held[rig] = make(map[string]bool)
-		}
-		held[rig][name] = true
+// definedOrderNames returns the order names one rig scan defines: those of
+// the orders it returns, whatever scope they declare, and the names whose
+// highest-priority definition is disabled, which the scan leaves out.
+func definedOrderNames(scanned []orders.Order, disabled []string) map[string]bool {
+	names := make(map[string]bool, len(scanned)+len(disabled))
+	for _, o := range scanned {
+		names[o.Name] = true
 	}
-	for _, o := range rigOrders {
-		hold(o.Rig, o.Name)
+	for _, name := range disabled {
+		names[name] = true
 	}
-	for rig, names := range rigDisabled {
-		for _, name := range names {
-			hold(rig, name)
-		}
-	}
-	return held
+	return names
 }
 
 // orderUnderPackDirs reports whether an order file was scanned from the

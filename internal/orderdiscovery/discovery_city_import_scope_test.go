@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // An order that declares scope = "rig" in a pack imported at CITY scope
@@ -471,6 +472,137 @@ interval = "5m"
 	}
 	if len(execs) != 2 || strings.Join(execs["alpha"], ",") != "scripts/rig.sh" || strings.Join(execs["beta"], ",") != "scripts/city.sh" {
 		t.Fatalf("watch registered as %v (rig: execs), want alpha's own scripts/rig.sh alone and the city's scripts/city.sh on beta", execs)
+	}
+}
+
+// cityLevelOrderSources are the two city-level roots whose orders that
+// declare scope = "rig" expand per rig: a pack the city imports at city scope,
+// and the city's own orders/. Each write puts one order file there and wires
+// the root into cfg.
+var cityLevelOrderSources = []struct {
+	name  string
+	write func(t *testing.T, cityPath string, cfg *config.City, name, content string)
+}{
+	{
+		name: "city import",
+		write: func(t *testing.T, _ string, cfg *config.City, name, content string) {
+			t.Helper()
+			packDir := filepath.Join(t.TempDir(), "review-pack")
+			writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), name, content)
+			cfg.PackDirs = append(cfg.PackDirs, packDir)
+		},
+	},
+	{
+		name: "city orders",
+		write: func(t *testing.T, cityPath string, _ *config.City, name, content string) {
+			t.Helper()
+			writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), name, content)
+		},
+	},
+}
+
+// orderExecsByRig lists the exec of each registration of the named order, by
+// the rig it is bound to, with "" for a city-wide registration.
+func orderExecsByRig(aa []orders.Order, name string) map[string][]string {
+	execs := map[string][]string{}
+	for _, a := range aa {
+		if a.Name == name {
+			execs[a.Rig] = append(execs[a.Rig], a.Exec)
+		}
+	}
+	return execs
+}
+
+// A rig's own definition decides the name for that rig whatever scope it
+// declares. A scope = "city" order in a rig's own orders/ registers once,
+// city-wide, as it does when no city-level order shares its name, and that
+// rig gets no copy of the city-level rig-scoped order. A rig that defines
+// nothing still gets its copy.
+func TestScanAllCityLevelRigScopedOrderYieldsToRigCityScopedOrder(t *testing.T) {
+	for _, src := range cityLevelOrderSources {
+		t.Run(src.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			rigLayer := orderDiscoveryRigLayer(t, "alpha")
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+					Rigs: map[string][]string{"alpha": {cityLayer, rigLayer}},
+				},
+				Rigs: []config.Rig{{Name: "alpha", FormulasDir: rigLayer}, {Name: "beta"}},
+			}
+			src.write(t, cityPath, cfg, "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+			writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(rigLayer), "orders"), "watch", `[order]
+scope = "city"
+exec = "scripts/rig.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			execs := orderExecsByRig(aa, "watch")
+			if len(execs) != 2 || strings.Join(execs[""], ",") != "scripts/rig.sh" || strings.Join(execs["beta"], ",") != "scripts/watch.sh" {
+				t.Fatalf("watch registered as %v (rig: execs), want alpha's own scripts/rig.sh once city-wide, the city-level scripts/watch.sh on beta, and nothing on alpha", execs)
+			}
+		})
+	}
+}
+
+// When two rigs define the name at scope = "city", the first rig's order
+// registers city-wide and the second's is deduplicated against it. The second
+// rig still defines the name, so neither rig gets a copy of the city-level
+// rig-scoped order, and a rig that defines nothing does.
+func TestScanAllCityLevelRigScopedOrderYieldsToEveryRigDefiningItAtCityScope(t *testing.T) {
+	for _, src := range cityLevelOrderSources {
+		t.Run(src.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			alphaLayer := orderDiscoveryRigLayer(t, "alpha")
+			betaLayer := orderDiscoveryRigLayer(t, "beta")
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+					Rigs: map[string][]string{
+						"alpha": {cityLayer, alphaLayer},
+						"beta":  {cityLayer, betaLayer},
+					},
+				},
+				Rigs: []config.Rig{
+					{Name: "alpha", FormulasDir: alphaLayer},
+					{Name: "beta", FormulasDir: betaLayer},
+					{Name: "gamma"},
+				},
+			}
+			src.write(t, cityPath, cfg, "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+			for layer, exec := range map[string]string{alphaLayer: "scripts/alpha.sh", betaLayer: "scripts/beta.sh"} {
+				writeOrderDiscoveryFile(t, filepath.Join(filepath.Dir(layer), "orders"), "watch", `[order]
+scope = "city"
+exec = "`+exec+`"
+trigger = "cooldown"
+interval = "5m"
+`)
+			}
+
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			execs := orderExecsByRig(aa, "watch")
+			if len(execs) != 2 || strings.Join(execs[""], ",") != "scripts/alpha.sh" || strings.Join(execs["gamma"], ",") != "scripts/watch.sh" {
+				t.Fatalf("watch registered as %v (rig: execs), want alpha's scripts/alpha.sh once city-wide, the city-level scripts/watch.sh on gamma, and nothing on alpha or beta", execs)
+			}
+		})
 	}
 }
 
