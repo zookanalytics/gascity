@@ -295,23 +295,29 @@ description = "Sweep merged convoys across the whole city"
 trigger = "cooldown"
 interval = "5m"
 exec = "scripts/convoy-sweep.sh"
-scope = "city"          # "city" or "rig"; default "rig"
+scope = "city"          # "city" or "rig"; leave it out to run where it is defined
 ```
 
-A `scope = "city"` order appears once in `gc order list` with no rig qualifier;
-rig-scoped orders appear once per importing rig (mirroring `scope` on
-`[[named_session]]`). A city-scoped order keeps the formula layer of the pack it
-was scanned from, so its formula must resolve from that pack rather than from any
-one rig's local `orders/` directory.
+A `scope = "city"` order appears once in `gc order list` with no rig qualifier.
+It keeps the formula layer of the pack it was scanned from, so its formula must
+resolve from that pack rather than from any one rig's local `orders/` directory.
 
-The mirror holds at city level too, for a pack imported at city scope and for
-the city's own `orders/`: an order there that declares `scope = "rig"`
-explicitly instantiates once per configured rig and never city-wide, as a named
-session declaring the same does, while an order that declares nothing
-registers once, city-wide. A rig that defines an order of the same name
-itself, in its own `orders/` or through a pack it imports, keeps that order in
-place of the copy, so a definition there with `enabled = false` turns the order
-off on that rig.
+What `scope` does depends on where the order is defined. At city level, that
+is a pack the city imports or the city's own `orders/`. In a rig, it is a pack
+imported into that rig or the rig's own `orders/`.
+
+| `scope` | Defined at city level | Defined in a rig |
+|---|---|---|
+| not set | once, city-wide | once, on that rig |
+| `"city"` | once, city-wide | once, city-wide |
+| `"rig"` | once on every rig, never city-wide | once, on that rig |
+
+`"city"` and `"rig"` mean what they mean on a `[[named_session]]`. Declare
+`scope = "rig"` on a city-level order to run it on every rig, including rigs
+that never import its pack. With no rig configured, that order does not run at
+all. A rig that defines an order of the same name itself, in its own `orders/`
+or through a pack it imports, keeps its own definition in place of the copy, so
+a definition there with `enabled = false` turns the order off on that rig.
 
 ## Disabling and skipping orders
 
@@ -378,7 +384,8 @@ nothing and fails as described above.
 
 <Accordion title="Disambiguating overrides when an order exists both city-wide and per-rig">
 Many orders expand at scan time into one instance per rig (anything in a rig's
-`orders/` directory or a pack imported into a rig). When the same order appears
+`orders/` directory or a pack imported into a rig, and a city-level order that
+declares `scope = "rig"`). When the same order appears
 city-wide AND per-rig, the override must say which instance it targets via `rig`:
 
 ```toml
@@ -568,7 +575,7 @@ cooldown overrides the `dev-ops` pack's 5-minute `test-suite` — the pack versi
 is ignored.
 
 Replacement never crosses scopes, though: a rig's `test-suite` doesn't replace a
-city order of the same name. As the previous section showed, those coexist as
+city-wide order of the same name. As the previous section showed, those coexist as
 independent scoped instances (`test-suite` vs `test-suite:rig:my-api`).
 
 ## Putting it together
