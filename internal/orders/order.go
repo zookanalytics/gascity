@@ -29,10 +29,20 @@ type Order struct {
 	// Exec is a shell command run directly by the controller, bypassing
 	// the agent pipeline. Mutually exclusive with Formula.
 	Exec string `toml:"exec,omitempty"`
-	// Scope controls how the order is instantiated during pack expansion:
-	// "city" registers the order exactly once regardless of how many rigs
-	// import the pack; "rig" (the default when empty) registers it once per
-	// importing rig. Mirrors [[named_session]].scope.
+	// Scope controls where the order registers, together with where it is
+	// defined. A city-level root is a pack the city imports or the city's own
+	// orders/. A rig's own roots are the packs that rig imports and its own
+	// orders/.
+	//   - Empty registers the order where it is defined: once, city-wide, from
+	//     a city-level root, and once on the rig from a rig's own roots.
+	//   - "city" registers it once, city-wide, from either, however many rigs
+	//     import its pack.
+	//   - "rig" registers it once on the rig from a rig's own roots. From a
+	//     city-level root it registers once on each configured rig and never
+	//     city-wide, except that a rig whose own roots define an order of the
+	//     same name gets no copy: its own definition decides for it.
+	// "city" and "rig" match [[named_session]].scope: one instance per city,
+	// and one per rig.
 	Scope string `toml:"scope,omitempty"`
 	// Trigger is the order scheduler selector: "cooldown", "cron",
 	// "condition", "event", or "manual". This is distinct from the
@@ -223,16 +233,18 @@ func (a *Order) IsExec() bool {
 	return a.Exec != ""
 }
 
-// IsCityScoped reports whether the order is city-scoped, i.e. instantiated
-// exactly once during pack expansion regardless of how many rigs import the
-// pack. The default (empty Scope) is rig-scoped.
+// IsCityScoped reports whether the order declares scope = "city", which
+// registers it once, city-wide, however many rigs import its pack. An order
+// that declares nothing is neither city-scoped nor rig-scoped; the Scope
+// field's doc says where each declaration registers it.
 func (a *Order) IsCityScoped() bool {
 	return a.Scope == "city"
 }
 
-// IsRigScoped reports whether the order declares scope = "rig" explicitly.
-// An order that declares nothing is rig-scoped only under a rig import;
-// orderdiscovery.ScanAll says what each declaration means at each scope.
+// IsRigScoped reports whether the order declares scope = "rig", which
+// registers a city-level order once on each configured rig and never
+// city-wide. An order that declares nothing is neither city-scoped nor
+// rig-scoped; the Scope field's doc says where each declaration registers it.
 func (a *Order) IsRigScoped() bool {
 	return a.Scope == "rig"
 }
@@ -346,7 +358,8 @@ func Validate(a Order) error {
 	if err := validateRequiresBackend(a); err != nil {
 		return err
 	}
-	// Scope, if set, must be a known value. Empty defaults to rig-scoped.
+	// Scope, if set, must be a known value. Empty is valid: the order
+	// registers where it is defined.
 	switch a.Scope {
 	case "", "city", "rig":
 	default:
