@@ -360,10 +360,9 @@ interval = "5m"
 	}
 }
 
-// Only an explicit scope = "rig" expands. Scope defaults to rig-scoped when
-// it is empty, but an empty field is not a declaration: most orders never
-// mention scope, and a split keyed on !IsCityScoped() would fan every one of
-// them out per rig.
+// Only an explicit scope = "rig" expands. An empty field is not a
+// declaration: most orders never mention scope, and a split keyed on
+// !IsCityScoped() would fan every one of them out per rig.
 func TestScanAllCityImportedOrderWithoutRigDeclarationStaysCityWide(t *testing.T) {
 	cityPath, cityLayer := orderDiscoveryCity(t)
 	packDir := filepath.Join(t.TempDir(), "review-pack")

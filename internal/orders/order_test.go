@@ -696,7 +696,7 @@ interval = "5m"
 	}
 }
 
-func TestParseScopeDefaultsToRig(t *testing.T) {
+func TestParseScopeEmptyWhenUndeclared(t *testing.T) {
 	data := []byte(`
 [order]
 exec = "scripts/health.sh"
@@ -708,10 +708,13 @@ interval = "5m"
 		t.Fatalf("Parse: %v", err)
 	}
 	if a.Scope != "" {
-		t.Errorf("Scope = %q, want empty (rig default)", a.Scope)
+		t.Errorf("Scope = %q, want empty (undeclared)", a.Scope)
 	}
 	if a.IsCityScoped() {
 		t.Error("IsCityScoped() = true, want false for unscoped order")
+	}
+	if a.IsRigScoped() {
+		t.Error("IsRigScoped() = true, want false for unscoped order")
 	}
 }
 

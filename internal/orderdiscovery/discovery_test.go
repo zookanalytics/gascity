@@ -743,7 +743,7 @@ exec = "scripts/sweep.sh"
 trigger = "cooldown"
 interval = "5m"
 `)
-	// An unscoped (rig-default) order still registers once per importing rig.
+	// An order that declares no scope still registers once per importing rig.
 	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "rig-health", `[order]
 exec = "scripts/health.sh"
 trigger = "cooldown"
