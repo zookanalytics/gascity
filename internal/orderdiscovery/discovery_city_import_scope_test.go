@@ -97,6 +97,56 @@ interval = "5m"
 	}
 }
 
+// Whether a rig gets a copy follows the order names its own roots define,
+// not where the city's pack sits on disk. Here the city imports a pack stored
+// inside the orders/ folder of the pack alpha imports. Alpha's scan reads only
+// the order files at the top of that folder, so alpha does not define "watch"
+// and gets a copy, as beta does.
+func TestScanAllCityImportedRigScopedOrderCopiesToRigWhosePackDirHoldsTheCityPack(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	rigPackDir := filepath.Join(t.TempDir(), "rig-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(rigPackDir, "orders"), "lint", `[order]
+exec = "scripts/lint.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	cityPackDir := filepath.Join(rigPackDir, "orders", "review-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(cityPackDir, "orders"), "watch", `[order]
+scope = "rig"
+exec = "scripts/watch.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		PackDirs:    []string{cityPackDir},
+		RigPackDirs: map[string][]string{"alpha": {rigPackDir}},
+		Rigs:        []config.Rig{{Name: "alpha"}, {Name: "beta"}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	byRig := map[string]map[string]int{}
+	for _, a := range aa {
+		if byRig[a.Name] == nil {
+			byRig[a.Name] = map[string]int{}
+		}
+		byRig[a.Name][a.Rig]++
+	}
+	if watch := byRig["watch"]; len(watch) != 2 || watch["alpha"] != 1 || watch["beta"] != 1 {
+		t.Fatalf("rig-scoped order in a city import registered as %v, want one copy on alpha, whose roots do not define it, and one on beta", watch)
+	}
+	if lint := byRig["lint"]; len(lint) != 1 || lint["alpha"] != 1 {
+		t.Fatalf("rig pack's own order registered as %v, want once on alpha", lint)
+	}
+}
+
 // Within one rig a local order replaces a pack's of the same name, and that
 // holds for the copy a city import adds: a rig whose own orders/ defines the
 // name keeps its own order and gets no copy, so the rig does not hold two

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -126,11 +125,11 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	}
 
 	// Each configured rig gets a copy of each city-level order that declares
-	// scope = "rig", unless the rig's own layers decide that order for it. A
-	// rig that imports the pack itself is skipped, since its own scan in the
-	// loop above decides that pack's orders for it. So is a rig whose own
-	// layers define an order of the same name, from another copy of the pack
-	// or in its own orders/: within one rig a local order replaces a pack's.
+	// scope = "rig", unless the rig's own layers define an order of that name.
+	// A rig's own layers decide every order name they define, as a higher
+	// layer's definition of a name replaces a lower one's. That covers a rig
+	// that imports the pack itself, whose scan above reads that pack's
+	// orders/, as well as another copy of the pack and the rig's own orders/.
 	// A definition there that is disabled, or that [orders] skip filters out
 	// through one of its skip_aliases, turns the order off on that rig, and
 	// one that declares scope = "city" runs once, city-wide, under the dedup
@@ -142,7 +141,7 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			continue
 		}
 		for _, o := range cityRigScoped {
-			if orderUnderPackDirs(o.Source, cfg.RigPackDirs[rig.Name]) || rigDefined[rig.Name][o.Name] {
+			if rigDefined[rig.Name][o.Name] {
 				continue
 			}
 			rigOrders = append(rigOrders, cloneOrderForRig(o, rig.Name))
@@ -300,28 +299,6 @@ func splitRigScopedOrders(cityOrders []orders.Order) (city, rigScoped []orders.O
 		city = append(city, o)
 	}
 	return city, rigScoped
-}
-
-// orderUnderPackDirs reports whether an order file was scanned from the
-// orders/ directory of one of the given pack dirs.
-func orderUnderPackDirs(source string, packDirs []string) bool {
-	for _, dir := range packDirs {
-		if pathWithin(source, packRoot(dir).Dir) {
-			return true
-		}
-	}
-	return false
-}
-
-func pathWithin(path, dir string) bool {
-	if path == "" || dir == "" {
-		return false
-	}
-	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
-	if err != nil {
-		return false
-	}
-	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // cloneOrderForRig stamps a copy of a city-scanned order for one rig. The
