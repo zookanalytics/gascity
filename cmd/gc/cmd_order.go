@@ -1605,8 +1605,8 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
 	}
 
-	// A rig-scoped order is registered once per importing rig, so a bare name
-	// with no --rig names several registrations at once. The API request
+	// A rig-scoped order is registered once per rig, so a bare name with no
+	// --rig names several registrations at once. The API request
 	// carries a single scoped_name, so routing an ambiguous name there answers
 	// for whichever registration findOrder returned first and silently drops
 	// every other rig's runs -- while the response still renders a RIG column,
@@ -1641,9 +1641,9 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 }
 
 // countOrderRegistrations reports how many loaded order registrations match
-// (name, rig). A rig-scoped order is registered once per importing rig, so an
-// unqualified name matches one registration per rig that imported it; an empty
-// rig therefore means "any rig", matching findOrder's own filter.
+// (name, rig). A rig-scoped order is registered once per rig, so an
+// unqualified name matches one registration per rig it runs on; an empty rig
+// therefore means "any rig", matching findOrder's own filter.
 func countOrderRegistrations(aa []orders.Order, name, rig string) int {
 	matches := 0
 	for _, a := range aa {

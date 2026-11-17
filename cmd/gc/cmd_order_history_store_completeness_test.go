@@ -13,8 +13,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
-// A rig-scoped order is registered once per importing rig, so one bare `name`
-// names several order registrations. These tests pin that a bounded read
+// A rig-scoped order is registered once per rig, so one bare `name` names
+// several order registrations. These tests pin that a bounded read
 // (`--limit N`) answers for every one of them, rather than for whichever
 // registration happened to be found first (gc-6a6vz).
 
@@ -49,7 +49,7 @@ func orderRunsStoreForScoped(t *testing.T, scoped string, newest time.Time) bead
 }
 
 // twoRigOrderRegistrations is the shape at the heart of gc-6a6vz: one order
-// name, one registration per importing rig.
+// name, one registration per rig.
 func twoRigOrderRegistrations() []orders.Order {
 	return []orders.Order{
 		{Name: "digest", Rig: "rig-a", Formula: "mol-digest"},
