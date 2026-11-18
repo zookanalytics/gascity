@@ -85,11 +85,9 @@ How they work together:
 - To find an order due, the controller reads its past runs from the bead
   store and, for an event trigger, the event bus. A due exec order runs its
   script on the controller's host, with no agent. A due formula order becomes
-  a wisp of its formula. The pool the order names, when it names one, takes
-  every work step that names no target of its own, so a formulas v2 order
-  whose work steps all name a target needs no pool. The control steps of a v2
-  wisp go to the control dispatcher of the run's scope, which `gc` provides,
-  and no coding agent runs them.
+  a wisp of its formula, and coding agents run its work steps. The control
+  steps of a v2 wisp go to the control dispatcher of the run's scope, which
+  `gc` provides, and no coding agent runs them.
 - A run executes in its order's scope: the city for a city-wide order, and
   the rig for a rig-bound one. A rig-bound order whose pool is a city agent,
   not one of the rig's, runs at city scope, where that agent reads its work.
@@ -109,9 +107,6 @@ and the [controller](architecture/controller.md).
   capability activates.
 - **Side effects stay in Layer 0.** I/O and process spawning happen only
   there.
-- **The controller drives SDK infrastructure.** Every infrastructure
-  operation, such as gate evaluation, health patrol, the bead lifecycle and
-  order dispatch, works with only the controller running.
 - **The CLI and the API are projections.** Both call the domain packages,
   neither re-implements domain logic, and every wire shape is typed
   ([invariants](architecture/invariants.md)).
