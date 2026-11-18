@@ -122,9 +122,7 @@ and the [controller](architecture/controller.md).
   its place there.
 - **`scope = "rig"` binds a definition to rigs and never city-wide.** An agent
   or named session in a pack the city imports that declares it is
-  instantiated on each configured rig. An order that declares it is bound only
-  to each rig whose own layers define it, so one defined only at city level
-  runs nowhere.
+  instantiated on each configured rig.
 
 ## Decisions
 
