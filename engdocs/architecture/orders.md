@@ -419,9 +419,24 @@ define defaults that operators override locally.
 
 ### Rig-scoped orders
 
-When a rig has rig-exclusive formula layers (layers beyond the city
-prefix), orders found in those layers are stamped with the rig
-name. This produces independent scoped tracking:
+An order is stamped with a rig name from one of two sources:
+
+- **A rig's own layers.** When a rig has rig-exclusive formula layers
+  (layers beyond the city prefix) or pack directories of its own, the
+  orders found there are stamped with the rig name. An order there that
+  declares `scope = "city"` is the exception: it registers once,
+  city-wide, with no stamp.
+- **A city-level order that declares `scope = "rig"`.** Such an order,
+  from a pack the city imports or from the city's own `orders/`, is
+  copied once per configured rig, each copy stamped with its rig, and
+  never registers city-wide. A rig whose own layers define an order of
+  the same name gets no copy, because the higher layer's definition
+  decides for that rig, and neither does a rig whose own order scan
+  failed and was skipped.
+
+An order that declares nothing registers where it is defined: once,
+city-wide, from a city-level layer, and stamped with the rig from a
+rig's own layers. The stamp produces independent scoped tracking:
 
 - Same order deployed to rigs `rig-a` and `rig-b` tracks
   independently as `db-health:rig:rig-a` and `db-health:rig:rig-b`.

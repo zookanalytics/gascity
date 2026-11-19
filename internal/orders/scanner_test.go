@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -155,6 +156,66 @@ enabled = false
 	}
 	if active := FilterEnabled(orders); len(active) != 0 {
 		t.Fatalf("got %d active orders, want 0 (disabled)", len(active))
+	}
+}
+
+// Every name the roots define is reported, in discovery order, whether or not
+// the scan returns its order. The highest-priority definition decides: a
+// disabled one over an enabled one leaves its order out, as skip naming the
+// order or one of its skip_aliases does, and an enabled one over a disabled
+// one is scanned.
+func TestScanRootsWithDefinedNamesReportsEveryDefinedName(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/low/orders/digest.toml"] = []byte(`
+[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+`)
+	fs.Files["/high/orders/digest.toml"] = []byte(`
+[order]
+formula = "mol-digest"
+trigger = "cooldown"
+interval = "24h"
+enabled = false
+`)
+	fs.Files["/low/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+enabled = false
+`)
+	fs.Files["/high/orders/cleanup.toml"] = []byte(`
+[order]
+formula = "mol-cleanup"
+trigger = "manual"
+`)
+	fs.Files["/high/orders/bench.toml"] = []byte(`
+[order]
+formula = "mol-bench"
+trigger = "manual"
+`)
+	fs.Files["/high/orders/export.toml"] = []byte(`
+[order]
+exec = "scripts/export.sh"
+trigger = "cooldown"
+interval = "15m"
+skip_aliases = ["old-export"]
+`)
+
+	scanned, defined, err := ScanRootsWithDefinedNames(fs, []ScanRoot{{Dir: "/low/orders"}, {Dir: "/high/orders"}}, []string{"bench", "old-export"})
+	if err != nil {
+		t.Fatalf("ScanRootsWithDefinedNames: %v", err)
+	}
+	// A disabled definition stays in the scan, disabled; skip removes one.
+	if len(scanned) != 2 || scanned[0].Name != "cleanup" || scanned[1].Name != "digest" || scanned[1].IsEnabled() {
+		t.Errorf("scanned = %v, want cleanup and a disabled digest", scanned)
+	}
+	if enabled := FilterEnabled(scanned); len(enabled) != 1 || enabled[0].Name != "cleanup" {
+		t.Errorf("enabled = %v, want cleanup alone", enabled)
+	}
+	if want := []string{"cleanup", "digest", "bench", "export"}; !slices.Equal(defined, want) {
+		t.Errorf("defined = %v, want %v", defined, want)
 	}
 }
 
