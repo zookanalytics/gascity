@@ -4,9 +4,7 @@ package orderdiscovery
 import (
 	"fmt"
 	"path/filepath"
-	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -16,7 +14,9 @@ import (
 )
 
 // RigScanErrorHandler handles a failed rig-exclusive order scan.
-// Returning nil skips that rig and continues scanning remaining rigs.
+// Returning nil skips that rig and continues scanning remaining rigs. A
+// skipped rig registers no order from the scan, including a copy of a
+// city-level order that declares scope = "rig".
 type RigScanErrorHandler func(rigName string, err error) error
 
 // OverrideErrorHandler handles a failed [orders.ApplyOverrides] call, whose
@@ -31,23 +31,6 @@ type ValidateErrorHandler func(orderName string, err error) error
 // OrderValidator performs caller-specific post-layering validation.
 type OrderValidator func(order orders.Order) error
 
-// UnboundRigScopedHandler reports a city-pass registration dropped because the
-// order file explicitly declares scope = "rig". boundRigs names the rigs that
-// did register the order, sorted; when it is empty the order now runs nowhere
-// and the declaration is a config error the caller should surface loudly.
-type UnboundRigScopedHandler func(orderName string, boundRigs []string)
-
-// UnboundRigScopedMessage renders the operator-facing explanation for a
-// registration dropped by the rig-scope guard, so every caller's log reads the
-// same and the two cases stay distinguishable: a drop that changed nothing
-// observable, versus one that removed the order's only registration.
-func UnboundRigScopedMessage(orderName string, boundRigs []string) string {
-	if len(boundRigs) == 0 {
-		return fmt.Sprintf("order %q declares scope = \"rig\" but no rig imports it, so it now runs nowhere — move it into a pack a rig imports, or drop the scope key to run it at city scope", orderName)
-	}
-	return fmt.Sprintf("order %q declares scope = \"rig\": dropped the unbound city-scope registration nothing could claim (still registered on rig(s) %s)", orderName, strings.Join(boundRigs, ", "))
-}
-
 // ScanOptions controls shared order discovery behavior.
 type ScanOptions struct {
 	FS              fsys.FS
@@ -55,9 +38,6 @@ type ScanOptions struct {
 	OnOverrideError OverrideErrorHandler
 	OnValidateError ValidateErrorHandler
 	ValidateOrder   OrderValidator
-	// OnUnboundRigScoped reports city-pass registrations dropped by the
-	// rig-scope guard. Optional: a nil handler still drops them, silently.
-	OnUnboundRigScoped UnboundRigScopedHandler
 }
 
 // ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
@@ -77,7 +57,14 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	if err != nil {
 		return nil, err
 	}
-	cityOrders, unboundRigScoped := dropUnboundRigScoped(cityOrders)
+	// An order the city scan registers that declares scope = "rig", from a
+	// pack imported at city scope or from the city's own orders/,
+	// instantiates once per configured rig and never city-wide, the way a
+	// city import's agent and an inline named session declaring the same do
+	// (config's expandCityImportedAgentsForRigs and
+	// ExpandGenericRigNamedSessions). An order that declares nothing keeps
+	// its contract: once, city-wide.
+	cityOrders, cityRigScoped := splitRigScopedOrders(cityOrders)
 
 	rigNames := make(map[string]struct{}, len(cfg.FormulaLayers.Rigs)+len(cfg.RigPackDirs))
 	for rigName := range cfg.FormulaLayers.Rigs {
@@ -89,29 +76,38 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 
 	// City-scoped orders register exactly once regardless of how many rigs
 	// import the pack, so dedup them across the rig loop by name. Seed the set
-	// with city-level orders so a city-local order of the same name wins.
+	// with the city scan's city-wide orders, so such an order wins over a
+	// rig's order of the same name.
 	cityScopedSeen := make(map[string]bool, len(cityOrders))
 	for _, o := range cityOrders {
 		cityScopedSeen[o.Name] = true
 	}
 
 	var promotedCityOrders, rigOrders []orders.Order
+	rigDefined := make(map[string]map[string]bool)
+	scanFailed := make(map[string]bool)
 	for _, rigName := range sortedRigNames(rigNames) {
 		exclusive := RigExclusiveLayers(cfg.FormulaLayers.Rigs[rigName], cityLayers)
 		exclusivePackDirs := cfg.RigPackDirs[rigName]
 		if len(exclusive) == 0 && len(exclusivePackDirs) == 0 {
 			continue
 		}
-		aa, err := orders.ScanRoots(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
+		aa, definedNames, err := orders.ScanRootsWithDefinedNames(fsysImpl, rigOrderRoots(exclusive, exclusivePackDirs, rigLocalFormulaLayer(exclusive, exclusivePackDirs)), cfg.Orders.Skip)
 		if err != nil {
 			if opts.OnRigScanError != nil {
 				if handlerErr := opts.OnRigScanError(rigName, err); handlerErr != nil {
 					return nil, handlerErr
 				}
+				scanFailed[rigName] = true
 				continue
 			}
 			return nil, fmt.Errorf("rig %s: %w", rigName, err)
 		}
+		defined := make(map[string]bool, len(definedNames))
+		for _, name := range definedNames {
+			defined[name] = true
+		}
+		rigDefined[rigName] = defined
 		for i := range aa {
 			if aa[i].IsCityScoped() {
 				// Keep the first occurrence (rigs are scanned in deterministic
@@ -128,27 +124,34 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 		}
 	}
 
-	if len(unboundRigScoped) > 0 && opts.OnUnboundRigScoped != nil {
-		reportUnboundRigScoped(unboundRigScoped, rigOrders, opts.OnUnboundRigScoped)
+	// Each configured rig gets a copy of each city-level order that declares
+	// scope = "rig", unless the rig's own layers define an order of that name.
+	// A rig's own layers decide every order name they define, as a higher
+	// layer's definition of a name replaces a lower one's. That covers a rig
+	// that imports the pack itself, whose scan above reads that pack's
+	// orders/, as well as another copy of the pack and the rig's own orders/.
+	// A definition there that is disabled, or that [orders] skip filters out
+	// through one of its skip_aliases, turns the order off on that rig, and
+	// one that declares scope = "city" runs once, city-wide, under the dedup
+	// above, with no copy on the rig. A rig whose scan failed and was skipped
+	// gets no copy either: the scan read none of its definitions, so a copy
+	// could run an order the rig replaces or turns off.
+	for _, rig := range cfg.Rigs {
+		if scanFailed[rig.Name] {
+			continue
+		}
+		for _, o := range cityRigScoped {
+			if rigDefined[rig.Name][o.Name] {
+				continue
+			}
+			rigOrders = append(rigOrders, cloneOrderForRig(o, rig.Name))
+		}
 	}
 
-	allOrders := make([]orders.Order, 0, len(cityOrders)+len(promotedCityOrders)+len(rigOrders)+len(unboundRigScoped))
+	allOrders := make([]orders.Order, 0, len(cityOrders)+len(promotedCityOrders)+len(rigOrders))
 	allOrders = append(allOrders, cityOrders...)
 	allOrders = append(allOrders, promotedCityOrders...)
 	allOrders = append(allOrders, rigOrders...)
-	// The registrations the rig-scope guard dropped ride along through override
-	// application and are cut again immediately after it, so a configured
-	// override can still match them.
-	//
-	// A rigless [[orders.overrides]] entry naming a rig-scoped order is the
-	// documented workaround for the very bug this guard fixes — it disables the
-	// unbound copy so that copy stops stranding a wisp every cooldown — so it is
-	// already in city.toml wherever the bug was hit. ApplyOverrides treats an
-	// override that matches nothing as an error, so cutting these before it runs
-	// would turn that workaround into a hard scan failure for the callers that
-	// leave OnOverrideError nil (gc order, the doctor order-firing check).
-	// Matching here consumes such an entry as the no-op it has now become.
-	allOrders = append(allOrders, unboundRigScoped...)
 	// Stamp the city-default cron timezone onto orders that don't author
 	// their own tz, so trigger evaluation sees one explicit location without
 	// widening the CheckTrigger signature. A bad [workspace] timezone fails
@@ -174,79 +177,11 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 			}
 		}
 	}
-	// Cut the dropped registrations back out, now that any override naming one
-	// of them has been consumed. They are removed before validation because a
-	// registration nothing can run must not produce validation diagnostics.
-	allOrders = slices.DeleteFunc(allOrders, isUnboundRigScoped)
 	allOrders, err = validateOrders(allOrders, opts.ValidateOrder, opts.OnValidateError)
 	if err != nil {
 		return nil, err
 	}
 	return allOrders, nil
-}
-
-// isUnboundRigScoped reports the registration shape the guard refuses: an
-// order that explicitly declares scope = "rig" yet carries no rig binding.
-// A promoted scope = "city" order also has no rig, which is why the scope
-// declaration — not the empty Rig alone — is what identifies the drop.
-func isUnboundRigScoped(order orders.Order) bool {
-	return order.Rig == "" && order.DeclaresRigScope()
-}
-
-// dropUnboundRigScoped removes city-pass registrations for orders that
-// explicitly declare scope = "rig", returning the survivors and the drops.
-//
-// A pack imported by rigs is still on the city layer list, so its orders/ is
-// scanned twice: once on the city pass, where Rig stays empty, and once per
-// importing rig. For a rig-scoped order that extra unbound copy is pure
-// breakage — its pool is a rig pool name that qualifies to nothing without a
-// rig, so its wisp is poured into the city store where nothing can claim it,
-// and the order's own cooldown re-strands it every interval. Refusing the
-// registration here is cheaper and quieter than detecting the strand later.
-//
-// The filter keys on Order.DeclaresRigScope (the literal "rig") rather than on
-// !IsCityScoped(), which would also match every order that never mentions
-// scope at all — nearly all of them.
-func dropUnboundRigScoped(cityOrders []orders.Order) (kept, dropped []orders.Order) {
-	kept = cityOrders[:0]
-	for _, order := range cityOrders {
-		if isUnboundRigScoped(order) {
-			dropped = append(dropped, order)
-			continue
-		}
-		kept = append(kept, order)
-	}
-	return kept, dropped
-}
-
-// reportUnboundRigScoped hands each dropped city-pass registration to the
-// caller along with the rigs that did register that order name.
-//
-// The rig list is what tells the two cases apart. Non-empty: the pack is
-// imported by rigs, every real registration survives, and the drop removed
-// only the copy that could never have run. Empty: the order is city-local, so
-// it is in no rig's exclusive layers and the guard removed it everywhere. That
-// second case is a correct removal — the order could only ever have stranded —
-// but it is a config error, which is why the drop is reported rather than
-// silently applied.
-func reportUnboundRigScoped(dropped, rigOrders []orders.Order, report UnboundRigScopedHandler) {
-	bound := make(map[string]map[string]bool, len(dropped))
-	for _, order := range dropped {
-		bound[order.Name] = map[string]bool{}
-	}
-	for _, order := range rigOrders {
-		if rigs, ok := bound[order.Name]; ok && order.Rig != "" {
-			rigs[order.Rig] = true
-		}
-	}
-	for _, order := range dropped {
-		rigs := make([]string, 0, len(bound[order.Name]))
-		for rig := range bound[order.Name] {
-			rigs = append(rigs, rig)
-		}
-		sort.Strings(rigs)
-		report(order.Name, rigs)
-	}
 }
 
 func validateOrders(allOrders []orders.Order, extraValidate OrderValidator, onError ValidateErrorHandler) ([]orders.Order, error) {
@@ -350,6 +285,41 @@ func formulaLayerRoot(layer string) orders.ScanRoot {
 		Dir:          filepath.Join(filepath.Dir(layer), "orders"),
 		FormulaLayer: layer,
 	}
+}
+
+// splitRigScopedOrders partitions the city-level scan into the orders that
+// stay city-wide and those that declare scope = "rig", whichever city-level
+// root defined them.
+func splitRigScopedOrders(cityOrders []orders.Order) (city, rigScoped []orders.Order) {
+	for _, o := range cityOrders {
+		if o.IsRigScoped() {
+			rigScoped = append(rigScoped, o)
+			continue
+		}
+		city = append(city, o)
+	}
+	return city, rigScoped
+}
+
+// cloneOrderForRig stamps a copy of a city-scanned order for one rig. The
+// maps are copied: overrides and env projection mutate them per instance.
+func cloneOrderForRig(o orders.Order, rig string) orders.Order {
+	o.Rig = rig
+	if o.Env != nil {
+		env := make(map[string]string, len(o.Env))
+		for k, v := range o.Env {
+			env[k] = v
+		}
+		o.Env = env
+	}
+	if o.Params != nil {
+		params := make(map[string]orders.OrderParam, len(o.Params))
+		for k, v := range o.Params {
+			params[k] = v
+		}
+		o.Params = params
+	}
+	return o
 }
 
 func packRoot(packDir string) orders.ScanRoot {

@@ -112,12 +112,12 @@ and the [controller](architecture/controller.md).
   ([invariants](architecture/invariants.md)).
 - **Running state is queried live.** No PID, lock or state file tracks a
   running process; the system itself is asked.
-- **On a rig, the rig's own formula wins.** Where a city-level formula
-  applies on a rig, a formula of the same name in the rig's own layers takes
-  its place there.
-- **`scope = "rig"` binds a definition to rigs and never city-wide.** An agent
-  or named session in a pack the city imports that declares it is
-  instantiated on each configured rig.
+- **On a rig, the rig's own definition wins.** Where a city-level formula or
+  order applies on a rig, a definition of the same name in the rig's own
+  layers takes its place there.
+- **`scope = "rig"` binds a city-level definition to each rig.** An agent or
+  named session in a pack the city imports, and any city-level order, that
+  declares it is instantiated on each configured rig and never city-wide.
 
 ## Decisions
 

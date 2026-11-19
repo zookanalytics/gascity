@@ -38,6 +38,17 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 // ScanRoots discovers orders across explicit order roots. Higher-priority
 // roots (later in the slice) override lower ones by order name.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
+	scanned, _, err := ScanRootsWithDefinedNames(fs, roots, skip)
+	return scanned, err
+}
+
+// ScanRootsWithDefinedNames is ScanRoots that also returns, in discovery
+// order, every order name the roots define. That includes each name the scan
+// leaves out, because its highest-priority definition is disabled or because
+// skip names it or one of that definition's skip_aliases: the roots still
+// define the name, so a definition of it from outside the roots must not
+// stand in for it.
+func ScanRootsWithDefinedNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, []string, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
 		skipSet[s] = true
@@ -56,7 +67,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 				legacyFindings = append(legacyFindings, legacyErr.findings...)
 				continue
 			}
-			return nil, err
+			return nil, nil, err
 		}
 		for _, a := range discovered {
 			name := a.Name
@@ -67,7 +78,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		}
 	}
 	if len(legacyFindings) > 0 {
-		return nil, legacyOrderLayoutError{findings: legacyFindings}
+		return nil, nil, legacyOrderLayoutError{findings: legacyFindings}
 	}
 
 	// Collect results, excluding disabled and skipped orders.
@@ -82,7 +93,7 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 		}
 		result = append(result, a)
 	}
-	return result, nil
+	return result, order, nil
 }
 
 func hasSkippedAlias(a Order, skipSet map[string]bool) bool {

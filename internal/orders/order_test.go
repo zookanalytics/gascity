@@ -696,7 +696,7 @@ interval = "5m"
 	}
 }
 
-func TestParseScopeDefaultsToRig(t *testing.T) {
+func TestParseScopeEmptyWhenUndeclared(t *testing.T) {
 	data := []byte(`
 [order]
 exec = "scripts/health.sh"
@@ -708,10 +708,13 @@ interval = "5m"
 		t.Fatalf("Parse: %v", err)
 	}
 	if a.Scope != "" {
-		t.Errorf("Scope = %q, want empty (rig default)", a.Scope)
+		t.Errorf("Scope = %q, want empty (undeclared)", a.Scope)
 	}
 	if a.IsCityScoped() {
 		t.Error("IsCityScoped() = true, want false for unscoped order")
+	}
+	if a.IsRigScoped() {
+		t.Error("IsRigScoped() = true, want false for unscoped order")
 	}
 }
 
@@ -857,11 +860,11 @@ func TestValidateCronBadTZ(t *testing.T) {
 	}
 }
 
-// DeclaresRigScope must key on the literal "rig" and nothing else. Registration
-// guards that drop or refuse an order call it, so treating an unscoped order as
-// a declaration would sweep up most of the order set, including the builtin
-// core orders that never mention scope.
-func TestDeclaresRigScopeOnlyOnExplicitDeclaration(t *testing.T) {
+// IsRigScoped keys on the literal "rig" and nothing else. Discovery expands a
+// city import's order per rig on it, so treating an unscoped order as a
+// declaration would fan most of the order set out per rig, including the
+// builtin orders that never mention scope.
+func TestIsRigScopedOnlyOnExplicitDeclaration(t *testing.T) {
 	for _, tc := range []struct {
 		scope string
 		want  bool
@@ -871,8 +874,8 @@ func TestDeclaresRigScopeOnlyOnExplicitDeclaration(t *testing.T) {
 		{scope: "city", want: false},
 	} {
 		a := Order{Name: "sweep", Scope: tc.scope}
-		if got := a.DeclaresRigScope(); got != tc.want {
-			t.Errorf("Order{Scope: %q}.DeclaresRigScope() = %v, want %v", tc.scope, got, tc.want)
+		if got := a.IsRigScoped(); got != tc.want {
+			t.Errorf("Order{Scope: %q}.IsRigScoped() = %v, want %v", tc.scope, got, tc.want)
 		}
 	}
 }
