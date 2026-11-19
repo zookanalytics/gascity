@@ -51,9 +51,9 @@ Quality goals, ranked:
 |---|---|
 | Operator | Runs `gc` against a city directory and follows the city's events. |
 | Coding-agent providers | The agent CLIs a session runs, such as Claude Code, Codex and Gemini. Gas City shapes each one through its launch command, its environment and the files in its work dir. |
-| Runtime substrates | Where a session runs: tmux, a subprocess, an exec script or Kubernetes, each behind a runtime provider. |
-| Bead store | The beads store, backed by Dolt in production. The city and each of its rigs keep their beads in a store of their own. |
-| Git | Each rig is a repository, and agents work in its checkouts and worktrees. |
+| Runtime substrates | Where a session runs, such as tmux, a subprocess, an exec script or Kubernetes, each behind a runtime provider. |
+| Bead store | The beads store, backed by Dolt in production. The city and each of its rigs keep their work in a store of their own. Infrastructure beads, such as the execution graph and order tracking, are kept there too unless the city's `[storage]` binds their classes to a store of their own ([storage classes](../docs/runbooks/split-storage-classes.md)). |
+| Git | A rig is a project directory, and when it is a Git repository, agents work in its checkouts and worktrees. |
 | Packs | The user's configuration: `city.toml`, `pack.toml`, formulas, prompts and orders. Builtin packs ship inside the binary. |
 
 The boundary is the `gc` binary: its CLI, the supervisor that hosts one
@@ -67,13 +67,13 @@ Gas City's parts are the bead store, the event bus, config, sessions and
 their runtime providers, prompt templates, provider hooks, formulas and
 dispatch, orders, health patrol, the controller, and the CLI and API that
 project them. The rows below are the parts that decide which orders a city
-runs, where each one is bound, and which store its runs go to.
+runs, where each one is bound, and where each run executes and is recorded.
 
 | Domain | Responsibility | Data it owns | Must not |
 |---|---|---|---|
 | Config | Composes `city.toml` and every pack imported at city scope or on a rig into the one resolved configuration every other part reads. | The declared configuration: the rigs, the imports at city scope and on each rig, and the layers each scope reads formulas and orders from. | Start a session, dispatch work or write a bead. |
 | Orders | Discovers the order set, binding each order city-wide or to one rig by where it is defined and the scope it declares. | The order set: each order's definition, trigger, action and binding. | Dispatch an order or write a bead. |
-| Controller | Runs one city: it reloads config when the city's files change, reconciles the city's sessions, and dispatches each due order. | The order runs it starts, each recorded as a tracking bead in the store the run goes to. | Decide which orders exist or where one is bound: it dispatches the order set as discovered. |
+| Controller | Runs one city: it reloads config when the city's files change, reconciles the city's sessions, and dispatches each due order. | The order runs it starts, each recorded as a tracking bead. | Decide which orders exist or where one is bound: it dispatches the order set as discovered. |
 
 How they work together:
 
@@ -85,12 +85,15 @@ How they work together:
 - To find an order due, the controller reads its past runs from the bead
   store and, for an event trigger, the event bus. A due exec order runs its
   script on the controller's host, with no agent. A due formula order becomes
-  a wisp of its formula, routed to the pool the order names, whose agents run
-  it.
-- A run goes to the store of its order's binding: the city's store for a
-  city-wide order, and the rig's store for a rig-bound one. A rig-bound order
-  whose pool is a city agent, not one of the rig's, runs in the city's store,
-  where that agent reads its work.
+  a wisp of its formula, and coding agents run its work steps. The control
+  steps of a v2 wisp go to the control dispatcher of the run's scope, which
+  `gc` provides, and no coding agent runs them.
+- A run executes in its order's scope: the city for a city-wide order, and
+  the rig for a rig-bound one. A rig-bound order whose pool is a city agent,
+  not one of the rig's, runs at city scope, where that agent reads its work.
+  Each record a run writes is kept in the store that holds the record's class
+  at that scope: the tracking bead is order tracking, and the wisp is
+  execution graph, except a v1 wisp poured with steps, which is work.
 
 The depth is in [config](architecture/config.md), [orders](architecture/orders.md)
 and the [controller](architecture/controller.md).
@@ -104,9 +107,6 @@ and the [controller](architecture/controller.md).
   capability activates.
 - **Side effects stay in Layer 0.** I/O and process spawning happen only
   there.
-- **The controller drives SDK infrastructure.** Every infrastructure
-  operation, such as gate evaluation, health patrol, the bead lifecycle and
-  order dispatch, works with only the controller running.
 - **The CLI and the API are projections.** Both call the domain packages,
   neither re-implements domain logic, and every wire shape is typed
   ([invariants](architecture/invariants.md)).
@@ -126,18 +126,23 @@ and the [controller](architecture/controller.md).
 - Config is TOML: `pack.toml` defines a pack and `city.toml` deploys a city.
 - `gc` is a fresh binary, not a fork of Gas Town.
 - No interface exists until two implementations do.
-- Every package is internal to the binary; none is exported as an SDK API.
+- No package is exported as an SDK API. Every package is internal to the
+  binary except `pkg/eventexport`, the public contract of a city's event
+  export.
 - Sessions and runtime providers carry a running agent's lifecycle. There is
   no agent-protocol interface.
-- Gas City has no skills system, no capability flags and no MCP or tool
-  registration. A sentence in a prompt, or the tool's own CLI, does each job.
+- Gas City has no capability flags. A sentence in a prompt does their job.
+- Gas City adds no framework around skills or tools. It places a pack's
+  skills and MCP servers where an agent's provider reads them, and the model
+  decides when to use one.
 
 ## Debt
 
 - **A run's tracking bead does not show whether the run is still going.**
-  While an order has an open tracking bead, it starts no other run. After a
-  restart, a run that ended with the old controller can keep its order from
-  running until the run's timeout passes. After a crash, the next controller
-  can close the tracking bead of an exec run that is still going, and a
-  second run can start beside it. Order dispatch does not yet meet Work
-  converges across a restart. gc-xpnop0 and gc-8utvkm retire it.
+  The controller reads an order's open tracking bead as its run still going,
+  and holds the order's next run back when it finds one. After a restart, a
+  run that ended with the old controller can keep its order from running
+  until the run's timeout passes. After a crash, the next controller can
+  close the tracking bead of an exec run that is still going, and a second
+  run can start beside it. Order dispatch does not yet meet Work converges
+  across a restart. gc-xpnop0 and gc-8utvkm retire it.
