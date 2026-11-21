@@ -30,6 +30,22 @@ suppression as best effort rather than a guarantee.
 gc mail send worker -s "disk warning" -m "..." --dedup "disk-warn:hq"
 ```
 
+## Waking the reader
+
+Plain mail waits for the reader's next turn, whenever that comes. Add
+`--notify` when the reader must act on the mail now: it requests a turn, and
+can wake a reader that is not running.
+
+```
+gc mail send <to> -s "Subject" -m "message body" --notify
+gc mail reply <id> -m "reply body" --notify
+```
+
+An agent whose config sets `notify_on_mail = true` gets that turn for every
+mail and reply to its sessions without `--notify`, except mail a session sends
+to itself and mail to a session that is draining, drained, archived or closed.
+Passing `--notify` to such a reader still requests one turn.
+
 ## Reading
 
 ```
