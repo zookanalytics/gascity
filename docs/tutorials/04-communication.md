@@ -36,7 +36,7 @@ with nudge from Tutorial 03:
 | Carrier | A bead in the store | Terminal input |
 | Survives a crash | Yes | No |
 | Subject line | Yes | No |
-| Wakes the recipient | No by itself; `--notify` can request a managed wake | Yes |
+| Wakes the recipient | No by itself; `--notify`, or `notify_on_mail` on the recipient's agent, can request a managed wake | Yes |
 | State | Stays unread until processed | Fire-and-forget |
 
 Send mail to the mayor:
@@ -54,6 +54,20 @@ Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that
 request can wake a non-running recipient; an unmanaged city queues the nudge for
 later delivery; without a city store the nudge is skipped.
+
+A session that acts only when it gets a turn can miss mail whose sender forgot
+`--notify`. Its agent can ask for the turn itself:
+
+```toml
+# agents/reviewer/agent.toml — every mail to a reviewer session requests a turn
+notify_on_mail = true
+```
+
+Every `gc mail send`, `gc mail reply` and `gc mail send --all` to one of that
+agent's sessions then requests a turn as `--notify` does, and passing
+`--notify` as well still requests only one. Mail a session sends to itself
+requests none, and neither does mail to a session that is draining, drained,
+archived or closed.
 
 Check for unread mail:
 
