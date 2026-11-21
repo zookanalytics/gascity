@@ -2966,6 +2966,34 @@ func TestMailReplyNotifyOnMailRequestsATurn(t *testing.T) {
 	c.requireReaderTurn(t, "human", stdout.String(), stderr.String())
 }
 
+// TestMailReplyNotifyOnMailFollowsARenamedSession: a reply goes to the
+// session that sent the message it answers, by that session's id, so the
+// session's turn is requested after its alias changed since the original
+// send, though the reply's To still shows the old alias.
+func TestMailReplyNotifyOnMailFollowsARenamedSession(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	original, err := newTestBeadMail(c.store).Send("reader-1", "human", "question", "ping")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	b, err := c.store.Get(c.reader)
+	if err != nil {
+		t.Fatalf("Get(reader): %v", err)
+	}
+	if err := c.store.SetMetadataBatch(c.reader, session.UpdatedAliasMetadata(b.Metadata, "reader-renamed")); err != nil {
+		t.Fatalf("SetMetadataBatch(alias rename): %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailReplyJSON([]string{original.ID, "pong"}, "", "", false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailReplyJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	inbox, err := newTestBeadMail(c.store).Inbox("reader-renamed")
+	if err != nil || len(inbox) != 1 {
+		t.Fatalf("Inbox(reader-renamed) = %v, %v; want the reply", inbox, err)
+	}
+	c.requireReaderTurn(t, "human", stdout.String(), stderr.String())
+}
+
 // TestMailSendAllNotifyOnMailRequestsTurnsOnlyForOptedInSessions: a broadcast
 // with no --notify requests a turn for each session whose agent sets
 // notify_on_mail and for no other.

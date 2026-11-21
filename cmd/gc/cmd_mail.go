@@ -151,17 +151,34 @@ func newMailNudgeFunc(sender string) nudgeFunc {
 // --notify (newNotifyOnMailNudgeFunc). It is no failure.
 var errNoMailTurn = errors.New("no turn requested for this recipient")
 
+// mailRecipientRouter is the optional mail-provider capability of naming the
+// route a message is delivered to (beadmail.Provider.RecipientRoute).
+type mailRecipientRouter interface {
+	RecipientRoute(id string) (string, error)
+}
+
 // newNotifyOnMailNudgeFunc requests a mail recipient's turn when the agent of
 // the recipient's session sets notify_on_mail (config.Agent.NotifyOnMail),
 // through the notice --notify sends (sendMailNotify), and answers
-// errNoMailTurn for every other recipient. It returns nil when no agent in
-// cfg sets notify_on_mail, so a city that does not use the setting looks up
-// no recipient.
-func newNotifyOnMailNudgeFunc(cityPath string, cfg *config.City, sessions *session.Store, sender string) nudgeFunc {
+// errNoMailTurn for every other recipient. Where mp names the route a message
+// is delivered to (mailRecipientRouter), the recipient is that route: a
+// reply's To is the alias its recipient had when the message it answers was
+// sent, which a rename since leaves naming no session. It returns nil when no
+// agent in cfg sets notify_on_mail, so a city that does not use the setting
+// looks up no recipient.
+func newNotifyOnMailNudgeFunc(cityPath string, cfg *config.City, sessions *session.Store, mp mail.Provider, sender string) nudgeFunc {
 	if sessions == nil || !anyAgentNotifiesOnMail(cfg) {
 		return nil
 	}
+	router, routed := mp.(mailRecipientRouter)
 	return func(recipient, messageID string) (string, error) {
+		if routed {
+			route, err := router.RecipientRoute(messageID)
+			if err != nil {
+				return "", fmt.Errorf("reading the route of message %s: %w", messageID, err)
+			}
+			recipient = route
+		}
 		target, ok, err := notifyOnMailTarget(cityPath, cfg, sessions, recipient, sender)
 		if err != nil {
 			return "", fmt.Errorf("checking whether %s asks for a turn on mail: %w", recipient, err)
@@ -186,8 +203,8 @@ func anyAgentNotifiesOnMail(cfg *config.City) bool {
 	return false
 }
 
-// notifyOnMailTarget resolves recipient, the mailbox address a send delivered
-// to, to the session a notify_on_mail turn is for, and reports false when
+// notifyOnMailTarget resolves recipient, the address a send or reply delivered
+// mail to, to the session a notify_on_mail turn is for, and reports false when
 // there is none: recipient names no session, the session's agent does not set
 // notify_on_mail, the session is finishing or finished
 // (mailRecipientFinished), or sender names the session itself. The address
@@ -2334,7 +2351,7 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	if notify && store != nil {
 		nf = newMailNudgeFunc(sender)
 	} else if store != nil {
-		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, sessionFrontDoor(sessStore), sender)
+		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, sessionFrontDoor(sessStore), mp, sender)
 	}
 
 	// When --to is set, prepend it to args so doMailSend sees [to, body].
@@ -2851,7 +2868,7 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	case notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil:
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
 	case store != nil:
-		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), sender)
+		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), mp, sender)
 	}
 
 	return doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
