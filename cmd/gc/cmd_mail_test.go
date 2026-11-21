@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	mailexec "github.com/gastownhall/gascity/internal/mail/exec"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -2691,6 +2692,290 @@ func assertQueuedMailNudgeMessage(t *testing.T, cityPath, sessionID, message, st
 	if nudge.Message != message {
 		t.Fatalf("nudge.Message = %q", nudge.Message)
 	}
+}
+
+// notifyOnMailCity is a file-backed city with two agents, reader, whose
+// config sets notify_on_mail, and plain, whose config does not, and one
+// asleep session of each, for the setting's tests through gc mail's
+// commands. The controller probe answers managed and its pokes are counted,
+// so a notice to an asleep session records the managed wake a stopped
+// session gets.
+type notifyOnMailCity struct {
+	path     string
+	store    beads.Store
+	reader   string // the reader session's bead id, aliased reader-1
+	plain    string // the plain session's bead id, aliased plain-1
+	pokes    int
+	warnings bytes.Buffer
+}
+
+func newNotifyOnMailCity(t *testing.T) *notifyOnMailCity {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+	c := &notifyOnMailCity{path: t.TempDir()}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "reader"
+start_command = "true"
+notify_on_mail = true
+
+[[agent]]
+name = "plain"
+start_command = "true"
+`
+	if err := os.WriteFile(filepath.Join(c.path, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", c.path)
+	t.Setenv("GC_CITY_PATH", c.path)
+	store, err := openCityStoreAt(c.path)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	c.store = store
+	c.reader = c.addSession(t, "reader")
+	c.plain = c.addSession(t, "plain")
+	prevManaged, prevPoke, prevWarn := nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter
+	nudgeCityUsesManagedReconciler = func(string) bool { return true }
+	nudgePokeController = func(string, reconcilekey.Key) error { c.pokes++; return nil }
+	nudgeWarningWriter = &c.warnings
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController, nudgeWarningWriter = prevManaged, prevPoke, prevWarn
+	})
+	return c
+}
+
+// addSession creates an asleep session of template, aliased <template>-1,
+// and returns its bead id.
+func (c *notifyOnMailCity) addSession(t *testing.T, template string) string {
+	t.Helper()
+	b, err := c.store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        template + "-1",
+			"session_name": template + "-1-session",
+			"template":     template,
+			"provider":     "fake",
+			"state":        string(session.StateAsleep),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session %s): %v", template, err)
+	}
+	return b.ID
+}
+
+// mailNudges returns the queued mail notices, by the session each is for.
+func (c *notifyOnMailCity) mailNudges(t *testing.T) map[string][]nudgequeue.Item {
+	t.Helper()
+	state, err := nudgequeue.LoadState(c.path)
+	if err != nil {
+		t.Fatalf("LoadState(): %v", err)
+	}
+	bySession := map[string][]nudgequeue.Item{}
+	for _, item := range state.Pending {
+		if item.Source == "mail" {
+			bySession[item.SessionID] = append(bySession[item.SessionID], item)
+		}
+	}
+	return bySession
+}
+
+// wakeRequest is the wake recorded on session id's row.
+func (c *notifyOnMailCity) wakeRequest(t *testing.T, id string) string {
+	t.Helper()
+	b, err := c.store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return b.Metadata["wake_request"]
+}
+
+// requireNoTurn asserts that a command which exited 0 and printed one --json
+// line requested no turn: notified is false, no mail notice is queued, no
+// session has a wake recorded, the controller was not poked and no nudge
+// failure was reported.
+func (c *notifyOnMailCity) requireNoTurn(t *testing.T, stdout, stderr string) {
+	t.Helper()
+	var result mailActionResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal %q: %v", stdout, err)
+	}
+	if result.Notified {
+		t.Fatalf("notified = true, want false; stdout: %s", stdout)
+	}
+	if got := c.mailNudges(t); len(got) != 0 {
+		t.Fatalf("queued mail notices = %v, want none", got)
+	}
+	for _, id := range []string{c.reader, c.plain} {
+		if got := c.wakeRequest(t, id); got != "" {
+			t.Fatalf("wake_request on %s = %q, want none", id, got)
+		}
+	}
+	if c.pokes != 0 {
+		t.Fatalf("pokes = %d, want 0", c.pokes)
+	}
+	if strings.Contains(stderr, "nudge") {
+		t.Fatalf("stderr = %q, want no nudge failure", stderr)
+	}
+}
+
+// requireReaderTurn asserts that a command which exited 0 and printed one
+// --json line requested exactly one turn, for the reader session: notified is
+// true, one mail notice from sender is queued for it with the managed wake
+// an asleep session gets, and the controller was poked once.
+func (c *notifyOnMailCity) requireReaderTurn(t *testing.T, sender, stdout, stderr string) {
+	t.Helper()
+	var result mailActionResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("unmarshal %q: %v", stdout, err)
+	}
+	if !result.Notified {
+		t.Fatalf("notified = false, want true; stdout: %s stderr: %s warnings: %s", stdout, stderr, c.warnings.String())
+	}
+	got := c.mailNudges(t)
+	if len(got) != 1 || len(got[c.reader]) != 1 {
+		t.Fatalf("queued mail notices = %v, want one for the reader session %s; stderr: %s warnings: %s", got, c.reader, stderr, c.warnings.String())
+	}
+	if want := "You have mail from " + sender; got[c.reader][0].Message != want {
+		t.Fatalf("notice = %q, want %q", got[c.reader][0].Message, want)
+	}
+	if got := c.wakeRequest(t, c.reader); got != string(session.WakeCauseExplicit) || c.pokes != 1 {
+		t.Fatalf("reader wake_request = %q, pokes = %d; want %q and 1", got, c.pokes, session.WakeCauseExplicit)
+	}
+	if got := c.wakeRequest(t, c.plain); got != "" {
+		t.Fatalf("plain wake_request = %q, want none", got)
+	}
+}
+
+// TestMailSendNotifyOnMailRequestsATurnWithoutNotify: mail one session sends
+// to a session whose agent sets notify_on_mail requests the turn --notify
+// would, with no --notify: the notice from the sending session, queued with a
+// managed wake for an asleep session, and notified in the --json result.
+func TestMailSendNotifyOnMailRequestsATurnWithoutNotify(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	t.Setenv("GC_SESSION_ID", c.plain)
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailSendJSON([]string{"reader-1", "hello"}, false, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	c.requireReaderTurn(t, "plain-1", stdout.String(), stderr.String())
+}
+
+// TestMailSendWithoutNotifyOnMailRequestsNoTurn: mail to a session whose
+// agent does not set notify_on_mail requests no turn, as before the setting.
+func TestMailSendWithoutNotifyOnMailRequestsNoTurn(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailSendJSON([]string{"plain-1", "hello"}, false, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	c.requireNoTurn(t, stdout.String(), stderr.String())
+}
+
+// TestMailSendNotifyOnMailSkipsMailToOneself: mail a session sends to itself
+// requests no turn, whether it is addressed by its alias or its bead id.
+func TestMailSendNotifyOnMailSkipsMailToOneself(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		to   func(c *notifyOnMailCity) string
+	}{
+		{"by alias", func(*notifyOnMailCity) string { return "reader-1" }},
+		{"by session id", func(c *notifyOnMailCity) string { return c.reader }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNotifyOnMailCity(t)
+			t.Setenv("GC_SESSION_ID", c.reader)
+			var stdout, stderr bytes.Buffer
+			if code := cmdMailSendJSON([]string{tc.to(c), "note to self"}, false, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			c.requireNoTurn(t, stdout.String(), stderr.String())
+		})
+	}
+}
+
+// TestMailSendNotifyWithNotifyOnMailRequestsOneTurn: --notify to a session
+// whose agent sets notify_on_mail requests one turn, not two.
+func TestMailSendNotifyWithNotifyOnMailRequestsOneTurn(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailSendJSON([]string{"reader-1", "hello"}, true, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	c.requireReaderTurn(t, "human", stdout.String(), stderr.String())
+}
+
+// TestMailSendNotifyOnMailDoesNotStartAFinishedSession: the setting requests
+// no turn of a session that has drained or closed, so nothing wakes it; the
+// mail waits, and the send reports no failure.
+func TestMailSendNotifyOnMailDoesNotStartAFinishedSession(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		finish func(t *testing.T, c *notifyOnMailCity)
+	}{
+		{"drained", func(t *testing.T, c *notifyOnMailCity) {
+			if err := c.store.SetMetadata(c.reader, "state", string(session.StateDrained)); err != nil {
+				t.Fatalf("SetMetadata(state): %v", err)
+			}
+		}},
+		{"asleep after a drain", func(t *testing.T, c *notifyOnMailCity) {
+			if err := c.store.SetMetadata(c.reader, "sleep_reason", "drained"); err != nil {
+				t.Fatalf("SetMetadata(sleep_reason): %v", err)
+			}
+		}},
+		{"closed", func(t *testing.T, c *notifyOnMailCity) {
+			if err := c.store.Close(c.reader); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNotifyOnMailCity(t)
+			tc.finish(t, c)
+			var stdout, stderr bytes.Buffer
+			if code := cmdMailSendJSON([]string{c.reader, "hello"}, false, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdMailSendJSON = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			c.requireNoTurn(t, stdout.String(), stderr.String())
+		})
+	}
+}
+
+// TestMailReplyNotifyOnMailRequestsATurn: a reply to a session whose agent
+// sets notify_on_mail requests its turn with no --notify, from the operator
+// too.
+func TestMailReplyNotifyOnMailRequestsATurn(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	original, err := newTestBeadMail(c.store).Send("reader-1", "human", "question", "ping")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailReplyJSON([]string{original.ID, "pong"}, "", "", false, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailReplyJSON = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	c.requireReaderTurn(t, "human", stdout.String(), stderr.String())
+}
+
+// TestMailSendAllNotifyOnMailRequestsTurnsOnlyForOptedInSessions: a broadcast
+// with no --notify requests a turn for each session whose agent sets
+// notify_on_mail and for no other.
+func TestMailSendAllNotifyOnMailRequestsTurnsOnlyForOptedInSessions(t *testing.T) {
+	c := newNotifyOnMailCity(t)
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailSendJSON([]string{"standup"}, false, true, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailSendJSON(--all) = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	c.requireReaderTurn(t, "human", stdout.String(), stderr.String())
 }
 
 func TestMailCommandsRejectMissingIDBeforeProviderCall(t *testing.T) {

@@ -113,6 +113,7 @@ export type AgentPatch = {
     MinActiveSessions: number | null;
     MouseMode: string | null;
     Name: string;
+    NotifyOnMail: boolean | null;
     Nudge: string | null;
     OptionDefaults?: {
         [key: string]: string;

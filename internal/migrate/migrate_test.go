@@ -1145,6 +1145,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
 		AutoReclaimStaleClaims: true,
+		NotifyOnMail:           true,
 		AssignedWorkDeferLimit: intPtr(4),
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,

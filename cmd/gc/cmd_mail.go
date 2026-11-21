@@ -32,7 +32,8 @@ import (
 // carry a re-checkable reference, so delivery-time re-validation can withdraw
 // it if the message is read or gone by then (gastownhall/gascity#5321).
 // It returns the id of the op that records the notice, "" when none does.
-// Errors are non-fatal.
+// errNoMailTurn reports a recipient it requested no turn for, which is no
+// failure. Other errors are non-fatal.
 type nudgeFunc func(recipient, messageID string) (opID string, err error)
 
 const (
@@ -144,6 +145,85 @@ func newMailNudgeFunc(sender string) nudgeFunc {
 		}
 		return sendMailNotify(target, sender, messageID)
 	}
+}
+
+// errNoMailTurn is a recipient a send or reply requests no turn for without
+// --notify (newNotifyOnMailNudgeFunc). It is no failure.
+var errNoMailTurn = errors.New("no turn requested for this recipient")
+
+// newNotifyOnMailNudgeFunc requests a mail recipient's turn when the agent of
+// the recipient's session sets notify_on_mail (config.Agent.NotifyOnMail),
+// through the notice --notify sends (sendMailNotify), and answers
+// errNoMailTurn for every other recipient. It returns nil when no agent in
+// cfg sets notify_on_mail, so a city that does not use the setting looks up
+// no recipient.
+func newNotifyOnMailNudgeFunc(cityPath string, cfg *config.City, sessions *session.Store, sender string) nudgeFunc {
+	if sessions == nil || !anyAgentNotifiesOnMail(cfg) {
+		return nil
+	}
+	return func(recipient, messageID string) (string, error) {
+		target, ok, err := notifyOnMailTarget(cityPath, cfg, sessions, recipient, sender)
+		if err != nil {
+			return "", fmt.Errorf("checking whether %s asks for a turn on mail: %w", recipient, err)
+		}
+		if !ok {
+			return "", errNoMailTurn
+		}
+		return sendMailNotify(target, sender, messageID)
+	}
+}
+
+// anyAgentNotifiesOnMail reports whether an agent in cfg sets notify_on_mail.
+func anyAgentNotifiesOnMail(cfg *config.City) bool {
+	if cfg == nil {
+		return false
+	}
+	for i := range cfg.Agents {
+		if cfg.Agents[i].NotifyOnMail {
+			return true
+		}
+	}
+	return false
+}
+
+// notifyOnMailTarget resolves recipient, the mailbox address a send delivered
+// to, to the session a notify_on_mail turn is for, and reports false when
+// there is none: recipient names no session, the session's agent does not set
+// notify_on_mail, the session is finishing or finished
+// (mailRecipientFinished), or sender names the session itself. The address
+// resolves as a session id, session name or live alias
+// (session.Store.ResolveAddress), which materializes no configured named
+// session, so the setting starts no session that has no row.
+func notifyOnMailTarget(cityPath string, cfg *config.City, sessions *session.Store, recipient, sender string) (nudgeTarget, bool, error) {
+	if recipient == "human" {
+		return nudgeTarget{}, false, nil
+	}
+	info, err := sessions.ResolveAddress(recipient, false)
+	if errors.Is(err, session.ErrSessionNotFound) {
+		return nudgeTarget{}, false, nil
+	}
+	if err != nil {
+		return nudgeTarget{}, false, err
+	}
+	if mailRecipientFinished(info) || sender == info.ID || sender == session.MailboxAddressFromInfo(info) {
+		return nudgeTarget{}, false, nil
+	}
+	target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+	return target, target.agent.NotifyOnMail, nil
+}
+
+// mailRecipientFinished reports whether a session is finishing or finished:
+// draining, drained, archived, closing or closed. notify_on_mail requests no
+// turn of such a session, whose mail waits as all unread mail does; a turn
+// would start a drained session again, since a drained row takes a recorded
+// wake (session.Store.RequestWakeUnlessHeld).
+func mailRecipientFinished(info session.Info) bool {
+	switch session.ProjectLifecycle(session.LifecycleInputFromInfo(info)).BaseState {
+	case session.BaseStateDraining, session.BaseStateDrained, session.BaseStateArchived,
+		session.BaseStateClosing, session.BaseStateClosed:
+		return true
+	}
+	return false
 }
 
 func newMailCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1880,7 +1960,10 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 Creates a message bead addressed to the recipient. The sender defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
 a recipient turn after sending. In a managed city, it can request a wake for
-a non-running recipient. Unread mail alone does not request a wake.
+a non-running recipient. Unread mail alone does not request a wake, unless
+the recipient's agent sets notify_on_mail: then every mail requests that
+turn, except mail a session sends to itself and mail to a session that is
+draining, drained, archived or closed.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -2003,7 +2086,10 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 Inherits the thread ID from the original message for conversation tracking.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
-Unread mail alone does not request a wake.
+Unread mail alone does not request a wake, unless the recipient's agent sets
+notify_on_mail: then every reply requests that turn, except a reply a
+session sends to itself and a reply to a session that is draining, drained,
+archived or closed.
 Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -2247,6 +2333,8 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	var nf nudgeFunc
 	if notify && store != nil {
 		nf = newMailNudgeFunc(sender)
+	} else if store != nil {
+		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, sessionFrontDoor(sessStore), sender)
 	}
 
 	// When --to is set, prepend it to args so doMailSend sees [to, body].
@@ -2374,9 +2462,12 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 	notified := false
 	var notifyOps []string
 	if nudgeFn != nil && to != "human" {
-		if opID, err := nudgeFn(to, m.ID); err != nil {
+		opID, err := nudgeFn(to, m.ID)
+		switch {
+		case errors.Is(err, errNoMailTurn):
+		case err != nil:
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
+		default:
 			notified = true
 			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
@@ -2445,9 +2536,12 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if opID, err := nudgeFn(to, m.ID); err != nil {
+			opID, err := nudgeFn(to, m.ID)
+			switch {
+			case errors.Is(err, errNoMailTurn):
+			case err != nil:
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
-			} else {
+			default:
 				notified = true
 				notifyOps = appendNotifyOp(notifyOps, opID)
 			}
@@ -2707,42 +2801,41 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	var cityPath string
 	var cfg *config.City
 	var notifySetupErr error
-	if sender != "human" || notify {
-		switch {
-		case strings.HasPrefix(providerName, "exec:"):
-			var err error
-			cityPath, err = resolveCity()
-			if err == nil {
-				cfg, _ = loadCityConfig(cityPath, stderr)
-				store, err = openStoreAtForCity(cityPath, cityPath)
-			}
-			if err != nil {
-				notifySetupErr = err
-				store = nil
-			}
-		case !isStorelessMailProvider():
-			var storeCode int
-			store, storeCode = openCityStore(stderr, "gc mail reply")
-			if store == nil {
-				return storeCode
-			}
-			var err error
-			cityPath, err = resolveCity()
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+	// The city store resolves the sender's identity and the session of a
+	// recipient whose agent sets notify_on_mail, so a reply opens it whoever
+	// sends it; a storeless mail provider's reply opens none.
+	switch {
+	case strings.HasPrefix(providerName, "exec:"):
+		var err error
+		cityPath, err = resolveCity()
+		if err == nil {
 			cfg, _ = loadCityConfig(cityPath, stderr)
+			store, err = openStoreAtForCity(cityPath, cityPath)
 		}
-		if sender != "human" {
-			if store != nil {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr, "gc mail reply")
-				if !ok {
-					return 1
-				}
-				sender = resolved
-			}
+		if err != nil {
+			notifySetupErr = err
+			store = nil
 		}
+	case !isStorelessMailProvider():
+		var storeCode int
+		store, storeCode = openCityStore(stderr, "gc mail reply")
+		if store == nil {
+			return storeCode
+		}
+		var err error
+		cityPath, err = resolveCity()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc mail reply: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		cfg, _ = loadCityConfig(cityPath, stderr)
+	}
+	if sender != "human" && store != nil {
+		resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr, "gc mail reply")
+		if !ok {
+			return 1
+		}
+		sender = resolved
 	}
 
 	// Determine body from remaining args if -m not set.
@@ -2752,10 +2845,13 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	}
 
 	var nf nudgeFunc
-	if notify && store != nil {
+	switch {
+	case notify && store != nil:
 		nf = newMailNudgeFunc(sender)
-	} else if notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil {
+	case notify && strings.HasPrefix(providerName, "exec:") && notifySetupErr != nil:
 		fmt.Fprintf(stderr, "gc mail reply: --notify requested but no city store available; nudge skipped: %v\n", notifySetupErr) //nolint:errcheck // best-effort stderr
+	case store != nil:
+		nf = newNotifyOnMailNudgeFunc(cityPath, cfg, cliSessionFrontDoor(store, cfg, cityPath), sender)
 	}
 
 	return doMailReplyJSON(mp, rec, args[0], sender, subject, body, nf, jsonOut, stdout, stderr)
@@ -2787,9 +2883,12 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 	notified := false
 	var notifyOps []string
 	if nudgeFn != nil && reply.To != "human" {
-		if opID, err := nudgeFn(reply.To, reply.ID); err != nil {
+		opID, err := nudgeFn(reply.To, reply.ID)
+		switch {
+		case errors.Is(err, errNoMailTurn):
+		case err != nil:
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
+		default:
 			notified = true
 			notifyOps = appendNotifyOp(notifyOps, opID)
 		}

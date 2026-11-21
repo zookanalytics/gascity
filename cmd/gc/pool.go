@@ -334,6 +334,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		SleepAfterIdle:         src.SleepAfterIdle,
 		SleepAfterIdleSource:   src.SleepAfterIdleSource,
 		AutoReclaimStaleClaims: src.AutoReclaimStaleClaims,
+		NotifyOnMail:           src.NotifyOnMail,
 		Suspended:              src.Suspended,
 		ResumeCommand:          src.ResumeCommand,
 		WakeMode:               src.WakeMode,

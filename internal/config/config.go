@@ -761,6 +761,9 @@ type AgentOverride struct {
 	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
 	// field for semantics).
 	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
+	// NotifyOnMail overrides Agent.NotifyOnMail (see that field for
+	// semantics).
+	NotifyOnMail *bool `toml:"notify_on_mail,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards
@@ -3912,6 +3915,13 @@ type Agent struct {
 	// route-matched candidate's only claim blocker is an existing assignee.
 	// Off by default; staleness is decided entirely by bd's own lease TTL.
 	AutoReclaimStaleClaims bool `toml:"auto_reclaim_stale_claims,omitempty"`
+	// NotifyOnMail requests a turn for every mail that gc mail send, gc mail
+	// reply or gc mail send --all delivers to one of this agent's open
+	// sessions, as if the sender had passed --notify. Mail a session sends to
+	// itself requests none, and so does mail to a session that is draining,
+	// drained or archived: that mail waits for the session's next turn, as all
+	// unread mail does when this is off.
+	NotifyOnMail bool `toml:"notify_on_mail,omitempty"`
 	// InstallAgentHooks overrides workspace-level install_agent_hooks for this agent.
 	// When set, replaces (not adds to) the workspace default.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`

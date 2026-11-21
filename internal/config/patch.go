@@ -92,6 +92,9 @@ type AgentPatch struct {
 	// AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that
 	// field for semantics).
 	AutoReclaimStaleClaims *bool `toml:"auto_reclaim_stale_claims,omitempty"`
+	// NotifyOnMail overrides Agent.NotifyOnMail (see that field for
+	// semantics).
+	NotifyOnMail *bool `toml:"notify_on_mail,omitempty"`
 	// InstallAgentHooks overrides the agent's install_agent_hooks list.
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// Skills is a tombstone field retained for v0.15.1 backwards compatibility.
@@ -598,6 +601,9 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	}
 	if p.AutoReclaimStaleClaims != nil {
 		a.AutoReclaimStaleClaims = *p.AutoReclaimStaleClaims
+	}
+	if p.NotifyOnMail != nil {
+		a.NotifyOnMail = *p.NotifyOnMail
 	}
 	if len(p.InstallAgentHooks) > 0 {
 		a.InstallAgentHooks = append([]string(nil), p.InstallAgentHooks...)

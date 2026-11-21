@@ -398,6 +398,12 @@
           "Name": {
             "type": "string"
           },
+          "NotifyOnMail": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "Nudge": {
             "type": [
               "string",
@@ -603,6 +609,7 @@
           "AssignedWorkDeferLimit",
           "SleepAfterIdle",
           "AutoReclaimStaleClaims",
+          "NotifyOnMail",
           "InstallAgentHooks",
           "Skills",
           "MCP",
