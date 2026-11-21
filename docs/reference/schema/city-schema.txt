@@ -269,6 +269,10 @@
           "type": "boolean",
           "description": "AutoReclaimStaleClaims opts this agent into gc hook --claim attempting\na scoped stale-lease reclaim (via `bd reclaim --id`) when a\nroute-matched candidate's only claim blocker is an existing assignee.\nOff by default; staleness is decided entirely by bd's own lease TTL."
         },
+        "notify_on_mail": {
+          "type": "boolean",
+          "description": "NotifyOnMail requests a turn for every mail that gc mail send, gc mail\nreply or gc mail send --all delivers to one of this agent's open\nsessions, as if the sender had passed --notify. Mail a session sends to\nitself requests none, and so does mail to a session that is draining,\ndrained or archived: that mail waits for the session's next turn, as all\nunread mail does when this is off."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
@@ -563,6 +567,10 @@
         "auto_reclaim_stale_claims": {
           "type": "boolean",
           "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
+        },
+        "notify_on_mail": {
+          "type": "boolean",
+          "description": "NotifyOnMail overrides Agent.NotifyOnMail (see that field for\nsemantics)."
         },
         "install_agent_hooks": {
           "items": {
@@ -860,6 +868,10 @@
         "auto_reclaim_stale_claims": {
           "type": "boolean",
           "description": "AutoReclaimStaleClaims overrides Agent.AutoReclaimStaleClaims (see that\nfield for semantics)."
+        },
+        "notify_on_mail": {
+          "type": "boolean",
+          "description": "NotifyOnMail overrides Agent.NotifyOnMail (see that field for\nsemantics)."
         },
         "install_agent_hooks": {
           "items": {

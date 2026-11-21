@@ -880,6 +880,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		SleepAfterIdle:               "30s",
 		SleepAfterIdleSource:         "agent",
 		AutoReclaimStaleClaims:       true,
+		NotifyOnMail:                 true,
 		InstallAgentHooks:            []string{"claude"},
 		SkillsDir:                    "/skills",
 		MCPDir:                       "/mcp",

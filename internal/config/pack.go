@@ -2819,6 +2819,7 @@ func (ov *AgentOverride) toAgentPatch() *AgentPatch {
 		AssignedWorkDeferLimit:  ov.AssignedWorkDeferLimit,
 		SleepAfterIdle:          ov.SleepAfterIdle,
 		AutoReclaimStaleClaims:  ov.AutoReclaimStaleClaims,
+		NotifyOnMail:            ov.NotifyOnMail,
 		InstallAgentHooks:       ov.InstallAgentHooks,
 		Skills:                  ov.Skills,
 		MCP:                     ov.MCP,

@@ -2851,7 +2851,10 @@ Reply to a message. The reply is addressed to the original sender.
 Inherits the thread ID from the original message for conversation tracking.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
-Unread mail alone does not request a wake.
+Unread mail alone does not request a wake, unless the recipient's agent sets
+notify_on_mail: then every reply requests that turn, except a reply a
+session sends to itself and a reply to a session that is draining, drained,
+archived or closed.
 Use -s/--subject for the reply subject and -m/--message for the reply body.
 
 ```
@@ -2872,7 +2875,10 @@ Send a message to a session alias or human.
 Creates a message bead addressed to the recipient. The sender defaults
 to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
 a recipient turn after sending. In a managed city, it can request a wake for
-a non-running recipient. Unread mail alone does not request a wake.
+a non-running recipient. Unread mail alone does not request a wake, unless
+the recipient's agent sets notify_on_mail: then every mail requests that
+turn, except mail a session sends to itself and mail to a session that is
+draining, drained, archived or closed.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.

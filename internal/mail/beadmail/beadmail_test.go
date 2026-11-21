@@ -719,6 +719,54 @@ func TestReplyUsesStoredSenderSessionIDAfterAliasRename(t *testing.T) {
 	}
 }
 
+// TestRecipientRouteIsTheAddressAMessageIsDeliveredTo: a send's route is the
+// recipient it names, and a reply's is the session id of the sender it
+// answers, which a rename of that session's alias since the original send
+// leaves in place while the reply's To keeps the old alias.
+func TestRecipientRouteIsTheAddressAMessageIsDeliveredTo(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+
+	sender, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "old-sender",
+			"session_name": "sender-gc-42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+	original, err := p.Send("old-sender", "human", "Approval", "please approve")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if route, err := p.RecipientRoute(original.ID); err != nil || route != "human" {
+		t.Fatalf("RecipientRoute(send) = %q, %v; want human", route, err)
+	}
+	if err := store.SetMetadataBatch(sender.ID, session.UpdatedAliasMetadata(sender.Metadata, "new-sender")); err != nil {
+		t.Fatalf("SetMetadataBatch(alias rename): %v", err)
+	}
+
+	reply, err := p.Reply(original.ID, "human", "approved", "approved")
+	if err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	if reply.To != "old-sender" {
+		t.Fatalf("reply To = %q, want the original display sender", reply.To)
+	}
+	if route, err := p.RecipientRoute(reply.ID); err != nil || route != sender.ID {
+		t.Fatalf("RecipientRoute(reply) = %q, %v; want the sender session id %q", route, err, sender.ID)
+	}
+	if _, err := p.RecipientRoute("gc-missing"); !errors.Is(err, mail.ErrNotFound) {
+		t.Fatalf("RecipientRoute(missing) error = %v, want mail.ErrNotFound", err)
+	}
+	if _, err := p.RecipientRoute(sender.ID); err == nil {
+		t.Fatal("RecipientRoute(session bead) succeeded, want an error for a bead that is no message")
+	}
+}
+
 func TestSendFallsBackToLiteralSenderWhenSessionIdentifierIsAmbiguous(t *testing.T) {
 	store := beads.NewMemStore()
 	p := newTestProvider(store)

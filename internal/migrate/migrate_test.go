@@ -765,10 +765,9 @@ schema = 2
 	}
 }
 
-// TestMigrateWritesAgentTomlForUpstreamOnlyAgent guards isZeroAgentConfig: an
-// agent whose only non-default field is upstream must still get its per-agent
-// agent.toml written. If isZeroAgentConfig omits cfg.Upstream it judges the
-// agent "zero", skips the write, and the per-agent upstream selection is lost.
+// TestMigrateWritesAgentTomlForUpstreamOnlyAgent covers an agent whose only
+// non-default field is upstream: it must still get its per-agent agent.toml
+// written, or the per-agent upstream selection is lost.
 func TestMigrateWritesAgentTomlForUpstreamOnlyAgent(t *testing.T) {
 	t.Parallel()
 
@@ -789,6 +788,66 @@ upstream = "bedrock"
 	agentToml := readFile(t, filepath.Join(cityDir, "agents", "worker", "agent.toml"))
 	if !strings.Contains(agentToml, `upstream = "bedrock"`) {
 		t.Fatalf("worker agent.toml missing upstream:\n%s", agentToml)
+	}
+}
+
+// TestMigrateWritesAgentTomlForASoleBoolSetting covers an agent whose only
+// setting is a bool: migration removes the inline agent from city.toml, so a
+// setting its agent.toml does not carry is lost.
+func TestMigrateWritesAgentTomlForASoleBoolSetting(t *testing.T) {
+	t.Parallel()
+
+	for _, setting := range []string{
+		"notify_on_mail = true",
+		"auto_reclaim_stale_claims = true",
+	} {
+		t.Run(setting, func(t *testing.T) {
+			t.Parallel()
+
+			cityDir := t.TempDir()
+			writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "worker"
+`+setting+"\n")
+
+			if _, err := Apply(cityDir, Options{}); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+
+			agentToml := readFile(t, filepath.Join(cityDir, "agents", "worker", "agent.toml"))
+			if !strings.Contains(agentToml, setting) {
+				t.Fatalf("worker agent.toml missing %q:\n%s", setting, agentToml)
+			}
+		})
+	}
+}
+
+// TestMigrateWritesNoAgentTomlForAnAgentWithNoSettings covers an agent with
+// nothing but its name, whose directory needs no agent.toml.
+func TestMigrateWritesNoAgentTomlForAnAgentWithNoSettings(t *testing.T) {
+	t.Parallel()
+
+	cityDir := t.TempDir()
+	writeFile(t, cityDir, "city.toml", `
+[workspace]
+name = "legacy-city"
+
+[[agent]]
+name = "worker"
+`)
+
+	if _, err := Apply(cityDir, Options{}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	if info, err := os.Stat(filepath.Join(cityDir, "agents", "worker")); err != nil || !info.IsDir() {
+		t.Fatalf("Stat(agents/worker) = %v, %v; want the agent's directory", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, "agents", "worker", "agent.toml")); !os.IsNotExist(err) {
+		t.Fatalf("Stat(agents/worker/agent.toml) error = %v, want it not to exist", err)
 	}
 }
 
@@ -1145,6 +1204,7 @@ func TestAgentConfigFromAgentCoversPersistedFields(t *testing.T) {
 		MaxSessionAgeJitter:    "15m",
 		SleepAfterIdle:         "30s",
 		AutoReclaimStaleClaims: true,
+		NotifyOnMail:           true,
 		AssignedWorkDeferLimit: intPtr(4),
 		InstallAgentHooks:      []string{"claude"},
 		HooksInstalled:         &trueVal,
