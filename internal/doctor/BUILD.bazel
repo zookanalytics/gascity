@@ -79,6 +79,7 @@ go_library(
         "//internal/pidutil",
         "//internal/platform/filelock",
         "//internal/platform/livefile",
+        "//internal/processgroup",
         "//internal/remotesource",
         "//internal/runtime",
         "//internal/runtime/programstatus",

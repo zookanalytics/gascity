@@ -16,6 +16,8 @@ go_library(
         "procfs_unix.go",
         "procfs_windows.go",
         "subreaper.go",
+        "zombie_darwin.go",
+        "zombie_other.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/pidutil",
     visibility = ["//:__subpackages__"],
@@ -51,12 +53,19 @@ go_test(
         "testcmd_unix_test.go",
         "testcmd_windows_test.go",
         "testenv_import_test.go",
+        "vanish_darwin_test.go",
         "vanish_linux_test.go",
     ],
     embed = [":pidutil"],
     deps = [
         "//internal/testenv",
     ] + select({
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
         "@rules_go//go/platform:windows": [
             "@org_golang_x_sys//windows",
         ],
