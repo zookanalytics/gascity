@@ -30,6 +30,22 @@ func TestBuiltinProvidersAndOrder(t *testing.T) {
 	}
 }
 
+// Claude Code is the one builtin whose CLI takes a file appended to its system
+// prompt, and a flagless resume keeps the system prompt it recorded, so the
+// flag is a fact of the claude preset alone. Every other builtin keeps the
+// prompt in its first turn.
+func TestBuiltinSystemPromptFileFlagIsClaudesAlone(t *testing.T) {
+	for name, spec := range BuiltinProviders() {
+		want := ""
+		if name == "claude" {
+			want = "--append-system-prompt-file"
+		}
+		if spec.SystemPromptFileFlag != want {
+			t.Errorf("%s: SystemPromptFileFlag = %q, want %q", name, spec.SystemPromptFileFlag, want)
+		}
+	}
+}
+
 func TestBuiltinProviderMimoCodeSpec(t *testing.T) {
 	providers := BuiltinProviders()
 	spec, ok := providers["mimocode"]

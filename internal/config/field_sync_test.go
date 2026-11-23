@@ -502,6 +502,7 @@ func TestProviderFieldSync(t *testing.T) {
 		"ResumeCommand":          "already patchable at agent level via AgentPatch.ResumeCommand",
 		"SessionIDFlag":          "internal session-id config, not patched",
 		"ForkFlag":               "internal fork-launch config (claude-only), not patched",
+		"SystemPromptFileFlag":   "launch-flag config set in [providers], not patched; the API's provider-patch wire carries ProviderPatch",
 		"PrintArgs":              "internal print-mode args, not patched",
 		"TitleModel":             "internal title-model key, not patched",
 	}

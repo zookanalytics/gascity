@@ -57,6 +57,12 @@ type BuiltinProviderSpec struct {
 	ResumeStyle            string
 	ResumeCommand          string
 	SessionIDFlag          string
+	// SystemPromptFileFlag is the CLI flag that takes a file whose text joins
+	// the provider's system prompt. A launch that passes the agent's rendered
+	// prompt this way keeps it out of the conversation, so a resume need not
+	// type it back in. Empty for a provider with no such flag, whose prompt
+	// stays in its first turn.
+	SystemPromptFileFlag string
 	// ForkFlag is the CLI flag that forks a resumed conversation into a new
 	// branch. Combined with ResumeFlag + SessionIDFlag it yields the fork-launch
 	// form (resume a parent brain, fork off it, bind gc's own session id). Empty
@@ -275,6 +281,12 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ForkFlag:      "--fork-session",
 		PrintArgs:     []string{"-p"},
 		TitleModel:    "haiku",
+		// Claude Code records a conversation's system prompt at its first
+		// request and reuses that record on every request and resume until the
+		// conversation compacts; after a compaction it renders the system
+		// prompt from the flags of the launch that makes the next request. So
+		// every launch passes the file, resumes included.
+		SystemPromptFileFlag: "--append-system-prompt-file",
 		// Claude Code (2.1.295+, verified on 2.1.311) reports OSC 7501 only
 		// after the terminal answers its support probe, which tmux never
 		// does, so capture runs it under the probe-answering relay.

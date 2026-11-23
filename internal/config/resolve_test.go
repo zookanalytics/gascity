@@ -2411,6 +2411,7 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		PathCheck:              "custom-bin",
 		SupportsACP:            boolPtr(true),
 		SupportsHooks:          boolPtr(true),
+		SystemPromptFileFlag:   strPtr("--append-system-prompt-file"),
 		InstructionsFile:       "CUSTOM.md",
 		ResumeFlag:             "--resume",
 		ResumeStyle:            "flag",
@@ -2449,6 +2450,69 @@ func TestMergeProviderOverBuiltinFieldSync(t *testing.T) {
 		if rv.Field(i).IsZero() {
 			t.Errorf("MergeProviderOverBuiltin did not propagate field %q from city to result", f.Name)
 		}
+	}
+}
+
+// The builtin claude preset declares the system-prompt file flag. A city keeps
+// it by saying nothing, changes it or switches it off with an empty string in
+// [providers], and a provider wrapped over claude inherits whatever its chain
+// declares.
+func TestSystemPromptFileFlagResolvesThroughConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		toml     string
+		provider string
+		want     string
+	}{
+		{name: "builtin claude", toml: "[providers.claude]\nbase = \"builtin:claude\"\n", provider: "claude", want: "--append-system-prompt-file"},
+		{name: "builtin codex", toml: "[providers.codex]\nbase = \"builtin:codex\"\n", provider: "codex", want: ""},
+		{
+			name:     "city changes it",
+			toml:     "[providers.claude]\nbase = \"builtin:claude\"\nsystem_prompt_file_flag = \"--system-prompt-file\"\n",
+			provider: "claude",
+			want:     "--system-prompt-file",
+		},
+		{
+			name:     "city switches it off",
+			toml:     "[providers.claude]\nbase = \"builtin:claude\"\nsystem_prompt_file_flag = \"\"\n",
+			provider: "claude",
+			want:     "",
+		},
+		{
+			name:     "wrapped provider inherits it",
+			toml:     "[providers.claude-max]\nbase = \"builtin:claude\"\ncommand = \"claude\"\n",
+			provider: "claude-max",
+			want:     "--append-system-prompt-file",
+		},
+		{
+			name:     "wrapped provider switches it off",
+			toml:     "[providers.claude-max]\nbase = \"builtin:claude\"\nsystem_prompt_file_flag = \"\"\n",
+			provider: "claude-max",
+			want:     "",
+		},
+		{
+			name: "a wrapper of a wrapper keeps the middle layer's switch-off",
+			toml: "[providers.claude-max]\nbase = \"builtin:claude\"\nsystem_prompt_file_flag = \"\"\n" +
+				"[providers.claude-fast]\nbase = \"provider:claude-max\"\n",
+			provider: "claude-fast",
+			want:     "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte("[workspace]\nname = \"test\"\n\n" + tc.toml + "\n[[agent]]\nname = \"worker\"\nprovider = \"" + tc.provider + "\"\n")
+			cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			rp, err := ResolveProvider(&cfg.Agents[0], &cfg.Workspace, cfg.Providers, lookPathAll)
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			if rp.SystemPromptFileFlag != tc.want {
+				t.Fatalf("SystemPromptFileFlag = %q, want %q", rp.SystemPromptFileFlag, tc.want)
+			}
+		})
 	}
 }
 
