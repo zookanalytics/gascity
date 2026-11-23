@@ -141,23 +141,23 @@ func agreementRows() []agreementRow {
 			wantServable: true,
 		},
 		{
-			// The discriminating row for HOLD comparison, and it points the
-			// other way: the reader serves it (exact-match miss) but the hook
-			// strips it (EqualFold hit), so the worker never sees it.
+			// The discriminating row for HOLD comparison: the query's jq filter
+			// and the hook both fold the case of a hold label's prefix, so the
+			// worker never sees it.
 			name: "routed bead held by a case-variant hold label",
 			bead: beads.Bead{
 				ID: "a-10", Status: "open", Type: "task",
-				Labels:   []string{strings.ToUpper(beadmeta.DispatchHoldLabels[0])},
+				Labels:   []string{strings.ToUpper("hold:po")},
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
 			wantServable: false,
 		},
 		{
 			// The discriminating row for a label the worker's query excludes that is
-			// NOT a dispatch hold: bd's native human label, a bead parked for a
-			// person. beadmeta.DispatchHoldLabels names only the two canonical
-			// holds, so the generated hold rows below cannot reach it. Without its
-			// own row demand would keep counting a bead no worker is ever served:
+			// NOT a hold: bd's native human label, a bead parked for a person. It
+			// is no hold:<value> label, so the generated hold rows below cannot
+			// reach it. Without its own row demand would keep counting a bead no
+			// worker is ever served:
 			// the seat spawns, its hook reads empty, it drains, and the row is
 			// counted again.
 			name: "routed bead flagged for a human",
@@ -196,7 +196,7 @@ func agreementRows() []agreementRow {
 			name: "held bead on a slot-suffixed route",
 			bead: beads.Bead{
 				ID: "a-11", Status: "open", Type: "task",
-				Labels:   []string{beadmeta.DispatchHoldLabels[0]},
+				Labels:   []string{"hold:po"},
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate + "-2"},
 			},
 			wantServable: false, wantRewrittenTo: agreementTemplate,
@@ -221,21 +221,32 @@ func agreementRows() []agreementRow {
 	}
 }
 
-// holdLabelAgreementRows is generated from the label set itself, so a new
-// dispatch hold cannot be added without this property covering it.
+// holdLabelAgreementRows pins the hold dimension on both sides: every active
+// hold label, whatever its value names, is not demand and is not served, and a
+// label that is no active hold (the cleared state, an empty value, a label
+// that only contains the word) is both.
 func holdLabelAgreementRows() []agreementRow {
-	rows := make([]agreementRow, 0, len(beadmeta.DispatchHoldLabels))
-	for i, label := range beadmeta.DispatchHoldLabels {
+	held := heldLabelVariants()
+	unheld := []string{"hold:cleared", "Hold:Cleared", "hold:", "on-hold"}
+	rows := make([]agreementRow, 0, len(held)+len(unheld)+1)
+	add := func(name string, labels []string, servable bool) {
 		rows = append(rows, agreementRow{
-			name: "routed bead held by " + label,
+			name: name,
 			bead: beads.Bead{
-				ID: "hold-" + string(rune('a'+i)), Status: "open", Type: "task",
-				Labels:   []string{label},
+				ID: "hold-" + string(rune('a'+len(rows))), Status: "open", Type: "task",
+				Labels:   labels,
 				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: agreementTemplate},
 			},
-			wantServable: false,
+			wantServable: servable,
 		})
 	}
+	for _, label := range held {
+		add("routed bead held by "+label, []string{label}, false)
+	}
+	for _, label := range unheld {
+		add("routed bead labeled "+label, []string{label}, true)
+	}
+	add("routed bead held beside a cleared hold", []string{"hold:cleared", "hold:po"}, false)
 	return rows
 }
 

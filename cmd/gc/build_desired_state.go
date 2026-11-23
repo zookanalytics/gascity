@@ -2455,7 +2455,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 		}
 		for _, b := range ready {
 			// AGREEMENT: count only rows a T-worker's own query would serve it.
-			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
+			// A routed epic, a bead on a hold, or a slot-suffixed route
 			// is not capacity demand — it is a seat that spawns, reads empty and
 			// drains, every tick, forever. See demand_serve_predicate.go.
 			template, servable := demandServableForTemplates(cfg, b, group.templates)
@@ -2485,7 +2485,7 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			}
 		}
 		// The claim reader merges these legs and serves them in the canonical
-		// ready order, bounded (routedReadyTierCommand); a concatenation of the
+		// ready order, bounded (routedReadyTierScript); a concatenation of the
 		// legs is not that order. Name demand in the order the claim window
 		// serves it, so the seat placed for a bead finds it in its window.
 		beads.SortBeadsReadyOrder(rows)
@@ -3543,7 +3543,7 @@ func appendOpenAssignedMoleculeWorkUnique(dst *[]beads.Bead, stores *[]beads.Sto
 // store-Ready()/deps, and assigned molecule roots) — never by the open-routed
 // orphan-release pass, whose beads have not passed any readiness gate.
 //
-// OPEN work parked on a dispatch hold is never marked: bd's Ready() is
+// OPEN work parked on an active hold is never marked: bd's Ready() is
 // hold-transparent, but the session's own hook refuses to serve a held row
 // (isHeldHookCandidate), so counting it as wake demand woke an on-demand named
 // session that drain-acked no_work and was re-woken every tick. The bead stays

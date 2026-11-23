@@ -15,6 +15,21 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+## Held work is never served and takes no place in a window
+
+A bead carrying an active hold (`beadmeta.HasActiveHold`: any `hold:<value>`
+label whose value is nonempty and not `cleared`) is never work, whatever the
+value names; the value is pack vocabulary, never a route or an agent. bd's
+`--exclude-label` matches one label exactly, so no reader flag can drop every
+hold: each generated read that serves work drops held rows with jq
+(`excludeActiveHoldsJQClause`) before it cuts its answer to a window
+(`unheldWindowScript`), and the count form drops them in its count. Keep the
+jq rendering, `PoolDemandServeRules.ExcludeActiveHolds`, the controller's
+demand predicate and the hook's serve filter on the one predicate;
+`TestActiveHoldLabelJQAgreesWithBeadmeta` runs the jq and Go forms over one
+label corpus. Never put a hold value in `ExcludeLabels` or an `--exclude-label`
+flag.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

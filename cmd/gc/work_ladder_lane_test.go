@@ -1298,7 +1298,7 @@ func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
 // recycle and no release for as long as the hold stands; once it lifts, the
 // ladder takes the claim up afresh, from its grace.
 func TestWorkLadderIgnoresHeldWork(t *testing.T) {
-	for _, label := range []string{beadmeta.HoldExternalLabel, beadmeta.HoldMayorLabel} {
+	for _, label := range []string{"hold:external", "hold:mayor"} {
 		t.Run(label, func(t *testing.T) {
 			c := newLadderCity(t)
 			id := c.claim("parked")
@@ -1341,7 +1341,7 @@ func TestWorkLadderRereadsTheHold(t *testing.T) {
 		return s
 	}
 	c.run(time.Minute, 30*time.Second, nil)
-	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldExternalLabel}}); err != nil {
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
 		t.Fatal(err)
 	}
 	c.run(time.Hour, 30*time.Second, nil)
@@ -1350,14 +1350,14 @@ func TestWorkLadderRereadsTheHold(t *testing.T) {
 	}
 
 	tc := newLadderCity(t)
-	b, err := tc.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{beadmeta.HoldMayorLabel}})
+	b, err := tc.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{"hold:mayor"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tc.trigger = b.ID
 	tc.lane.summary = func() *allocSummary {
 		s := tc.summary()
-		s.ReadyRouted = []beads.Bead{{ID: b.ID, Status: "open", Labels: []string{beadmeta.HoldMayorLabel}}}
+		s.ReadyRouted = []beads.Bead{{ID: b.ID, Status: "open", Labels: []string{"hold:mayor"}}}
 		return s
 	}
 	tc.setRow(map[string]string{beadmeta.TriggerBeadIDMetadataKey: b.ID})
@@ -1448,7 +1448,7 @@ func TestWorkLadderReleaseRespectsAHoldPlacedLate(t *testing.T) {
 		Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
 		Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
 	}}})})
-	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldMayorLabel}}); err != nil {
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{"hold:mayor"}}); err != nil {
 		t.Fatal(err)
 	}
 	c.pass()
@@ -1464,7 +1464,7 @@ func TestWorkLadderReleaseRespectsAHoldPlacedLate(t *testing.T) {
 // or recycled.
 func TestWorkLadderRereadsATriggerHold(t *testing.T) {
 	c := newLadderCity(t)
-	b, err := c.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{beadmeta.HoldExternalLabel}})
+	b, err := c.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{"hold:external"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1483,7 +1483,7 @@ func TestWorkLadderRereadsACarriedHold(t *testing.T) {
 	c := newLadderCity(t)
 	id := c.claim("carried, then parked")
 	c.run(2*time.Minute, 30*time.Second, nil)
-	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldExternalLabel}}); err != nil {
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{"hold:external"}}); err != nil {
 		t.Fatal(err)
 	}
 	c.partial, c.claims = true, nil // the snapshot lost it; the ladder carries it

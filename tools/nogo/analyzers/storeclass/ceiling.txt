@@ -6,8 +6,8 @@
 cmd/gc	cache-peel	22
 cmd/gc	cap-assert	102
 cmd/gc	mint	168
-cmd/gc	raw-field	184
-cmd/gc	raw-param	1114
+cmd/gc	raw-field	182
+cmd/gc	raw-param	1113
 cmd/gc	raw-result	281
 cmd/gc	raw-type	4
 cmd/gc	raw-var	38

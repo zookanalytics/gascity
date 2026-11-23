@@ -39,9 +39,7 @@ stores.
 
 The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
-           --exclude-type=epic --exclude-label "hold:mayor" \
-           --exclude-label "hold:external" --exclude-label "human" \
-           --json --limit=20
+           --exclude-type=epic --exclude-label "human" --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
 --sort selects a created_at order, and --limit is applied last, so a bounded
@@ -52,7 +50,9 @@ The rows of --status in_progress carry their blockers (blocked_by), and a row
 whose blockers cannot be resolved fails the read. --until-unblocked ends that
 answer at its first unblocked row, the one a crash-recovery read resumes, and
 resolves no row past it, so a later row's unresolvable blocker does not fail
-the read.
+the read. It leaves out every row carrying an active hold label (hold:<value>,
+the value nonempty and not "cleared") before --limit and before the cut, and
+resolves nothing for such a row: a held claim is never the one to resume.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
@@ -140,7 +140,7 @@ func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral,
 	// quietly narrows (ga-8lyxc).
 	cmd.Flags().BoolVar(includeEphemeral, "include-ephemeral", false, "accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier)")
 	cmd.Flags().StringVar(&opts.Status, "status", "", "list beads in this status instead of ready work: open|in_progress|blocked|closed")
-	cmd.Flags().BoolVar(&flags.untilUnblocked, "until-unblocked", false, "with --status in_progress, end the answer at its first unblocked row, resolving no row past it")
+	cmd.Flags().BoolVar(&flags.untilUnblocked, "until-unblocked", false, "with --status in_progress, leave out rows on an active hold and end the answer at its first unblocked row, resolving no row past it")
 	// --json is accepted for parity with `bd ready --json`, which the generated
 	// work_query carries verbatim. The payload is a JSON array either way; the
 	// flag exists so the query does not have to be rewritten to drop it.
@@ -169,13 +169,19 @@ func cmdReady(flags readyFlags, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if rows, ok := readyThroughController(cityPath, flags.query, stderr); ok {
+	controllerQuery := flags.query
+	if flags.untilUnblocked {
+		// The controller cannot leave held rows out, so it is asked for the
+		// whole answer: a held row in a bounded answer would take a place in the
+		// window that an unheld claim behind it should have.
+		controllerQuery.Limit = 0
+	}
+	if rows, ok := readyThroughController(cityPath, controllerQuery, stderr); ok {
 		if flags.untilUnblocked {
-			// The controller answers the whole window with every row resolved, and
-			// its cut is the in-process read's answer. A row past the cut that cannot
-			// be resolved fails the controller's read instead, and the in-process
-			// read below answers.
-			rows = readywork.CutUntilUnblocked(rows)
+			// The controller answers with every row resolved, and its cut is the
+			// in-process read's answer. A row that cannot be resolved fails the
+			// controller's read instead, and the in-process read below answers.
+			rows = readywork.CutUntilUnblocked(rows, flags.query.Limit)
 		}
 		if err := writeJSON(stdout, rows); err != nil {
 			fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr

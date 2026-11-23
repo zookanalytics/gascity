@@ -535,7 +535,7 @@ func TestCutUntilUnblockedEndsAResolvedAnswerAtItsFirstUnblockedRow(t *testing.T
 		{"empty answer", nil, []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := rowIDs(CutUntilUnblocked(tc.rows)); !slices.Equal(got, tc.want) {
+			if got := rowIDs(CutUntilUnblocked(tc.rows, 0)); !slices.Equal(got, tc.want) {
 				t.Fatalf("CutUntilUnblocked = %v, want %v", got, tc.want)
 			}
 		})
@@ -543,9 +543,9 @@ func TestCutUntilUnblockedEndsAResolvedAnswerAtItsFirstUnblockedRow(t *testing.T
 }
 
 // TestCutOfTheWholeWindowIsTheUntilUnblockedRead pins the property the CLI's
-// controller route rests on: when every row of the window resolves, cutting the
-// whole window's answer gives exactly the rows, and the blockers, that
-// ReadUntilUnblocked reads in-process.
+// controller route rests on: when every row resolves, cutting the controller's
+// unbounded answer with the read's bound gives exactly the rows, and the
+// blockers, that ReadUntilUnblocked reads in-process.
 func TestCutOfTheWholeWindowIsTheUntilUnblockedRead(t *testing.T) {
 	store := beads.NewMemStore()
 	gate := openGate(t, store)
@@ -556,7 +556,7 @@ func TestCutOfTheWholeWindowIsTheUntilUnblockedRead(t *testing.T) {
 	inProgressRow(t, store, "later claim", 3)
 	legs := []Leg{testLeg("city", store)}
 
-	whole, err := Read(legs, inProgressWindow(20))
+	whole, err := Read(legs, inProgressWindow(0))
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
@@ -564,7 +564,7 @@ func TestCutOfTheWholeWindowIsTheUntilUnblockedRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadUntilUnblocked: %v", err)
 	}
-	if want := CutUntilUnblocked(whole); !reflect.DeepEqual(got, want) {
+	if want := CutUntilUnblocked(whole, 20); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ReadUntilUnblocked = %+v\nwant the cut of the whole window %+v", got, want)
 	}
 	if len(got) != 3 {
@@ -581,12 +581,12 @@ func untilUnblockedAndWhole(t *testing.T, legs []Leg) []ReadyBead {
 	if err != nil {
 		t.Fatalf("Read(--until-unblocked): %v", err)
 	}
-	whole, err := Read(legs, inProgressWindow(20))
+	whole, err := Read(legs, inProgressWindow(0))
 	if err != nil {
-		t.Fatalf("Read(whole window): %v", err)
+		t.Fatalf("Read(whole answer): %v", err)
 	}
-	if got, want := rowIDs(cut), rowIDs(CutUntilUnblocked(whole)); !slices.Equal(got, want) {
-		t.Fatalf("cut %v != CutUntilUnblocked(whole window) %v", got, want)
+	if got, want := rowIDs(cut), rowIDs(CutUntilUnblocked(whole, 20)); !slices.Equal(got, want) {
+		t.Fatalf("cut %v != CutUntilUnblocked(whole answer, 20) %v", got, want)
 	}
 	return cut
 }
@@ -625,5 +625,123 @@ func TestUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
 	cut = untilUnblockedAndWhole(t, legs)
 	if got, want := rowIDs(cut), []string{unresolvable.ID, byGraph.ID}; !slices.Equal(got, want) {
 		t.Fatalf("after the graph bead closed: split cut = %v, want %v", got, want)
+	}
+}
+
+// labeledInProgressRow is inProgressRow carrying labels.
+func labeledInProgressRow(t *testing.T, store beads.Store, title string, p int, labels []string, blockers ...string) beads.Bead {
+	t.Helper()
+	row := inProgressRow(t, store, title, p, blockers...)
+	if err := store.Update(row.ID, beads.UpdateOpts{Labels: labels}); err != nil {
+		t.Fatalf("label %s: %v", row.ID, err)
+	}
+	return row
+}
+
+// TestUntilUnblockedLeavesHeldRowsOutBeforeTheBoundAndTheCut pins that the
+// crash-recovery read leaves a claim on an active hold out of its answer, as it
+// leaves out a type it excludes: a held claim is never the one the tier
+// resumes, so as the first unblocked row it would end the answer, and the
+// resumable claim behind it would never be read. Every hold value is a hold,
+// whatever it names, and the held rows do not take places in the window. The
+// plain read is the control: it reads the held rows.
+func TestUntilUnblockedLeavesHeldRowsOutBeforeTheBoundAndTheCut(t *testing.T) {
+	store := beads.NewMemStore()
+	var held []string
+	for _, label := range []string{"hold:mayor", "hold:po", " Hold:Release-Train "} {
+		held = append(held, labeledInProgressRow(t, store, "held claim "+label, 0, []string{label}).ID)
+	}
+	cleared := labeledInProgressRow(t, store, "claim with a hold since cleared", 1, []string{"hold:cleared", "hold:"})
+	claim := inProgressRow(t, store, "resumable claim", 2)
+	legs := []Leg{testLeg("city", store)}
+
+	whole, err := Read(legs, inProgressWindow(2))
+	if err != nil {
+		t.Fatalf("Read(--limit 2): %v", err)
+	}
+	if got := rowIDs(whole); !slices.Equal(got, held[:2]) {
+		t.Fatalf("control: Read(--limit 2) = %v, want the two held claims that sort first", got)
+	}
+
+	rows, err := readUntilUnblocked(legs, 2)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked --limit 2): %v", err)
+	}
+	if got := rowIDs(rows); !slices.Equal(got, []string{cleared.ID}) {
+		t.Fatalf("Read(--until-unblocked --limit 2) = %v, want the claim whose hold was cleared, the first unheld unblocked one", got)
+	}
+
+	if err := store.Update(cleared.ID, beads.UpdateOpts{Labels: []string{"hold:po"}}); err != nil {
+		t.Fatalf("hold %s again: %v", cleared.ID, err)
+	}
+	rows, err = readUntilUnblocked(legs, 2)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked --limit 2) after the hold came back: %v", err)
+	}
+	if got := rowIDs(rows); !slices.Equal(got, []string{claim.ID}) {
+		t.Fatalf("Read(--until-unblocked --limit 2) = %v, want %s: hold:cleared beside an active hold is held", got, claim.ID)
+	}
+}
+
+// TestUntilUnblockedResolvesNothingForAHeldRow pins that a held row costs the
+// read nothing: its blockers are never read, so a held claim whose edges
+// cannot be read does not fail the read of the claim the tier resumes.
+func TestUntilUnblockedResolvesNothingForAHeldRow(t *testing.T) {
+	store := beads.NewMemStore()
+	held := labeledInProgressRow(t, store, "held claim", 0, []string{"hold:po"})
+	claim := inProgressRow(t, store, "resumable claim", 1)
+
+	rows, err := readUntilUnblocked([]Leg{testLeg("city", failingDepListStore{MemStore: store, failDepList: held.ID})}, 20)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked) with the held row's edges unreadable: %v", err)
+	}
+	if got := rowIDs(rows); !slices.Equal(got, []string{claim.ID}) {
+		t.Fatalf("Read(--until-unblocked) = %v, want only %s", got, claim.ID)
+	}
+}
+
+// TestCutUntilUnblockedLeavesHeldRowsOut pins the cut the CLI makes of the
+// controller's whole answer: held rows are left out before the bound, so the
+// controller route answers what the in-process read answers.
+func TestCutUntilUnblockedLeavesHeldRowsOut(t *testing.T) {
+	held := ReadyBead{ID: "held", Labels: []string{"hold:po"}}
+	gated := ReadyBead{ID: "gated", BlockedBy: []ReadyBeadBlocker{{ID: "gate", Status: "open"}}}
+	cleared := ReadyBead{ID: "cleared", Labels: []string{"hold:cleared"}}
+	free := ReadyBead{ID: "free"}
+	for _, tc := range []struct {
+		name  string
+		rows  []ReadyBead
+		limit int
+		want  []string
+	}{
+		{"held head", []ReadyBead{held, free}, 0, []string{"free"}},
+		{"held rows take no place in the bound", []ReadyBead{held, held, gated, free}, 2, []string{"gated", "free"}},
+		{"cleared hold is no hold", []ReadyBead{held, cleared, free}, 0, []string{"cleared"}},
+		{"only held rows", []ReadyBead{held}, 0, []string{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := rowIDs(CutUntilUnblocked(tc.rows, tc.limit)); !slices.Equal(got, tc.want) {
+				t.Fatalf("CutUntilUnblocked(limit %d) = %v, want %v", tc.limit, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCutOfTheWholeAnswerIsTheUntilUnblockedReadWithHeldRows pins the property
+// the CLI's controller route rests on when held rows sort ahead: cutting the
+// controller's unbounded answer with the read's bound gives exactly the rows
+// ReadUntilUnblocked reads in-process.
+func TestCutOfTheWholeAnswerIsTheUntilUnblockedReadWithHeldRows(t *testing.T) {
+	store := beads.NewMemStore()
+	gate := openGate(t, store)
+	labeledInProgressRow(t, store, "held claim", 0, []string{"hold:po"})
+	labeledInProgressRow(t, store, "held gated claim", 0, []string{"hold:external"}, gate)
+	inProgressRow(t, store, "gated claim", 1, gate)
+	inProgressRow(t, store, "resumable claim", 2)
+	legs := []Leg{testLeg("city", store)}
+
+	cut := untilUnblockedAndWhole(t, legs)
+	if len(cut) != 2 {
+		t.Fatalf("ReadUntilUnblocked = %v, want the gated claim then the resumable one", rowIDs(cut))
 	}
 }

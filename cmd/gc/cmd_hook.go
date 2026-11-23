@@ -1707,8 +1707,8 @@ func workQueryHasReadyWork(output string) bool {
 // filterUnreadyHookCandidates strips beads from work_query output that fail
 // bd ready semantics: bd's deferred status (dated or not) or a future
 // defer_until, any open blocking dep in the row's blocked_by array, the row's
-// own is_blocked / status=="blocked" marker, or a canonical dispatch hold
-// label. The work_query is expected to gate these, but defensive filtering
+// own is_blocked / status=="blocked" marker, or an active hold label
+// (isHeldHookCandidate). The work_query is expected to gate these, but defensive filtering
 // here prevents a single broken query from cascading into agent action on a
 // bead it cannot progress.
 // Pure function over JSON; takes time.Time so tests stay deterministic.
@@ -1904,9 +1904,9 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 	return false
 }
 
-// isHeldHookCandidate reports whether item carries a canonical dispatch hold
-// label (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
-// required next actor or condition is, by construction, not this session.
+// isHeldHookCandidate reports whether item carries an active hold label
+// (beadmeta.HasActiveHold) — a bead deliberately parked because its required
+// next actor or condition is, by construction, not this session.
 //
 // Serving one as work is never right for ANY hook path: the assignee cannot
 // advance it, and because the assignment is never released the same bead comes
@@ -1917,17 +1917,17 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // hold dimension is filtered here, in the one seam every hook path already runs
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
-// Only the two canonical values match: each label is trimmed and compared
-// whole, case-insensitively, against the shared beadmeta constants, so
-// unrelated labels that merely look hold-ish (`mpr-human-hold`, the routing
-// label `needs-mayor`) are ordinary work and must not be stranded.
+// Every hold:<value> label whose value is nonempty and not cleared matches,
+// whatever the value names: the value is the pack's vocabulary, never an agent
+// this code knows. Labels that only contain the word (`mpr-human-hold`,
+// `on-hold`) are ordinary work and must not be stranded.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the
 // is_blocked projection above it.
 //
 // Scope (ga-5736js): this filters what the hook SERVES as work, on every hook
-// path. The controller applies the same predicate (beadmeta.HasDispatchHold)
+// path. The controller applies the same predicate (beadmeta.HasActiveHold)
 // to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
 // keep its assignee awake, and is not a drain-ack strand. The rest of the
 // assignment's accounting stays hold-transparent: the assigned-work snapshot,
@@ -1948,7 +1948,7 @@ func isHeldHookCandidate(item map[string]any) bool {
 	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
 	// answer with the same function, so they cannot drift from what the hook
 	// actually refuses to serve.
-	return beadmeta.HasDispatchHold(labels)
+	return beadmeta.HasActiveHold(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth

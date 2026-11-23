@@ -272,8 +272,9 @@ func TestGraphDispatchReadBeadStateReadsAllFieldsInOneCall(t *testing.T) {
 // TestGraphDispatchRoutedQueueServesOnlyUnheldWork pins fetch_routed_queue,
 // the graph worker's between-hook-polls read of its learned route: it serves
 // what the routed tier of the default work query serves (the bd flags cover
-// unassigned and non-epic), so a bead on a hold:* dispatch label is dropped,
-// and an empty or failed read reports no work.
+// unassigned and non-epic), so a bead on an active hold is dropped whatever the
+// hold names, a bead whose only hold label is cleared or empty is served, and
+// an empty or failed read reports no work.
 func TestGraphDispatchRoutedQueueServesOnlyUnheldWork(t *testing.T) {
 	fns := graphDispatchFuncs(t, "bounded", "json_payload", "fetch_routed_queue")
 	cases := []struct {
@@ -284,8 +285,8 @@ func TestGraphDispatchRoutedQueueServesOnlyUnheldWork(t *testing.T) {
 	}{
 		{
 			name:   "unheld work is served",
-			stdout: `[{"id":"gc-1","labels":["pool:worker"]},{"id":"gc-2"},{"id":"gc-3","labels":["hold:external"]}]`,
-			want:   "gc-1,gc-2",
+			stdout: `[{"id":"gc-1","labels":["pool:worker"]},{"id":"gc-2"},{"id":"gc-3","labels":["hold:external"]},{"id":"gc-4","labels":["hold:po"]},{"id":"gc-5","labels":["hold:cleared","hold:"]},{"id":"gc-6","labels":["hold:cleared"," Hold:Release-Train "]}]`,
+			want:   "gc-1,gc-2,gc-5",
 		},
 		{name: "only held work", stdout: `[{"id":"gc-3","labels":["hold:external"]}]`},
 		{name: "empty queue", stdout: `[]`},

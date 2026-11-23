@@ -67,14 +67,14 @@ const WAITING_CHECKPOINT_VALUE = 'awaiting-human';
 const WAITING_WHO_META_KEY = 'gc.waiting_on';
 const HOLD_LABEL_PREFIX = 'hold:';
 
-// The two canonical `hold:<value>` label values, mirrored from
-// internal/beadmeta/hold_labels.go (HoldMayorLabel / HoldExternalLabel).
-// engdocs/contributors/hold-label-conventions.md is the shared definition:
-// these are the ONLY sanctioned hold values — "the required next actor is the
-// mayor" and "the required next actor or condition is outside this bd
-// instance" — and neither carries a parenthetical, so without an explicit
+// The two `hold:<value>` label values this repository's own tracker treats as
+// canonical (engdocs/contributors/hold-label-conventions.md): "the required
+// next actor is the mayor" and "the required next actor or condition is outside
+// this bd instance". Neither carries a parenthetical, so without an explicit
 // mapping both fall through to the generic "human" and lose the actor this
-// chip exists to name. Keep in sync with the Go constants.
+// chip exists to name. The runtime holds work on any hold:<value>
+// (internal/beadmeta ActiveHoldValue); this view names an actor only for these
+// two.
 const HOLD_MAYOR_LABEL = 'hold:mayor';
 const HOLD_EXTERNAL_LABEL = 'hold:external';
 const CANONICAL_HOLD_ACTORS: ReadonlyMap<string, string> = new Map([

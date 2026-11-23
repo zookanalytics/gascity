@@ -139,8 +139,8 @@ _pog_branch_id_bead_inactive() {
 # and returns 0 when the bead reads as currently owned by this session;
 # otherwise prints a short, undecorated reason and returns 1. Checks, in
 # order: status open/in_progress, assignee among this session's live
-# identities, gc.routed_to unset-or-matching, no hold:mayor/hold:external
-# label. Shared by assert_bead_still_claimed (the public push gate, which
+# identities, gc.routed_to unset-or-matching, no active hold:<value> label.
+# Shared by assert_bead_still_claimed (the public push gate, which
 # wraps the reason into its own BLOCKED/--no-verify message below) and
 # _pog_resolve_bead_id's undeclared-single-match tier (ga-0ywrmy.1, which
 # discards the reason and uses only the pass/fail to decide whether an
@@ -152,11 +152,14 @@ _pog_branch_id_bead_inactive() {
 # there is a read-only-variable error, not a shadow.
 _pog_ownership_violation() {
     local json="$1"
-    local bead_status assignee routed_to labels
+    local bead_status assignee routed_to held
     bead_status="$(jq -r '.[0].status // empty' <<<"$json")"
     assignee="$(jq -r '.[0].assignee // empty' <<<"$json")"
     routed_to="$(jq -r '.[0].metadata."gc.routed_to" // empty' <<<"$json")"
-    labels="$(jq -r '.[0].labels[]? // empty' <<<"$json")"
+    # The first active hold label, as internal/beadmeta ActiveHoldValue reads
+    # one: trimmed, a case-insensitive hold: prefix, and a value that is
+    # nonempty and not "cleared" in any case. The value names no one here.
+    held="$(jq -r '[.[0].labels[]? | tostring | gsub("^\\s+|\\s+$"; "") | select((ascii_downcase | startswith("hold:")) and ((.[5:] | gsub("^\\s+|\\s+$"; "") | ascii_downcase) as $v | $v != "" and $v != "cleared"))] | first // empty' <<<"$json")"
 
     if [[ "$bead_status" != "in_progress" && "$bead_status" != "open" ]]; then
         printf "status is '%s', not in_progress/open; the claim behind this push is stale" "$bead_status"
@@ -184,12 +187,8 @@ _pog_ownership_violation() {
         return 1
     fi
 
-    if grep -qx 'hold:mayor' <<<"$labels"; then
-        printf 'is held (hold:mayor); a mayor ruling is pending'
-        return 1
-    fi
-    if grep -qx 'hold:external' <<<"$labels"; then
-        printf 'is held (hold:external)'
+    if [[ -n "$held" ]]; then
+        printf 'is held (%s); whoever the hold names acts next' "$held"
         return 1
     fi
 

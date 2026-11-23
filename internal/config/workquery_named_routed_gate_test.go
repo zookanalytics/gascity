@@ -40,7 +40,7 @@ func fakeBDSelfRoutedFrontier(route, beadID string) string {
 // and that they follow the route predicate immediately, are pinned against the
 // production rendering by TestWorkQueryGolden,
 // TestPoolDemandPredicateSharedWithWorkQuery and
-// TestBdReadyPoolDemandShellExcludesDispatchHoldLabels.
+// TestRouteScopedPoolDemandShellsExcludeHumanLabel.
 func routedReadGlob(route string) string {
 	return `*"--metadata-field gc.routed_to=` + route + `"*`
 }

@@ -9,7 +9,6 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -874,7 +873,7 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		{name: "ladder off: work_started names it, released (v5.10x)", reason: executionStalledDrainReason, release: true, started: "cell"},
 		{name: "ladder off: an earlier incarnation's stamp, released (v5.10x)", reason: executionStalledDrainReason, release: true, started: "old-stamp"},
 		{name: "ladder off: this incarnation's stamp, kept", reason: executionStalledDrainReason, started: "stamp"},
-		{name: "ladder off: stamped but hold:mayor, released", reason: executionStalledDrainReason, release: true, started: "stamp", hold: beadmeta.HoldMayorLabel},
+		{name: "ladder off: stamped but hold:mayor, released", reason: executionStalledDrainReason, release: true, started: "stamp", hold: "hold:mayor"},
 		{name: "ladder off: a stale marker, kept", reason: executionStalledDrainReason, stale: true},
 		{name: "ladder off mid-recycle: the ladder's recycle at this generation, kept", reason: executionStalledDrainReason, recycled: true},
 		{name: "ladder off, an unreadable ladder cell: maybe the ladder's recycle, kept", reason: executionStalledDrainReason, badCell: true},

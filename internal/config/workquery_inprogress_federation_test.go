@@ -16,7 +16,7 @@ import (
 // The federated read asks for the candidates window, not one row: the merged
 // answer's first row may be gated, and the tier serves the first row of the
 // window its gate passes (TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow).
-// The window excludes the dispatch holds and ends at its first unblocked row, so
+// The window leaves the held rows out and ends at its first unblocked row, so
 // a row past the one the tier serves is never resolved
 // (TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow). It
 // excludes mail too, so a claimed mail wisp cannot be that first unblocked row
@@ -24,7 +24,7 @@ import (
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --until-unblocked --json --limit=20)` +
 			workQueryReadFailure("gc ready --status in_progress") + `; ` +
 			servableInProgressRowsScript(1)
 		if got != want {
@@ -58,14 +58,14 @@ func TestAssignedInProgressTierOnSingleStore(t *testing.T) {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{})
 		want := `r=$(bd list --status in_progress --assignee="$` + shellVar + `" --json --limit=1)` +
 			workQueryReadFailure("bd list --status in_progress") + `; `
-		if got != want {
-			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant\n  %q", shellVar, got, want)
+		if !strings.HasPrefix(got, want) {
+			t.Errorf("single-store tier-0 for $%s =\n  %q\nwant it to open with\n  %q", shellVar, got, want)
 		}
 	}
 	// The single-store enrichment must not grow the presence key: its reader is
 	// `bd list`, whose rows never carry blocked_by, so the branch could only ever
 	// be dead shell on the path every deployment runs.
-	single := inProgressBlockedByEnrichmentScript(false, true)
+	single := inProgressBlockedByEnrichmentScript(false)
 	if strings.Contains(single, "blocked_by // empty") {
 		t.Errorf("single-store enrichment grew the federated presence key: %q", single)
 	}

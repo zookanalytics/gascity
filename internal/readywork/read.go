@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fanout"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -84,6 +85,12 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 // read, which resumes the first row of its window it can serve and needs
 // nothing past it.
 //
+// A row carrying an active hold (beadmeta.HasActiveHold) is never the one the
+// tier resumes, so the read leaves it out before its bound and its cut, as it
+// leaves out a type the query excludes, and resolves nothing for it. A held
+// row that took a place in the window, or ended the answer as its first
+// unblocked row, would hide the claim the session can resume behind it.
+//
 // Blockers are resolved in answer order and only as far as the cut, so a row
 // past it whose blockers cannot be resolved does not fail the read. A row at or
 // ahead of the cut still does: the cut cannot be placed past a row whose
@@ -91,10 +98,10 @@ func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) 
 // no unblocked row is answered whole.
 //
 // The cut is not a parameter of GET /work/ready. The controller answers the
-// whole window with every row resolved, and the CLI ends that answer with
-// CutUntilUnblocked, which is this read's answer whenever every row of the
-// window resolves. When one past the cut does not, the controller's read fails
-// and the CLI reads in-process, through this.
+// whole in_progress answer, unbounded, with every row resolved, and the CLI
+// makes this read's answer of it with CutUntilUnblocked whenever every row
+// resolves. When one does not, the controller's read fails and the CLI reads
+// in-process, through this.
 func ReadUntilUnblocked(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) {
 	c, err := compileUntilUnblocked(q)
 	if err != nil {
@@ -121,19 +128,31 @@ func compileUntilUnblocked(q Query) (compiled, error) {
 	if c.status != StatusInProgress {
 		return compiled{}, fmt.Errorf("--until-unblocked needs --status %s, the one status whose rows carry their blockers", StatusInProgress)
 	}
+	c.excludeHeld = true
 	return c, nil
 }
 
-// CutUntilUnblocked ends rows, an in_progress answer whose every row carries its
-// blockers, at its first unblocked row: the cut ReadUntilUnblocked makes,
-// applied to an answer that resolved every row.
-func CutUntilUnblocked(rows []ReadyBead) []ReadyBead {
-	for i, row := range rows {
-		if !hasOpenBlocker(row.BlockedBy) {
-			return rows[:i+1]
+// CutUntilUnblocked makes ReadUntilUnblocked's answer of rows, an unbounded
+// in_progress answer in the query's order whose every row carries its
+// blockers: the rows on an active hold left out, the rest bounded to limit
+// (0 is unbounded), and that window ended at its first unblocked row.
+func CutUntilUnblocked(rows []ReadyBead, limit int) []ReadyBead {
+	window := make([]ReadyBead, 0, len(rows))
+	for _, row := range rows {
+		if beadmeta.HasActiveHold(row.Labels) {
+			continue
+		}
+		window = append(window, row)
+		if limit > 0 && len(window) == limit {
+			break
 		}
 	}
-	return rows
+	for i, row := range window {
+		if !hasOpenBlocker(row.BlockedBy) {
+			return window[:i+1]
+		}
+	}
+	return window
 }
 
 // readCompiled answers the compiled query c over legs, ending an in_progress

@@ -396,3 +396,52 @@ func (s *routeQuerySpyStore) List(query beads.ListQuery) ([]beads.Bead, error) {
 	s.mu.Unlock()
 	return s.Store.List(query)
 }
+
+// TestRouteRepairsNeverWriteARouteFromAHold pins that no doctor repair reads a
+// hold as a route: a hold:<value> label is neither a missing route nor
+// evidence of one, even when an agent of that name exists. The explicit route
+// checks leave an unrouted held bead unrouted and a held bead's route as it
+// is.
+func TestRouteRepairsNeverWriteARouteFromAHold(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker"},
+			{Name: "po", BindingName: "pack"},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "HELD-UNROUTED", Title: "parked", Type: "task", Status: "open", Labels: []string{"hold:po"}},
+		{
+			ID: "HELD-ROUTED", Title: "parked", Type: "task", Status: "open", Labels: []string{"hold:po"},
+			Metadata: map[string]string{"gc.routed_to": "worker"},
+		},
+		{
+			ID: "HELD-BESIDE-CLEARED", Title: "parked", Type: "task", Status: "open", Labels: []string{"hold:cleared", "hold:release-train"},
+			Metadata: map[string]string{"gc.routed_to": "worker"},
+		},
+	}, nil)
+	newStore := func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+	for _, check := range []doctor.Check{
+		newV2RoutedToNamespaceCheck(cfg, cityDir, newStore),
+		newRunTargetRoutedToBackfillCheck(cfg, cityDir, newStore),
+	} {
+		if err := check.Fix(&doctor.CheckContext{}); err != nil {
+			t.Fatalf("%s Fix: %v", check.Name(), err)
+		}
+	}
+	for id, want := range map[string]string{"HELD-UNROUTED": "", "HELD-ROUTED": "worker", "HELD-BESIDE-CLEARED": "worker"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != want {
+			t.Errorf("%s gc.routed_to = %q after the route repairs, want %q: a hold names no route", id, got, want)
+		}
+	}
+}

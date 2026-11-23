@@ -2087,9 +2087,9 @@ func fenceHookDrainAck(label, reason string, opts hookClaimOptions, ops hookClai
 
 // hookHeldStartedClaim returns the first claim the session's work_started
 // cell names that is still in_progress under one of this seat's identities
-// and on no dispatch hold, read live through the hook's own bd context. A
-// held bead (hold:mayor, hold:external) is never work for the hook to serve
-// (gas-kg6), so it does not hold the ack either. err reports a read that
+// and on no active hold, read live through the hook's own bd context. A held
+// bead (beadmeta.HasActiveHold) is never work for the hook to serve (gas-kg6),
+// so it does not hold the ack either. err reports a read that
 // failed, when no held claim was found. Two reads are answers, not
 // failures: a bead the store no longer has (beads.ErrNotFound) holds
 // nothing, and an entry naming a store this context cannot read, which is
@@ -2131,7 +2131,7 @@ func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaim
 			continue
 		}
 		if strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") && hookClaimHasIdentity(b.Assignee, identities) &&
-			!beadmeta.HasDispatchHold(b.Labels) {
+			!beadmeta.HasActiveHold(b.Labels) {
 			return b, nil
 		}
 	}
@@ -2273,12 +2273,12 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			strings.TrimSpace(sibling.Assignee) != "" ||
 			!strings.EqualFold(strings.TrimSpace(sibling.Status), "open") ||
 			!hookClaimMatchesRoute(sibling, opts.RouteTargets) ||
-			// Pre-assignment is a decision about what to DO with a bead, and a
-			// canonical dispatch hold (beadmeta.DispatchHoldLabels) means the
-			// sibling's required next actor is, by construction, not this
-			// claimant — the same beadmeta.HasDispatchHold answer the hook's
-			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
-			beadmeta.HasDispatchHold(sibling.Labels) ||
+			// Pre-assignment is a decision about what to DO with a bead, and an
+			// active hold means the sibling's required next actor is, by
+			// construction, not this claimant — the same beadmeta.HasActiveHold
+			// answer the hook's serve filter (isHeldHookCandidate) gives
+			// (gas-kg6, #6026).
+			beadmeta.HasActiveHold(sibling.Labels) ||
 			// A pin runs the sibling in this seat's directory, so a sibling
 			// whose evidence binds it to another managed worktree is left
 			// routed for a seat in that worktree, as a fresh claim leaves it.

@@ -490,8 +490,8 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 	return flags
 }
 
-// assignedOpenWorkHeld reports whether b is OPEN assigned work parked on a
-// canonical dispatch hold (beadmeta.HasDispatchHold). Such a row is never work
+// assignedOpenWorkHeld reports whether b is OPEN assigned work parked on an
+// active hold (beadmeta.HasActiveHold). Such a row is never work
 // for its assignee — the hook's serve filter (isHeldHookCandidate) strips it
 // before claiming — so it must never be wake demand either: counting it wakes a
 // session whose hook immediately drain-acks no_work, and the controller re-wakes
@@ -501,5 +501,5 @@ func readyAssignedFlagsForBeads(readyAssigned map[storeScopedBeadKey]bool, beadL
 // and stays hold-transparent for demand/liveness accounting (ga-5736js), so its
 // owner remains visible to crash recovery.
 func assignedOpenWorkHeld(b beads.Bead) bool {
-	return b.Status == "open" && beadmeta.HasDispatchHold(b.Labels)
+	return b.Status == "open" && beadmeta.HasActiveHold(b.Labels)
 }

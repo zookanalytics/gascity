@@ -364,6 +364,21 @@ func singleStoreReadCount(command string) int {
 		strings.Count(command, bdListInProgressCommand)
 }
 
+// crashRecoveryExtraReadWords counts the reader words the single-store
+// crash-recovery tiers of a command carry beyond their federated form's. Each
+// such tier reads `bd list` twice, its one-row window and the unbounded read
+// that looks past a held row (unheldWindowScript), where the federated tier
+// reads once, because `gc ready --until-unblocked` leaves the held rows out
+// itself. That is the one sanctioned difference in the number of reads, and a
+// read names its reader twice: in its command and in its failure clause.
+func crashRecoveryExtraReadWords(single string) int {
+	tiers := 0
+	for _, shellVar := range []string{"id", "cand"} {
+		tiers += strings.Count(single, singleQuoteEscaped(assignedInProgressTierCommand(shellVar, QueryTopology{})))
+	}
+	return 2 * tiers
+}
+
 // renormalizeFederatedCommand maps a federated command back onto the
 // single-store one by undoing ONLY the differences the swap is allowed to make:
 // the reader words, their failure clauses, and the crash-recovery tier's
@@ -384,11 +399,11 @@ func renormalizeFederatedCommand(federated string) string {
 		return strings.ReplaceAll(in, singleQuoteEscaped(from), singleQuoteEscaped(to))
 	}
 	federated = replaceFragment(federated,
-		inProgressBlockedByEnrichmentScript(true, true),
-		inProgressBlockedByEnrichmentScript(false, true))
+		inProgressBlockedByEnrichmentScript(true),
+		inProgressBlockedByEnrichmentScript(false))
 	federated = replaceFragment(federated,
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true, true),
-		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false, true))
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(true),
+		inProgressBlockedByEnrichmentScriptDeferringGraphAnchor(false))
 	for _, shellVar := range []string{"id", "cand"} {
 		federated = replaceFragment(federated,
 			assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true}),
@@ -417,8 +432,8 @@ func TestFederatedSwapChangesOnlyTheReader(t *testing.T) {
 			federated := v.forTopo(shape.agent, QueryTopology{Beads: bd105, FederatedReady: true})
 			if n := singleStoreReadCount(single); n == 0 {
 				t.Fatalf("%s/%s: single-store command contains no read to swap", shape.name, v.name)
-			} else if got := strings.Count(federated, gcReadyCommand); got != n {
-				t.Errorf("%s/%s: single-store command has %d swappable reads, federated has %d %q", shape.name, v.name, n, got, gcReadyCommand)
+			} else if got, want := strings.Count(federated, gcReadyCommand), n-crashRecoveryExtraReadWords(single); got != want {
+				t.Errorf("%s/%s: single-store command names its readers %d times, federated names %q %d times, want %d", shape.name, v.name, n, gcReadyCommand, got, want)
 			}
 			if strings.Contains(federated, bdReadyCommand) {
 				t.Errorf("%s/%s: federated command still shells %q, so that tier stays blind on a split city: %q", shape.name, v.name, bdReadyCommand, federated)

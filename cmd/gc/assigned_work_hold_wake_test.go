@@ -21,9 +21,9 @@ import (
 // stopped the session, emitted session.drain_acked_with_assigned_work, and woke
 // it again on the next tick — ~470 times in 24h.
 //
-// The rule these tests pin: an OPEN assigned bead parked on a dispatch hold is
+// The rule these tests pin: an OPEN assigned bead parked on an active hold is
 // not work for its assignee (gas-kg6), so it is not wake demand either. The hook
-// and the controller answer with the same predicate (beadmeta.HasDispatchHold).
+// and the controller answer with the same predicate (beadmeta.HasActiveHold).
 // In_progress held work stays hold-transparent (ga-5736js): it is a claimed
 // ownership fact and keeps its owner visible to recovery.
 
@@ -43,10 +43,11 @@ func heldAssignedOpenWorkCity() *config.City {
 	}
 }
 
-// heldLabelVariants is every canonical hold value plus a case/space variant the
-// hook's EqualFold filter also strips.
+// heldLabelVariants are active hold labels: the values the runtime always
+// honored, pack-defined values it reads no meaning into, and a case/space
+// variant the predicate folds.
 func heldLabelVariants() []string {
-	return append(append([]string(nil), beadmeta.DispatchHoldLabels...), " Hold:External ")
+	return []string{"hold:mayor", "hold:external", "hold:po", "hold:release-train", " Hold:External "}
 }
 
 func TestBuildDesiredState_OnDemandNamedSession_HeldAssignedOpenWorkIsNotWakeDemand(t *testing.T) {
@@ -83,7 +84,7 @@ func TestBuildDesiredState_OnDemandNamedSession_HeldAssignedOpenWorkIsNotWakeDem
 func TestBuildDesiredState_OnDemandNamedSession_UnheldAssignedOpenWorkStillWakesBesideHeld(t *testing.T) {
 	store := beads.NewMemStore()
 	for _, b := range []beads.Bead{
-		{Title: "held", Type: "task", Status: "open", Assignee: "olivia", Labels: []string{beadmeta.HoldExternalLabel}},
+		{Title: "held", Type: "task", Status: "open", Assignee: "olivia", Labels: []string{"hold:external"}},
 		{Title: "actionable", Type: "task", Status: "open", Assignee: "olivia"},
 	} {
 		if _, err := store.Create(b); err != nil {
@@ -97,26 +98,31 @@ func TestBuildDesiredState_OnDemandNamedSession_UnheldAssignedOpenWorkStillWakes
 }
 
 // ga-5736js scope pin: an in_progress held bead is a claimed ownership fact, so
-// it keeps its owner's demand. Only OPEN held work loses wake readiness.
+// it keeps its owner's demand, whatever the hold names. Only OPEN held work
+// loses wake readiness.
 func TestBuildDesiredState_OnDemandNamedSession_HeldInProgressWorkKeepsDemand(t *testing.T) {
-	store := beads.NewMemStore()
-	b, err := store.Create(beads.Bead{
-		Title:    "claimed then parked",
-		Type:     "task",
-		Status:   "open",
-		Assignee: "olivia",
-		Labels:   []string{beadmeta.HoldExternalLabel},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	inProgress := "in_progress"
-	if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
-		t.Fatal(err)
-	}
-	ds := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), heldAssignedOpenWorkCity(), runtime.NewFake(), store, io.Discard)
-	if !ds.NamedSessionDemand["olivia"] {
-		t.Fatal("NamedSessionDemand[olivia] = false for held in_progress work; in_progress ownership stays hold-transparent (ga-5736js)")
+	for _, label := range heldLabelVariants() {
+		t.Run(label, func(t *testing.T) {
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{
+				Title:    "claimed then parked",
+				Type:     "task",
+				Status:   "open",
+				Assignee: "olivia",
+				Labels:   []string{label},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			inProgress := "in_progress"
+			if err := store.Update(b.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+				t.Fatal(err)
+			}
+			ds := buildDesiredState("test-city", t.TempDir(), time.Now().UTC(), heldAssignedOpenWorkCity(), runtime.NewFake(), store, io.Discard)
+			if !ds.NamedSessionDemand["olivia"] {
+				t.Fatal("NamedSessionDemand[olivia] = false for held in_progress work; in_progress ownership stays hold-transparent (ga-5736js)")
+			}
+		})
 	}
 }
 
@@ -127,7 +133,7 @@ func TestSessionHasAwakeAssignedWork_HeldOpenWorkIsNotAwakeDemand(t *testing.T) 
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title: "held", Type: "task", Status: "open", Assignee: "olivia",
-		Labels: []string{beadmeta.HoldExternalLabel},
+		Labels: []string{"hold:external"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +185,7 @@ func TestDrainAckOpenArm_UnheldOpenWorkBesideHeldStillFires(t *testing.T) {
 	store := beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{
 		Title: "held", Type: "task", Status: "open", Assignee: "olivia",
-		Labels: []string{beadmeta.HoldMayorLabel},
+		Labels: []string{"hold:po"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -198,13 +204,17 @@ func TestDrainAckOpenArm_UnheldOpenWorkBesideHeldStillFires(t *testing.T) {
 
 // The hook's serve filter and the controller's wake/claimability gates must
 // answer with the same predicate, or they drift and the loop returns.
-func TestHeldHookCandidateAgreesWithDispatchHoldPredicate(t *testing.T) {
+func TestHeldHookCandidateAgreesWithActiveHoldPredicate(t *testing.T) {
 	cases := [][]string{
 		nil,
 		{"mysql-cutover"},
-		{"needs-mayor", "mpr-human-hold"},
-		{beadmeta.HoldExternalLabel},
-		{"x", beadmeta.HoldMayorLabel},
+		{"needs-review", "mpr-human-hold", "on-hold"},
+		{"hold:external"},
+		{"x", "hold:mayor"},
+		{"hold:po"},
+		{"hold:cleared"},
+		{"hold:cleared", "hold:release-train"},
+		{"hold:", "hold"},
 		{" Hold:External "},
 	}
 	for _, labels := range cases {
@@ -215,8 +225,8 @@ func TestHeldHookCandidateAgreesWithDispatchHoldPredicate(t *testing.T) {
 		item := map[string]any{"labels": raw}
 		bead := beads.Bead{Status: "open", Assignee: "olivia", Labels: labels}
 		hook := isHeldHookCandidate(item)
-		if want := beadmeta.HasDispatchHold(labels); hook != want {
-			t.Errorf("labels %q: isHeldHookCandidate = %v, beadmeta.HasDispatchHold = %v", labels, hook, want)
+		if want := beadmeta.HasActiveHold(labels); hook != want {
+			t.Errorf("labels %q: isHeldHookCandidate = %v, beadmeta.HasActiveHold = %v", labels, hook, want)
 		}
 		if wakes := !assignedOpenWorkHeld(bead); wakes == hook {
 			t.Errorf("labels %q: hook serves=%v but controller wake gate counts=%v; they must agree", labels, !hook, wakes)

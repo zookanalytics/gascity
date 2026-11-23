@@ -12,11 +12,11 @@ import (
 )
 
 // Coverage for #8010: the assigned-ready tier serves its first row and exits
-// the work query, so a dispatch-held OPEN assignment it returns starves every
-// tier below it. Its ready read excludes beadmeta.DispatchHoldLabels (never the
-// human label) before its --limit=1, and its bd-1.0.4 wisp probe drops the same
-// labels before its `.[:1]` cut, so a held row is neither served nor able to
-// shadow an unheld assignment. These tests EXECUTE the generated query against a
+// the work query, so a held OPEN assignment it returns starves every tier below
+// it. Its ready read drops rows on an active hold (never the human label)
+// before its one-row window, and its bd-1.0.4 wisp probe drops the same rows
+// before its `.[:1]` cut, so a held row is neither served nor able to shadow an
+// unheld assignment. These tests EXECUTE the generated query against a
 // fake reader that honors the filter flags, so they pin observable behavior.
 
 // fakeFilteringReader stands in for both `bd` and `gc`. `ready` and `list`
@@ -221,20 +221,22 @@ func assignedHoldSeatIdentities() map[string]string {
 }
 
 // TestAssignedReadyHeldOnlyFallsThroughToRoutedTier: a held OPEN assignment on
-// any seat identity, for either hold and every reader shape, yields an empty
-// assigned-ready page, so the routed step below is served.
+// any seat identity, for every hold value and every reader shape, yields an
+// empty assigned-ready page, so the routed step below is served. The one-row
+// read came back full and held, so the tier read again unbounded to look past
+// it.
 func TestAssignedReadyHeldOnlyFallsThroughToRoutedTier(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
 		for identityName, identity := range assignedHoldSeatIdentities() {
-			for _, hold := range beadmeta.DispatchHoldLabels {
+			for _, hold := range activeHoldFixtures() {
 				t.Run(topoName+"/"+identityName+"/"+hold, func(t *testing.T) {
 					got, log := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
 						assignedOpenRow("held", identity, hold),
 						routedOpenRow(),
 					})
 					assertServed(t, got, "routed")
-					if !strings.Contains(log, "--assignee="+identity+" --exclude-label hold:mayor --exclude-label hold:external --json --limit=1") {
-						t.Errorf("assigned-ready read for %s does not exclude the dispatch holds before its limit; reads:\n%s", identity, log)
+					if !strings.Contains(log, "--assignee="+identity+" --json --limit=0") {
+						t.Errorf("assigned-ready read for %s did not look past its held one-row window; reads:\n%s", identity, log)
 					}
 				})
 			}
@@ -248,7 +250,7 @@ func TestAssignedReadyHeldOnlyFallsThroughToRoutedTier(t *testing.T) {
 func TestLegacyControlAssignedReadyHeldOnlyFallsThrough(t *testing.T) {
 	const legacyAlias = "rig/workflow-control"
 	for topoName, topo := range assignedHoldTopologies() {
-		for _, hold := range beadmeta.DispatchHoldLabels {
+		for _, hold := range activeHoldFixtures() {
 			t.Run(topoName+"/"+hold, func(t *testing.T) {
 				script := legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`
 				got, _ := runFilteredQuery(t, script, map[string]string{"GC_ALIAS": "rig/" + ControlDispatcherAgentName},
@@ -261,36 +263,34 @@ func TestLegacyControlAssignedReadyHeldOnlyFallsThrough(t *testing.T) {
 	}
 }
 
-// TestAssignedReadyScriptsExcludeDispatchHoldsNotHuman pins the generator: both
-// assigned-ready loops carry every canonical dispatch hold and never the human
-// label, on both readers.
-func TestAssignedReadyScriptsExcludeDispatchHoldsNotHuman(t *testing.T) {
+// TestAssignedReadyScriptsExcludeActiveHoldsNotHuman pins the generator: both
+// assigned-ready loops drop held rows and never the human label, on both
+// readers.
+func TestAssignedReadyScriptsExcludeActiveHoldsNotHuman(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
 		for name, got := range map[string]string{
 			"standardAssignedReadyWorkQueryScript":      standardAssignedReadyWorkQueryScript(topo),
 			"legacyControlAssignedReadyWorkQueryScript": legacyControlAssignedReadyWorkQueryScript(topo),
 		} {
-			for _, label := range beadmeta.DispatchHoldLabels {
-				if want := `--exclude-label "` + label + `"`; !strings.Contains(got, want) {
-					t.Errorf("%s/%s() missing %q: %q", topoName, name, want, got)
-				}
+			if !strings.Contains(got, singleQuoteEscaped(excludeActiveHoldsJQClause())) {
+				t.Errorf("%s/%s() does not drop held rows: %q", topoName, name, got)
 			}
-			if strings.Contains(got, `--exclude-label "`+beadmeta.HumanLabel+`"`) {
-				t.Errorf("%s/%s() excludes the human label, which is not a dispatch hold: %q", topoName, name, got)
+			if strings.Contains(got, `--exclude-label "`+beadmeta.HumanLabel+`"`) || strings.Contains(got, `== "`+beadmeta.HumanLabel+`"`) {
+				t.Errorf("%s/%s() excludes the human label, which is not a hold: %q", topoName, name, got)
 			}
 		}
 	}
 }
 
-// TestAssignedReadyServesUnheldAssignmentBehindHeldHead: the exclusion rides
-// the reader ahead of its --limit=1, so a held assignment that sorts first
-// cannot hide an unheld one for the same identity, and the assigned tier
-// answers without reaching the routed tier.
+// TestAssignedReadyServesUnheldAssignmentBehindHeldHead: held rows are dropped
+// ahead of the one-row window, so a held assignment that sorts first cannot
+// hide an unheld one for the same identity, and the assigned tier answers
+// without reaching the routed tier.
 func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
 	for topoName, topo := range map[string]QueryTopology{"bd": singleStoreTopology(), "federated": federatedTopology()} {
 		t.Run(topoName, func(t *testing.T) {
 			got, log := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
-				assignedOpenRow("held-head", assignedHoldTestAlias, beadmeta.HoldMayorLabel),
+				assignedOpenRow("held-head", assignedHoldTestAlias, "hold:mayor"),
 				assignedOpenRow("unheld", assignedHoldTestAlias),
 				routedOpenRow(),
 			})
@@ -304,12 +304,12 @@ func TestAssignedReadyServesUnheldAssignmentBehindHeldHead(t *testing.T) {
 	}
 }
 
-// TestAssignedReadyStaysHumanTransparent: bd's human label is not a dispatch
-// hold, nor is a non-canonical hold:human label, so a task assigned to the seat
-// that carries one is still served ahead of routed work on every reader shape.
+// TestAssignedReadyStaysHumanTransparent: bd's human label is not a hold, so a
+// task assigned to the seat that carries it is still served ahead of routed
+// work on every reader shape. Inactive hold labels are served the same way.
 func TestAssignedReadyStaysHumanTransparent(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
-		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
+		for _, label := range append([]string{beadmeta.HumanLabel}, inactiveHoldFixtures()...) {
 			t.Run(topoName+"/"+label, func(t *testing.T) {
 				got, _ := runFilteredQuery(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(), []fakeReaderRow{
 					assignedOpenRow("labeled", assignedHoldTestAlias, label),
@@ -332,7 +332,7 @@ func TestAssignedReadyHeldWispFallsThroughToRoutedTier(t *testing.T) {
 	for topoName, topo := range bd104WispTopologies() {
 		for identityName, identity := range assignedHoldSeatIdentities() {
 			for pathName, dependencyCount := range wispProbePaths() {
-				for _, hold := range beadmeta.DispatchHoldLabels {
+				for _, hold := range activeHoldFixtures() {
 					t.Run(topoName+"/"+identityName+"/"+pathName+"/"+hold, func(t *testing.T) {
 						got, log := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
 							[]fakeReaderRow{routedOpenRow()},
@@ -355,13 +355,13 @@ func TestAssignedReadyHeldWispFallsThroughToRoutedTier(t *testing.T) {
 func TestAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) {
 	cases := map[string][]fakeReaderRow{
 		"fast": inCreationOrder(
-			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, beadmeta.HoldMayorLabel),
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, "hold:mayor"),
 			assignedOpenWisp("unheld", assignedHoldTestAlias, 0)),
 		"enriched": inCreationOrder(
-			assignedOpenWisp("held-head", assignedHoldTestAlias, 1, beadmeta.HoldExternalLabel),
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 1, "hold:po"),
 			assignedOpenWisp("unheld", assignedHoldTestAlias, 1)),
 		"held fast, unheld enriched": inCreationOrder(
-			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, beadmeta.HoldMayorLabel),
+			assignedOpenWisp("held-head", assignedHoldTestAlias, 0, "hold:release-train"),
 			assignedOpenWisp("unheld", assignedHoldTestAlias, 1)),
 	}
 	for topoName, topo := range bd104WispTopologies() {
@@ -388,7 +388,7 @@ func TestLegacyControlAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) 
 	const legacyAlias = "rig/workflow-control"
 	for topoName, topo := range bd104WispTopologies() {
 		for pathName, dependencyCount := range wispProbePaths() {
-			for _, hold := range beadmeta.DispatchHoldLabels {
+			for _, hold := range activeHoldFixtures() {
 				t.Run(topoName+"/"+pathName+"/"+hold, func(t *testing.T) {
 					script := legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`
 					got, _ := runFilteredQueryWithWisps(t, script, map[string]string{"GC_ALIAS": "rig/" + ControlDispatcherAgentName}, nil,
@@ -404,13 +404,12 @@ func TestLegacyControlAssignedReadyServesUnheldWispBehindHeldHead(t *testing.T) 
 	}
 }
 
-// TestAssignedReadyWispStaysHumanTransparent: the wisp probe drops the dispatch
-// holds and nothing else, so a wisp assigned to the seat that carries bd's
-// human label, or a non-canonical hold:human label, is still served ahead of
-// routed work.
+// TestAssignedReadyWispStaysHumanTransparent: the wisp probe drops held rows
+// and nothing else, so a wisp assigned to the seat that carries bd's human
+// label, or an inactive hold label, is still served ahead of routed work.
 func TestAssignedReadyWispStaysHumanTransparent(t *testing.T) {
 	for topoName, topo := range bd104WispTopologies() {
-		for _, label := range []string{beadmeta.HumanLabel, "hold:human"} {
+		for _, label := range append([]string{beadmeta.HumanLabel}, inactiveHoldFixtures()...) {
 			t.Run(topoName+"/"+label, func(t *testing.T) {
 				got, _ := runFilteredQueryWithWisps(t, assignedHoldPoolAgent().EffectiveWorkQueryFor(topo), assignedHoldSeatEnv(),
 					[]fakeReaderRow{routedOpenRow()},

@@ -7,12 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Regression coverage for gas-kg6: `gc hook --claim` handed back a bead parked
-// on a canonical dispatch hold (beadmeta.DispatchHoldLabels) as action=work.
+// on an active hold (beadmeta.HasActiveHold) as action=work.
 //
 // A hold:external / hold:mayor bead is one whose required next actor is, by
 // construction, not this session. The existing/ready-assignment paths keyed off
@@ -50,7 +49,7 @@ func holdTestClaimOptions() hookClaimOptions {
 // regression: the exact observed sequence. An in_progress bead assigned to this
 // session and parked hold:external must not come back as action=work.
 func TestHookClaimDoesNotServeHeldExistingAssignment(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range heldLabelVariants() {
 		t.Run(label, func(t *testing.T) {
 			const heldID = "gas-4cu"
 			runner := func(string, string) (string, error) {
@@ -92,7 +91,7 @@ func TestHookClaimSkipsHeldAssignmentAndClaimsReadyWork(t *testing.T) {
 	)
 	runner := func(string, string) (string, error) {
 		return `[
-			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, beadmeta.HoldExternalLabel) + `,
+			` + heldWorkQueryRow(heldID, "in_progress", holdTestIdentity, "hold:external") + `,
 			{"id":"` + readyID + `","status":"open","issue_type":"task","assignee":"","metadata":{"gc.routed_to":"` + holdTestIdentity + `"}}
 		]`, nil
 	}
@@ -129,7 +128,7 @@ func TestHookClaimSkipsHeldAssignmentAndClaimsReadyWork(t *testing.T) {
 func TestHookClaimDoesNotPromoteHeldReadyAssignment(t *testing.T) {
 	const heldID = "gas-held-open"
 	runner := func(string, string) (string, error) {
-		return `[` + heldWorkQueryRow(heldID, "open", holdTestIdentity, beadmeta.HoldMayorLabel) + `]`, nil
+		return `[` + heldWorkQueryRow(heldID, "open", holdTestIdentity, "hold:mayor") + `]`, nil
 	}
 	ops := hookClaimOps{
 		Runner: runner,
@@ -156,10 +155,14 @@ func TestHookClaimDoesNotPromoteHeldReadyAssignment(t *testing.T) {
 func TestFilterUnreadyHookCandidatesDropsHeldBeads(t *testing.T) {
 	now := time.Now()
 	in := `[
-		{"id":"held-mayor","status":"in_progress","labels":["` + beadmeta.HoldMayorLabel + `"]},
-		{"id":"held-external","status":"in_progress","labels":["` + beadmeta.HoldExternalLabel + `"]},
-		{"id":"held-both","status":"open","labels":["` + beadmeta.HoldMayorLabel + `","` + beadmeta.HoldExternalLabel + `"]},
+		{"id":"held-mayor","status":"in_progress","labels":["hold:mayor"]},
+		{"id":"held-external","status":"in_progress","labels":["hold:external"]},
+		{"id":"held-both","status":"open","labels":["hold:mayor","hold:external"]},
+		{"id":"held-po","status":"open","labels":["hold:po"]},
+		{"id":"held-beside-cleared","status":"open","labels":["hold:cleared","hold:release-train"]},
 		{"id":"plain","status":"open","labels":["mysql-cutover"]},
+		{"id":"cleared","status":"open","labels":["hold:cleared"]},
+		{"id":"empty-hold","status":"open","labels":["hold:"]},
 		{"id":"nolabels","status":"open"},
 		{"id":"nulllabels","status":"open","labels":null}
 	]`
@@ -169,7 +172,7 @@ func TestFilterUnreadyHookCandidatesDropsHeldBeads(t *testing.T) {
 	if err := json.Unmarshal([]byte(got), &rows); err != nil {
 		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
 	}
-	want := []string{"plain", "nolabels", "nulllabels"}
+	want := []string{"plain", "cleared", "empty-hold", "nolabels", "nulllabels"}
 	if len(rows) != len(want) {
 		t.Fatalf("filterUnreadyHookCandidates kept %d rows, want %d: %s", len(rows), len(want), got)
 	}
@@ -192,7 +195,6 @@ func TestFilterUnreadyHookCandidatesKeepsNonHoldLabels(t *testing.T) {
 		t.Fatalf("filtered output is not a JSON array: %v (output %q)", err, got)
 	}
 	if len(rows) != 1 || rows[0]["id"] != "wk-1" {
-		t.Fatalf("non-canonical hold-ish labels were filtered; only %v are holds. got %s",
-			beadmeta.DispatchHoldLabels, got)
+		t.Fatalf("labels that only contain the word hold were filtered; only an active hold:<value> label holds. got %s", got)
 	}
 }

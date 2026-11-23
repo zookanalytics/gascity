@@ -238,15 +238,15 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
-// A pack that parks finished work on a canonical dispatch hold clears the
-// assignee and gc.routed_to on purpose: the next actor is not the pool that
-// worked it. That leaves exactly the detached-orphan signature (open,
-// unassigned, unrouted, branch, session back-reference), so without a hold gate
-// the sweep re-stamps the old pool route behind the parker's back. Restoring a
-// route is a decision about what to DO with the bead, and DispatchHoldLabels
-// answers no to every such decision. Fails without the hold gate (restored=1).
+// A pack that parks finished work on a hold clears the assignee and
+// gc.routed_to on purpose: the next actor is not the pool that worked it. That
+// leaves exactly the detached-orphan signature (open, unassigned, unrouted,
+// branch, session back-reference), so without a hold gate the sweep re-stamps
+// the old pool route behind the parker's back. Restoring a route is a decision
+// about what to DO with the bead, and an active hold answers no to every such
+// decision, whatever its value names. Fails without the hold gate (restored=1).
 func TestSweepDetachedHandoffOrphans_SkipsHeldBead(t *testing.T) {
-	for _, hold := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "Hold:External") {
+	for _, hold := range heldLabelVariants() {
 		t.Run(hold, func(t *testing.T) {
 			store := beads.NewMemStore()
 			sessionBead, err := store.Create(beads.Bead{
@@ -305,11 +305,13 @@ func TestSweepDetachedHandoffOrphans_SkipsHeldBead(t *testing.T) {
 	}
 }
 
-// The hold gate reads the SDK's canonical hold set and nothing else. A pack's
-// own parking label is pack vocabulary the SDK cannot know, so a bead parked
-// only by such a label is still a candidate; a pack parks with a canonical hold
-// or a bd status (blocked/deferred, excluded by the Live candidate List).
-func TestDetachedHandoffOrphanCandidateHonorsOnlyCanonicalHolds(t *testing.T) {
+// The hold gate reads bd's hold state dimension and nothing else: any active
+// hold:<value> label parks the bead, whatever the value names, because the
+// value is the pack's vocabulary and the SDK reads none of it. A label outside
+// the dimension, or an inactive hold (hold:cleared, an empty value), parks
+// nothing, so such a bead is still a candidate; a pack parks with a hold or a
+// bd status (blocked/deferred, excluded by the Live candidate List).
+func TestDetachedHandoffOrphanCandidateHonorsActiveHolds(t *testing.T) {
 	base := func(labels ...string) beads.Bead {
 		return beads.Bead{ID: "H-1", Status: "open", Labels: labels, Metadata: map[string]string{
 			beadmeta.BranchMetadataKey:    "polecat/ga-h",
@@ -319,13 +321,13 @@ func TestDetachedHandoffOrphanCandidateHonorsOnlyCanonicalHolds(t *testing.T) {
 	if !isDetachedHandoffOrphanCandidate(base()) {
 		t.Fatal("the unlabeled base bead is not a candidate; every assertion below would pass vacuously")
 	}
-	for _, hold := range beadmeta.DispatchHoldLabels {
+	for _, hold := range append(heldLabelVariants(), "hold:someone-else") {
 		if isDetachedHandoffOrphanCandidate(base("upstream-pr", hold)) {
 			t.Errorf("a bead carrying %q is a detached-orphan candidate; route restore would re-route parked work", hold)
 		}
 	}
-	if !isDetachedHandoffOrphanCandidate(base("deferred:w3-scope", "hold:someone-else")) {
-		t.Error("a bead with only non-canonical labels is not a candidate; the SDK must not grow pack label vocabulary")
+	if !isDetachedHandoffOrphanCandidate(base("deferred:w3-scope", "on-hold", "hold:cleared", "hold:")) {
+		t.Error("a bead with no active hold is not a candidate; only an active hold:<value> label parks it")
 	}
 }
 

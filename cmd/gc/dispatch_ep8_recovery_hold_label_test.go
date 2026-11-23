@@ -78,7 +78,7 @@ esac
 	// still carries hold:mayor. Model what a DIFFERENT agent's subsequent
 	// route-scoped (Tier 3) hook sees when it evaluates ready work.
 	readyAfterRecovery := []beads.Bead{
-		{ID: "ga-held-work", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/builder"}, Labels: []string{beadmeta.HoldMayorLabel}},
+		{ID: "ga-held-work", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/builder"}, Labels: []string{"hold:mayor"}},
 	}
 	served := filterReadyByRoute(readyAfterRecovery, beadmeta.RunTargetMetadataKey, "gascity/builder")
 	if len(served) != 0 {
@@ -115,7 +115,7 @@ esac
 	// still carries hold:external. Model what a DIFFERENT agent's subsequent
 	// route-scoped (Tier 3) hook sees when it evaluates ready work.
 	readyAfterRecovery := []beads.Bead{
-		{ID: "ga-held-boot", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gascity/builder"}, Labels: []string{beadmeta.HoldExternalLabel}},
+		{ID: "ga-held-boot", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gascity/builder"}, Labels: []string{"hold:external"}},
 	}
 	served := filterReadyByRoute(readyAfterRecovery, beadmeta.RoutedToMetadataKey, "gascity/builder")
 	if len(served) != 0 {

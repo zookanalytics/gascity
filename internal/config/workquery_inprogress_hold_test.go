@@ -5,16 +5,14 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // Regression coverage for gas-kg6, the hold-label sibling of the dep-blocked
 // defect pinned in workquery_inprogress_blocked_test.go.
 //
 // The in_progress ("crash recovery") tier short-circuits with `exit 0` on the
-// first assigned in_progress bead it finds. A bead parked on a canonical
-// dispatch hold has no open blocking dependency, so the blocked_by gate let it
+// first assigned in_progress bead it finds. A bead parked on an active hold
+// has no open blocking dependency, so the blocked_by gate let it
 // through: the tier served the parked bead and the ready-gated tier below it
 // never ran. A worker that correctly parked its bead was therefore re-served
 // that same bead forever and could never reach its ready queue.
@@ -54,7 +52,7 @@ esac
 // the shell layer: a parked candidate must not swallow the tick — the
 // ready-gated tier still runs and serves the worker's other ready work.
 func TestInProgressTierFallsThroughWhenHeld(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range activeHoldFixtures() {
 		t.Run(label, func(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")
@@ -81,7 +79,7 @@ func TestInProgressTierSkipsHeldCandidate(t *testing.T) {
 	}
 	bdScript := `#!/bin/sh
 case "$1" in
-  list) printf '%s' '` + heldInProgressListRow(beadmeta.HoldExternalLabel) + `' ;;
+  list) printf '%s' '` + heldInProgressListRow("hold:external") + `' ;;
   show) printf '%s' '[{"id":"wk-1","status":"in_progress","dependencies":[]}]' ;;
   *) printf '[]' ;;
 esac
@@ -105,8 +103,8 @@ func TestInProgressTierServesUnheldCandidate(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
-	// Ordinary labels, including hold-ish ones that are NOT canonical dispatch
-	// holds, must not suppress the re-serve.
+	// Ordinary labels, including ones that only contain the word "hold", are
+	// not holds and must not suppress the re-serve.
 	bdScript := `#!/bin/sh
 case "$1" in
   list) printf '%s' '[{"id":"wk-1","status":"in_progress","assignee":"sess-1","labels":["mpr-human-hold","needs-mayor"]}]' ;;
@@ -128,15 +126,15 @@ esac
 
 // TestLegacyControlInProgressTierSkipsHeldCandidate pins that the
 // control-dispatcher variant of the same tier carries the identical guard —
-// it shares inProgressBlockedByEnrichmentScript, so a fix applied to only one
-// shape would silently leave the other jammed.
+// it shares assignedInProgressTierCommand, so a fix applied to only one shape
+// would silently leave the other jammed.
 func TestLegacyControlInProgressTierSkipsHeldCandidate(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available; the work-query shell requires it")
 	}
 	bdScript := `#!/bin/sh
 case "$1" in
-  list) printf '%s' '` + heldInProgressListRow(beadmeta.HoldMayorLabel) + `' ;;
+  list) printf '%s' '` + heldInProgressListRow("hold:po") + `' ;;
   show) printf '%s' '[{"id":"wk-1","status":"in_progress","dependencies":[]}]' ;;
   *) printf '[]' ;;
 esac

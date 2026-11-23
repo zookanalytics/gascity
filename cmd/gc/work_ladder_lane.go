@@ -212,7 +212,7 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 // outstanding is each seat's work (§6.2), by session ID, from today's three
 // predicates: its own trigger, open and unclaimed; exactly one ready
 // continuation pinned to it; and the in_progress claims it holds under a
-// current identity. Work on a dispatch hold (hold:mayor, hold:external) is
+// current identity. Work on an active hold (beadmeta.HasActiveHold) is
 // not the ladder's (owner ruling 2026-10-18): it stays with its agent,
 // unnudged, until the hold lifts, and then the ladder takes it up afresh. A
 // claim whose seat asked a person and waits on their decision
@@ -227,7 +227,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 	out := make(map[string][]ladderTarget)
 	held := make(map[string]bool)
 	for _, b := range slices.Concat(s.AssignedWork, s.ReadyRouted) {
-		if beadmeta.HasDispatchHold(b.Labels) {
+		if beadmeta.HasActiveHold(b.Labels) {
 			held[b.ID] = true
 		}
 	}
@@ -307,7 +307,7 @@ func (p *ladderPass) trigger(snap idleClaimWorkSnapshot, row beads.Bead) (workla
 		return workladder.ClaimKey{}, false
 	}
 	w, ok := snap.byScope[key]
-	if !ok || !isUnclaimedTrigger(p.cfg, w) || beadmeta.HasDispatchHold(w.Labels) {
+	if !ok || !isUnclaimedTrigger(p.cfg, w) || beadmeta.HasActiveHold(w.Labels) {
 		return workladder.ClaimKey{}, false
 	}
 	return workladder.ClaimKey{Store: claimStoreRef(key.StoreRef), Bead: id}, true
@@ -322,7 +322,7 @@ func (p *ladderPass) triggerRecheck(id string) func() backstopResolution {
 		switch {
 		case err != nil:
 			return backstopResolutionHold
-		case !found || !isUnclaimedTrigger(p.cfg, b) || beadmeta.HasDispatchHold(b.Labels):
+		case !found || !isUnclaimedTrigger(p.cfg, b) || beadmeta.HasActiveHold(b.Labels):
 			return backstopResolutionClear
 		}
 		return backstopResolutionOutstanding
@@ -333,7 +333,7 @@ func (p *ladderPass) triggerRecheck(id string) func() backstopResolution {
 // hold parks (b, the bead that read found) is clear: not the ladder's while
 // the hold stands.
 func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
-	if res == backstopResolutionOutstanding && beadmeta.HasDispatchHold(b.Labels) {
+	if res == backstopResolutionOutstanding && beadmeta.HasActiveHold(b.Labels) {
 		return backstopResolutionClear
 	}
 	return res
@@ -374,7 +374,7 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		switch {
 		case err != nil:
 			return backstopResolutionHold
-		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasDispatchHold(b.Labels):
+		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasActiveHold(b.Labels):
 			return backstopResolutionClear
 		}
 		status := "in_progress"
@@ -1073,7 +1073,7 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 		outcome = ladderReleaseGone // finished or moved since the snapshot: nothing to release, nothing to report
 	case len(hits) != 1:
 		outcome, why = ladderReleaseKept, fmt.Sprintf("%d live hits", len(hits))
-	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
+	case beadmeta.HasActiveHold(hits[0].bead.Labels):
 		outcome = ladderReleaseGone // parked on a hold since the snapshot: not the ladder's
 	case awaitsHuman(hits[0].bead, row.ID):
 		outcome = ladderReleaseGone // its seat asked a person since the snapshot: never released

@@ -15,27 +15,47 @@ import (
 // This file expresses the ga-x9kptu / ga-5736js acceptance criteria at the
 // Go-level control-ready evaluation path: route-scoped results
 // (filterReadyByRoute, and evaluateControlReady's routed groups) must
-// exclude beads carrying a beadmeta.DispatchHoldLabels value, while the
+// exclude beads carrying an active hold, whatever its value names, while the
 // assignee-scoped path (filterReadyByAssignee) stays hold-transparent.
 
-func TestFilterReadyByRouteExcludesDispatchHoldLabels(t *testing.T) {
+func TestFilterReadyByRouteExcludesActiveHolds(t *testing.T) {
 	older := time.Unix(100, 0)
+	routed := map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}
 	ready := []beads.Bead{
-		{ID: "ga-plain", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}},
-		{ID: "ga-held-mayor", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel}},
-		{ID: "ga-held-external", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldExternalLabel}},
-		{ID: "ga-held-both", CreatedAt: older, Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel}},
+		{ID: "ga-plain", CreatedAt: older, Metadata: routed},
+		{ID: "ga-held-mayor", CreatedAt: older, Metadata: routed, Labels: []string{"hold:mayor"}},
+		{ID: "ga-held-external", CreatedAt: older, Metadata: routed, Labels: []string{"hold:external"}},
+		{ID: "ga-held-both", CreatedAt: older, Metadata: routed, Labels: []string{"hold:mayor", "hold:external"}},
+		{ID: "ga-held-po", CreatedAt: older, Metadata: routed, Labels: []string{"hold:po"}},
+		{ID: "ga-held-beside-cleared", CreatedAt: older, Metadata: routed, Labels: []string{"hold:cleared", "Hold:Release-Train"}},
+		{ID: "ga-cleared", CreatedAt: older, Metadata: routed, Labels: []string{"hold:cleared"}},
 	}
 	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
-	want := []string{"ga-plain"}
+	want := []string{"ga-cleared", "ga-plain"} // created together, so in id order
 	if !stringSlicesEqual(beadIDs(got), want) {
-		t.Fatalf("filterReadyByRoute ids = %v, want %v (hold-labeled beads must be excluded, including a bead carrying both hold labels at once)", beadIDs(got), want)
+		t.Fatalf("filterReadyByRoute ids = %v, want %v (held beads must be excluded whatever the hold names, and a cleared hold is no hold)", beadIDs(got), want)
 	}
 }
 
-func TestFilterReadyByAssigneeDoesNotExcludeDispatchHoldLabels(t *testing.T) {
+// TestFilterReadyByRouteCutsAfterDroppingHeldBeads pins that held beads take
+// no place in the route's scan limit: an unheld bead behind a full scan of held
+// ones is still returned.
+func TestFilterReadyByRouteCutsAfterDroppingHeldBeads(t *testing.T) {
+	routed := map[string]string{beadmeta.RunTargetMetadataKey: "core/control-dispatcher"}
+	var ready []beads.Bead
+	for i := 0; i < workflowServeScanLimit; i++ {
+		ready = append(ready, beads.Bead{ID: fmt.Sprintf("ga-held-%02d", i), CreatedAt: time.Unix(int64(100+i), 0), Metadata: routed, Labels: []string{"hold:po"}})
+	}
+	ready = append(ready, beads.Bead{ID: "ga-unheld", CreatedAt: time.Unix(1000, 0), Metadata: routed})
+	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
+	if want := []string{"ga-unheld"}; !stringSlicesEqual(beadIDs(got), want) {
+		t.Fatalf("filterReadyByRoute ids = %v, want %v", beadIDs(got), want)
+	}
+}
+
+func TestFilterReadyByAssigneeDoesNotExcludeActiveHolds(t *testing.T) {
 	ready := []beads.Bead{
-		{ID: "ga-held-mayor", Assignee: "cand", Labels: []string{beadmeta.HoldMayorLabel}},
+		{ID: "ga-held-mayor", Assignee: "cand", Labels: []string{"hold:mayor"}},
 	}
 	got := filterReadyByAssignee(ready, "cand", workflowServeScanLimit)
 	want := []string{"ga-held-mayor"}
@@ -44,9 +64,9 @@ func TestFilterReadyByAssigneeDoesNotExcludeDispatchHoldLabels(t *testing.T) {
 	}
 }
 
-// bd's native human label parks a bead for a person. It is not a dispatch hold
-// (beadmeta.DispatchHoldLabels names only the two canonical holds), but the
-// route-scoped read must withhold it for the same reason: a worker cannot
+// bd's native human label parks a bead for a person. It is not a hold (no
+// hold:<value> label), but the route-scoped read must withhold it for the same
+// reason: a worker cannot
 // advance a bead that is waiting on a person, and serving it again every tick
 // burns a turn each time. The assignee-scoped tier stays transparent to it.
 func TestFilterReadyByRouteExcludesHumanLabel(t *testing.T) {
@@ -55,7 +75,7 @@ func TestFilterReadyByRouteExcludesHumanLabel(t *testing.T) {
 	ready := []beads.Bead{
 		{ID: "ga-plain", CreatedAt: older, Metadata: routed},
 		{ID: "ga-human", CreatedAt: older, Metadata: routed, Labels: []string{"human"}},
-		{ID: "ga-human-and-held", CreatedAt: older, Metadata: routed, Labels: []string{"human", beadmeta.HoldMayorLabel}},
+		{ID: "ga-human-and-held", CreatedAt: older, Metadata: routed, Labels: []string{"human", "hold:mayor"}},
 	}
 	got := filterReadyByRoute(ready, beadmeta.RunTargetMetadataKey, "core/control-dispatcher")
 	want := []string{"ga-plain"}
@@ -75,7 +95,7 @@ func TestFilterReadyByAssigneeDoesNotExcludeHumanLabel(t *testing.T) {
 	}
 }
 
-func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
+func TestEvaluateControlReadyExcludesActiveHolds(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	parsed, ok := parseControlReadyQuery(query)
 	if !ok {
@@ -87,8 +107,9 @@ func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	}
 	ready := []beads.Bead{
 		{ID: "ga-routed", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}},
-		{ID: "ga-routed-held", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel}},
-		{ID: "ga-routed-held-both", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel}},
+		{ID: "ga-routed-held", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{"hold:mayor"}},
+		{ID: "ga-routed-held-both", Metadata: map[string]string{beadmeta.RunTargetMetadataKey: "gascity/control-dispatcher"}, Labels: []string{"hold:mayor", "hold:external"}},
+		{ID: "ga-routed-held-po", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "gascity/control-dispatcher"}, Labels: []string{"hold:po"}},
 	}
 	got := evaluateControlReady(ready, parsed, envList)
 	want := []string{"ga-routed"}
@@ -97,14 +118,14 @@ func TestEvaluateControlReadyExcludesDispatchHoldLabels(t *testing.T) {
 	}
 }
 
-// TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg is
+// TestTryControlReadyScanExcludesActiveHoldsOnFileLeg is
 // ga-5736js end-to-end on an in-process leg: a routed_to-matching bead carrying
-// a beadmeta.DispatchHoldLabels value must not reach the control dispatcher's
+// an active hold must not reach the control dispatcher's
 // queue when the answer is served from a file leg's Ready read. The
 // filter-level tests above pin the rule; this one pins that the leg read
 // actually carries Labels far enough for the rule to fire. (End-to-end coverage
 // originates from PR #4787.)
-func TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg(t *testing.T) {
+func TestTryControlReadyScanExcludesActiveHoldsOnFileLeg(t *testing.T) {
 	cityDir, store := setUpControlReadyFileStoreCity(t)
 	noBDOnPathForTest(t)
 
@@ -115,17 +136,24 @@ func TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg(t *testing.T) {
 	}
 	heldMayor, err := store.Create(beads.Bead{
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
-		Labels:   []string{beadmeta.HoldMayorLabel},
+		Labels:   []string{"hold:mayor"},
 	})
 	if err != nil {
-		t.Fatalf("create %s routed bead: %v", beadmeta.HoldMayorLabel, err)
+		t.Fatalf("create %s routed bead: %v", "hold:mayor", err)
 	}
 	heldExternal, err := store.Create(beads.Bead{
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
-		Labels:   []string{beadmeta.HoldExternalLabel},
+		Labels:   []string{"hold:external"},
 	})
 	if err != nil {
-		t.Fatalf("create %s routed bead: %v", beadmeta.HoldExternalLabel, err)
+		t.Fatalf("create %s routed bead: %v", "hold:external", err)
+	}
+	heldPO, err := store.Create(beads.Bead{
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: target},
+		Labels:   []string{"hold:po"},
+	})
+	if err != nil {
+		t.Fatalf("create %s routed bead: %v", "hold:po", err)
 	}
 
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"}
@@ -145,19 +173,18 @@ func TestTryControlReadyScanExcludesDispatchHoldLabelsOnFileLeg(t *testing.T) {
 	}
 	wantIDs := []string{routed.ID}
 	if !stringSlicesEqual(gotIDs, wantIDs) {
-		t.Fatalf("queue ids = %#v, want %#v (held beads %s and %s must not be auto-routed to the pool)", gotIDs, wantIDs, heldMayor.ID, heldExternal.ID)
+		t.Fatalf("queue ids = %#v, want %#v (held beads %s, %s and %s must not be auto-routed to the pool)", gotIDs, wantIDs, heldMayor.ID, heldExternal.ID, heldPO.ID)
 	}
 }
 
-// TestTryControlReadyScanExcludesDispatchHoldLabelsOnBdLeg is ga-5736js
-// end-to-end on a bd leg: a routed_to-matching bead carrying a
-// beadmeta.DispatchHoldLabels value in the leg's single `bd ready --json`
-// response must not reach the control dispatcher's queue, matching the file
-// leg above. The hold labels are spelled as
-// literal JSON in the fake bd script on purpose -- this test pins the wire
-// format bd emits, so substituting the Go constants here would defeat it.
+// TestTryControlReadyScanExcludesActiveHoldsOnBdLeg is ga-5736js
+// end-to-end on a bd leg: a routed_to-matching bead carrying an active hold in
+// the leg's single `bd ready --json` response must not reach the control
+// dispatcher's queue, matching the file leg above. The hold labels are spelled
+// as literal JSON in the fake bd script on purpose -- this test pins the wire
+// format bd emits.
 // (End-to-end coverage originates from PR #4787.)
-func TestTryControlReadyScanExcludesDispatchHoldLabelsOnBdLeg(t *testing.T) {
+func TestTryControlReadyScanExcludesActiveHoldsOnBdLeg(t *testing.T) {
 	configureIsolatedRuntimeEnv(t)
 	cityDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
@@ -174,8 +201,8 @@ case "$1" in
     exit 7
     ;;
 esac
-printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-fallback-held-mayor","metadata":{"gc.routed_to":"%s"},"labels":["hold:mayor"]},{"id":"ga-fallback-held-external","metadata":{"gc.routed_to":"%s"},"labels":["hold:external"]}]'
-`, target, target, target)
+printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-fallback-held-mayor","metadata":{"gc.routed_to":"%s"},"labels":["hold:mayor"]},{"id":"ga-fallback-held-external","metadata":{"gc.routed_to":"%s"},"labels":["hold:external"]},{"id":"ga-fallback-held-po","metadata":{"gc.routed_to":"%s"},"labels":["hold:po"]}]'
+`, target, target, target, target)
 	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake bd: %v", err)
 	}
@@ -198,6 +225,6 @@ printf '[{"id":"ga-fallback-routed","metadata":{"gc.routed_to":"%s"}},{"id":"ga-
 	}
 	wantIDs := []string{"ga-fallback-routed"}
 	if !stringSlicesEqual(gotIDs, wantIDs) {
-		t.Fatalf("queue ids = %#v, want %#v (held beads ga-fallback-held-mayor and ga-fallback-held-external must not be auto-routed to the pool)", gotIDs, wantIDs)
+		t.Fatalf("queue ids = %#v, want %#v (held beads ga-fallback-held-mayor, ga-fallback-held-external and ga-fallback-held-po must not be auto-routed to the pool)", gotIDs, wantIDs)
 	}
 }

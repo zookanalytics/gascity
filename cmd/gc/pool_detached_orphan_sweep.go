@@ -196,7 +196,7 @@ func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool)
 }
 
 // isDetachedHandoffOrphanCandidate reports whether b has the signature of a
-// fully-detached handoff orphan: open, unassigned, not on a dispatch hold, no
+// fully-detached handoff orphan: open, unassigned, not on an active hold, no
 // pool route (neither gc.routed_to nor a legacy gc.run_target), no gc.kind, not
 // taken over by a graph workflow, not a molecule step (no gc.step_id /
 // gc.step_ref), no merge_result, a pushed-branch record (the "branch" key),
@@ -229,11 +229,12 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 	if strings.TrimSpace(b.Assignee) != "" {
 		return false // still assigned — releaseOrphanedPoolAssignments covers this path
 	}
-	if beadmeta.HasDispatchHold(b.Labels) {
+	if beadmeta.HasActiveHold(b.Labels) {
 		// Parked, not detached: whoever parked it cleared the route because the
 		// next actor is not the pool that worked it. Restoring a route decides
-		// what to DO with the bead, which a hold answers (DispatchHoldLabels);
-		// once the hold lifts the bead is a candidate again.
+		// what to DO with the bead, which a hold answers (beadmeta.HasActiveHold),
+		// whatever its value names; once the hold lifts the bead is a candidate
+		// again.
 		return false
 	}
 	if strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey]) != "" {

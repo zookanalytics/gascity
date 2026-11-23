@@ -67,7 +67,7 @@ func TestSingleSessionConfigAgentProbesItsOwnQualifiedName(t *testing.T) {
 // shell glob: which flags bdReadyPoolDemandShell renders, and that it renders
 // them immediately after the route predicate, are pinned against the production
 // rendering by TestWorkQueryGolden, TestPoolDemandPredicateSharedWithWorkQuery
-// and TestBdReadyPoolDemandShellExcludesDispatchHoldLabels. Keying this fake on
+// and TestRouteScopedPoolDemandShellsExcludeHumanLabel. Keying this fake on
 // the flag order too would only couple it to an incidental property of
 // PoolDemandServeRules.ShellArgs().
 func TestEffectiveWorkQueryForSingleSessionConfigAgentServesRoutedUnassignedWork(t *testing.T) {

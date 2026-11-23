@@ -878,9 +878,6 @@ cmd/gc/doctor_executor_identity_residue_check.go	newExecutorIdentityResidueCheck
 cmd/gc/doctor_executor_identity_residue_check.go	sameStoreEngine	raw-param	2
 cmd/gc/doctor_hold_label_conventions.go	holdLabelConventionsCheck	raw-field	1
 cmd/gc/doctor_hold_label_conventions.go	newHoldLabelConventionsCheck	raw-param	1
-cmd/gc/doctor_hold_label_routed_to.go	holdLabelRoutedToCheck	raw-field	1
-cmd/gc/doctor_hold_label_routed_to.go	holdRouteTarget	raw-field	1
-cmd/gc/doctor_hold_label_routed_to.go	newHoldLabelRoutedToCheck	raw-param	1
 cmd/gc/doctor_nested_worktree_liveness.go	doctorLiveSessionWorktreeDirs	raw-param	1
 cmd/gc/doctor_nested_worktree_liveness.go	doctorNestedWorktreeLiveness	raw-param	1
 cmd/gc/doctor_ops_recording.go	newOpsRecordingDoctorCheck	raw-param	1

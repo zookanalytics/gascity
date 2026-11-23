@@ -818,7 +818,8 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 
 // controlReadyRoutedDemandArgs renders the flag set routed_ready()'s
 // route-scoped, unassigned bd-ready calls carry: unassigned, no epics, and no
-// bead parked on a dispatch hold (ga-x9kptu / ga-5736js).
+// bead carrying bd's human label. A hold has no flag; controlReadyRoutedFilterJQ
+// drops held beads.
 //
 // It renders from config.PoolDemandServeRules — the same value the worker's
 // generated Tier-3 query and the controller's demand predicate are built from —
@@ -827,6 +828,23 @@ func workflowServeControlReadyQuery(agentCfg config.Agent, controlSessionNames .
 // hold-transparent by design and must never call this.
 func controlReadyRoutedDemandArgs() string {
 	return config.PoolDemandServeRulesForQuery().ShellArgs()
+}
+
+// controlReadyRoutedFilterJQ is the jq program routed_ready() pipes each
+// unbounded read through: the serve rules' hold filter
+// (PoolDemandServeRules.HoldFilterJQ), then the scan limit, so a held bead
+// never takes an unheld bead's place in the scan. It is escaped for a
+// double-quoted string inside the query's single-quoted sh -c script.
+func controlReadyRoutedFilterJQ(limit string) string {
+	return escapeForQuotedJQ(`[.[]` + config.PoolDemandServeRulesForQuery().HoldFilterJQ() + `] | .[:` + limit + `]`)
+}
+
+// escapeForQuotedJQ escapes a jq program for a double-quoted string inside the
+// control-ready query's single-quoted sh -c script.
+func escapeForQuotedJQ(program string) string {
+	program = strings.ReplaceAll(program, `\`, `\\`)
+	program = strings.ReplaceAll(program, `"`, `\"`)
+	return strings.ReplaceAll(program, `$`, `\$`)
 }
 
 func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg config.BeadsConfig, controlSessionNames ...string) string {
@@ -866,11 +884,12 @@ func workflowServeControlReadyQueryForBeads(agentCfg config.Agent, beadsCfg conf
 		`set -e; ` +
 		`tmp=$(mktemp); seen="$tmp.seen"; err="$tmp.err"; : > "$seen"; trap "rm -f \"$tmp\" \"$seen\" \"$err\"" EXIT; ` +
 		`emit_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
+		`emit_routed_ready() { r=$("$@" 2>"$err") || { status=$?; [ -n "$r" ] && printf "%s\n" "$r" >&2; cat "$err" >&2; return "$status"; }; kept=$(printf "%s" "$r" | jq -c "` + controlReadyRoutedFilterJQ(limit) + `" 2>/dev/null) && r="$kept"; [ -n "$r" ] && [ "$r" != "[]" ] && printf "%s\n" "$r" >> "$tmp"; return 0; }; ` +
 		`assignee_ready() { cand="$1"; [ -z "$cand" ] && return 0; if grep -Fxq "$cand" "$seen"; then return 0; fi; printf "%s\n" "$cand" >> "$seen"; ` +
 		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --assignee="$cand" --exclude-type=epic --json --limit=` + limit + `; }; ` +
 		`routed_ready() { route="$1"; [ -z "$route" ] && return 0; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
-		`emit_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=` + limit + `; ` +
+		`emit_routed_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=0; ` +
+		`emit_routed_ready bd --readonly --sandbox ready` + includeEphemeral + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$route"` + controlReadyRoutedDemandArgs() + ` --json --sort oldest --limit=0; ` +
 		`}; ` +
 		`for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL_TARGET" "$GC_SESSION_ID"; do ` +
 		`[ -z "$id" ] && continue; ` +
