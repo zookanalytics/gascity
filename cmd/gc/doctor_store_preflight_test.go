@@ -393,3 +393,63 @@ func TestBuildDoctorChecks_SkipStorePreflightSkipsProbe(t *testing.T) {
 		t.Fatalf("store checks omitted with SkipStorePreflight; names=%v", names)
 	}
 }
+
+// The stub fails outage-shaped, so a probe that ran registers
+// bead-store-preflight and drops the store checks.
+func TestBuildDoctorChecks_StorePreflightProbesOnlyABdServedCityStore(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		provider   string // city.toml [beads] provider, none when empty
+		gcBeads    string // GC_BEADS, unset when empty
+		wantProbed bool
+	}{
+		{name: "no provider means bd", wantProbed: true},
+		{name: "bd", provider: "bd", wantProbed: true},
+		{name: "gc-beads-bd exec", provider: "exec:/nonexistent/scripts/gc-beads-bd.sh", wantProbed: true},
+		{name: "file", provider: "file"},
+		{name: "file from GC_BEADS", gcBeads: "file"},
+		{name: "custom exec", provider: "exec:/nonexistent/scripts/my-store.sh"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cityToml := "[workspace]\nname = \"demo\"\n"
+			if tc.provider != "" {
+				cityToml += fmt.Sprintf("\n[beads]\nprovider = %q\n", tc.provider)
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_DOLT", "skip")
+			if tc.gcBeads != "" {
+				t.Setenv("GC_BEADS", tc.gcBeads)
+			}
+
+			probed := false
+			old := doctorBeadStorePreflight
+			doctorBeadStorePreflight = func(string, func(string) (beads.Store, error)) error {
+				probed = true
+				return fmt.Errorf("connection refused")
+			}
+			t.Cleanup(func() { doctorBeadStorePreflight = old })
+
+			cfg := &config.City{Workspace: config.Workspace{Name: "demo"}}
+			names := doctorCheckNames(buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+				ControllerRunning:    true,
+				SkipCityDoltCheck:    true,
+				SkipManagedDoltCheck: true,
+				SkipRigDoltChecks:    true,
+			}))
+			if probed != tc.wantProbed {
+				t.Fatalf("preflight probed = %v, want %v", probed, tc.wantProbed)
+			}
+			if got := doctorCheckIndex(names, "bead-store-preflight") >= 0; got != tc.wantProbed {
+				t.Errorf("bead-store-preflight registered = %v, want %v; names=%v", got, tc.wantProbed, names)
+			}
+			for _, name := range []string{"beads-store", "session-model"} {
+				if got := doctorCheckIndex(names, name) >= 0; got == tc.wantProbed {
+					t.Errorf("%s registered = %v, want %v; names=%v", name, got, !tc.wantProbed, names)
+				}
+			}
+		})
+	}
+}

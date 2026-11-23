@@ -18,7 +18,7 @@ const (
 	doctorPerRigStoreCheckCount = 3
 )
 
-// City-scoped store probe before store-dependent checks (also used at gc start warmup). Tests override.
+// City-scoped bd read that buildDoctorChecks runs before the store-dependent checks. Tests override.
 var doctorBeadStorePreflight = defaultDoctorBeadStorePreflight
 
 func defaultDoctorBeadStorePreflight(cityPath string, _ func(string) (beads.Store, error)) error {

@@ -470,8 +470,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		}
 		var probeErr error
 		// The preflight is a store read, so it is not run against a stopped
-		// proxied city; the checks it gates report "not checked" instead.
-		if !opts.SkipStorePreflight && !cityStoreStopped {
+		// proxied city; the checks it gates report "not checked" instead. It
+		// reads through bd, so it is not run for a city whose store bd does
+		// not serve, such as a file store. There its answer says nothing about
+		// the city's store, yet a bd that outlasts the deadline would still
+		// read as an outage and drop every store check.
+		if !opts.SkipStorePreflight && !cityStoreStopped && cityUsesBdStoreContract(cityPath) {
 			probeErr = doctorBeadStorePreflight(cityPath, storeFactory)
 			storePreflightPassed = probeErr == nil
 		}
