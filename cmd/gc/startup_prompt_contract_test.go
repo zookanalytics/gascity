@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -27,6 +28,9 @@ type launchMode struct {
 	startedHash string
 	sessionKey  string
 	wakeMode    string
+	// systemPromptKey is the session's record of the conversation that began
+	// with the prompt in its system prompt.
+	systemPromptKey string
 }
 
 var launchModes = []launchMode{
@@ -83,11 +87,12 @@ func (c contractCity) controllerState() *controllerState {
 
 func (c contractCity) sessionInfo(mode launchMode) session.Info {
 	return session.Info{
-		Template:          "worker",
-		WorkDir:           c.path,
-		SessionKey:        mode.sessionKey,
-		StartedConfigHash: mode.startedHash,
-		WakeMode:          mode.wakeMode,
+		Template:               "worker",
+		WorkDir:                c.path,
+		SessionKey:             mode.sessionKey,
+		StartedConfigHash:      mode.startedHash,
+		WakeMode:               mode.wakeMode,
+		SystemPromptSessionKey: mode.systemPromptKey,
 	}
 }
 
@@ -108,6 +113,13 @@ var launchBuilders = []launchBuilder{
 // creates or resumes depending on the session bead's state.
 func reconcilerLaunch(t *testing.T, _ contractCity, mode launchMode, prompt string) runtime.Config {
 	t.Helper()
+	return reconcilerLaunchOf(t, TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude", Prompt: prompt}, mode)
+}
+
+// reconcilerLaunchOf is buildPreparedStart's launch of tp for a session in
+// mode.
+func reconcilerLaunchOf(t *testing.T, tp TemplateParams, mode launchMode) runtime.Config {
+	t.Helper()
 	store := beads.NewMemStore()
 	meta := map[string]string{"session_name": "worker", "template": "worker", "state": "asleep"}
 	if mode.startedHash != "" {
@@ -119,13 +131,16 @@ func reconcilerLaunch(t *testing.T, _ contractCity, mode launchMode, prompt stri
 	if mode.wakeMode != "" {
 		meta["wake_mode"] = mode.wakeMode
 	}
+	if mode.systemPromptKey != "" {
+		meta[session.SystemPromptSessionKeyMetadataKey] = mode.systemPromptKey
+	}
 	bead, err := store.Create(beads.Bead{Title: "worker", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
 	if err != nil {
 		t.Fatalf("Create(session): %v", err)
 	}
 	candidate := startCandidate{
 		info: sessiontest.SeedBead(t, bead),
-		tp:   TemplateParams{TemplateName: "worker", SessionName: "worker", Command: "claude", Prompt: prompt},
+		tp:   tp,
 	}
 	prepared, _, err := buildPreparedStart(candidate, &config.City{}, store)
 	if err != nil {
@@ -217,6 +232,74 @@ func TestStartupPromptContractWorkerResumeCarriesPromptInNudgeNotArgv(t *testing
 				}
 				if !strings.Contains(cfg.Nudge, contractPromptBody) {
 					t.Errorf("worker resume must carry the prompt in the nudge, got %q", abbreviate(cfg.Nudge))
+				}
+			})
+		}
+	}
+}
+
+// TestStartupPromptContractSystemPromptRidesEveryLaunch pins the system-prompt
+// carrier for every launch builder on a provider that declares the flag: every
+// launch, fresh and resumed, passes the rendered prompt as the system prompt
+// file and is marked delivered, so the SessionStart hook never carries it. The
+// prompt also rides the first turn wherever the launch cannot show that the
+// conversation's recorded system prompt holds it: a resume of a conversation
+// begun without the record, and every worker resume of one, wake_mode=fresh
+// included. A reconciler fresh start's first message and a wake of a recorded
+// conversation are the opener.
+func TestStartupPromptContractSystemPromptRidesEveryLaunch(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	city := newContractCity(t, contractPromptBody)
+	beacon := runtime.FormatBeaconAt("test-city", "worker", false, time.Time{})
+	reconciler := func(t *testing.T, c contractCity, mode launchMode, prompt string) runtime.Config {
+		t.Helper()
+		return reconcilerLaunchOf(t, TemplateParams{
+			TemplateName: "worker", SessionName: "worker", Command: "claude",
+			Prompt: beacon + "\n\n" + prompt, Beacon: beacon, ResolvedProvider: c.resolved,
+		}, mode)
+	}
+	builders := []launchBuilder{{name: "reconciler", build: reconciler}, launchBuilders[1], launchBuilders[2]}
+	modes := []struct {
+		mode launchMode
+		// opener says the reconciler's first turn is the opener alone, and
+		// workerOpener the worker resolvers'; otherwise it replays the prompt.
+		opener, workerOpener bool
+	}{
+		{mode: launchModes[0], opener: true},
+		{mode: launchModes[1]},
+		{mode: launchModes[2], opener: true},
+		{mode: launchMode{name: "resume of a system-prompt conversation", startedHash: "cfg", sessionKey: "warm", systemPromptKey: "warm"}, opener: true, workerOpener: true},
+	}
+	for _, builder := range builders {
+		for _, m := range modes {
+			if builder.name != "reconciler" && m.mode.startedHash == "" {
+				// The worker resolvers resume; a first start is the reconciler's.
+				continue
+			}
+			wantOpener := m.opener
+			if builder.name != "reconciler" {
+				wantOpener = m.workerOpener
+			}
+			t.Run(builder.name+"/"+m.mode.name, func(t *testing.T) {
+				cfg := builder.build(t, city, m.mode, contractPromptBody)
+				if !strings.Contains(cfg.SystemPrompt, contractPromptBody) || cfg.SystemPromptFileFlag != "--append-system-prompt-file" {
+					t.Fatalf("system prompt = %q via %q, want the prompt via Claude's flag", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag)
+				}
+				if cfg.Env[startupPromptDeliveredEnv] != "1" {
+					t.Errorf("%s = %q, want 1 so the hook never carries the prompt", startupPromptDeliveredEnv, cfg.Env[startupPromptDeliveredEnv])
+				}
+				turn := cfg.Nudge
+				if cfg.PromptSuffix != "" {
+					turn = shellquote.Split(cfg.PromptSuffix)[0]
+				}
+				if got := strings.Contains(turn, contractPromptBody); got == wantOpener {
+					t.Errorf("first turn carries the prompt = %v, want %v (turn %q)", got, !wantOpener, abbreviate(turn))
+				}
+				if wantOpener && !strings.HasSuffix(turn, startupOpenerInstruction) {
+					t.Errorf("first turn = %q, want the opener ending in the default instruction", abbreviate(turn))
 				}
 			})
 		}

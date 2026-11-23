@@ -61,3 +61,24 @@ func TestInfoLogicalConversationIDEmptyWithoutBeadID(t *testing.T) {
 		t.Fatalf("LogicalConversationID() = %q, want empty without a bead ID", got)
 	}
 }
+
+// The record names one conversation by its session key: a resume of that
+// conversation finds its prompt in the system prompt, and a session whose key
+// moved on to a new conversation, or that has none, does not.
+func TestInfoSystemPromptCarriesPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info Info
+		want bool
+	}{
+		{name: "record names the current conversation", info: Info{SessionKey: "k1", SystemPromptSessionKey: "k1"}, want: true},
+		{name: "record names an earlier conversation", info: Info{SessionKey: "k2", SystemPromptSessionKey: "k1"}},
+		{name: "no record", info: Info{SessionKey: "k1"}},
+		{name: "no session key", info: Info{SystemPromptSessionKey: "k1"}},
+		{name: "neither", info: Info{}},
+	} {
+		if got := tc.info.SystemPromptCarriesPrompt(); got != tc.want {
+			t.Errorf("%s: SystemPromptCarriesPrompt() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

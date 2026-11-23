@@ -203,6 +203,14 @@ func TestRelaunchResultStep(t *testing.T) {
 	if step := relaunchResultStep(inTask); !step.Done || step.Write[session.LaunchTaskWorkDirMetadataKey] != "/wt/fe-1" {
 		t.Fatalf("landed in a task work_dir: step %+v, want the task work_dir recorded with the baseline", step)
 	}
+	cleared := ""
+	flagless := v
+	flagless.prev = relaunched{OK: true, Hash: cfg, SystemPromptSessionKey: &cleared}
+	if step := relaunchResultStep(flagless); !step.Done {
+		t.Fatalf("landed with no system prompt file: step %+v, want it done", step)
+	} else if got, ok := step.Write[session.SystemPromptSessionKeyMetadataKey]; !ok || got != "" {
+		t.Fatalf("landed with no system prompt file: step %+v, want the system prompt record cleared with the baseline", step)
+	}
 	named := v
 	named.prev = relaunched{Named: true, Err: errors.New("no box")}
 	if step := relaunchResultStep(named); step.Done || len(step.Write) != 0 || step.Refuse != "" {
@@ -288,5 +296,30 @@ func TestRelaunchCall(t *testing.T) {
 				t.Fatalf("%d Relaunch call(s) through the composite: the relaunch must go to the leaf it fenced (C8.7)", n)
 			}
 		})
+	}
+}
+
+// A relaunch carries the system prompt record its preparation decides
+// (startSystemPromptSessionKey) to its result step: one that passes no system
+// prompt file clears the record the row holds.
+func TestRelaunchCallCarriesTheSystemPromptRecord(t *testing.T) {
+	tp := TemplateParams{TemplateName: "worker", Command: "run", FPExtra: map[string]string{"pool.max": "2"}}
+	probe, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
+	cfg := sessionCoreConfigForHashInfo(tp, probe.w.Census.Rows[probe.k].Info)
+	c, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active", "session_key", "k-1", session.SystemPromptSessionKeyMetadataKey, "k-1",
+		"started_config_hash", runtime.FingerprintVersion+":stale", "started_provision_hash", runtime.ProvisionFingerprint(cfg), "started_launch_hash", runtime.FingerprintVersion+":old-launch")
+	row := c.w.Census.Rows[c.k].Info
+	fake := runtime.NewFake()
+	if err := fake.Start(t.Context(), "s-heal", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	c.w.Env = &reconcileEnv{Cfg: workerCity(1)}
+	caps := txCaps{start: startCaps{sp: fake}, reads: effectReads{city: c.store}}
+	out, err := relaunchCall(t.Context(), caps, relaunchPlan{w: c.w, row: row, tp: tp, hash: sessionCoreConfigForHashInfo(tp, row), name: "s-heal", leaf: fake, now: gatherNow})
+	if err != nil || !out.OK {
+		t.Fatalf("relaunch %+v (%v), want it landed", out, err)
+	}
+	if out.SystemPromptSessionKey == nil || *out.SystemPromptSessionKey != "" {
+		t.Fatalf("relaunch record = %v, want a clear: the relaunch passed no system prompt file", out.SystemPromptSessionKey)
 	}
 }

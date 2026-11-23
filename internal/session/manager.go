@@ -525,6 +525,10 @@ type Info struct {
 	// ResumeLaunch is the RAW resume_launch metadata: "true" when the
 	// incarnation that last committed was launched as a resume.
 	ResumeLaunch string // resume_launch (raw)
+	// SystemPromptSessionKey is the RAW system_prompt_session_key metadata:
+	// the session key of the conversation that began with the rendered
+	// prompt in its system prompt (SystemPromptSessionKeyMetadataKey).
+	SystemPromptSessionKey string // system_prompt_session_key (raw)
 	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
 	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
 	// firing session.wake_refused, so repeated reconciler ticks on the same

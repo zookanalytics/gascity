@@ -764,3 +764,37 @@ func TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir(t *testing.T) {
 		t.Errorf("workdir %q exists after the check (stat err=%v); doctor must not create it", wantWorkDir, err)
 	}
 }
+
+// An oversized prompt on a provider that passes it into the system prompt
+// reaches the agent through a file, so it clears the argv budget. A city that
+// switches the provider's flag off gets the argv budget, and its nudge-fallback
+// warning, back.
+func TestPromptDeliveryBudgetCheck_SystemPromptCarriesOversizedPrompt(t *testing.T) {
+	clearPromptDeliveryBudgetEnv(t)
+	off := ""
+	switchedOff := config.BuiltinProviderAlias("claude")
+	switchedOff.SystemPromptFileFlag = &off
+	for _, tc := range []struct {
+		name string
+		spec config.ProviderSpec
+		want doctor.CheckStatus
+	}{
+		{name: "claude passes the prompt as a file", spec: config.BuiltinProviderAlias("claude"), want: doctor.StatusOK},
+		{name: "a city that switches the flag off", spec: switchedOff, want: doctor.StatusWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			tmpl := writePromptFile(t, cityPath, "prompts/oversized.md", strings.Repeat("a", 100000))
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "demo"},
+				Agents:    []config.Agent{{Name: "oversized", Provider: "claude", Session: "tmux", PromptTemplate: tmpl}},
+				Providers: map[string]config.ProviderSpec{"claude": tc.spec},
+			}
+			check := newPromptDeliveryBudgetDoctorCheck(cityPath, cfg, func(name string) (string, error) { return "/usr/bin/" + name, nil })
+			res := check.Run(&doctor.CheckContext{CityPath: cityPath})
+			if res.Status != tc.want {
+				t.Fatalf("status = %v, want %v; message=%q details=%v", res.Status, tc.want, res.Message, res.Details)
+			}
+		})
+	}
+}

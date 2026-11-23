@@ -3,6 +3,8 @@ package main
 import (
 	"io"
 	"maps"
+	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -20,8 +22,13 @@ type startupPromptCity struct {
 
 // applyTo returns hints with the startup prompt of the session described by
 // info delivered for a launch that resumes it. resolved and transport are the
-// provider and transport the caller resolved for this launch. The prompt rides
-// the post-start nudge and the launch env carries GC_STARTUP_PROMPT_DELIVERED,
+// provider and transport the caller resolved for this launch. On a provider
+// and runtime that pass the prompt into the agent's system prompt, every such
+// launch does, and the post-start nudge is the opener (the session's beacon
+// and the default instruction: these resolvers carry no configured nudge)
+// when the conversation began with the prompt there, or the prompt itself
+// when it did not. Elsewhere the prompt rides the post-start nudge. Either way
+// the launch env carries GC_STARTUP_PROMPT_DELIVERED,
 // so the SessionStart hook adds context without repeating a prompt it cannot
 // inline past the provider's size cap. It applies the reconciler's promptDelivery
 // policy and returns hints unchanged when nothing can or needs to be delivered:
@@ -56,15 +63,18 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 		return hints, nil
 	}
 	plan, err := planStartupPrompt(startupPromptSource{
-		TemplateName:     agent.QualifiedName(),
-		SessionName:      info.SessionName,
-		InstanceName:     info.AgentName,
-		Prompt:           prompt,
-		IsACP:            transport == config.SessionTransportACP,
-		ResolvedProvider: resolved,
-		HintNudge:        hints.Nudge,
-		RuntimeName:      runtimeName,
-		CityRuntimes:     c.cfg.Runtimes,
+		TemplateName:                agent.QualifiedName(),
+		SessionName:                 info.SessionName,
+		InstanceName:                info.AgentName,
+		Prompt:                      prompt,
+		Beacon:                      runtime.FormatBeaconAt(loadedCityName(c.cfg, c.path), primeAgentName(agent, info), false, time.Now()),
+		IsACP:                       transport == config.SessionTransportACP,
+		ResolvedProvider:            resolved,
+		HintNudge:                   hints.Nudge,
+		RuntimeName:                 runtimeName,
+		CityRuntimes:                c.cfg.Runtimes,
+		Fork:                        strings.TrimSpace(info.BrainParentSID) != "",
+		ConversationHasSystemPrompt: info.SystemPromptCarriesPrompt(),
 	}, startupPromptResumeLaunch)
 	if err != nil {
 		return runtime.Config{}, err
@@ -74,6 +84,12 @@ func (c startupPromptCity) applyTo(info session.Info, resolved *config.ResolvedP
 	hints.Env = maps.Clone(hints.Env)
 	plan.applyTo(&hints)
 	return hints, nil
+}
+
+// primeAgentName is the agent name the prompt of the session described by
+// info renders for: the session's own agent name, else a's qualified name.
+func primeAgentName(a *config.Agent, info session.Info) string {
+	return firstNonEmptyGCString(info.AgentName, a.QualifiedName())
 }
 
 // promptFor renders the prompt gc prime would emit for agent a in the session
@@ -91,7 +107,7 @@ func (c startupPromptCity) promptFor(a *config.Agent, info session.Info) string 
 	}
 	identity := primeSessionIdentity{
 		Alias: info.Alias,
-		Agent: firstNonEmptyGCString(info.AgentName, a.QualifiedName()),
+		Agent: primeAgentName(a, info),
 		Dir:   info.WorkDir,
 	}
 	cityName := loadedCityName(c.cfg, c.path)

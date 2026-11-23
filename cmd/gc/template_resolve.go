@@ -60,6 +60,12 @@ type TemplateParams struct {
 	Command string
 	// Prompt is the fully rendered prompt (with beacon).
 	Prompt string
+	// Beacon is the bare identity line the rendered Prompt starts with
+	// (`[city] alias • ts`, no prime instruction). It opens the first message
+	// of a conversation whose Prompt rides the system prompt
+	// (startupOpener), and a Prompt that is the Beacon alone carries no
+	// instructions to put there.
+	Beacon string
 	// Env is the merged environment (passthrough + provider + agent + passthrough vars).
 	Env map[string]string
 	// OperatorEnv carries only the operator-authored environment layers —
@@ -836,6 +842,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params := TemplateParams{
 		Command:          command,
 		Prompt:           prompt,
+		Beacon:           runtime.FormatBeaconAt(p.cityName, qualifiedName, false, p.beaconTime),
 		Env:              env,
 		OperatorEnv:      operatorEnv,
 		Upstream:         cfgAgent.Upstream,
@@ -1000,11 +1007,18 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 // caller must not construct a runtime.Config or call Provider.Start in that
 // case (gastownhall/gascity ga-q8wgom.1.1).
 func templateParamsToConfigWithDelivery(tp TemplateParams) (runtime.Config, promptDeliveryResult, error) {
+	return templateParamsToLaunchConfig(tp, tp.startupPromptSource())
+}
+
+// templateParamsToLaunchConfig is templateParamsToConfigWithDelivery with the
+// fresh launch's startup prompt planned from src, which the launch builder
+// fills in with what it knows of the session (launchStartupPromptSource).
+func templateParamsToLaunchConfig(tp TemplateParams, src startupPromptSource) (runtime.Config, promptDeliveryResult, error) {
 	// SessionStart hooks can enrich context, but the startup prompt still needs
 	// a first-turn delivery mechanism. Without argv/flag/nudge delivery, freshly
 	// spawned workers sit idle at the provider prompt. The routing policy lives
 	// in the shared startup prompt plan.
-	plan, err := planStartupPrompt(tp.startupPromptSource(), startupPromptFreshLaunch)
+	plan, err := planStartupPrompt(src, startupPromptFreshLaunch)
 	if err != nil {
 		return runtime.Config{}, promptDeliveryResult{}, err
 	}

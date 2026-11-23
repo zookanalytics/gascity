@@ -722,6 +722,7 @@ func renderProviderExplainText(w io.Writer, r config.ResolvedProvider, name stri
 	explainProviderField(w, "resume_flag", r.ResumeFlag, r.Provenance.FieldLayer["resume_flag"])
 	explainProviderField(w, "resume_style", r.ResumeStyle, r.Provenance.FieldLayer["resume_style"])
 	explainProviderField(w, "session_id_flag", r.SessionIDFlag, r.Provenance.FieldLayer["session_id_flag"])
+	explainProviderField(w, "system_prompt_file_flag", r.SystemPromptFileFlag, r.Provenance.FieldLayer["system_prompt_file_flag"])
 	explainProviderField(w, "title_model", r.TitleModel, r.Provenance.FieldLayer["title_model"])
 
 	explainResolvedBool(w, "supports_hooks", r.SupportsHooks, r.Provenance.FieldLayer["supports_hooks"])
@@ -829,6 +830,7 @@ func renderProviderExplainJSON(r config.ResolvedProvider, name string, stdout, s
 			"resume_flag":              r.ResumeFlag,
 			"resume_style":             r.ResumeStyle,
 			"session_id_flag":          r.SessionIDFlag,
+			"system_prompt_file_flag":  r.SystemPromptFileFlag,
 			"title_model":              r.TitleModel,
 			"supports_hooks":           triStateFromProvenance("supports_hooks", r.SupportsHooks),
 			"supports_acp":             triStateFromProvenance("supports_acp", r.SupportsACP),

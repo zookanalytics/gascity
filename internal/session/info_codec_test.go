@@ -126,6 +126,7 @@ func infoFromPersistedBeadFrozen(b beads.Bead) Info {
 		ChurnCount:                     b.Metadata["churn_count"],
 		ResumeFailures:                 b.Metadata["resume_failures"],
 		ResumeLaunch:                   b.Metadata["resume_launch"],
+		SystemPromptSessionKey:         b.Metadata[SystemPromptSessionKeyMetadataKey],
 		IdleRespawnAttempts:            b.Metadata["idle_respawn_attempts"],
 		IdleRespawnBeadID:              b.Metadata["idle_respawn_bead_id"],
 		WakeMode:                       b.Metadata["wake_mode"],

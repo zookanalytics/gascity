@@ -1,8 +1,13 @@
 package session
 
 import (
+	"context"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TestPromptHash pins the empty-prompt gate, determinism, and distinctness.
@@ -134,5 +139,111 @@ func assertClearsStartedHashAndPriming(t *testing.T, patch MetadataPatch) {
 		if got, ok := patch[k]; !ok || got != "" {
 			t.Errorf("priming key %s not cleared (got %q, ok=%v)", k, got, ok)
 		}
+	}
+}
+
+// The start commit writes the record of the conversation whose system prompt
+// carries the rendered prompt as its caller decides: a session key sets it, an
+// empty value clears it, and no value leaves it as it is.
+func TestCommitStartedPatchRecordsTheSystemPromptConversation(t *testing.T) {
+	now := time.Date(2026, 11, 22, 1, 2, 3, 0, time.UTC)
+	key, none := "7f3c2a1e", ""
+
+	patch := CommitStartedPatch(CommitStartedPatchInput{CoreHash: "c", Now: now, SystemPromptSessionKey: &key})
+	if got := patch[SystemPromptSessionKeyMetadataKey]; got != key {
+		t.Errorf("set: %s = %q, want %q", SystemPromptSessionKeyMetadataKey, got, key)
+	}
+	patch = CommitStartedPatch(CommitStartedPatchInput{CoreHash: "c", Now: now, SystemPromptSessionKey: &none})
+	if got, ok := patch[SystemPromptSessionKeyMetadataKey]; !ok || got != "" {
+		t.Errorf("clear: %s = %q (present %v), want an empty value that clears the record", SystemPromptSessionKeyMetadataKey, got, ok)
+	}
+	patch = CommitStartedPatch(CommitStartedPatchInput{CoreHash: "c", Now: now})
+	if got, ok := patch[SystemPromptSessionKeyMetadataKey]; ok {
+		t.Errorf("leave: %s = %q, want no write", SystemPromptSessionKeyMetadataKey, got)
+	}
+}
+
+// A start that began a conversation records it when its launch passed the
+// rendered prompt as the system prompt file, and clears the record when it
+// passed none. A resume that passed the file leaves the record, whichever
+// conversation it names, and one that passed none clears it. A value the row
+// already holds writes nothing.
+func TestSystemPromptSessionKeyAfterStart(t *testing.T) {
+	show := func(p *string) string {
+		if p == nil {
+			return "nil"
+		}
+		return strconv.Quote(*p)
+	}
+	for _, tc := range []struct {
+		name      string
+		record    string
+		began     bool
+		passedKey string
+		want      string // "nil" leaves the record; otherwise the quoted value written
+	}{
+		{name: "a new conversation with the file", record: "k1", began: true, passedKey: "k2", want: `"k2"`},
+		{name: "a new conversation with the file, already recorded", record: "k1", began: true, passedKey: "k1", want: "nil"},
+		{name: "a new conversation without the file", record: "k1", began: true, want: `""`},
+		{name: "a new conversation without the file, no record", began: true, want: "nil"},
+		{name: "a resume of the recorded conversation with the file", record: "k1", passedKey: "k1", want: "nil"},
+		{name: "a resume of an older conversation with the file", record: "k1", passedKey: "k2", want: "nil"},
+		{name: "a resume without the file", record: "k1", want: `""`},
+		{name: "a resume without the file, no record", want: "nil"},
+	} {
+		got := SystemPromptSessionKeyAfterStart(Info{SystemPromptSessionKey: tc.record}, tc.began, tc.passedKey)
+		if show(got) != tc.want {
+			t.Errorf("%s: SystemPromptSessionKeyAfterStart = %s, want %s", tc.name, show(got), tc.want)
+		}
+		patch := SystemPromptSessionKeyPatch(got)
+		if v, ok := patch[SystemPromptSessionKeyMetadataKey]; ok != (got != nil) || (got != nil && v != *got) {
+			t.Errorf("%s: SystemPromptSessionKeyPatch = %v, want the record %s", tc.name, patch, show(got))
+		}
+	}
+}
+
+// A session Manager start records no conversation as begun with the rendered
+// prompt in its system prompt: one that passes the system prompt file leaves
+// the record, and one that passes none clears it, since a compaction in that
+// life would leave the conversation's recorded system prompt without the
+// prompt.
+func TestManagerStartKeepsTheSystemPromptRecordOnlyWithTheFile(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	for k, v := range map[string]string{"session_key": "k1", SystemPromptSessionKeyMetadataKey: "k1"} {
+		if err := store.SetMetadata(info.ID, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+	record := func() string {
+		t.Helper()
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return b.Metadata[SystemPromptSessionKeyMetadataKey]
+	}
+	resume := func(hints runtime.Config) {
+		t.Helper()
+		if err := sp.Stop(info.SessionName); err != nil {
+			t.Fatalf("Stop: %v", err)
+		}
+		if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume k1", hints); err != nil {
+			t.Fatalf("Start(resume): %v", err)
+		}
+	}
+
+	resume(runtime.Config{WorkDir: "/tmp", SystemPrompt: "# Role", SystemPromptFileFlag: "--append-system-prompt-file"})
+	if got := record(); got != "k1" {
+		t.Fatalf("record after a start that passed the system prompt file = %q, want k1 left as it was", got)
+	}
+	resume(runtime.Config{WorkDir: "/tmp"})
+	if got := record(); got != "" {
+		t.Fatalf("record after a start that passed no system prompt file = %q, want it cleared", got)
 	}
 }

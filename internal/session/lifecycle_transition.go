@@ -47,6 +47,50 @@ const (
 	PromptHashMetadataKey = "prompt_hash"
 )
 
+// SystemPromptSessionKeyMetadataKey records the session key of the
+// conversation whose every launch passed the agent's rendered prompt as its
+// system prompt. Every start writes it as SystemPromptSessionKeyAfterStart
+// decides: the controller's start commit and warm relaunch, and the session
+// Manager's own start. A resume whose session key matches it types only the
+// opener; any other resume replays the prompt, because the conversation's
+// recorded system prompt may not carry it.
+const SystemPromptSessionKeyMetadataKey = "system_prompt_session_key"
+
+// SystemPromptSessionKeyAfterStart is the value a successful start of the
+// session described by info writes to SystemPromptSessionKeyMetadataKey, nil
+// when the record stands. passedKey is the session key of the conversation
+// the launch passed the rendered prompt to as its system prompt file, "" when
+// it passed none, and began reports that the start began that conversation
+// rather than resuming one. A start that began a conversation records
+// passedKey, so one that passed no file clears the record. A resume that
+// passed the file keeps the record as it is, and a resume that passed none
+// clears it: once that life compacts, the conversation's recorded system
+// prompt lacks the prompt, so no later wake may count on it.
+func SystemPromptSessionKeyAfterStart(info Info, began bool, passedKey string) *string {
+	passedKey = strings.TrimSpace(passedKey)
+	if !began && passedKey != "" {
+		return nil
+	}
+	key := ""
+	if began {
+		key = passedKey
+	}
+	if key == strings.TrimSpace(info.SystemPromptSessionKey) {
+		return nil
+	}
+	return &key
+}
+
+// SystemPromptSessionKeyPatch is the patch giving
+// SystemPromptSessionKeyMetadataKey the value key holds, "" clearing it: the
+// record SystemPromptSessionKeyAfterStart chose. A nil key writes nothing.
+func SystemPromptSessionKeyPatch(key *string) MetadataPatch {
+	if key == nil {
+		return MetadataPatch{}
+	}
+	return MetadataPatch{SystemPromptSessionKeyMetadataKey: *key}
+}
+
 // primingResetKeys are the three priming markers cleared wherever
 // started_config_hash is cleared (S19 Stage 2 priming-key lifetime rule). Kept
 // as a slice so the six clear sites share one vocabulary.
@@ -400,6 +444,11 @@ type CommitStartedPatchInput struct {
 	// LaunchTaskWorkDir is the patch recording the task work_dir the start
 	// launched the session in (LaunchTaskWorkDirPatch); empty writes nothing.
 	LaunchTaskWorkDir MetadataPatch
+	// SystemPromptSessionKey, when non-nil, is the value
+	// SystemPromptSessionKeyMetadataKey takes: a new conversation's session
+	// key when its launch passed the rendered prompt in the system prompt,
+	// else "", which clears the record. Nil writes nothing.
+	SystemPromptSessionKey *string
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -453,6 +502,7 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 	}
 	maps.Copy(patch, input.RuntimeBinding)
 	maps.Copy(patch, input.LaunchTaskWorkDir)
+	maps.Copy(patch, SystemPromptSessionKeyPatch(input.SystemPromptSessionKey))
 	return patch
 }
 

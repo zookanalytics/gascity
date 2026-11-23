@@ -1070,9 +1070,22 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
 	// The Manager launches in cfg.WorkDir, the session's own work dir and
-	// never a task work_dir, so a start it made clears a recorded one.
+	// never a task work_dir, so a start it made clears a recorded one. It
+	// records no conversation as begun with the rendered prompt in its system
+	// prompt, so a start that passed the system prompt file leaves that record
+	// and one that passed none clears it (SystemPromptSessionKeyAfterStart).
 	if started {
 		if record := LaunchTaskWorkDirPatch(infoFromPersistedBead(b), ""); len(record) > 0 {
+			if binding == nil {
+				binding = MetadataPatch{}
+			}
+			maps.Copy(binding, record)
+		}
+		passed := ""
+		if cfg.SystemPrompt != "" && cfg.SystemPromptFileFlag != "" {
+			passed = b.Metadata["session_key"]
+		}
+		if record := SystemPromptSessionKeyPatch(SystemPromptSessionKeyAfterStart(infoFromPersistedBead(b), false, passed)); len(record) > 0 {
 			if binding == nil {
 				binding = MetadataPatch{}
 			}

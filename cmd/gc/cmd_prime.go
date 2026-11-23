@@ -168,9 +168,10 @@ type promptBudgetJSON struct {
 
 // reportPromptDeliveryBudget computes and reports (on stderr) the
 // promptDelivery budget decision for a --strict gc prime invocation
-// (ga-q8wgom.1.2). It reuses promptDelivery/promptDeliverySupportFor
-// (ga-q8wgom.1.1) rather than re-deriving delivery mode independently, so
-// the strict diagnostic can never disagree with what a real launch does.
+// (ga-q8wgom.1.2). It reuses budgetPromptDelivery, the system-prompt route
+// and promptDelivery/promptDeliverySupportFor (ga-q8wgom.1.1), rather than
+// re-deriving delivery mode independently, so the strict diagnostic can never
+// disagree with what a real launch does.
 //
 // The returned error is non-nil exactly when promptDelivery hard-fails (an
 // oversized prompt on a runtime with no confirmed post-start delivery
@@ -181,7 +182,7 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 	sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
 	isACP := sessionTransport == config.SessionTransportACP
 
-	delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, cfg.Runtimes)
+	delivery, dErr := budgetPromptDelivery(prompt, isACP, resolved, effProvider, cfg.Runtimes)
 
 	configuredMode := "arg"
 	switch {
@@ -193,6 +194,8 @@ func reportPromptDeliveryBudget(prompt string, a *config.Agent, cfg *config.City
 
 	effectiveMode := "argv"
 	switch {
+	case delivery.EffectiveMode == "system-prompt":
+		effectiveMode = "system-prompt"
 	case dErr != nil:
 		effectiveMode = "hard-fail"
 	case delivery.OversizedFallback:

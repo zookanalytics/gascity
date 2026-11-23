@@ -285,6 +285,11 @@ type preparedStart struct {
 	// re-derivation from the template (S19 re-eligibility).
 	promptDelivered bool
 	promptHash      string
+	// systemPromptSessionKey is the session key of the conversation the
+	// launch runs, when the launch passes the rendered prompt as the system
+	// prompt, else "". The start commit's record reads it
+	// (startSystemPromptSessionKey).
+	systemPromptSessionKey string
 	// capacityTicket is the endpoint capacity admission for this attempt,
 	// nil when the endpoint is unguarded. Every path that holds one resolves
 	// it exactly once (resolveStartCapacity / abandonCapacityTicket).
@@ -1293,7 +1298,7 @@ func buildPreparedStartWithTranscript(
 		candidate.tp = tp
 	}
 	tp := candidate.tp
-	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
+	agentCfg, delivery, err := templateParamsToLaunchConfig(tp, launchStartupPromptSource(tp, candidate.info))
 	if err != nil {
 		return nil, candidate.info, err
 	}
@@ -1491,7 +1496,13 @@ func buildPreparedStartWithTranscript(
 	// make the stored hash never match the re-derivation and re-prime forever.
 	promptHash := sessionpkg.PromptHash(tp.Prompt)
 	if !firstStart && !forceFresh && hasResumeKey {
-		resumeStartupPromptPlan(tp.Prompt, tp.Hints.Nudge).applyTo(&agentCfg)
+		launchStartupPromptSource(tp, candidate.info).resumePlan().applyTo(&agentCfg)
+	}
+	// A launch that passes the rendered prompt as the system prompt names its
+	// conversation for the start commit's record (startSystemPromptSessionKey).
+	systemPromptSessionKey := ""
+	if agentCfg.SystemPrompt != "" {
+		systemPromptSessionKey = strings.TrimSpace(candidate.info.SessionKey)
 	}
 	// Initial message: append to prompt on first start only, reusing the
 	// overrides parsed once by parseSessionTemplateOverridesForLaunch above.
@@ -1564,6 +1575,7 @@ func buildPreparedStartWithTranscript(
 		launchHash:             launchHash,
 		prePolicyLaunchHash:    prePolicyLaunchHash,
 		promptDelivered:        promptDelivered,
+		systemPromptSessionKey: systemPromptSessionKey,
 		promptHash:             promptHash,
 		transcriptRoots:        transcriptRoots,
 		conversationReset:      conversationReset,
@@ -3501,6 +3513,26 @@ func commitStartResultTraced(
 	return startCommitSucceeded
 }
 
+// launchStartupPromptSource is the startup prompt source of a launch of the
+// session described by info from tp: a session forked off a parent
+// conversation keeps its prompt in its first turn, and a resume carries
+// whether its conversation began with the prompt in its system prompt.
+func launchStartupPromptSource(tp TemplateParams, info sessionpkg.Info) startupPromptSource {
+	src := tp.startupPromptSource()
+	src.Fork = strings.TrimSpace(info.BrainParentSID) != ""
+	src.ConversationHasSystemPrompt = info.SystemPromptCarriesPrompt()
+	return src
+}
+
+// startSystemPromptSessionKey is what a successful start or warm relaunch of
+// prepared writes to session.SystemPromptSessionKeyMetadataKey, nil when the
+// record stands (sessionpkg.SystemPromptSessionKeyAfterStart): prepared names
+// the conversation its launch passed the rendered prompt to, and whether the
+// launch began that conversation or resumed it.
+func startSystemPromptSessionKey(prepared *preparedStart, info sessionpkg.Info) *string {
+	return sessionpkg.SystemPromptSessionKeyAfterStart(info, !prepared.resumed, prepared.systemPromptSessionKey)
+}
+
 // startCommitPatch is a successful start's commit patch for prepared on
 // info at now: the hashes, the task work_dir the session launched in when
 // info does not record it yet, and the transition of creating/asleep/drained
@@ -3546,6 +3578,8 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		PromptHash:          promptHash,
 		RuntimeBinding:      prepared.runtimeBinding,
 		LaunchTaskWorkDir:   sessionpkg.LaunchTaskWorkDirPatch(info, prepared.launchTaskWorkDir),
+		// Which conversation's system prompt carries the rendered prompt.
+		SystemPromptSessionKey: startSystemPromptSessionKey(prepared, info),
 	})
 	// The resume backstop (mc-bm1af): whether this incarnation was launched
 	// as a resume, for a later rapid crash; a fresh launch starts a new
@@ -4025,6 +4059,9 @@ func recoverRunningPendingCreate(
 		// The runtime is already live: record the thread it hosts the
 		// session in, as every confirmed start does.
 		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
+		// The rebuilt prepared start re-derives the launch the original made,
+		// so this is the record that start's own commit would have written.
+		SystemPromptSessionKey: startSystemPromptSessionKey(prepared, info),
 	})
 	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(context.Background(), prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {

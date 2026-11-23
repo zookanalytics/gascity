@@ -7986,8 +7986,9 @@ func relaunchAgentForLaunchDrift(
 	// provider-independent — any concurrent live drift is re-applied idempotently by
 	// the live-drift clause on the next tick (a redundant SessionLive re-apply is
 	// harmless; a missed one self-heals).
-	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown,
-		sessionpkg.LaunchTaskWorkDirPatch(preparedInfo, prepared.launchTaskWorkDir))
+	launch := sessionpkg.LaunchTaskWorkDirPatch(preparedInfo, prepared.launchTaskWorkDir)
+	maps.Copy(launch, sessionpkg.SystemPromptSessionKeyPatch(startSystemPromptSessionKey(prepared, preparedInfo)))
+	launchBatch, rebaseErr := rebaselineLaunchDriftHashesWithBatch(info.ID, sessFront, prepared.coreHash, prepared.provisionHash, prepared.launchHash, prepared.coreBreakdown, launch)
 	if rebaseErr != nil {
 		// The agent is already relaunched; do not trigger a second restart. The
 		// stale Core baseline self-corrects on a later rebaseline tick. Fold the
@@ -8059,9 +8060,10 @@ func relaunchAbortResidueFold(info sessionpkg.Info, sessFront *sessionpkg.Store,
 // NOT fingerprint inputs, so the baseline must be the durable-config hashes the
 // next tick's sessionCoreConfigForHashInfo comparison will reproduce.
 //
-// launch records the task work_dir the relaunch respawned the agent in
-// (LaunchTaskWorkDirPatch), in the same write: the agent runs in the prepared
-// work dir from here on.
+// launch holds the relaunch's launch records, written in the same write: the
+// task work_dir it respawned the agent in (LaunchTaskWorkDirPatch), where the
+// agent runs from here on, and which conversation's system prompt carries the
+// rendered prompt (SystemPromptSessionKeyPatch).
 //
 // Returns the mirrored patch on success so the caller can fold it onto the typed
 // snapshot via ApplyPatch. Returns (nil, nil) when there is nothing to do (empty

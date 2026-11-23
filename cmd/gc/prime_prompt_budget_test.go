@@ -387,3 +387,43 @@ func TestPrimePromptBudgetUnchangedNonStrictOutput(t *testing.T) {
 		}
 	}
 }
+
+// An oversized prompt for a Claude agent on tmux rides a file into the
+// system prompt, so the strict report names that route and no argv fallback.
+func TestPrimePromptBudgetSystemPromptRoute(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+	writePromptBudgetCity(t, `[workspace]
+name = "test-city"
+
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+session = "tmux"
+prompt_template = "prompts/worker.md"
+`, prompt)
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	for _, want := range []string{
+		"raw_bytes=" + strconv.Itoa(maxPromptSuffixRawBytes),
+		"effective_mode=system-prompt",
+		"runtime=tmux",
+		"oversized_fallback=false",
+		"hard_fail=false",
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr, want substring %q (stderr=%.300s)", want, stderr.String())
+		}
+	}
+}

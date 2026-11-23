@@ -243,3 +243,25 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 	}
 	return res, nil
 }
+
+// budgetPromptDelivery is the delivery a launch gives prompt, as the prompt
+// budget diagnostics read it (gc prime --strict, gc doctor's
+// prompt-delivery-budget). A prompt that rides the agent's system prompt
+// (systemPromptFileFlagFor) reaches the agent through a file, so no argv
+// budget applies to it, and its effective mode is "system-prompt". Any other
+// prompt gets promptDelivery's routing.
+func budgetPromptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) (promptDeliveryResult, error) {
+	if prompt == "" || systemPromptFileFlagFor(rp, isACP, runtimeName) == "" {
+		return promptDelivery(prompt, isACP, rp, "", runtimeName, packRuntimes)
+	}
+	res := promptDeliveryResult{
+		Delivered:     true,
+		EffectiveMode: "system-prompt",
+		RawBytes:      len(prompt),
+		ArgvBytes:     len(shellquote.Quote(prompt)),
+	}
+	if rp != nil {
+		res.ConfiguredMode = rp.PromptMode
+	}
+	return res, nil
+}

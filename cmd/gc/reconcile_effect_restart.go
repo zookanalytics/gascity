@@ -176,6 +176,9 @@ type relaunched struct {
 	// LaunchTaskWorkDir is the task work_dir the relaunch respawned the agent
 	// in, "" for the session's own work dir.
 	LaunchTaskWorkDir string
+	// SystemPromptSessionKey is the system prompt record the relaunch writes
+	// (startSystemPromptSessionKey), nil to leave the row's as it is.
+	SystemPromptSessionKey *string
 }
 
 // relaunchCall is legacy's relaunchAgentForLaunchDrift past its guards: the
@@ -216,6 +219,7 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
 		}
 		out.LaunchTaskWorkDir = prepared.launchTaskWorkDir
+		out.SystemPromptSessionKey = startSystemPromptSessionKey(prepared, p.row)
 	}
 	out.OK = out.Err == nil
 	return out, nil
@@ -235,9 +239,11 @@ func relaunchResultStep(v txView) txStep {
 		return txStep{Refuse: out.Held}
 	case out.OK:
 		// A relaunch respawns the agent in its prepared work dir, which the
-		// row records as a launch does.
+		// row records as a launch does, and writes the system prompt record
+		// as a start commit does.
 		write := baselinePatch(out.Hash, baselineRelaunch)
 		maps.Copy(write, session.LaunchTaskWorkDirPatch(v.Row, out.LaunchTaskWorkDir))
+		maps.Copy(write, session.SystemPromptSessionKeyPatch(out.SystemPromptSessionKey))
 		step := txStep{Write: write, Done: true}
 		step.Facts.Events = []events.Event{{Type: events.SessionUpdated, Actor: "gc", Subject: res.TP.DisplayName(), Message: "agent relaunched (launch-only config change)"}}
 		return step
