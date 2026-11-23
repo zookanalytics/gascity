@@ -66,12 +66,10 @@ func nativeDoltOperationContext(parent context.Context) (context.Context, contex
 // size. The library's AddDependency runs a recursive cycle-reachability query
 // per blocking edge, so a large molecule (67 nodes / ~100 edges on the
 // mol-adopt-pr-v2 shape) cannot finish inside the flat per-command budget: the
-// batch died at the 120s deadline mid-edges, retried into the same wall, and
-// fell back to per-bead creates — turning a single atomic pour into ~9 minutes
-// of partial work (2026-07-17 code red). Until the per-edge check is replaced
-// by one whole-graph CycleThroughEdges pass (needs a beads-side export of
-// DependencyAddOptions), give each node and edge a slice of budget on top of
-// the flat floor so the atomic path completes instead of falling back.
+// batch dies at the 120s deadline mid-edges, and so does its one retry. Until
+// the per-edge check is replaced by one whole-graph CycleThroughEdges pass
+// (needs a beads-side export of DependencyAddOptions), give each node and edge
+// a slice of budget on top of the flat floor so the atomic path completes.
 func nativeGraphApplyDeadline(plan *GraphApplyPlan) time.Duration {
 	d := bdCommandTimeout
 	if plan == nil {
