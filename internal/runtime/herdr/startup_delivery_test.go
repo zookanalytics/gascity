@@ -38,6 +38,15 @@ func TestStartupDeliveryText(t *testing.T) {
 			want: prime + "\n\n" + "Read your brief. Triage your rig.",
 		},
 		{
+			name: "instructions in the system prompt: only the opener is typed",
+			cfg: runtime.Config{
+				PromptSuffix:         shellquote.Quote("[city] deacon • 2026-11-22T10:00:00\n\nRead your brief."),
+				SystemPrompt:         prime,
+				SystemPromptFileFlag: "--append-system-prompt-file",
+			},
+			want: "[city] deacon • 2026-11-22T10:00:00\n\nRead your brief.",
+		},
+		{
 			name: "nothing to deliver (deterministic worker / suppressed prompt)",
 			cfg:  runtime.Config{},
 			want: "",

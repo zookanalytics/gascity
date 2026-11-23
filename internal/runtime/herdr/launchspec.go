@@ -42,6 +42,18 @@ var herdrAgentKinds = map[string]bool{
 // quoted occurrences also trigger the fallback, which still runs correctly.
 const launchShellMetachars = "|&;<>()`$=\n"
 
+// passFile adds a flag and the file path it takes to the launch: to the agent's
+// arguments for a kind launch, and to the shell command for a raw one. A blank
+// command launches no agent to pass it to.
+func (s *launchSpec) passFile(flag, path string) {
+	switch {
+	case s.Kind != "":
+		s.Args = append(s.Args, flag, path)
+	case s.Raw != "":
+		s.Raw += " " + flag + " " + shellquote.Quote(path)
+	}
+}
+
 // launchSpecFor parses a session command into its herdr launch mode. A blank
 // command returns the zero spec: the pane's own shell is the session.
 func launchSpecFor(command string) launchSpec {

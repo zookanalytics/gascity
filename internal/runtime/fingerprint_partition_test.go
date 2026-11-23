@@ -125,6 +125,8 @@ var excludedFromCore = map[string]string{
 	"PackOverlayDirs":        "additive pack file staging, not hashed",
 	"PromptSuffix":           "volatile beacon text, deliberately excluded",
 	"PromptFlag":             "command-reconstruction hint, not hashed",
+	"SystemPrompt":           "rendered prompt text; a changed prompt reaches a conversation at its next fresh start or compaction, never by a restart",
+	"SystemPromptFileFlag":   "prompt-delivery flag, not hashed, like PromptFlag",
 	"FreshOnly":              "per-call Start mode (LL6), not config identity",
 	"ProgramStatus":          "leaf-applied capture declaration; arming and heal never restart the agent",
 }

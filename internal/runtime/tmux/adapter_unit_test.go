@@ -61,6 +61,80 @@ func TestBuildLaunchCommandColorWrapsLongPromptCommand(t *testing.T) {
 	}
 }
 
+// The system prompt file lives in the session's directory under the city
+// runtime root, never in the work directory. Each launch replaces it whole and
+// private to its owner, and a provider with no runtime root refuses it rather
+// than writing it somewhere a task can reach.
+func TestTmuxStartOpsWriteSystemPrompt(t *testing.T) {
+	runtimeDir := t.TempDir()
+	ops := newTmuxStartOps(nil, runtimeDir, 0, runtime.Config{}, true)
+	path, err := ops.writeSystemPrompt("gc-city-worker", "# Role v1")
+	if err != nil {
+		t.Fatalf("writeSystemPrompt: %v", err)
+	}
+	want := filepath.Join(runtimeDir, "sessions", "gc-city-worker", "system-prompt.md")
+	if path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+	if _, err := ops.writeSystemPrompt("gc-city-worker", "# Role v2"); err != nil {
+		t.Fatalf("second writeSystemPrompt: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "# Role v2" {
+		t.Fatalf("file = %q, %v; want the second launch's text", got, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("mode = %v, want 0600", mode)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("session dir holds %d entries, want the file alone (no temp file left behind)", len(entries))
+	}
+
+	if _, err := newTmuxStartOps(nil, "", 0, runtime.Config{}, true).writeSystemPrompt("gc-city-worker", "# Role"); err == nil {
+		t.Fatal("writeSystemPrompt with no runtime root = nil, want an error")
+	}
+}
+
+// Stop removes the session's system prompt file with the session, whether the
+// session was running or had already gone.
+func TestProviderStopRemovesTheSystemPromptFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		outs []string
+		errs []error
+	}{
+		// A remain-on-exit corpse: its dead pane has no process to reap, so
+		// the kill reaches tmux without a process-table walk.
+		{name: "killed session", outs: []string{"pane\t4242\t1", ""}, errs: []error{nil, nil}},
+		{name: "vanished session", outs: []string{"", ""}, errs: []error{nil, notFoundErr("kill-session")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtimeDir := t.TempDir()
+			ops := newTmuxStartOps(nil, runtimeDir, 0, runtime.Config{}, true)
+			path, err := ops.writeSystemPrompt("worker-1", "# Role")
+			if err != nil {
+				t.Fatal(err)
+			}
+			fe := &fakeExecutor{outs: tc.outs, errs: tc.errs}
+			p := &Provider{tm: &Tmux{exec: fe}, cache: NewStateCache(nil, time.Hour), cfg: Config{RuntimeDir: runtimeDir}}
+			if err := p.Stop("worker-1"); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("system prompt file after Stop: %v, want it removed", err)
+			}
+		})
+	}
+}
+
 func TestProviderAttachRefusesDeadPane(t *testing.T) {
 	fe := &fakeExecutor{
 		outs: []string{"41", "", "pane\t1"},

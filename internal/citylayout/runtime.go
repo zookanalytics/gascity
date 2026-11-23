@@ -84,7 +84,9 @@ func PublishedServicesDir(cityRoot string) string {
 
 // SessionDiagnosticsRoot is the subdirectory, relative to a city's runtime
 // root, holding per-session diagnostic artifacts: start-stderr.log,
-// nudge-unconfirmed.log, and startup-nudge-unconfirmed.log.
+// nudge-unconfirmed.log, and startup-nudge-unconfirmed.log. The tmux provider
+// also keeps a running session's system-prompt.md there, the file its launches
+// pass the agent's CLI.
 const SessionDiagnosticsRoot = "sessions"
 
 // SessionDiagnosticsDir returns the directory holding per-session diagnostic

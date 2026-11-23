@@ -337,14 +337,34 @@ func (p *Provider) Stop(name string) error {
 	// Excluding a caller that lives outside the pane is a harmless no-op.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
 	if err != nil && errors.Is(err, ErrSessionNotFound) {
+		p.removeSystemPrompt(name)
 		return nil // idempotent
 	}
 	if err == nil {
 		// Immediately remove from cache so IsRunning reflects the kill
 		// without waiting for an async refresh cycle.
 		p.cache.EvictSession(name)
+		p.removeSystemPrompt(name)
 	}
 	return err
+}
+
+// removeSystemPrompt removes a stopped session's system prompt file: only a
+// running agent reads it, and the session's next launch writes it again. A
+// removal that fails leaves a stale file that next launch replaces, so it is
+// logged and does not fail the stop.
+func (p *Provider) removeSystemPrompt(name string) {
+	path := systemPromptPath(p.cfg.RuntimeDir, name)
+	if path == "" {
+		return
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		logf := p.logf
+		if logf == nil {
+			logf = log.Printf
+		}
+		logf("tmux: removing the system prompt file of stopped session %q: %v", name, err)
+	}
 }
 
 // Interrupt sends Ctrl-C to the named tmux session.
@@ -1063,6 +1083,7 @@ func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
 		return fmt.Errorf("stopping unattended tmux session %q by certified ID %q: %w", name, after.sessionID, err)
 	}
 	p.cache.EvictSession(name)
+	p.removeSystemPrompt(name)
 	return nil
 }
 
@@ -1517,6 +1538,9 @@ func (p *Provider) TeardownServer() error {
 // startOps abstracts tmux operations needed by the startup sequence.
 // This enables unit testing without a real tmux server.
 type startOps interface {
+	// writeSystemPrompt replaces the session's system prompt file with text
+	// and returns the file's path.
+	writeSystemPrompt(name, text string) (string, error)
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
@@ -1785,6 +1809,57 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string
 	writeDiagnosticTextBlock(&b, "--- last pane output ---\n", paneContent)
 
 	return o.writeDiagnostic(name, "start-stderr.log", b.String())
+}
+
+// systemPromptFileName is the file in a session's directory under the city
+// runtime root that holds the system prompt the session's launches pass its
+// agent.
+const systemPromptFileName = "system-prompt.md"
+
+// systemPromptPath is the session name's system prompt file under runtimeDir,
+// "" when there is no runtime root.
+func systemPromptPath(runtimeDir, name string) string {
+	dir := citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir)
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name, systemPromptFileName)
+}
+
+// writeSystemPrompt replaces the session's system prompt file with text,
+// atomically and private to its owner, and returns the file's path. The file
+// sits in the session's directory under the city runtime root, so it never
+// lands in a task or worktree directory. With no runtime root there is
+// nowhere to put it, which fails the launch rather than starting the agent
+// without its instructions.
+func (o *tmuxStartOps) writeSystemPrompt(name, text string) (string, error) {
+	path := systemPromptPath(o.runtimeDir, name)
+	if path == "" {
+		return "", fmt.Errorf("no city runtime root to hold the system prompt file of session %q", name)
+	}
+	if err := runtime.EnsurePrivateDir(filepath.Dir(path)); err != nil {
+		return "", fmt.Errorf("creating the directory of %s: %w", path, err)
+	}
+	if err := runtime.WritePrivateFile(path, []byte(text)); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// passSystemPromptFile writes cfg.SystemPrompt to the session's system prompt
+// file and returns cfg with its command passing that file through
+// cfg.SystemPromptFileFlag. The flag goes before any first message
+// buildLaunchCommand appends. A cfg without both is returned as it is.
+func passSystemPromptFile(ops startOps, name string, cfg runtime.Config) (runtime.Config, error) {
+	if cfg.SystemPrompt == "" || cfg.SystemPromptFileFlag == "" {
+		return cfg, nil
+	}
+	path, err := ops.writeSystemPrompt(name, cfg.SystemPrompt)
+	if err != nil {
+		return cfg, fmt.Errorf("writing the system prompt file of session %q: %w", name, err)
+	}
+	cfg.Command += " " + cfg.SystemPromptFileFlag + " " + shellquote.Quote(path)
+	return cfg, nil
 }
 
 // recordUnconfirmedNudge persists a durable diagnostic artifact when the
@@ -2238,7 +2313,11 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: running pre_start: %w", err)
 	}
 
-	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	launch, err := passSystemPromptFile(ops, name, cfg)
+	if err != nil {
+		return fmt.Errorf("relaunch: %w", err)
+	}
+	fullCommand, promptFile, err := buildLaunchCommand(name, launch)
 	if err != nil {
 		return err
 	}
@@ -2669,7 +2748,11 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
-	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	launch, err := passSystemPromptFile(ops, name, cfg)
+	if err != nil {
+		return err
+	}
+	fullCommand, promptFile, err := buildLaunchCommand(name, launch)
 	if err != nil {
 		return err
 	}

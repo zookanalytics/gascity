@@ -89,6 +89,12 @@ type fakeStartOps struct {
 
 	paneBusyResult bool
 	paneBusyErr    error
+
+	// systemPromptPath is the path writeSystemPrompt reports, and
+	// systemPromptErr its failure; systemPrompts holds each text written.
+	systemPromptPath string
+	systemPromptErr  error
+	systemPrompts    []string
 }
 
 type errReader struct{}
@@ -114,6 +120,15 @@ func (f *fakeStartOps) createSession(name, workDir, command string, env map[stri
 		return err
 	}
 	return nil
+}
+
+func (f *fakeStartOps) writeSystemPrompt(name, text string) (string, error) {
+	f.calls = append(f.calls, startCall{method: "writeSystemPrompt", name: name})
+	if f.systemPromptErr != nil {
+		return "", f.systemPromptErr
+	}
+	f.systemPrompts = append(f.systemPrompts, text)
+	return f.systemPromptPath, nil
 }
 
 func (f *fakeStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
@@ -2282,6 +2297,37 @@ func TestDoRelaunchSession_PreStartRunsBeforeRespawn(t *testing.T) {
 	}
 }
 
+// A relaunch into a warm box passes the system prompt file like a fresh start:
+// the flag rides every launch, so a conversation that compacts after a
+// relaunch still renders its instructions.
+func TestDoRelaunchSession_PassesTheSystemPromptFile(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		systemPromptPath: "/city/.gc/sessions/test/system-prompt.md",
+	}
+	cfg := runtime.Config{
+		Command:              "claude --resume 7f3c2a1e",
+		WorkDir:              "/proj",
+		SystemPrompt:         "# Role",
+		SystemPromptFileFlag: "--append-system-prompt-file",
+	}
+	if err := doRelaunchSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("doRelaunchSession: %v", err)
+	}
+	var respawned string
+	for _, c := range ops.calls {
+		if c.method == "respawnAgent" {
+			respawned = c.command
+		}
+	}
+	if want := "env -u CI -u NO_COLOR claude --resume 7f3c2a1e --append-system-prompt-file '/city/.gc/sessions/test/system-prompt.md'"; respawned != want {
+		t.Fatalf("respawned command = %q, want %q", respawned, want)
+	}
+	if len(ops.systemPrompts) != 1 || ops.systemPrompts[0] != "# Role" {
+		t.Fatalf("system prompt written = %q, want the role", ops.systemPrompts)
+	}
+}
+
 func TestDoRelaunchSession_PreStartFailureIsFatal(t *testing.T) {
 	ops := &fakeStartOps{
 		hasSessionResult:   true,
@@ -2956,6 +3002,121 @@ func TestEnsureFreshSession_PromptSuffixWithFlagPrefix(t *testing.T) {
 	want := "myprovider --prompt 'You are an agent.'"
 	if c.command != want {
 		t.Errorf("createSession command = %q, want %q", c.command, want)
+	}
+}
+
+// A launch that carries a system prompt writes it to the session's file and
+// passes that file with the provider's flag ahead of the first message, so the
+// agent's CLI reads the instructions into its system prompt and the
+// conversation opens on the short first message alone.
+func TestEnsureFreshSession_SystemPromptPassedAsFile(t *testing.T) {
+	opener := shellquote.Quote("[city] worker \u2022 2026-11-22T10:00:00\n\nGo.")
+	for _, tc := range []struct {
+		name   string
+		path   string
+		suffix string
+		want   func(path string) string
+	}{
+		{
+			name:   "opener as the first message",
+			path:   "/city/.gc/sessions/gc-test/system-prompt.md",
+			suffix: opener,
+			want: func(path string) string {
+				return "env -u CI -u NO_COLOR claude --effort max --append-system-prompt-file '" + path + "' " + opener
+			},
+		},
+		{
+			name:   "a path with a quote in it",
+			path:   "/it's a city/.gc/sessions/gc-test/system-prompt.md",
+			suffix: opener,
+			want: func(string) string {
+				return `env -u CI -u NO_COLOR claude --effort max --append-system-prompt-file '/it'\''s a city/.gc/sessions/gc-test/system-prompt.md' ` + opener
+			},
+		},
+		{
+			name: "no first message",
+			path: "/city/.gc/sessions/gc-test/system-prompt.md",
+			want: func(path string) string {
+				return "env -u CI -u NO_COLOR claude --effort max --append-system-prompt-file '" + path + "'"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ops := &fakeStartOps{systemPromptPath: tc.path}
+			cfg := runtime.Config{
+				WorkDir:              "/proj",
+				Command:              "claude --effort max",
+				SystemPrompt:         "# Role\n\nDo the work.",
+				SystemPromptFileFlag: "--append-system-prompt-file",
+				PromptSuffix:         tc.suffix,
+			}
+			if err := ensureFreshSession(ops, "gc-test", cfg); err != nil {
+				t.Fatalf("ensureFreshSession: %v", err)
+			}
+			assertCallSequence(t, ops, []string{"writeSystemPrompt", "createSession"})
+			if got, want := ops.calls[1].command, tc.want(tc.path); got != want {
+				t.Fatalf("createSession command = %q, want %q", got, want)
+			}
+			if len(ops.systemPrompts) != 1 || ops.systemPrompts[0] != cfg.SystemPrompt {
+				t.Fatalf("system prompt written = %q, want %q", ops.systemPrompts, cfg.SystemPrompt)
+			}
+		})
+	}
+}
+
+// A first message too long for the inline command goes through the prompt
+// file expansion, and the exec'd command still passes the system prompt.
+func TestEnsureFreshSession_SystemPromptSurvivesLongPromptExpansion(t *testing.T) {
+	ops := &fakeStartOps{systemPromptPath: "/city/.gc/sessions/gc-test/system-prompt.md"}
+	cfg := runtime.Config{
+		WorkDir:              t.TempDir(),
+		Command:              "claude",
+		SystemPrompt:         "# Role",
+		SystemPromptFileFlag: "--append-system-prompt-file",
+		PromptSuffix:         shellquote.Quote(strings.Repeat("go ", maxInlinePromptLen)),
+	}
+	if err := ensureFreshSession(ops, "gc-test", cfg); err != nil {
+		t.Fatalf("ensureFreshSession: %v", err)
+	}
+	// The exec'd command sits inside the sh -c script's own quoting.
+	got := ops.calls[1].command
+	if !strings.Contains(got, `exec claude --append-system-prompt-file '\''/city/.gc/sessions/gc-test/system-prompt.md'\'' "$__gc_prompt"`) {
+		t.Fatalf("createSession command = %q, want the exec'd command to pass the system prompt file", got)
+	}
+}
+
+// A system prompt the runtime cannot write fails the launch before any
+// session exists: the agent would otherwise start without its instructions.
+func TestEnsureFreshSession_SystemPromptWriteFailureFailsTheLaunch(t *testing.T) {
+	ops := &fakeStartOps{systemPromptErr: errors.New("disk full")}
+	cfg := runtime.Config{
+		WorkDir:              "/proj",
+		Command:              "claude",
+		SystemPrompt:         "# Role",
+		SystemPromptFileFlag: "--append-system-prompt-file",
+	}
+	err := ensureFreshSession(ops, "gc-test", cfg)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("ensureFreshSession error = %v, want the write failure", err)
+	}
+	assertCallSequence(t, ops, []string{"writeSystemPrompt"})
+}
+
+// Text without a flag, or a flag without text, passes no file: the launch is
+// today's.
+func TestEnsureFreshSession_SystemPromptNeedsTextAndFlag(t *testing.T) {
+	for _, cfg := range []runtime.Config{
+		{WorkDir: "/proj", Command: "claude", SystemPrompt: "# Role"},
+		{WorkDir: "/proj", Command: "claude", SystemPromptFileFlag: "--append-system-prompt-file"},
+	} {
+		ops := &fakeStartOps{systemPromptPath: "/city/.gc/sessions/gc-test/system-prompt.md"}
+		if err := ensureFreshSession(ops, "gc-test", cfg); err != nil {
+			t.Fatalf("ensureFreshSession: %v", err)
+		}
+		assertCallSequence(t, ops, []string{"createSession"})
+		if got := ops.calls[0].command; got != "env -u CI -u NO_COLOR claude" {
+			t.Fatalf("createSession command = %q, want the bare command", got)
+		}
 	}
 }
 

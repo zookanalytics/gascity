@@ -177,7 +177,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.RemoveMeta(name, metaStartupUnconfirmed); err != nil {
 		fmt.Fprintf(os.Stderr, "herdr: clearing prior-life startup marker for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
 	}
-	startupText, err := p.prepareStartupTurn(name, &spec, startupDeliveryText(cfg))
+	startupText, err := p.prepareStartupTurn(name, &spec, cfg)
 	if err != nil {
 		return err
 	}
