@@ -2521,6 +2521,242 @@ func TestCmdMailReplyHumanNotifyQueuesNudge(t *testing.T) {
 	}
 }
 
+// newMailNotifyCity makes a city whose mail is bead mail and whose sessions
+// run on the fake provider, with the session alice in it, and returns the
+// city path, its store and alice's session bead.
+func newMailNotifyCity(t *testing.T) (string, beads.Store, beads.Bead) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	alice, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "alice",
+			"session_name": "alice-session",
+			"provider":     "fake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session alice): %v", err)
+	}
+	return cityPath, store, alice
+}
+
+// closeMailNotifySession closes alice's session and opens a successor that
+// holds the alias alice now, as a pool slot's next session does, and returns
+// the successor's session bead.
+func closeMailNotifySession(t *testing.T, store beads.Store, alice beads.Bead) beads.Bead {
+	t.Helper()
+	if err := store.Close(alice.ID); err != nil {
+		t.Fatalf("Close(session alice): %v", err)
+	}
+	successor, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "alice",
+			"session_name": "alice-successor",
+			"provider":     "fake",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(successor session): %v", err)
+	}
+	return successor
+}
+
+// mailNotifyProvider opens the city's mail provider, the one the mail commands
+// open, so a test's messages are written and read through the store those
+// commands use for messages.
+func mailNotifyProvider(t *testing.T) mail.Provider {
+	t.Helper()
+	mp, code := openCityMailProvider(io.Discard, "test")
+	if mp == nil {
+		t.Fatalf("openCityMailProvider() = nil, exit %d", code)
+	}
+	return mp
+}
+
+// decodeMailActionResult decodes the one JSON line a mail command printed.
+func decodeMailActionResult(t *testing.T, stdout *bytes.Buffer) mailActionResult {
+	t.Helper()
+	var result mailActionResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal %q: %v", stdout.String(), err)
+	}
+	return result
+}
+
+// pendingMailNudges returns the city's queued nudges.
+func pendingMailNudges(t *testing.T, cityPath string) []nudgequeue.Item {
+	t.Helper()
+	state, err := nudgequeue.LoadState(cityPath)
+	if err != nil {
+		t.Fatalf("LoadState(): %v", err)
+	}
+	return state.Pending
+}
+
+// TestCmdMailReplyNotifyReachesASenderRenamedSinceItSent: a reply is
+// delivered to the session that sent the message it answers, by that
+// session's id, so --notify requests that session's turn after its alias
+// changed, though the reply's To still shows the alias it sent from.
+func TestCmdMailReplyNotifyReachesASenderRenamedSinceItSent(t *testing.T) {
+	cityPath, store, alice := newMailNotifyCity(t)
+	original, err := mailNotifyProvider(t).Send("alice", "human", "Hello", "first")
+	if err != nil {
+		t.Fatalf("Send(): %v", err)
+	}
+	if err := store.SetMetadataBatch(alice.ID, session.UpdatedAliasMetadata(alice.Metadata, "alice-renamed")); err != nil {
+		t.Fatalf("SetMetadataBatch(alias rename): %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailReplyJSON([]string{original.ID, "reply body"}, "", "", true, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailReplyJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result := decodeMailActionResult(t, &stdout)
+	if result.Message == nil || result.Message.To != "alice" {
+		t.Fatalf("reply = %+v, want it addressed to the alias the original was sent from", result.Message)
+	}
+	if !result.Notified {
+		t.Fatalf("notified = false, want true; stderr=%s", stderr.String())
+	}
+	pending := pendingMailNudges(t, cityPath)
+	if len(pending) != 1 || pending[0].SessionID != alice.ID || pending[0].Source != "mail" {
+		t.Fatalf("pending nudges = %+v, want one mail nudge for session %s; stderr=%s", pending, alice.ID, stderr.String())
+	}
+}
+
+// TestCmdMailReplyNotifyRequestsNoTurnFromAClosedSender: a reply to a message
+// whose sending session has closed is delivered to that session's id. No live
+// session's inbox holds it, the successor that now holds the alias the
+// message was sent from included, so --notify requests no turn and queues no
+// notice, and says so. The reply itself lands.
+func TestCmdMailReplyNotifyRequestsNoTurnFromAClosedSender(t *testing.T) {
+	cityPath, store, alice := newMailNotifyCity(t)
+	original, err := mailNotifyProvider(t).Send("alice", "human", "Hello", "first")
+	if err != nil {
+		t.Fatalf("Send(): %v", err)
+	}
+	successor := closeMailNotifySession(t, store, alice)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailReplyJSON([]string{original.ID, "reply body"}, "", "", true, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailReplyJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result := decodeMailActionResult(t, &stdout)
+	if result.Notified {
+		t.Fatalf("notified = true, want false for a closed sender; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nudge failed") || !strings.Contains(stderr.String(), "closed") || !strings.Contains(stderr.String(), alice.ID) {
+		t.Fatalf("stderr = %q, want the closed session %s reported", stderr.String(), alice.ID)
+	}
+	if pending := pendingMailNudges(t, cityPath); len(pending) != 0 {
+		t.Fatalf("pending nudges = %+v, want none", pending)
+	}
+
+	mp := mailNotifyProvider(t)
+	closedInbox, err := mp.Inbox(alice.ID)
+	if err != nil {
+		t.Fatalf("Inbox(%s): %v", alice.ID, err)
+	}
+	if len(closedInbox) != 1 || closedInbox[0].ID != result.ID {
+		t.Fatalf("closed sender's inbox = %+v, want the reply %s", closedInbox, result.ID)
+	}
+	successorInbox, err := mp.Inbox(successor.ID)
+	if err != nil {
+		t.Fatalf("Inbox(%s): %v", successor.ID, err)
+	}
+	if len(successorInbox) != 0 {
+		t.Fatalf("successor's inbox = %+v, want the reply outside it", successorInbox)
+	}
+}
+
+// TestCmdMailSendNotifyRequestsNoTurnFromAClosedSession: mail sent to a closed
+// session's id lands in that session's mailbox, which no live session reads,
+// so --notify requests no turn and queues no notice there either.
+func TestCmdMailSendNotifyRequestsNoTurnFromAClosedSession(t *testing.T) {
+	cityPath, store, alice := newMailNotifyCity(t)
+	closeMailNotifySession(t, store, alice)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdMailSendJSON([]string{alice.ID, "status please"}, true, false, "", "", "", "", "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdMailSendJSON() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	result := decodeMailActionResult(t, &stdout)
+	if result.Message == nil || result.Message.To != alice.ID {
+		t.Fatalf("sent = %+v, want it addressed to the closed session %s", result.Message, alice.ID)
+	}
+	if result.Notified {
+		t.Fatalf("notified = true, want false for a closed session; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "nudge failed") || !strings.Contains(stderr.String(), "closed") || !strings.Contains(stderr.String(), alice.ID) {
+		t.Fatalf("stderr = %q, want the closed session %s reported", stderr.String(), alice.ID)
+	}
+	if pending := pendingMailNudges(t, cityPath); len(pending) != 0 {
+		t.Fatalf("pending nudges = %+v, want none", pending)
+	}
+}
+
+// routeFailingMailProvider is a mail provider that cannot say where it
+// delivered a message.
+type routeFailingMailProvider struct {
+	mail.Provider
+	err error
+}
+
+func (p routeFailingMailProvider) RecipientRoute(string) (string, error) {
+	return "", p.err
+}
+
+// TestDoMailReplyNotifyReportsAnUnreadableRoute: when the provider cannot say
+// where it delivered the reply, --notify requests no turn rather than look up
+// the reply's To, which can name a session the reply never reached.
+func TestDoMailReplyNotifyReportsAnUnreadableRoute(t *testing.T) {
+	mp := routeFailingMailProvider{Provider: mail.NewFake(), err: errors.New("store unavailable")}
+	original, err := mp.Send("alice", "human", "Hello", "first")
+	if err != nil {
+		t.Fatalf("Send(): %v", err)
+	}
+	var nudged []string
+	nf := func(recipient, _ string) (string, error) {
+		nudged = append(nudged, recipient)
+		return "", nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailReplyJSON(mp, events.Discard, original.ID, "human", "", "reply body", nf, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailReplyJSON() = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if len(nudged) != 0 {
+		t.Fatalf("nudged %q, want no turn requested", nudged)
+	}
+	if result := decodeMailActionResult(t, &stdout); result.Notified {
+		t.Fatalf("notified = true, want false")
+	}
+	if !strings.Contains(stderr.String(), "nudge failed") || !strings.Contains(stderr.String(), "store unavailable") {
+		t.Fatalf("stderr = %q, want the unreadable route reported", stderr.String())
+	}
+}
+
 func TestCmdMailReplyExecProviderNotifyQueuesNudge(t *testing.T) {
 	cityPath, sessionID, script := setupExecMailReplyNudgeTest(t)
 	t.Setenv("GC_MAIL", "exec:"+script)

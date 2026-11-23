@@ -132,7 +132,8 @@ func appendNotifyOp(ids []string, opID string) []string {
 // newMailNudgeFunc notifies a mail recipient from sender, passing the mail
 // message id as the notice's cause (sendMailNotify). Under require a notice
 // the op journal cannot record is refused before the recipient resolves, so
-// it materializes no configured named session's row.
+// it materializes no configured named session's row. A recipient that
+// resolves to a closed session is refused (errMailRecipientClosed).
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient, messageID string) (string, error) {
 		target, err := resolveMessageOpTarget(recipient, mailNotifyOpRequest(mailNotifyText(sender), messageID), io.Discard)
@@ -142,8 +143,23 @@ func newMailNudgeFunc(sender string) nudgeFunc {
 		if err != nil {
 			return "", err
 		}
+		if target.closed {
+			return "", closedMailRecipientError(target.sessionID)
+		}
 		return sendMailNotify(target, sender, messageID)
 	}
+}
+
+// errMailRecipientClosed is a mail notice refused because its recipient
+// resolved to a closed session. A closed session takes no turn, and a notice
+// queued for it would be claimed by whichever live session holds its alias now
+// (queuedNudgeClaimableForTarget), whose inbox does not hold mail delivered to
+// the closed session's id.
+var errMailRecipientClosed = errors.New("the recipient's session is closed and takes no turn")
+
+// closedMailRecipientError is errMailRecipientClosed naming the session.
+func closedMailRecipientError(id string) error {
+	return fmt.Errorf("%w: session %q", errMailRecipientClosed, id)
 }
 
 func newMailCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -2786,12 +2802,18 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 
 	notified := false
 	var notifyOps []string
-	if nudgeFn != nil && reply.To != "human" {
-		if opID, err := nudgeFn(reply.To, reply.ID); err != nil {
+	if nudgeFn != nil {
+		recipient, err := replyNoticeRecipient(mp, reply)
+		switch {
+		case err != nil:
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else {
-			notified = true
-			notifyOps = appendNotifyOp(notifyOps, opID)
+		case recipient != "human":
+			if opID, err := nudgeFn(recipient, reply.ID); err != nil {
+				fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
+			} else {
+				notified = true
+				notifyOps = appendNotifyOp(notifyOps, opID)
+			}
 		}
 	}
 	if jsonOut {
@@ -2799,6 +2821,29 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
+}
+
+// mailRecipientRouter is the optional mail-provider capability of naming the
+// route a message is delivered to (beadmail.Provider.RecipientRoute).
+type mailRecipientRouter interface {
+	RecipientRoute(id string) (string, error)
+}
+
+// replyNoticeRecipient is the address a reply's notice is for: the route the
+// provider delivered the reply to, where the provider names one
+// (mailRecipientRouter), else the reply's To. A reply's To is the display
+// address its recipient had when the message it answers was sent, which names
+// no session, or another one, once that session's alias changes or it closes.
+func replyNoticeRecipient(mp mail.Provider, reply mail.Message) (string, error) {
+	router, ok := mp.(mailRecipientRouter)
+	if !ok {
+		return reply.To, nil
+	}
+	route, err := router.RecipientRoute(reply.ID)
+	if err != nil {
+		return "", fmt.Errorf("reading where reply %s was delivered: %w", reply.ID, err)
+	}
+	return route, nil
 }
 
 // cmdMailMarkRead marks a message as read.
