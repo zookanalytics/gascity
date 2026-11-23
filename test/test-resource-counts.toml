@@ -267,6 +267,11 @@ resource = "slow_process_gate"
 calls = 1
 
 [[count]]
+path = "cmd/gc/cmd_convoy_progress_fanout_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "environment"
 calls = 1
@@ -2433,6 +2438,12 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/pidutil/vanish_darwin_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/processgroup/processgroup_darwin_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -3760,7 +3771,7 @@ tagged = true
 [[count]]
 path = "test/integration/bdstore_test.go"
 resource = "subprocess"
-calls = 5
+calls = 6
 tagged = true
 
 [[count]]
