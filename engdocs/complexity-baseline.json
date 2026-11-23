@@ -286,12 +286,6 @@
       "ccn": 50
     },
     {
-      "package": "migrate",
-      "function": "isZeroAgentConfig",
-      "file": "internal/migrate/migrate.go",
-      "ccn": 50
-    },
-    {
       "package": "productmetrics",
       "function": "(*Service).RecordOnce",
       "file": "internal/productmetrics/spool.go",

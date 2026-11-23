@@ -650,12 +650,13 @@ func migrateAgentAssets(cityPath string, entry agentEntry, usage usageCounts, re
 		}
 	}
 
-	cfg := agentConfigFromAgent(agent)
-	if !isZeroAgentConfig(cfg) {
-		data, err := marshalAgentFile(cfg)
-		if err != nil {
-			return fmt.Errorf("agent.toml: %w", err)
-		}
+	// Every agentFile field is omitempty, so an agent with no setting encodes
+	// to nothing and needs no agent.toml.
+	data, err := marshalAgentFile(agentConfigFromAgent(agent))
+	if err != nil {
+		return fmt.Errorf("agent.toml: %w", err)
+	}
+	if len(data) > 0 {
 		if err := maybeWriteFile(filepath.Join(agentDir, "agent.toml"), data,
 			fmt.Sprintf("write agents/%s/agent.toml", agent.Name), report, opts.DryRun); err != nil {
 			return err
@@ -966,59 +967,6 @@ func agentConfigFromAgent(agent config.Agent) agentFile {
 		WakeMode:               agent.WakeMode,
 		MouseMode:              agent.MouseMode,
 	}
-}
-
-func isZeroAgentConfig(cfg agentFile) bool {
-	return cfg.Description == "" &&
-		cfg.Dir == "" &&
-		cfg.WorkDir == "" &&
-		cfg.TmuxAlias == "" &&
-		cfg.Scope == "" &&
-		!cfg.Suspended &&
-		len(cfg.PreStart) == 0 &&
-		cfg.Nudge == "" &&
-		cfg.Session == "" &&
-		cfg.Provider == "" &&
-		cfg.ContextAdvisory == nil &&
-		cfg.Upstream == "" &&
-		cfg.StartCommand == "" &&
-		cfg.Lifecycle == "" &&
-		len(cfg.Args) == 0 &&
-		cfg.PromptMode == "" &&
-		cfg.PromptFlag == "" &&
-		cfg.ReadyDelayMs == nil &&
-		cfg.ReadyPromptPrefix == "" &&
-		len(cfg.ProcessNames) == 0 &&
-		cfg.EmitsPermissionWarning == nil &&
-		len(cfg.Env) == 0 &&
-		len(cfg.OptionDefaults) == 0 &&
-		cfg.MaxActiveSessions == nil &&
-		cfg.MinActiveSessions == nil &&
-		cfg.ScaleCheck == "" &&
-		cfg.DrainTimeout == "" &&
-		cfg.OnBoot == "" &&
-		cfg.OnDeath == "" &&
-		cfg.WorkQuery == "" &&
-		cfg.SlingQuery == "" &&
-		cfg.IdleTimeout == "" &&
-		cfg.MaxSessionAge == "" &&
-		cfg.MaxSessionAgeJitter == "" &&
-		cfg.SleepAfterIdle == "" &&
-		cfg.AssignedWorkDeferLimit == nil &&
-		len(cfg.InstallAgentHooks) == 0 &&
-		cfg.HooksInstalled == nil &&
-		cfg.InjectAssignedSkills == nil &&
-		len(cfg.SessionSetup) == 0 &&
-		cfg.SessionSetupScript == "" &&
-		len(cfg.SessionLive) == 0 &&
-		cfg.DefaultSlingFormula == nil &&
-		len(cfg.InjectFragments) == 0 &&
-		len(cfg.AppendFragments) == 0 &&
-		cfg.Attach == nil &&
-		len(cfg.DependsOn) == 0 &&
-		cfg.ResumeCommand == "" &&
-		cfg.WakeMode == "" &&
-		cfg.MouseMode == ""
 }
 
 func dedupeStrings(values []string) []string {
