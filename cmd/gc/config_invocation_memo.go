@@ -15,8 +15,9 @@ import (
 //
 // `gc bd` is the case it exists for. Before it execs bd, the passthrough's
 // guards and env builders each need the config of the same city. A read verb
-// routes on deployment facts alone, and so do the env builders every verb runs
-// (the pinned-bd resolver and the hosted-credential probe): they share one
+// routes on deployment facts alone, and so does the hosted-credential probe
+// the env builders run for every verb (the pinned-bd resolver reads the root
+// city.toml's [workspace.env] table on its own): they share one
 // deployment-layer load (loadCityDeploymentConfig), which reads city.toml, its
 // fragments and the site binding and no pack. A composed load walks every pack,
 // include and order directory, 50-70 ms a time on a production-sized city, so

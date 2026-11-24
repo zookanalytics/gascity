@@ -3826,21 +3826,6 @@
       "id": 149
     },
     {
-      "path": "gc session release-name",
-      "aliases": [],
-      "conditional_modes": [],
-      "hidden": false,
-      "effective_hidden": false,
-      "disable_flag_parsing": false,
-      "shape": "runnable",
-      "recording_policy": "recordable",
-      "mode": "standard",
-      "notice_policy": "eligible",
-      "classification": "session-release-name",
-      "owner": "immediate",
-      "id": 217
-    },
-    {
       "path": "gc session rename",
       "aliases": [],
       "conditional_modes": [],
@@ -4250,6 +4235,21 @@
       "classification": "storage-snapshot-restore",
       "owner": "immediate",
       "id": 216
+    },
+    {
+      "path": "gc storage split",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-split",
+      "owner": "immediate",
+      "id": 217
     },
     {
       "path": "gc storage status",
