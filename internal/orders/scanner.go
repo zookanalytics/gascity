@@ -22,8 +22,9 @@ type ScanRoot struct {
 
 // Scan discovers orders across formula layers. Wave 2 requires top-level flat
 // order files; older PackV1 directory layouts now hard-error. Higher-priority
-// layers (later in the slice) override lower ones by order name. Disabled
-// orders and those in the skip list are excluded.
+// layers (later in the slice) override lower ones by order name. Orders in the
+// skip list are excluded. Disabled orders are returned so overrides can enable
+// them; call FilterEnabled to get the active set.
 func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 	roots := make([]ScanRoot, 0, len(formulaLayers))
 	for _, layer := range formulaLayers {
@@ -36,7 +37,9 @@ func Scan(fs fsys.FS, formulaLayers []string, skip []string) ([]Order, error) {
 }
 
 // ScanRoots discovers orders across explicit order roots. Higher-priority
-// roots (later in the slice) override lower ones by order name.
+// roots (later in the slice) override lower ones by order name. Disabled
+// orders are returned (FilterEnabled decides the active set); orders in the
+// skip list are excluded.
 func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 	scanned, _, err := ScanRootsWithDefinedNames(fs, roots, skip)
 	return scanned, err
@@ -44,10 +47,10 @@ func ScanRoots(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, error) {
 
 // ScanRootsWithDefinedNames is ScanRoots that also returns, in discovery
 // order, every order name the roots define. That includes each name the scan
-// leaves out, because its highest-priority definition is disabled or because
-// skip names it or one of that definition's skip_aliases: the roots still
-// define the name, so a definition of it from outside the roots must not
-// stand in for it.
+// leaves out because skip names it or one of its highest-priority
+// definition's skip_aliases: the roots still define the name, so a definition
+// of it from outside the roots must not stand in for it. A disabled
+// definition is not left out; the scan returns it with Enabled false.
 func ScanRootsWithDefinedNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]Order, []string, error) {
 	skipSet := make(map[string]bool, len(skip))
 	for _, s := range skip {
@@ -81,13 +84,11 @@ func ScanRootsWithDefinedNames(fs fsys.FS, roots []ScanRoot, skip []string) ([]O
 		return nil, nil, legacyOrderLayoutError{findings: legacyFindings}
 	}
 
-	// Collect results, excluding disabled and skipped orders.
+	// Collect results, excluding skipped orders. Disabled orders stay in the
+	// result so overrides can enable them; FilterEnabled decides the active set.
 	var result []Order
 	for _, name := range order {
 		a := found[name]
-		if !a.IsEnabled() {
-			continue
-		}
 		if skipSet[name] || hasSkippedAlias(a, skipSet) {
 			continue
 		}
