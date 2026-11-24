@@ -77,8 +77,8 @@ func loadCityConfigForBdPassthrough(cityPath string, warnings io.Writer) (*confi
 // verb (bdReadVerbs): the city's deployment layer, with no pack read.
 //
 // A read routes on rigs and their prefixes, the workspace prefix, [beads] and
-// [storage], and the env builders before its exec read rigs, workspace.env and
-// the storage binding. LoadDeployment composes each of those as the full
+// [storage], and the env builders before its exec read rigs and the storage
+// binding. LoadDeployment composes each of those as the full
 // composition does. A write keeps loadCityConfigForBdPassthrough, because its
 // guards open stores from the composed config.
 //

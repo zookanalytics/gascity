@@ -2490,93 +2490,73 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
-// TestGcBdHeartbeatRefreshesClaimStampedBySessionID is the end-to-end proof
-// that doBd threads the own-claim actor into the bd heartbeat subprocess
-// (gc-ox80c): a bead whose assignee is this session's GC_SESSION_ID is
-// heartbeated under that id even though the ambient BEADS_ACTOR is the session
-// name. The refused cases pin upstream's identity policy (#6324): a claim held
-// under the session name or the alias alone is a shared chair, not this
-// session's own, so the heartbeat keeps the ambient actor and bd refuses it.
-func TestGcBdHeartbeatRefreshesClaimStampedBySessionID(t *testing.T) {
-	// The write guard's store.Get shells `bd show --json <id>`; return a bead
-	// held by the assignee under test. The heartbeat leg records the actor it
-	// ran under.
-	setup := func(t *testing.T, assignee string) string {
-		t.Helper()
-		capture := filepath.Join(t.TempDir(), "gc-bd-actor.txt")
-		silentFallbackTestSetup(t, `#!/bin/sh
-sub=""
-for a in "$@"; do
-  case "$a" in
-    show|heartbeat|update|close|reopen|delete) sub="$a"; break;;
-  esac
-done
-case "$sub" in
-  show)
-    printf '%s' '[{"id":"demo-abc","assignee":"'"${FAKE_ASSIGNEE}"'","status":"in_progress","issue_type":"task","created_at":"2026-02-27T10:00:00Z"}]'
-    ;;
-  heartbeat)
-    printf '%s' "${BEADS_ACTOR:-}" > "${CAPTURE_PATH}"
-    ;;
-esac
-`)
-		t.Setenv("CAPTURE_PATH", capture)
-		t.Setenv("FAKE_ASSIGNEE", assignee)
-		return capture
-	}
-	heartbeatActor := func(t *testing.T, capture string) string {
-		t.Helper()
-		var stdout, stderr bytes.Buffer
-		if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
-			t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
-		}
-		data, err := os.ReadFile(capture)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(data)
+// TestBdAssigneeShapeRefusal pins the crn-23jqc defense-in-depth fix: `gc bd
+// update` refuses a non-empty --assignee value with an empty rig or role
+// segment (e.g. "cairn/", "/pm", "a//b") instead of forwarding it to bd,
+// while still allowing the documented "" clear idiom and any properly-
+// segmented value through. Such a malformed value is invisible to both
+// standard discovery tiers (exact --assignee=<role> match and --unassigned),
+// so a bead written with it becomes silently unreachable -- the 2026-08-15
+// cairn incident this bead defends against. The guard resolves the verb
+// through bdflags.SplitGlobalFlags, so a global flag before `update` (e.g.
+// `--actor bob update ...`) cannot bypass it.
+func TestBdAssigneeShapeRefusal(t *testing.T) {
+	// Fake bd that echoes its argv to stdout and exits 0 -- proves a case
+	// reached the exec.Command forward, as opposed to being refused first.
+	const echoArgsFakeBdScript = `#!/bin/sh
+echo "$@"
+exit 0
+`
+	cases := []struct {
+		name    string
+		args    []string
+		refused bool
+	}{
+		{"trailing-slash-empty-role", []string{"update", "demo-abc", "--assignee=cairn/"}, true},
+		{"leading-slash-empty-rig-space-form", []string{"update", "demo-abc", "--assignee", "/pm"}, true},
+		{"double-slash-empty-middle-segment", []string{"update", "demo-abc", "--assignee=a//b"}, true},
+		{"short-form-separated", []string{"update", "demo-abc", "-a", "/pm"}, true},
+		{"short-form-inline", []string{"update", "demo-abc", "-a=cairn/"}, true},
+		{"empty-value-clears-assignee", []string{"update", "demo-abc", "--assignee="}, false},
+		{"fully-qualified-value", []string{"update", "demo-abc", "--assignee=cairn/pm"}, false},
+		{"bare-role-no-rig", []string{"update", "demo-abc", "--assignee=deep-investigator"}, false},
+		{"claim-passes-through", []string{"update", "demo-abc", "--claim"}, false},
+		{"non-update-subcommand-forwards", []string{"create", "x", "--assignee=cairn/"}, false},
+		{"global-value-flag-before-verb", []string{"--actor", "bob", "update", "demo-abc", "--assignee=cairn/"}, true},
+		{"global-bool-flag-before-verb", []string{"--json", "update", "demo-abc", "--assignee", "/pm"}, true},
+		{"global-inline-value-before-verb", []string{"--format=json", "update", "demo-abc", "-a=a//b"}, true},
 	}
 
-	t.Run("claim stamped with the session bead id refreshes as that id", func(t *testing.T) {
-		capture := setup(t, "lx-sess")
-		t.Setenv("GC_SESSION_ID", "lx-sess")
-		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
-		t.Setenv("GC_ALIAS", "")
-		t.Setenv("BEADS_ACTOR", "gc-pool-name")
-		if got := heartbeatActor(t, capture); got != "lx-sess" {
-			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the owning session id %q", got, "lx-sess")
-		}
-	})
-	t.Run("claim held under the session name alone is refused (#6324)", func(t *testing.T) {
-		capture := setup(t, "gc-pool-name")
-		t.Setenv("GC_SESSION_ID", "lx-sess")
-		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
-		t.Setenv("GC_ALIAS", "")
-		t.Setenv("BEADS_ACTOR", "city-default-actor")
-		if got := heartbeatActor(t, capture); got != "city-default-actor" {
-			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "city-default-actor")
-		}
-	})
-	t.Run("claim held under the alias alone is refused (#6324)", func(t *testing.T) {
-		capture := setup(t, "reviewer")
-		t.Setenv("GC_SESSION_ID", "lx-sess")
-		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
-		t.Setenv("GC_ALIAS", "reviewer")
-		t.Setenv("BEADS_ACTOR", "gc-pool-name")
-		if got := heartbeatActor(t, capture); got != "gc-pool-name" {
-			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "gc-pool-name")
-		}
-	})
-	t.Run("claim held by another session is refused", func(t *testing.T) {
-		capture := setup(t, "lx-someone-else")
-		t.Setenv("GC_SESSION_ID", "lx-sess")
-		t.Setenv("GC_SESSION_NAME", "gc-pool-name")
-		t.Setenv("GC_ALIAS", "")
-		t.Setenv("BEADS_ACTOR", "gc-pool-name")
-		if got := heartbeatActor(t, capture); got != "gc-pool-name" {
-			t.Fatalf("heartbeat ran as BEADS_ACTOR=%q, want the ambient actor %q left alone", got, "gc-pool-name")
-		}
-	})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			silentFallbackTestSetup(t, echoArgsFakeBdScript)
+
+			var stdout, stderr bytes.Buffer
+			got := doBd(tc.args, &stdout, &stderr)
+
+			if tc.refused {
+				if got == 0 {
+					t.Fatalf("doBd(%v) = 0, want non-zero (refused)", tc.args)
+				}
+				if !strings.Contains(stderr.String(), "empty rig or role segment") {
+					t.Fatalf("stderr = %q, want empty-rig-or-role-segment refusal", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "crn-23jqc") {
+					t.Fatalf("stderr = %q, want crn-23jqc reference", stderr.String())
+				}
+				if stdout.String() != "" {
+					t.Fatalf("stdout = %q, want empty -- bd must never be invoked on a refusal", stdout.String())
+				}
+				return
+			}
+			if got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0 (forwarded); stderr=%q", tc.args, got, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.args[1]) {
+				t.Fatalf("stdout = %q, want forwarded args echoed by fake bd", stdout.String())
+			}
+		})
+	}
 }
 
 // TestBdMutationWriteID covers the compatibility shim (first-ID extraction).

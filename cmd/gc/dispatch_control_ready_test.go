@@ -680,14 +680,9 @@ func TestControlReadyFallbackReadyReadsOncePastAShortPage(t *testing.T) {
 }
 
 func TestNextWorkflowServeBeadsNonControlQueryUsesOriginalShellPath(t *testing.T) {
-	tmp := t.TempDir()
-	bdPath := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bdPath, []byte(`#!/bin/sh
+	installFakeBdOnPath(t, `#!/bin/sh
 printf '[{"id":"ga-plain"}]'
-`), 0o755); err != nil {
-		t.Fatalf("write fake bd: %v", err)
-	}
-	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+`, map[string]nativeFakeBdReply{"": {Stdout: `[{"id":"ga-plain"}]`}})
 
 	got, err := nextWorkflowServeBeads("bd ready --json --limit=20", t.TempDir(), nil)
 	if err != nil {
