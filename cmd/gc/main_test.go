@@ -243,8 +243,13 @@ func exitTestProcess(code int) {
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunControllerTokenChildSpy()
+	maybeRunNativeFakeBd()
 	maybeRunFakeDoltSQLServer()
 	maybeRunControlDispatchSigtermChild()
+	// Infrastructure spawns never probe the host's systemd user manager from
+	// tests; tests that exercise scoping install a fake (infra_scope_test.go).
+	disableInfraScopeForTests()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -333,6 +338,12 @@ func TestMain(m *testing.M) {
 	// floor would reach for a bd that does not serve it; the tests that pin
 	// the floor install their own surface.
 	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
+	// The split's rehearsal and the storage-split doctor check run `gc
+	// version` on the gc an agent session would find (B10). A test never runs
+	// a gc from the host's PATH or home: by default it finds none, and the
+	// tests that pin the probe install their own (stubSessionPathGC) or call
+	// probeSessionPathGCVersion.
+	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "", "", nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
@@ -521,8 +532,39 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != dir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, dir)
+		want := canonicalTestPath(dir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
+		}
+	})
+
+	// This explicit linked fixture protects the cross-platform discovery
+	// invariant. It does not claim a currently reproduced live macOS failure.
+	t.Run("canonical_resolves_symlinked_fixture", func(t *testing.T) {
+		root := t.TempDir()
+		realCity := filepath.Join(root, "real-city")
+		if err := os.MkdirAll(filepath.Join(realCity, "nested"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(realCity, "city.toml"), []byte("[workspace]\nname = \"linked\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		linkedCity := filepath.Join(root, "linked-city")
+		if err := os.Symlink(realCity, linkedCity); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+
+		want := canonicalTestPath(realCity)
+		if linkedCity == want {
+			t.Fatalf("invalid symlink fixture: linked path %q equals resolved target %q", linkedCity, want)
+		}
+		start := filepath.Join(linkedCity, "nested")
+		got, err := findCity(start)
+		if err != nil {
+			t.Fatalf("findCity(%q) error: %v", start, err)
+		}
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want resolved canonical target %q (not raw link %q)", start, got, want, linkedCity)
 		}
 	})
 
@@ -578,8 +620,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", nested, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", nested, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", nested, got, want)
 		}
 	})
 
@@ -617,8 +660,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -665,8 +709,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != cityDir {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, cityDir)
+		want := canonicalTestPath(cityDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -688,8 +733,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", homeDir, err)
 		}
-		if got != homeDir {
-			t.Errorf("findCity(%q) = %q, want %q", homeDir, got, homeDir)
+		want := canonicalTestPath(homeDir)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", homeDir, got, want)
 		}
 	})
 
@@ -732,8 +778,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", ceiling, err)
 		}
-		if got != ceiling {
-			t.Errorf("findCity(%q) = %q, want %q", ceiling, got, ceiling)
+		want := canonicalTestPath(ceiling)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", ceiling, got, want)
 		}
 	})
 
@@ -776,8 +823,9 @@ func TestFindCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("findCity(%q) error: %v", dir, err)
 		}
-		if got != parent {
-			t.Errorf("findCity(%q) = %q, want %q", dir, got, parent)
+		want := canonicalTestPath(parent)
+		if got != want {
+			t.Errorf("findCity(%q) = %q, want canonical path %q", dir, got, want)
 		}
 	})
 
@@ -2781,6 +2829,7 @@ func mapKeys(m map[string]TemplateParams) []string {
 // --- gc init (doInit with fsys.Fake) ---
 
 func TestDoInitSuccess(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	// No pre-existing files — doInit creates everything from scratch.
 
@@ -2802,6 +2851,11 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.Contains(out, "bright-lights") {
 		t.Errorf("stdout missing city name: %q", out)
 	}
+	written, err := config.Parse(f.Files[filepath.Join("/bright-lights", "city.toml")])
+	if err != nil {
+		t.Fatalf("parsing the written city.toml: %v", err)
+	}
+	assertBornSplit(t, written)
 
 	// Verify .gc/ and the new city-root conventions were created (no rigs/ — created on demand by gc rig add).
 	if !f.Dirs[filepath.Join("/bright-lights", ".gc")] {
@@ -3483,6 +3537,7 @@ func TestRunWizardEOFStdin(t *testing.T) {
 }
 
 func TestDoInitWithWizardConfig(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		interactive:     true,
@@ -3669,6 +3724,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 }
 
 func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		configName:       "minimal",

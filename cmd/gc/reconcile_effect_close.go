@@ -521,7 +521,14 @@ var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 // list leaves the session dirs empty; the process walk still gates the prune,
 // and an indeterminate walk makes it fail closed.
 func (c *closeReleases) pruneLiveness(store beads.Store, closed beads.Bead) worktreeLivenessInputs {
-	if c.cfg == nil || !c.cfg.Daemon.AutoPruneWorkerDirEnabled() {
+	return storePruneLiveness(c.cfg, store, closed.ID)
+}
+
+// storePruneLiveness gathers pruneLiveness's inputs for the session row
+// closedID from the store alone, for close paths that hold no pass snapshot:
+// the pool-slot close cascade and the drain-ack finalize.
+func storePruneLiveness(cfg *config.City, store beads.Store, closedID string) worktreeLivenessInputs {
+	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return worktreeLivenessInputs{}
 	}
 	in := worktreeLivenessInputs{live: collectLiveWorktreeStateFn()}
@@ -531,7 +538,7 @@ func (c *closeReleases) pruneLiveness(store beads.Store, closed beads.Bead) work
 	}
 	seen := make(map[string]struct{})
 	for _, r := range rows {
-		if r.ID == closed.ID || r.Status == "closed" {
+		if r.ID == closedID || r.Status == "closed" {
 			continue
 		}
 		for _, dir := range sessionRecordedWorktreeDirs(sessionInfoFromBead(r)) {
