@@ -42,7 +42,8 @@ type ScanOptions struct {
 
 // ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
 // and applies configured order overrides. The returned slice includes orders
-// disabled by overrides; callers choose whether to filter them.
+// disabled by their own file or by overrides; callers choose whether to filter
+// them with orders.FilterEnabled.
 func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Order, error) {
 	if cfg == nil {
 		cfg = &config.City{}
@@ -130,8 +131,10 @@ func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Orde
 	// layer's definition of a name replaces a lower one's. That covers a rig
 	// that imports the pack itself, whose scan above reads that pack's
 	// orders/, as well as another copy of the pack and the rig's own orders/.
-	// A definition there that is disabled, or that [orders] skip filters out
-	// through one of its skip_aliases, turns the order off on that rig, and
+	// A definition there that is disabled is the rig's instance of the order,
+	// off unless an [[orders.overrides]] entry for that rig enables it; one
+	// that [orders] skip filters out through one of its skip_aliases turns
+	// the order off on that rig; and
 	// one that declares scope = "city" runs once, city-wide, under the dedup
 	// above, with no copy on the rig. A rig whose scan failed and was skipped
 	// gets no copy either: the scan read none of its definitions, so a copy
