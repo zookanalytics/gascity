@@ -100,7 +100,8 @@ const (
 	DeferredTypeMetadataKey = beadmeta.DeferredTypeMetadataKey
 
 	// InstantiatingMetadataKey marks graph workflows that are visible in the
-	// store while sequential fallback is still wiring their dependency graph.
+	// store while a one-bead-at-a-time pour is still wiring their dependency
+	// graph. A batch pour exposes no partial graph and writes no fence.
 	InstantiatingMetadataKey = beadmeta.InstantiatingMetadataKey
 )
 
@@ -866,10 +867,18 @@ func attachStepRefs(step formula.RecipeStep) []string {
 // Instantiate creates beads from a pre-compiled Recipe. Use this when
 // you need to inspect or modify the Recipe before instantiation.
 //
-// Steps are created in order (root first, then children depth-first).
-// Dependencies are wired after all beads exist. On partial failure,
-// already-created beads are marked with "molecule_failed" metadata
-// for cleanup.
+// When graph apply is enabled, the store is a beads.GraphApplyStore and
+// DeferAssignees is unset, the recipe is written as one batch, which leaves
+// the whole graph or none of it. A transient batch error (a timeout or a
+// dropped connection) is retried once after a short wait. Any other batch
+// error, and the retry's error, is returned with no bead written one at a
+// time: a batch that timed out may still have committed, and a pour that
+// stops part way leaves part of a run behind.
+//
+// Otherwise steps are created one at a time, in order (root first, then
+// children depth-first), and dependencies are wired after all beads exist.
+// On partial failure, already-created beads are marked with
+// "molecule_failed" metadata for cleanup.
 func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Recipe, opts Options) (*Result, error) {
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
@@ -902,16 +911,13 @@ func Instantiate(ctx context.Context, store beads.MoleculeTarget, recipe *formul
 				return nil, fmt.Errorf("retrying graph apply for recipe %q: %w", recipe.Name, ctx.Err())
 			}
 			result, retryErr := instantiateViaGraphApply(ctx, applier, recipe, opts)
-			if retryErr == nil {
-				return result, nil
+			if retryErr != nil {
+				graphApplyTracef("graph-apply retry-error recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
+				return nil, fmt.Errorf("retrying graph apply for recipe %q: %w", recipe.Name, retryErr)
 			}
-			if !isTransientGraphApplyError(retryErr) {
-				return nil, retryErr
-			}
-			graphApplyTracef("graph-apply transient-error fallback recipe=%s first_err=%v retry_err=%v", recipe.Name, err, retryErr)
-		} else {
-			graphApplyTracef("graph-apply unavailable recipe=%s store=%s", recipe.Name, beads.PhysicalStoreKey(store))
+			return result, nil
 		}
+		graphApplyTracef("graph-apply unavailable recipe=%s store=%s", recipe.Name, beads.PhysicalStoreKey(store))
 	}
 
 	// Merge variable defaults from recipe with caller-provided vars.
