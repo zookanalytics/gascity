@@ -3235,6 +3235,106 @@ func TestEnsureFreshSession_SystemPromptSurvivesLongPromptExpansion(t *testing.T
 	}
 }
 
+// filePromptOps is fakeStartOps with the real system prompt file writer, so a
+// test can read back what a launch left in the session's directory.
+type filePromptOps struct {
+	*fakeStartOps
+	files *tmuxStartOps
+}
+
+func (o filePromptOps) writeSystemPrompt(name, text string) (string, error) {
+	return o.files.writeSystemPrompt(name, text)
+}
+
+// assertOnlySystemPromptFile fails unless the session's directory holds the
+// running launch's system prompt file alone, still with its text.
+func assertOnlySystemPromptFile(t *testing.T, path, text string) {
+	t.Helper()
+	if got, err := os.ReadFile(path); err != nil || string(got) != text {
+		t.Fatalf("running launch's system prompt file = %q, %v; want %q", got, err, text)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if len(names) != 1 || names[0] != filepath.Base(path) {
+		t.Fatalf("session dir holds %q, want the running launch's file alone", names)
+	}
+}
+
+// A start that loses the session name leaves the running launch's system
+// prompt file as it was, though the start carries other instructions, and
+// removes the file it wrote: the running agent reads its file again after a
+// compaction.
+func TestEnsureFreshSession_RefusedStartLeavesTheRunningLaunchsSystemPromptFile(t *testing.T) {
+	notRunning := false
+	createFailed := errors.New("tmux exploded")
+	for _, tc := range []struct {
+		name  string
+		ops   *fakeStartOps
+		fresh bool
+		procs []string
+		// wantErr is what ensureFreshSession returns, nil for a start another
+		// launch beat to the name after the dead session was cleaned up.
+		wantErr error
+	}{
+		{name: "fresh-only start", ops: &fakeStartOps{createErrs: []error{ErrSessionExists}}, fresh: true, wantErr: runtime.ErrSessionExists},
+		{name: "no process names to read the agent by", ops: &fakeStartOps{createErrs: []error{ErrSessionExists}}, wantErr: runtime.ErrSessionExists},
+		{name: "live agent", ops: &fakeStartOps{createErrs: []error{ErrSessionExists}, isRuntimeRunningResult: true}, procs: []string{"claude"}, wantErr: runtime.ErrSessionExists},
+		{name: "agent liveness unknown", ops: &fakeStartOps{createErrs: []error{ErrSessionExists}, isRuntimeRunningErr: errors.New("ps failed")}, procs: []string{"claude"}, wantErr: runtime.ErrSessionExists},
+		{name: "another launch recreates the dead session first", ops: &fakeStartOps{createErrs: []error{ErrSessionExists, ErrSessionExists}, isSessionRunningResult: &notRunning}},
+		{name: "tmux cannot create the session", ops: &fakeStartOps{createErrs: []error{createFailed}}, wantErr: createFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			files := newTmuxStartOps(nil, t.TempDir(), 0, runtime.Config{}, true)
+			const running = "# The running launch's role"
+			live, err := files.writeSystemPrompt("gc-test", running)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := runtime.Config{
+				WorkDir:              "/proj",
+				Command:              "claude",
+				SystemPrompt:         "# Another launch's role",
+				SystemPromptFileFlag: "--append-system-prompt-file",
+				ProcessNames:         tc.procs,
+				FreshOnly:            tc.fresh,
+			}
+			err = ensureFreshSession(filePromptOps{tc.ops, files}, "gc-test", cfg)
+			if (tc.wantErr == nil && err != nil) || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
+				t.Fatalf("ensureFreshSession = %v, want %v", err, tc.wantErr)
+			}
+			assertOnlySystemPromptFile(t, live, running)
+		})
+	}
+}
+
+// A relaunch whose respawn fails leaves the running agent, and the system
+// prompt file it reads, as they were, and removes the file it wrote.
+func TestDoRelaunchSession_FailedRespawnLeavesTheRunningAgentsSystemPromptFile(t *testing.T) {
+	files := newTmuxStartOps(nil, t.TempDir(), 0, runtime.Config{}, true)
+	const running = "# The running agent's role"
+	live, err := files.writeSystemPrompt("test", running)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := &fakeStartOps{hasSessionResult: true, respawnErr: errors.New("respawn-pane failed")}
+	cfg := runtime.Config{
+		Command:              "claude --resume 7f3c2a1e",
+		WorkDir:              "/proj",
+		SystemPrompt:         "# The relaunch's role",
+		SystemPromptFileFlag: "--append-system-prompt-file",
+	}
+	if err := doRelaunchSession(context.Background(), filePromptOps{ops, files}, "test", cfg, DefaultConfig().SetupTimeout); err == nil || !strings.Contains(err.Error(), "respawn-pane failed") {
+		t.Fatalf("doRelaunchSession = %v, want the respawn failure", err)
+	}
+	assertOnlySystemPromptFile(t, live, running)
+}
+
 // A system prompt the runtime cannot write fails the launch before any
 // session exists: the agent would otherwise start without its instructions.
 func TestEnsureFreshSession_SystemPromptWriteFailureFailsTheLaunch(t *testing.T) {
