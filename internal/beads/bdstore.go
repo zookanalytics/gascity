@@ -42,7 +42,7 @@ var (
 	// paths are identified.
 	bdReadCommandTimeout = 120 * time.Second
 	// bdGraphApplyCommandTimeout bounds atomic graph creation below callers'
-	// outer command budgets so transient Dolt stalls can retry or fall back.
+	// outer command budgets so a transient Dolt stall leaves time to retry.
 	bdGraphApplyCommandTimeout = 45 * time.Second
 	// bdQueryCommandTimeout bounds the `bd query` subcommand, which reads the
 	// ephemeral (wisp) tier. gc reload and gc doctor run a sequence of these
