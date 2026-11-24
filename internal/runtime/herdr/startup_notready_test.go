@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -273,22 +274,30 @@ func TestDeliverStartupTurnDoesNotRepromptWhileTheComposerHoldsText(t *testing.T
 }
 
 // (d) An agent that keeps rejecting the turn is re-prompted only until the
-// budget runs out, and the error says so.
+// budget runs out, and the error says so. The delivery runs in a synctest
+// bubble, whose clock moves through the pauses between attempts and stands
+// still while the fake herdr runs, so the attempts the budget allows do not
+// depend on how fast the host starts a process. With a 1s pause and a 2.5s
+// budget they start at 0s, 1s and 2s, and a fourth would start past the
+// budget.
 func TestDeliverStartupTurnGivesUpWhenTheNotReadyBudgetRunsOut(t *testing.T) {
 	bin, trace := notReadyFake(t, 0,
 		`    i=0; while [ $i -lt $N ]; do echo 'Managed account policy is still loading.'; i=$((i+1)); done; echo '> '`)
-	c := notReadyClient(bin, 200*time.Millisecond)
+	c := notReadyClient(bin, 2500*time.Millisecond)
+	c.rejectDelay = time.Second
 
-	err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent, []string{notReadyMarker}, "> ")
-	if err == nil {
-		t.Fatal("deliverStartupTurn reported a turn the agent never took as delivered")
-	}
-	if !strings.Contains(err.Error(), "rejected as not ready") || !strings.Contains(err.Error(), "attempts") {
-		t.Fatalf("error = %v, want it to report the not-ready rejection and the attempts", err)
-	}
-	if got := readTrace(t, trace); promptCount(got) < 2 {
-		t.Fatalf("prompts = %d, want re-prompts before giving up:\n%s", promptCount(got), got)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent, []string{notReadyMarker}, "> ")
+		if err == nil {
+			t.Fatal("deliverStartupTurn reported a turn the agent never took as delivered")
+		}
+		if !strings.Contains(err.Error(), "rejected as not ready") || !strings.Contains(err.Error(), "on all 3 attempts over 2s") {
+			t.Fatalf("error = %v, want it to report the not-ready rejection on all 3 attempts over 2s", err)
+		}
+		if got := readTrace(t, trace); promptCount(got) != 3 {
+			t.Fatalf("prompts = %d, want 3, one for each attempt the budget allows:\n%s", promptCount(got), got)
+		}
+	})
 }
 
 // (e) herdr refusing a nudge with agent_blocked comes back as
