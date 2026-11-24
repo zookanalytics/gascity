@@ -416,9 +416,9 @@ func TestDrainAckKeepsClaimsTheSeatStarted(t *testing.T) {
 				b := beads.Bead{Title: name, Type: "task", Metadata: routedToWorker()}
 				switch name {
 				case "mayor":
-					b.Labels = []string{beadmeta.HoldMayorLabel}
+					b.Labels = []string{"hold:mayor"}
 				case "external":
-					b.Labels = []string{beadmeta.HoldExternalLabel}
+					b.Labels = []string{"hold:external"}
 				}
 				ids[name] = mustCreateDrainAckBead(t, work, b, "in_progress", "worker-1").ID
 			}

@@ -9,14 +9,14 @@ package main
 //
 // The controller's demand loop counted any ready, unassigned row whose route
 // normalized to T. The worker's Tier-3 query serves a strictly smaller set: it
-// passes --exclude-type=epic and one --exclude-label per dispatch hold, and it
-// matches the route by EXACT string. So three classes of row were permanent
-// capacity demand that no worker could ever claim:
+// passes --exclude-type=epic, drops every row on an active hold, and matches
+// the route by EXACT string. So three classes of row were permanent capacity
+// demand that no worker could ever claim:
 //
 //   - a routed EPIC (an unassigned parent has no executable spec — the query
 //     excludes it deliberately, workquery.go),
-//   - a bead parked on hold:mayor / hold:external (parked precisely because the
-//     next actor is not this worker),
+//   - a bead parked on a hold (parked precisely because the next actor is not
+//     this worker),
 //   - a route stamped with a live slot suffix, "<base>-N", which the demand side
 //     normalizes to <base> and every raw consumer rejects.
 //
@@ -128,19 +128,20 @@ func demandRowServable(b beads.Bead) bool {
 		}
 	}
 	// LABEL: human is exact, case-sensitive, like the query's label filter;
-	// the hook does not apply a human post-filter. Dispatch holds are
-	// case-insensitive: the hook re-applies them with EqualFold
-	// (isHeldHookCandidate), so a "Hold:Mayor" bead is stripped even if the
-	// reader serves it. The worker never sees it, so it is not capacity demand.
+	// the hook does not apply a human post-filter. Holds go through the active
+	// hold predicate (beadmeta.HasActiveHold), which the query's jq filter
+	// renders and the hook re-applies (isHeldHookCandidate): the label trimmed,
+	// its prefix and the cleared value case-insensitive, any nonempty value. The
+	// worker never sees a held row, so it is not capacity demand.
 	for _, label := range b.Labels {
 		label = strings.TrimSpace(label)
 		for _, excluded := range rules.ExcludeLabels {
-			if label == excluded || (excluded != beadmeta.HumanLabel && strings.EqualFold(label, excluded)) {
+			if label == excluded {
 				return false
 			}
 		}
 	}
-	return true
+	return !rules.ExcludeActiveHolds || !beadmeta.HasActiveHold(b.Labels)
 }
 
 // demandRowClaimability names whether a trigger row a demand-spawned seat failed
@@ -153,7 +154,7 @@ func demandRowServable(b beads.Bead) bool {
 // The reason is the answer, not a bare "not ready", because the two consumers —
 // classifyDemandTrigger and the drain-ack open arm
 // (firstOpenClaimableAssignedWorkBeadForReachableStore) — act differently on
-// each cause: a deferral or a dispatch hold is PROOF of non-claimability, while
+// each cause: a deferral or an active hold is PROOF of non-claimability, while
 // an unproven blockedness reading is only a question, to be settled against live
 // deps. Naming the cause here keeps that distinction in one place. Reconstructing
 // it by elimination at a call site ("the only remaining reason is …") would be
@@ -172,8 +173,8 @@ const (
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
-	// demandRowHeld: the row carries a canonical dispatch hold
-	// (beadmeta.HasDispatchHold). The hook never serves a held row to anyone
+	// demandRowHeld: the row carries an active hold
+	// (beadmeta.HasActiveHold). The hook never serves a held row to anyone
 	// (isHeldHookCandidate), so this is PROOF of non-claimability, read off a
 	// fresh bead-local field exactly like a deferral. A seat that drained past
 	// held assigned work drained correctly; reporting it as a strand is what
@@ -205,7 +206,7 @@ const (
 )
 
 // classifyDemandRowClaimability answers the claimability question for one row.
-// Deferral and a dispatch hold are checked first: they are the causes that are
+// Deferral and an active hold are checked first: they are the causes that are
 // proof, so a row that is also flagged blocked classifies by the proof.
 //
 // An ABSENT is_blocked projection is not evidence of unblockedness, and this
@@ -237,7 +238,7 @@ func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimab
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
 	}
-	if beadmeta.HasDispatchHold(b.Labels) {
+	if beadmeta.HasActiveHold(b.Labels) {
 		return demandRowHeld
 	}
 	// Ahead of the is_blocked clause: the status is bead-local and fresh, so an

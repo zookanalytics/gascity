@@ -237,6 +237,45 @@ func TestFilterAssignedWorkBeadsForPoolDemandKeepsDirectAssigneeAfterTemplateFal
 	}
 }
 
+// TestFilterAssignedWorkBeadsForPoolDemandCountsHeldAssignedWork pins the
+// ownership half of the hold contract: a hold answers what a session should DO,
+// never whether it should EXIST. Assigned work on an active hold, open or
+// in_progress and whatever the hold names, still counts toward its template's
+// seats, so its owner stays visible to the pool and to crash recovery.
+func TestFilterAssignedWorkBeadsForPoolDemandCountsHeldAssignedWork(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{
+			Name: "worker",
+		}},
+	}
+	sessions := []beads.Bead{{
+		ID:     "session-1",
+		Status: "open",
+		Type:   sessionBeadType,
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "worker-session",
+		},
+	}}
+	for _, hold := range heldLabelVariants() {
+		for _, status := range []string{"open", "in_progress"} {
+			t.Run(status+"/"+hold, func(t *testing.T) {
+				work := []beads.Bead{{
+					ID:       "held-assigned",
+					Status:   status,
+					Assignee: "session-1",
+					Labels:   []string{hold},
+					Metadata: map[string]string{},
+				}}
+				got, _ := filterAssignedWorkBeadsForPoolDemand(cfg, "", nil, sessionInfosFromBeads(sessions), work, []string{""})
+				if len(got) != 1 || got[0].ID != "held-assigned" {
+					t.Fatalf("filtered work = %#v, want the held assignment counted: a hold must not hide its owner from pool accounting", got)
+				}
+			})
+		}
+	}
+}
+
 func TestFilterAssignedWorkBeadsForPoolDemandKeepsLegacyWorkflowRunTarget(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{

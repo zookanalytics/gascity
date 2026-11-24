@@ -181,8 +181,9 @@ silently) apart from the router's own transient drain bookkeeping (#6360).
   `gc.continuation_group` and pins `gc.session_affinity=require` alongside it.
   Claiming one executable step pre-assigns its workflow siblings to the same
   persistent session, preserving its worktree and conversation context. A
-  sibling carrying a canonical dispatch hold (`hold:mayor` or `hold:external`)
-  is not pre-assigned: its next actor is by construction not this session.
+  sibling carrying an active hold label (`hold:<value>`, any nonempty value but
+  `cleared`) is not pre-assigned: its next actor is by construction not this
+  session.
   Once the hold is released it is claimed as ordinary pool work, possibly by
   a session without the group's worktree or conversation context.
 - `lifecycle = "one_shot"` marks each step an independent claim, because no

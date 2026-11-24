@@ -666,7 +666,7 @@ func startedCell(entries ...session.WorkStartedEntry) string {
 // not hold the ack: the drain is acknowledged. Kills a fence that ignores
 // either hold label.
 func TestHookDrainAckFenceSkipsDispatchHolds(t *testing.T) {
-	for _, hold := range []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel} {
+	for _, hold := range []string{"hold:mayor", "hold:external"} {
 		t.Run(hold, func(t *testing.T) {
 			got, l, stderr := drainAckFenceRun(t, startedCell(session.WorkStartedEntry{Store: startedStoreRef, Bead: "p-1"}), func(id string) (beads.Bead, error) {
 				return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1", Labels: []string{hold}}, nil
@@ -721,7 +721,7 @@ func TestHookDrainAckFenceFindsAHeldClaimBehindOthers(t *testing.T) {
 		case "gone-1":
 			return beads.Bead{}, beads.ErrNotFound
 		case "parked-1":
-			return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1", Labels: []string{beadmeta.HoldMayorLabel}}, nil
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1", Labels: []string{"hold:mayor"}}, nil
 		default:
 			return beads.Bead{ID: id, Status: "closed", Assignee: "worker-1"}, nil
 		}

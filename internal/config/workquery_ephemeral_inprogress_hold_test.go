@@ -5,16 +5,14 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-
-	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // Regression coverage for the ephemeral (wisp) sibling of the gas-kg6 hold
 // gate, from the #5114 review: ephemeralAssignedInProgressProbeScript sits in
 // the same tier-1 slot as the `bd list --status in_progress` query, immediately
-// after the block that received the nheld gate, and had no hold check of its
-// own. A held ephemeral bead assigned to the session made the probe exit the
-// script with only that bead; the Go-side filter then stripped it, so the hook
+// after the read that drops held rows, and had no hold check of its own. A held
+// ephemeral bead assigned to the session made the probe exit the script with
+// only that bead; the Go-side filter then stripped it, so the hook
 // reported action=drain / no_work while genuinely ready work sat unqueried —
 // the same starvation the gas-kg6 fix exists to remove, wearing a different
 // label.
@@ -54,7 +52,7 @@ esac
 // the ready-gated tier below still runs and serves the worker's other ready
 // work, instead of the script exiting with a bead the Go filter must discard.
 func TestEphemeralInProgressProbeFallsThroughWhenHeld(t *testing.T) {
-	for _, label := range beadmeta.DispatchHoldLabels {
+	for _, label := range activeHoldFixtures() {
 		t.Run(label, func(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")
@@ -82,7 +80,7 @@ func TestEphemeralInProgressProbeSkipsHeldCandidate(t *testing.T) {
 	}
 	bdScript := `#!/bin/sh
 case "$1" in
-  query) printf '%s' '` + heldEphemeralInProgressRow(beadmeta.HoldExternalLabel) + `' ;;
+  query) printf '%s' '` + heldEphemeralInProgressRow("hold:external") + `' ;;
   *) printf '[]' ;;
 esac
 `
@@ -115,7 +113,7 @@ func TestEphemeralInProgressProbeServesUnheldCandidate(t *testing.T) {
 		},
 		{
 			name: "held first row does not shadow an unheld second",
-			rows: `[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":["` + beadmeta.HoldExternalLabel + `"]},` +
+			rows: `[{"id":"wisp-1","status":"in_progress","assignee":"sess-1","labels":["` + "hold:external" + `"]},` +
 				`{"id":"wisp-2","status":"in_progress","assignee":"sess-1","labels":[]}]`,
 			want: "wisp-2",
 		},
@@ -155,7 +153,7 @@ func TestLegacyControlEphemeralInProgressProbeSkipsHeldCandidate(t *testing.T) {
 	}
 	bdScript := `#!/bin/sh
 case "$1" in
-  query) printf '%s' '` + heldEphemeralInProgressRow(beadmeta.HoldMayorLabel) + `' ;;
+  query) printf '%s' '` + heldEphemeralInProgressRow("hold:po") + `' ;;
   *) printf '[]' ;;
 esac
 `

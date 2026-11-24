@@ -26,7 +26,6 @@ var doctorCityStoreDependentNames = []string{
 	"storage-rigs",
 	"storage-split",
 	"dangling-blocking-edges",
-	"hold-label-routed-to",
 	"pool-idle-routed-work",
 	"v2-demand-migrations",
 	"v2-session-migration",
@@ -120,8 +119,8 @@ func TestBuildDoctorChecks_SkipsStoreChecksWhenStoreUnreachable(t *testing.T) {
 		t.Fatalf("preflight message = %q, want doltlite residual note", res.Message)
 	}
 	// The city checks (doctorCityStoreCheckCount) plus three per active rig, two rigs active.
-	if !strings.Contains(res.Message, "skipped 31 store checks") {
-		t.Fatalf("preflight message = %q, want skip count 31", res.Message)
+	if !strings.Contains(res.Message, "skipped 30 store checks") {
+		t.Fatalf("preflight message = %q, want skip count 30", res.Message)
 	}
 	if !strings.Contains(res.Message, "2 rigs") {
 		t.Fatalf("preflight message = %q, want rig count 2", res.Message)
@@ -237,8 +236,8 @@ func TestBuildDoctorChecks_NonUnreachableProbeKeepsStoreChecks(t *testing.T) {
 	if doctorCheckIndex(names, "beads-store") < 0 {
 		t.Fatalf("city beads-store missing after non-outage probe error; names=%v", names)
 	}
-	if doctorCheckIndex(names, "hold-label-routed-to") < 0 {
-		t.Fatalf("hold-label-routed-to missing after non-outage probe error; names=%v", names)
+	if doctorCheckIndex(names, "pool-idle-routed-work") < 0 {
+		t.Fatalf("pool-idle-routed-work missing after non-outage probe error; names=%v", names)
 	}
 }
 

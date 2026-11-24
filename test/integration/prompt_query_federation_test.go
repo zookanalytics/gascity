@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -270,13 +269,13 @@ func TestCityScopedAgentPromptQueriesFindRigWork(t *testing.T) {
 
 		// Three in_progress claims held by the agent's session identity, in the
 		// federated reader's (priority, created_at, id) order:
-		//   - P0 in the CITY store, parked on a dispatch hold;
+		//   - P0 in the CITY store, parked on a hold whose value is pack vocabulary;
 		//   - P1 in the rig store, blocked by an open rig gate;
 		//   - P2 in the rig store, servable: the one claim the session can resume.
 		// The two gated claims sort first, so a one-row read of the merged answer
 		// sees only the held one and the servable claim is never read.
 		cityName := filepath.Base(cityDir)
-		heldID := promptQueryBeadID(t, mustCreateCityBead(t, cityDir, "held city claim", "--priority", "0", "--labels", beadmeta.HoldExternalLabel), config.DeriveBeadsPrefix(cityName))
+		heldID := promptQueryBeadID(t, mustCreateCityBead(t, cityDir, "held city claim", "--priority", "0", "--labels", "hold:po"), config.DeriveBeadsPrefix(cityName))
 		claim(heldID, false)
 		gateID := promptQueryBeadID(t, mustCreateRigBead(t, cityDir, rigDir, "gate the blocked claim waits on"), rigPrefix)
 		blockedID := promptQueryBeadID(t, mustCreateRigBead(t, cityDir, rigDir, "blocked rig claim", "--priority", "1"), rigPrefix)

@@ -5712,7 +5712,7 @@ func drainStepRootFormulaName(root beads.Bead) string {
 // sessionHasAwakeAssignedWorkForReachableStore reports whether assigned work
 // should keep a session awake: in-progress work always counts, held or not,
 // while open work counts only when it is ready (unblocked, not deferred, and not
-// ready-excluded) and not parked on a dispatch hold (assignedOpenWorkHeld).
+// ready-excluded) and not parked on an active hold (assignedOpenWorkHeld).
 func sessionHasAwakeAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	scope := releaseScope(info, sw.Legs().cfg)
 	if sw == nil || sw.ids == nil {
@@ -5826,7 +5826,7 @@ func firstOpenClaimableAssignedWorkBeadForReachableStore(sw *SeatWork, info sess
 //   - deferred — a future defer_until and bd's deferred status (dated or not)
 //     are fresh bead-local fields, never stale, so this is PROOF: no worker
 //     could have claimed the row and draining past it was correct pull.
-//   - held — a canonical dispatch hold label (beadmeta.HasDispatchHold) is a
+//   - held — an active hold label (beadmeta.HasActiveHold) is a
 //     fresh bead-local field too, and the hook refuses to serve a held row on
 //     every path, so this is PROOF as well: draining past it was correct pull.
 //   - status_blocked — bd itself parked the row (status "blocked", read back from

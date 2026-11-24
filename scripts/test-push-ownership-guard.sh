@@ -459,6 +459,36 @@ test_block_on_hold_external() {
     rm -rf "$repo" "$fbd"
 }
 
+test_block_on_hold_pack_value() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" '["hold:cleared"," Hold:PO "]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "Hold:PO" <<<"$out" && grep -q -- "--no-verify" <<<"$out"; then
+        record_pass "block/hold-pack-value (rc=$rc, any active hold value holds, beside a cleared one)"
+    else
+        record_fail "block/hold-pack-value" "expected non-zero rc naming Hold:PO+--no-verify, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+test_allow_inactive_hold_labels() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "ga-abc123.1" "in_progress" "agent-x" "tmpl-x" '["hold:cleared","hold:","hold","on-hold"]'
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then
+        record_pass "allow/inactive-hold-labels"
+    else
+        record_fail "allow/inactive-hold-labels" "expected rc=0 for labels that are no active hold, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_block_on_bd_unreachable() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "builder/ga-abc123.1-my-feature")"
@@ -1552,6 +1582,8 @@ run_all() {
     test_block_on_routed_to_changed
     test_block_on_hold_mayor
     test_block_on_hold_external
+    test_block_on_hold_pack_value
+    test_allow_inactive_hold_labels
     test_block_on_bd_unreachable
     test_block_on_bd_timeout
     test_retry_recovers_from_transient_failure

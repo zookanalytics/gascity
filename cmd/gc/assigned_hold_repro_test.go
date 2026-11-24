@@ -205,28 +205,29 @@ func TestAssignedHoldHeldOpenAliasAssignmentStillServesRoutedStep(t *testing.T) 
 	}
 	for _, reader := range readers {
 		for identityName, identity := range identities {
-			for _, hold := range beadmeta.DispatchHoldLabels {
+			for _, hold := range heldLabelVariants() {
 				t.Run(reader.name+"/"+identityName+"/"+hold, func(t *testing.T) {
 					out, log := assignedHoldRunWorkQuery(t, assignedHoldTopology(reader.federated), []assignedHoldRow{
 						assignedHoldDecoy("open", identity, hold),
 						assignedHoldRoutedStep(),
 					})
 					assignedRead := reader.binary + " ready --include-ephemeral --assignee=" + identity + " "
-					var sawAssignedRead bool
+					var sawAssignedRead, sawUnboundedRead bool
 					for _, line := range strings.Split(log, "\n") {
 						if !strings.HasPrefix(line, assignedRead) {
 							continue
 						}
 						sawAssignedRead = true
-						if !strings.Contains(line, "--exclude-label hold:mayor --exclude-label hold:external") {
-							t.Errorf("assigned-ready read %q does not exclude the dispatch holds", line)
-						}
-						if strings.Contains(line, "--exclude-label human") {
-							t.Errorf("assigned-ready read %q excludes human, which is not a dispatch hold", line)
+						sawUnboundedRead = sawUnboundedRead || strings.HasSuffix(line, "--limit=0")
+						if strings.Contains(line, "--exclude-label") {
+							t.Errorf("assigned-ready read %q names a label to exclude; holds are dropped by the active hold predicate and human is not one", line)
 						}
 					}
 					if !sawAssignedRead {
 						t.Fatalf("no %q call in reader log:\n%s", assignedRead, log)
+					}
+					if !sawUnboundedRead {
+						t.Errorf("the held one-row window was not read past; reader log:\n%s", log)
 					}
 					res, claimed := assignedHoldClaim(t, out)
 					assertAssignedHoldRoutedStepClaimed(t, out, res, claimed)
@@ -242,8 +243,8 @@ func TestAssignedHoldHeldOpenAliasAssignmentStillServesRoutedStep(t *testing.T) 
 func TestAssignedHoldControlsServeRoutedStep(t *testing.T) {
 	cases := map[string][]assignedHoldRow{
 		"no decoy":            {assignedHoldRoutedStep()},
-		"held in_progress":    {assignedHoldDecoy("in_progress", assignedHoldAlias, beadmeta.HoldExternalLabel), assignedHoldRoutedStep()},
-		"held in_progress/id": {assignedHoldDecoy("in_progress", assignedHoldSession, beadmeta.HoldMayorLabel), assignedHoldRoutedStep()},
+		"held in_progress":    {assignedHoldDecoy("in_progress", assignedHoldAlias, "hold:external"), assignedHoldRoutedStep()},
+		"held in_progress/id": {assignedHoldDecoy("in_progress", assignedHoldSession, "hold:mayor"), assignedHoldRoutedStep()},
 	}
 	for name, rows := range cases {
 		for _, federated := range []bool{false, true} {

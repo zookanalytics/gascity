@@ -352,14 +352,18 @@ hook_poll_due() {
 }
 
 # fetch_routed_queue <route> prints the ready, unassigned, non-epic beads routed
-# to <route> that carry no hold:* dispatch label (the routed tier of the
-# default work query) and fails when there are none.
+# to <route> that carry no active hold label (the routed tier of the default
+# work query; internal/beadmeta ActiveHoldValue defines an active hold) and
+# fails when there are none.
 fetch_routed_queue() {
     local routed=""
     routed=$(bounded 10 bd ready --metadata-field "gc.routed_to=$1" --unassigned --exclude-type=epic --json --limit=0 2>/dev/null) || return 1
     routed=$(printf '%s\n' "$routed" | json_payload | jq -c '
         [ (if type == "array" then .[]? else . end)
-          | select(([ (.labels // [])[] | select(startswith("hold:")) ] | length) == 0) ]
+          | select(([ (.labels // [])[] | tostring | gsub("^\\s+|\\s+$"; "")
+                    | select((ascii_downcase | startswith("hold:"))
+                             and ((.[5:] | gsub("^\\s+|\\s+$"; "") | ascii_downcase) as $v
+                                  | $v != "" and $v != "cleared")) ] | length) == 0) ]
         | select(length > 0)' 2>/dev/null) || return 1
     [ -n "$routed" ] || return 1
     printf '%s\n' "$routed"

@@ -1,19 +1,22 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
 // This file expresses the ga-x9kptu / ga-5736js acceptance criteria for the
 // shell-generated control-ready query (workflowServeControlReadyQueryForBeads):
-// routed_ready() (route-scoped, unassigned) must exclude beads carrying a
-// beadmeta.DispatchHoldLabels value, while assignee_ready() (Tier 1/2) stays
-// hold-transparent. routed_ready() is a single shared function invoked once
-// for the primary target and once each for the legacy and bare-route
+// routed_ready() (route-scoped, unassigned) must exclude beads carrying an
+// active hold, whatever its value names, while assignee_ready() (Tier 1/2)
+// stays hold-transparent. routed_ready() is a single shared function invoked
+// once for the primary target and once each for the legacy and bare-route
 // aliases, so fixing it once must apply uniformly across all three.
 //
 // TestWorkflowServeControlReadyQueryShellFallbackUnreachable closes the
@@ -21,22 +24,69 @@ import (
 // routed_ready()/assignee_ready() can ever actually run as a subprocess via
 // nextWorkflowServeBeads's raw shellWorkQueryWithEnv fallback, or whether
 // tryControlReadyScan always intercepts first. It proves the
-// latter, so the string-level assertions above are defense-in-depth on
+// latter, so the shell-level tests here are defense-in-depth on
 // currently-dead code, not coverage of a live production path -- the real
 // enforcement for this query shape runs through evaluateControlReady /
 // filterReadyByRoute (see dispatch_control_ready_hold_label_test.go).
 
-func TestWorkflowServeControlReadyQueryRoutedReadyExcludesDispatchHoldLabels(t *testing.T) {
+func TestWorkflowServeControlReadyQueryRoutedReadyDropsActiveHolds(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
-	for _, label := range beadmeta.DispatchHoldLabels {
-		want := `--exclude-label "` + label + `"`
-		if count := strings.Count(query, want); count != 2 {
-			t.Errorf("workflowServeControlReadyQuery() contains %q %d times, want 2 (routed_ready's two bd-ready calls): %s", want, count, query)
-		}
+	if count := strings.Count(query, `emit_routed_ready bd --readonly --sandbox ready`); count != 2 {
+		t.Errorf("routed_ready's bd-ready calls go through emit_routed_ready %d times, want 2: %s", count, query)
+	}
+	if strings.Contains(query, `--exclude-label "hold:`) {
+		t.Errorf("workflowServeControlReadyQuery() names a hold label in an --exclude-label flag; holds are dropped by the active hold predicate: %s", query)
 	}
 }
 
-func TestWorkflowServeControlReadyQueryAssigneeReadyDoesNotExcludeDispatchHoldLabels(t *testing.T) {
+// TestWorkflowServeControlReadyQueryShellServesNoHeldRow runs the generated
+// shell against a fake bd whose routed reads answer a full scan of held rows
+// ahead of an unheld one, and whose assignee reads answer a held assignment:
+// the routed groups lose every held row and keep the unheld one, the assignee
+// group stays hold-transparent.
+func TestWorkflowServeControlReadyQueryShellServesNoHeldRow(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the control-ready shell requires it")
+	}
+	var routed []map[string]any
+	for i := 0; i < workflowServeScanLimit; i++ {
+		routed = append(routed, map[string]any{"id": "held-" + string(rune('a'+i)), "labels": []string{"hold:po"}})
+	}
+	routed = append(routed, map[string]any{"id": "unheld"}, map[string]any{"id": "cleared", "labels": []string{"hold:cleared"}})
+	routedJSON, err := json.Marshal(routed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routedPath := filepath.Join(t.TempDir(), "routed.json")
+	if err := os.WriteFile(routedPath, routedJSON, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
+	out := runWorkflowServeShellQueryForTest(t, query, map[string]string{
+		"GC_ALIAS": "gascity/" + config.ControlDispatcherAgentName,
+	}, `#!/bin/sh
+case " $* " in
+  *" --assignee="*) printf '[{"id":"assigned-held","labels":["hold:po"]}]' ;;
+  *"gc.routed_to="*) cat "`+routedPath+`" ;;
+  *) printf '[]' ;;
+esac
+`)
+	var rows []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("control-ready shell printed %q: %v", out, err)
+	}
+	var ids []string
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	if want := []string{"assigned-held", "unheld", "cleared"}; !stringSlicesEqual(ids, want) {
+		t.Fatalf("control-ready shell ids = %v, want %v: held routed rows dropped before the scan limit, the assignee group hold-transparent", ids, want)
+	}
+}
+
+func TestWorkflowServeControlReadyQueryAssigneeReadyIsHoldTransparent(t *testing.T) {
 	query := workflowServeControlReadyQuery(config.Agent{Name: config.ControlDispatcherAgentName, Dir: "gascity"})
 	start := strings.Index(query, `assignee_ready() { `)
 	if start < 0 {

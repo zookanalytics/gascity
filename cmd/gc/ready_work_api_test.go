@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -850,8 +851,8 @@ func TestReadyRoutesThroughTheController(t *testing.T) {
 
 // TestReadyUntilUnblockedCutsTheControllersAnswer pins --until-unblocked on the
 // controller route. The endpoint takes no cut, so the command asks for the whole
-// window and cuts the controller's answer itself: it prints the cut of the
-// in-process window, a gated claim and then the first unblocked one. The city's
+// answer and cuts the controller's answer itself: it prints the cut of the
+// in-process answer, a gated claim and then the first unblocked one. The city's
 // rig is broken, so an in-process read would fail; the answer is the
 // controller's.
 func TestReadyUntilUnblockedCutsTheControllersAnswer(t *testing.T) {
@@ -876,7 +877,9 @@ func TestReadyUntilUnblockedCutsTheControllersAnswer(t *testing.T) {
 	if code := cmdReady(readyFlags{query: q, untilUnblocked: true}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady(--until-unblocked) = %d; stderr=%s — the routed read must not open the broken rig", code, stderr.String())
 	}
-	cut := readywork.CutUntilUnblocked(f.inProcess(t, q))
+	whole := q
+	whole.Limit = 0
+	cut := readywork.CutUntilUnblocked(f.inProcess(t, whole), q.Limit)
 	if len(cut) != 2 || cut[0].ID != gated.ID {
 		t.Fatalf("the fixture window cuts to %v, want the gated claim %s then one unblocked claim", readyWireIDs(cut), gated.ID)
 	}
@@ -886,6 +889,51 @@ func TestReadyUntilUnblockedCutsTheControllersAnswer(t *testing.T) {
 	}
 	if stdout.String() != want.String() {
 		t.Fatalf("routed gc ready --until-unblocked printed\n%s\nwant the cut of the in-process window\n%s", stdout.String(), want.String())
+	}
+}
+
+// TestReadyUntilUnblockedLeavesHeldClaimsOutOnTheControllerRoute pins that the
+// controller route answers what the in-process read answers when held claims
+// sort ahead and would fill the window: the command asks the controller for the
+// whole answer, leaves the held claims out, and only then bounds and cuts it.
+// Any hold value holds, whatever it names. The city's rig is broken, so the
+// answer is the controller's.
+func TestReadyUntilUnblockedLeavesHeldClaimsOutOnTheControllerRoute(t *testing.T) {
+	newReadyCityWithBrokenRig(t)
+	f := newReadyWorkSplitFixture(t)
+	inProgress := readywork.StatusInProgress
+	var held []string
+	for _, label := range []string{"hold:po", "hold:release-train"} {
+		b := mustCreateReadyBead(t, f.city, beads.Bead{Title: "held claim " + label, Type: "task", Priority: readyPriority(0), Labels: []string{label}})
+		if err := f.city.Update(b.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.assignee}); err != nil {
+			t.Fatalf("claim %s: %v", b.ID, err)
+		}
+		held = append(held, b.ID)
+	}
+	client := readyWorkTestServer(t, f.controller())
+	prev := readyAPIClient
+	readyAPIClient = func(string) (*api.Client, string) { return client, "" }
+	t.Cleanup(func() { readyAPIClient = prev })
+
+	q := readywork.Query{Status: readywork.StatusInProgress, Assignee: f.assignee, Limit: 2}
+	if got := readyWireIDs(f.inProcess(t, q)); !reflect.DeepEqual(got, held) {
+		t.Fatalf("control: the bounded window reads %v, want the two held claims that sort first", got)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cmdReady(readyFlags{query: q, untilUnblocked: true}, &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdReady(--until-unblocked) = %d; stderr=%s", code, stderr.String())
+	}
+	var got []readywork.ReadyBead
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("decode %q: %v", stdout.String(), err)
+	}
+	if len(got) == 0 {
+		t.Fatalf("routed gc ready --until-unblocked printed no claim; the held claims hid the resumable one")
+	}
+	for _, row := range got {
+		if slices.Contains(held, row.ID) {
+			t.Fatalf("routed gc ready --until-unblocked printed held claim %s: %v", row.ID, readyWireIDs(got))
+		}
 	}
 }
 
@@ -1200,11 +1248,13 @@ func TestReadyUntilUnblockedAppliesTheCrossStoreRuleOnASplitCity(t *testing.T) {
 		if err != nil {
 			t.Fatalf("in-process --until-unblocked: %v", err)
 		}
-		whole, err := cs.ReadyWork(context.Background(), window)
+		unbounded := window
+		unbounded.Limit = 0
+		whole, err := cs.ReadyWork(context.Background(), unbounded)
 		if err != nil {
-			t.Fatalf("controller window: %v", err)
+			t.Fatalf("controller answer: %v", err)
 		}
-		if got, want := readyWireIDs(cut), readyWireIDs(readywork.CutUntilUnblocked(whole)); !reflect.DeepEqual(got, want) {
+		if got, want := readyWireIDs(cut), readyWireIDs(readywork.CutUntilUnblocked(whole, window.Limit)); !reflect.DeepEqual(got, want) {
 			t.Fatalf("in-process cut %v != the CLI's cut of the controller's window %v", got, want)
 		}
 		return cut
