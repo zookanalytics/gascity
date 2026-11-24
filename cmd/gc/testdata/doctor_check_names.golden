@@ -23,6 +23,7 @@ bd-command-inventory
 legacy-suspended-field
 daemon-session-reconciler
 beads-ledger-feed
+city-suspension
 rollout:beads.conditional_writes
 rollout:beads.guarded_release
 rollout:daemon.formula_v2
@@ -92,7 +93,6 @@ exec-runtime-identity
 work-option-metadata-migration
 backlog-depth
 order-tracking-retention
-agent-token-telemetry
 session-model
 startup-health-episodes
 ownerless-runtimes
@@ -108,6 +108,7 @@ dolt-journal-size
 dolt-log-size
 dolt-config
 dolt-version
+bd-schema
 events-log
 events-log-size
 bd-backup-size

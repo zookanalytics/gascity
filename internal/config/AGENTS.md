@@ -23,8 +23,9 @@ value names; the value is pack vocabulary, never a route or an agent. bd's
 `--exclude-label` matches one label exactly, so no reader flag can drop every
 hold: each generated read that serves work drops held rows with jq
 (`excludeActiveHoldsJQClause`) before it cuts its answer to a window
-(`unheldWindowScript`), and the count form drops them in its count. Keep the
-jq rendering, `PoolDemandServeRules.ExcludeActiveHolds`, the controller's
+(`claimWindowScript`, which drops the rows that exclude this claimant in the
+same pass), and the count form drops them in its count. Keep the jq
+rendering, `PoolDemandServeRules.ExcludeActiveHolds`, the controller's
 demand predicate and the hook's serve filter on the one predicate;
 `TestActiveHoldLabelJQAgreesWithBeadmeta` runs the jq and Go forms over one
 label corpus. Never put a hold value in `ExcludeLabels` or an `--exclude-label`

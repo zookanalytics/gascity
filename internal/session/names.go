@@ -463,17 +463,15 @@ func ensureSessionNameAvailableForSelfAndOwner(store beads.SessionStore, name, s
 }
 
 // sessionNameHolderError reports that a session name is reserved by another
-// session bead, naming both the holder and the remedy.
+// session bead, naming the holder and saying when it is closed.
 //
 // A CLOSED holder is the dangerous shape: it has no runtime to stop, so an
 // operator reading only "already belongs to <id>" has no way to tell the name
-// is held by a dead record rather than a live session, and no lever to try.
-// That ambiguity is what turned gc-5fdrr into a ~40h outage resolved by hand
-// metadata surgery. Say the holder is closed and name the release lever.
+// is held by a dead record rather than a live session. That ambiguity is what
+// turned gc-5fdrr into a ~40h outage resolved by hand metadata surgery.
 func sessionNameHolderError(name string, b beads.Bead) error {
 	if b.Status == "closed" {
-		return fmt.Errorf("%w: %q already belongs to %s (closed); release it with: gc session release-name %q",
-			ErrSessionNameExists, name, b.ID, name)
+		return fmt.Errorf("%w: %q already belongs to %s (closed)", ErrSessionNameExists, name, b.ID)
 	}
 	return fmt.Errorf("%w: %q already belongs to %s", ErrSessionNameExists, name, b.ID)
 }

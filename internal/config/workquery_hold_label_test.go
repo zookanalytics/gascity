@@ -30,8 +30,8 @@ func routedReadAndWindowScripts(topo QueryTopology) map[string]string {
 func TestRouteScopedReadsDropActiveHoldsBeforeTheirWindow(t *testing.T) {
 	for topoName, topo := range assignedHoldTopologies() {
 		for name, got := range routedReadAndWindowScripts(topo) {
-			if !strings.Contains(got, `[.[]`+excludeActiveHoldsJQClause()+`]`) {
-				t.Errorf("%s/%s() does not drop held rows before its window: %q", topoName, name, got)
+			if !strings.Contains(got, `[.[]`+excludeActiveHoldsJQClause()+excludeClaimantsJQClause()+`]`) {
+				t.Errorf("%s/%s() does not drop held rows, and rows that exclude this claimant, before its window: %q", topoName, name, got)
 			}
 			if !strings.Contains(got, "--limit=0") {
 				t.Errorf("%s/%s() cannot read past a held window: %q", topoName, name, got)

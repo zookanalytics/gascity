@@ -137,7 +137,7 @@ trigger = "manual"
 	}
 }
 
-func TestScanDisabled(t *testing.T) {
+func TestScanReturnsDisabledAndFilterEnabledDropsIt(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/layer1/orders/digest.toml"] = []byte(`
 [order]
@@ -151,8 +151,11 @@ enabled = false
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(orders) != 0 {
-		t.Fatalf("got %d orders, want 0 (disabled)", len(orders))
+	if len(orders) != 1 || orders[0].IsEnabled() {
+		t.Fatalf("Scan = %#v, want the one order returned with Enabled=false", orders)
+	}
+	if active := FilterEnabled(orders); len(active) != 0 {
+		t.Fatalf("got %d active orders, want 0 (disabled)", len(active))
 	}
 }
 
@@ -204,8 +207,12 @@ skip_aliases = ["old-export"]
 	if err != nil {
 		t.Fatalf("ScanRootsWithDefinedNames: %v", err)
 	}
-	if len(scanned) != 1 || scanned[0].Name != "cleanup" {
-		t.Errorf("scanned = %v, want cleanup alone", scanned)
+	// A disabled definition stays in the scan, disabled; skip removes one.
+	if len(scanned) != 2 || scanned[0].Name != "cleanup" || scanned[1].Name != "digest" || scanned[1].IsEnabled() {
+		t.Errorf("scanned = %v, want cleanup and a disabled digest", scanned)
+	}
+	if enabled := FilterEnabled(scanned); len(enabled) != 1 || enabled[0].Name != "cleanup" {
+		t.Errorf("enabled = %v, want cleanup alone", enabled)
 	}
 	if want := []string{"cleanup", "digest", "bench", "export"}; !slices.Equal(defined, want) {
 		t.Errorf("defined = %v, want %v", defined, want)

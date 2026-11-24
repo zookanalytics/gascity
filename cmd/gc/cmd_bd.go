@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/spf13/cobra"
 )
 
@@ -102,12 +103,21 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+All arguments after "gc bd" are forwarded to bd unchanged, with two
+exceptions. A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Every other list is forwarded as written. A ready frontier —
+"ready", or "list --ready" — also gets "--exclude-type=session" and
+"--exclude-label=order-tracking". gc's per-agent session beads and per-run
+order-tracking beads are open, unassigned and unblocked for their whole
+lifetime, so bd would list them as claimable work; claiming or closing one
+edits the reconciler's own state. Each exclusion is dropped when the argv
+already names what it would hide ("--type session", "--label
+order-tracking") or already excludes it. The label exclusion is also
+dropped when "--skip-labels" is set, which bd will not combine with
+"--exclude-label". "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
@@ -204,6 +214,10 @@ func resolveBdInvokingGCBinary() (string, error) {
 	if !filepath.IsAbs(executable) {
 		return "", fmt.Errorf("invoking gc executable %q is not absolute", executable)
 	}
+	// canonical-path-exception: existence/resolvability only, not comparison
+	// preparation. GC_BIN pins the physical executable bd re-invokes, so an
+	// unresolvable path must be an error, never a lexical fallback
+	// (TestLoadBearingGCBinPinsStayStrict).
 	canonical, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return "", fmt.Errorf("canonicalize invoking gc executable: %w", err)
@@ -212,7 +226,7 @@ func resolveBdInvokingGCBinary() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("stat invoking gc executable: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+	if !info.Mode().IsRegular() || !fsys.IsExecutable(info) {
 		return "", fmt.Errorf("invoking gc executable %q is not an executable regular file", canonical)
 	}
 	return canonical, nil
@@ -288,7 +302,7 @@ func bestEffortInvokingGCBinary() string {
 // follows symlinks, so a link whose target an upgrade removed is refused too.
 func runnableGCBinary(path string) bool {
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+	return err == nil && info.Mode().IsRegular() && fsys.IsExecutable(info)
 }
 
 func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execStoreTarget) {
@@ -473,9 +487,27 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// molecules. See bd_wisp_tier.go.
 	bdArgs = rewriteBdWispTierArgs(bdArgs)
 
+	// A ready frontier (`ready`, or `list --ready`) hides gc's own session and
+	// order-tracking beads, which bd would otherwise list as claimable work.
+	// See bd_ready_internal.go.
+	bdArgs = rewriteBdReadyInternalArgs(bdArgs)
+
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
 	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Assignee shape guard (crn-23jqc): refuse a non-empty --assignee value
+	// with an empty rig or role segment (e.g. "cairn/", "/pm", "a//b") before
+	// it reaches bd. Such a value is invisible to both --assignee=<role>
+	// exact matching and --unassigned matching, so a bead written with it
+	// becomes silently unreachable by every agent. "" (clear) is unaffected.
+	// Pure argv analysis with no store dependency, so it runs here alongside
+	// its sibling refusal — ahead of the by-ID class route, which would
+	// otherwise serve the write in process and never reach a later guard.
+	if msg, refused := bdAssigneeShapeRefusal(bdArgs); refused {
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -806,19 +838,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
-	// A session closing or heartbeating work it claimed acts under the identity
-	// the claim recorded, so bd's owner-only assignee check passes without
-	// --force (close) and the lease actually refreshes (heartbeat). Reuses the
-	// beads the write guard above already read into guardBeads; a heartbeat
-	// the guard skipped reads its bead here, only when the actor could change.
-	if id, ok := ownClaimHeartbeatNeedsRead(bdArgs, guardBeads, os.Getenv, hookClaimEnvValue(cmd.Env, "BEADS_ACTOR")); ok && guardStore == nil {
-		if bead, getErr := bdWriteGuardStore(target.ScopeRoot, cityPath, cfg).Get(id); getErr == nil {
-			if guardBeads == nil {
-				guardBeads = make(map[string]beads.Bead, 1)
-			}
-			guardBeads[id] = bead
-		}
-	}
+	// A session closing work it claimed closes it under the identity the claim
+	// recorded, so bd's assignee check passes without --force.
 	cmd.Env = ownClaimCloseEnv(cmd.Env, bdArgs, guardBeads, os.Getenv)
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport

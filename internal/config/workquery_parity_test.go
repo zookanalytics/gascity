@@ -367,7 +367,7 @@ func singleStoreReadCount(command string) int {
 // crashRecoveryExtraReadWords counts the reader words the single-store
 // crash-recovery tiers of a command carry beyond their federated form's. Each
 // such tier reads `bd list` twice, its one-row window and the unbounded read
-// that looks past a held row (unheldWindowScript), where the federated tier
+// that looks past a dropped row (claimWindowScript), where the federated tier
 // reads once, because `gc ready --until-unblocked` leaves the held rows out
 // itself. That is the one sanctioned difference in the number of reads, and a
 // read names its reader twice: in its command and in its failure clause.
