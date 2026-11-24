@@ -123,7 +123,7 @@ func TestEvaluatePoolDefaultScaleCheckCountsRoutedReadyWork(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	initEmbeddedRealBD(t, dir, bdPath)
 
 	agent := &config.Agent{
 		Name:              "worker",
@@ -169,7 +169,7 @@ func TestEvaluatePoolDefaultScaleCheckIgnoresRoutedActiveUnassignedWork(t *testi
 	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	initEmbeddedRealBD(t, dir, bdPath)
 
 	raw := runExternalOutput(t, dir, bdPath, "create", "--json", "active worker job", "-t", "task",
 		"--metadata", `{"gc.routed_to":"worker"}`)
@@ -229,7 +229,7 @@ func TestCmdGCRealBDTestsUseTestOwnedDoltContext(t *testing.T) {
 	t.Setenv("PATH", filepath.Dir(bdPath)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := beadstest.GuardedTempDir(t)
 	registerRealBDServerStop(t, dir)
-	runExternal(t, dir, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	initEmbeddedRealBD(t, dir, bdPath)
 
 	homeConfigPath := filepath.Join(home, ".beads", "config.yaml")
 	if _, err := os.Stat(homeConfigPath); !os.IsNotExist(err) {
@@ -1438,17 +1438,40 @@ func runExternal(t *testing.T, dir, name string, args ...string) {
 
 func runExternalOutput(t *testing.T, dir, name string, args ...string) []byte {
 	t.Helper()
+	out, err := externalCommand(dir, name, args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+// externalCommand is the command that runs name in dir with the test's
+// environment, pointing a bd at dir's own .beads.
+func externalCommand(dir, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
 	if filepath.Base(name) == "bd" {
 		cmd.Env = append(cmd.Env, "BEADS_DIR="+filepath.Join(dir, ".beads"))
 	}
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("%s %s failed: %v\n%s", name, strings.Join(args, " "), err, out)
+	return cmd
+}
+
+// initEmbeddedRealBD runs `bd init -p ct` in dir, which creates an embedded
+// Dolt store, and skips t when bdPath cannot open one: a bd built with
+// CGO_ENABLED=0 refuses embedded mode (beadstest.EmbeddedDoltUnsupported). Any
+// other failure fails t.
+func initEmbeddedRealBD(t *testing.T, dir, bdPath string) {
+	t.Helper()
+	args := []string{"init", "-p", "ct", "--skip-hooks", "-q"}
+	out, err := externalCommand(dir, bdPath, args...).CombinedOutput()
+	if err == nil {
+		return
 	}
-	return out
+	if beadstest.EmbeddedDoltUnsupported(string(out)) {
+		t.Skipf("%s cannot open an embedded Dolt store, which this test needs:\n%s", bdPath, out)
+	}
+	t.Fatalf("%s %s failed: %v\n%s", bdPath, strings.Join(args, " "), err, out)
 }
 
 func findPreferredBinary(name string, preferred ...string) (string, error) {

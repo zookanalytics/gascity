@@ -6589,7 +6589,7 @@ func TestBuildDesiredState_MinZeroDefaultScaleCheckRoutedWorkCreatesPoolSession(
 	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	runExternal(t, cityPath, bdPath, "init", "-p", "ct", "--skip-hooks", "-q")
+	initEmbeddedRealBD(t, cityPath, bdPath)
 	runExternal(t, cityPath, bdPath, "config", "set", "types.custom", "session")
 
 	store := beads.NewBdStore(cityPath, beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(map[string]string{

@@ -101,6 +101,7 @@ go_test(
     ],
     embed = [":helpers"],
     deps = [
+        "//internal/beads/beadstest",
         "//internal/testenv",
         "@com_github_steveyegge_beads//schema",
     ] + select({

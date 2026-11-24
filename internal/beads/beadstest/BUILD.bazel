@@ -17,6 +17,7 @@ go_library(
         "conditional_writer_conformance.go",
         "conformance.go",
         "conformance_skips.go",
+        "embedded_dolt.go",
         "fake_bd.go",
         "fence_conformance.go",
         "guarded_batch_conformance.go",
@@ -45,6 +46,7 @@ go_test(
     srcs = [
         "class_handles_test.go",
         "conformance_skips_test.go",
+        "embedded_dolt_test.go",
         "fake_bd_test.go",
         "identity_guard_test.go",
         "op_recording_store_test.go",

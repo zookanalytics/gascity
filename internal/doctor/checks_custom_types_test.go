@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -301,25 +302,6 @@ func TestCustomTypesStoreEnvProjectsDoltliteBackend(t *testing.T) {
 	}
 }
 
-// embeddedDoltUnsupported reports whether a failed `bd` invocation failed
-// because the bd binary on PATH cannot open an embedded Dolt store at all —
-// the CGO_ENABLED=0 build, which rejects embedded mode outright:
-//
-//	Error: failed to open Dolt store: embedded Dolt requires a CGO build,
-//	but this bd binary was built with CGO_ENABLED=0.
-//
-// That is a host provisioning property, not a defect in the code under test,
-// so callers skip on it instead of failing. The match deliberately requires
-// BOTH "embedded dolt" and "cgo": either term alone is an ordinary failure
-// that must stay a hard failure. Matching the two terms rather than the exact
-// sentence keeps a reworded bd error from silently reverting the guard; if bd
-// ever drops both terms the test hard-fails again, which is the safe
-// direction — a loud failure, never a silent skip.
-func embeddedDoltUnsupported(output string) bool {
-	lower := strings.ToLower(output)
-	return strings.Contains(lower, "embedded dolt") && strings.Contains(lower, "cgo")
-}
-
 // TestCustomTypesCheck_TableDrift proves detect+heal of the bug this bead
 // fixes: config.yaml's types.custom CSV can list a type (e.g. "step") that
 // the normalized custom_types TABLE doesn't have a row for. bd's create
@@ -394,7 +376,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// still runs there; this skip is local convenience only. Any other init
 	// failure remains a hard failure.
 	if out, err := tryBD("init", "--non-interactive", "-p", "tst", "--skip-hooks", "--skip-agents"); err != nil {
-		if embeddedDoltUnsupported(out) {
+		if beadstest.EmbeddedDoltUnsupported(out) {
 			t.Skipf("bd on PATH cannot open an embedded Dolt store (CGO_ENABLED=0 build); "+
 				"this test manufactures drift directly in .beads/embeddeddolt/. "+
 				"Install a bd with embedded-mode support to run it.\n%s", out)
@@ -491,7 +473,7 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 			// CGO_ENABLED=0 bd cannot open an embedded Dolt store at all, which
 			// is a host property rather than a defect in the code under test.
 			// Any other bd failure stays a hard failure.
-			if embeddedDoltUnsupported(string(out)) {
+			if beadstest.EmbeddedDoltUnsupported(string(out)) {
 				t.Skipf("bd on PATH cannot open an embedded Dolt store (CGO_ENABLED=0 build); "+
 					"this test pins Dolt-context isolation for a real embedded store. "+
 					"Install a bd with embedded-mode support to run it.\n%s", out)
@@ -734,62 +716,6 @@ func TestCustomTypesServerInitEnvSetsLoadTolerantReadyTimeout(t *testing.T) {
 	}
 	if !slices.Equal(base, []string{"PATH=/usr/bin", "BEADS_DOLT_READY_TIMEOUT=1", "HOME=/home/test"}) {
 		t.Errorf("customTypesServerInitEnv modified its input: %q", base)
-	}
-}
-
-// TestEmbeddedDoltUnsupported pins the classifier that decides whether a
-// failed `bd` invocation is the ambient embedded-Dolt/CGO capability gap
-// (skip) or a real defect (fail). Both directions matter: too loose and a
-// genuine bd regression is silently skipped into green; too strict and the
-// CGO_ENABLED=0 hosts are back to a hard-failing push gate.
-func TestEmbeddedDoltUnsupported(t *testing.T) {
-	cases := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{
-			name: "verbatim bd CGO_ENABLED=0 init failure",
-			output: "  ✓ Initialized git repository\n" +
-				"Error: failed to open Dolt store: embedded Dolt requires a CGO build, " +
-				"but this bd binary was built with CGO_ENABLED=0.\n\n" +
-				"Three options:\n\n" +
-				"  1. Use the proxied dolt sql-server (no external server, no reinstall):\n" +
-				"       bd init --proxied-server\n",
-			want: true,
-		},
-		{
-			name:   "reworded phrasing of the same capability gap",
-			output: "Error: embedded dolt requires a cgo-enabled build",
-			want:   true,
-		},
-		{
-			name:   "empty output is not a capability gap",
-			output: "",
-			want:   false,
-		},
-		{
-			name:   "unrelated store failure still fails the test",
-			output: "Error: failed to open Dolt store: database is locked",
-			want:   false,
-		},
-		{
-			name:   "embedded Dolt named without a CGO cause still fails",
-			output: "Error: embedded Dolt store is corrupt; run bd doctor",
-			want:   false,
-		},
-		{
-			name:   "CGO named without embedded Dolt still fails",
-			output: "Error: cgo linker failure while loading extension",
-			want:   false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := embeddedDoltUnsupported(tc.output); got != tc.want {
-				t.Errorf("embeddedDoltUnsupported(%q) = %v, want %v", tc.output, got, tc.want)
-			}
-		})
 	}
 }
 
