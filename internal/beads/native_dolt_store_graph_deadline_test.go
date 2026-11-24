@@ -6,8 +6,8 @@ import (
 )
 
 // A large molecule pour must get more transaction budget than a single bd
-// command: the per-edge cycle checks made a 67-node plan blow the flat 120s
-// deadline mid-transaction and fall back to per-bead creates (2026-07-17).
+// command: the per-edge cycle checks keep a 67-node plan from finishing
+// inside the flat 120s deadline, and a batch cut off there fails the pour.
 func TestNativeGraphApplyDeadlineScalesWithPlanSize(t *testing.T) {
 	t.Parallel()
 
