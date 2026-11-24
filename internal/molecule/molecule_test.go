@@ -622,7 +622,7 @@ func TestInstantiateGraphApplyIncludesExternalDeps(t *testing.T) {
 	assertGraphPlanEdgeCount(t, store.plan, "wf.step", "", blocker.ID, "blocks", 1)
 }
 
-func TestInstantiateRetriesTransientGraphApplyBeforeFallback(t *testing.T) {
+func TestInstantiateRetriesTransientGraphApplyOnce(t *testing.T) {
 	store := &graphApplySpyStore{
 		MemStore: beads.NewMemStore(),
 		errs: []error{
@@ -654,93 +654,64 @@ func TestInstantiateRetriesTransientGraphApplyBeforeFallback(t *testing.T) {
 	if result.RootID != "bd-1" {
 		t.Fatalf("RootID = %q, want graph apply ID bd-1", result.RootID)
 	}
-	beads, err := store.ListOpen()
-	if err != nil {
-		t.Fatalf("ListOpen: %v", err)
-	}
-	if len(beads) != 0 {
-		t.Fatalf("fallback created %d beads after retry succeeded", len(beads))
+	if n := beadCount(t, store); n != 0 {
+		t.Fatalf("the bead-by-bead pour wrote %d beads after the retry succeeded", n)
 	}
 }
 
-func TestInstantiateFallsBackWhenGraphApplyDoltConnectionTimesOut(t *testing.T) {
-	store := &graphApplySpyStore{
-		MemStore: beads.NewMemStore(),
-		err:      fmt.Errorf("bd create --graph: exit status 1: [mysql] packets.go:58 read tcp 127.0.0.1:41442->127.0.0.1:50546: i/o timeout: graph create: adding edge bd-1->bd-2: failed to check for dependency cycle: invalid connection"),
+// TestInstantiateReturnsGraphApplyErrorWithNoBeadByBeadPour pins that a batch
+// error ends the pour on a store that offers the batch. The one retry of a
+// transient error returns its own error, and nothing is written one bead at a
+// time: a batch that timed out may still have committed, and a bead-by-bead
+// pour that stops part way leaves a half-made run.
+func TestInstantiateReturnsGraphApplyErrorWithNoBeadByBeadPour(t *testing.T) {
+	doltTimeout := errors.New("bd create --graph: exit status 1: [mysql] packets.go:58 read tcp 127.0.0.1:41442->127.0.0.1:50546: i/o timeout: graph create: adding edge bd-1->bd-2: failed to check for dependency cycle: invalid connection")
+	cycleCheckTimeout := errors.New("adding edge ga-wisp-f5tz43->ga-wisp-oog3my: failed to check for dependency cycle: context deadline exceeded")
+	missingIDs := errors.New("bd create --graph: graph apply result missing IDs for keys: wf.step")
+	tests := []struct {
+		name string
+		errs []error
+		want error
+	}{
+		{name: "bd create --graph loses its Dolt connection twice", errs: []error{doltTimeout, doltTimeout}, want: doltTimeout},
+		{name: "native cycle check times out twice", errs: []error{cycleCheckTimeout, cycleCheckTimeout}, want: cycleCheckTimeout},
+		{name: "retry fails with an error that is not transient", errs: []error{doltTimeout, missingIDs}, want: missingIDs},
 	}
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(true)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
-	recipe := &formula.Recipe{
-		Name: "wf",
-		Steps: []formula.RecipeStep{
-			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
-			{ID: "wf.step", Title: "Work", Type: "task"},
-		},
-		Deps: []formula.RecipeDep{
-			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
-		},
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &graphApplySpyStore{MemStore: beads.NewMemStore(), errs: tt.errs}
+			prev := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(true)
+			t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+			recipe := &formula.Recipe{
+				Name: "wf",
+				Steps: []formula.RecipeStep{
+					{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
+					{ID: "wf.step", Title: "Work", Type: "task"},
+				},
+				Deps: []formula.RecipeDep{
+					{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
+				},
+			}
 
-	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
-	if err != nil {
-		t.Fatalf("Instantiate: %v", err)
-	}
-	if store.plan == nil {
-		t.Fatal("ApplyGraphPlan was not attempted")
-	}
-	if store.calls != 2 {
-		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
-	}
-	if result.Created != 2 {
-		t.Fatalf("Created = %d, want 2", result.Created)
-	}
-	if result.RootID == "" || result.RootID == "bd-1" {
-		t.Fatalf("RootID = %q, want sequential store ID", result.RootID)
-	}
-	if _, err := store.Get(result.RootID); err != nil {
-		t.Fatalf("fallback root missing from store: %v", err)
+			result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Instantiate error = %v, want %v", err, tt.want)
+			}
+			if result != nil {
+				t.Fatalf("Instantiate result = %+v, want nil", result)
+			}
+			if store.calls != 2 {
+				t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
+			}
+			if n := beadCount(t, store); n != 0 {
+				t.Fatalf("the bead-by-bead pour wrote %d beads after the batch failed", n)
+			}
+		})
 	}
 }
 
-func TestInstantiateFallsBackWhenNativeGraphApplyCycleCheckTimesOut(t *testing.T) {
-	store := &graphApplySpyStore{
-		MemStore: beads.NewMemStore(),
-		err:      fmt.Errorf("adding edge ga-wisp-f5tz43->ga-wisp-oog3my: failed to check for dependency cycle: context deadline exceeded"),
-	}
-	prev := IsGraphApplyEnabled()
-	SetGraphApplyEnabled(true)
-	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
-	recipe := &formula.Recipe{
-		Name: "wf",
-		Steps: []formula.RecipeStep{
-			{ID: "wf", Title: "Workflow", Type: "task", IsRoot: true, Metadata: map[string]string{"gc.kind": "workflow"}},
-			{ID: "wf.step", Title: "Work", Type: "task"},
-		},
-		Deps: []formula.RecipeDep{
-			{StepID: "wf.step", DependsOnID: "wf", Type: "parent-child"},
-		},
-	}
-
-	result, err := Instantiate(context.Background(), beadstest.GraphMolecule(store), recipe, Options{})
-	if err != nil {
-		t.Fatalf("Instantiate: %v", err)
-	}
-	if store.calls != 2 {
-		t.Fatalf("ApplyGraphPlan calls = %d, want 2", store.calls)
-	}
-	if result.Created != 2 {
-		t.Fatalf("Created = %d, want 2", result.Created)
-	}
-	if result.RootID == "" || result.RootID == "bd-1" {
-		t.Fatalf("RootID = %q, want sequential store ID", result.RootID)
-	}
-	if _, err := store.Get(result.RootID); err != nil {
-		t.Fatalf("fallback root missing from store: %v", err)
-	}
-}
-
-func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) {
+func TestInstantiateDoesNotRetryNonTransientGraphApplyError(t *testing.T) {
 	store := &graphApplySpyStore{
 		MemStore: beads.NewMemStore(),
 		err:      fmt.Errorf("bd create --graph: graph apply result missing IDs for keys: wf.step"),
@@ -766,12 +737,8 @@ func TestInstantiateDoesNotFallbackForNonTransientGraphApplyError(t *testing.T) 
 	if store.calls != 1 {
 		t.Fatalf("ApplyGraphPlan calls = %d, want 1", store.calls)
 	}
-	beads, listErr := store.ListOpen()
-	if listErr != nil {
-		t.Fatalf("ListOpen: %v", listErr)
-	}
-	if len(beads) != 0 {
-		t.Fatalf("fallback created %d beads for non-transient graph apply error", len(beads))
+	if n := beadCount(t, store); n != 0 {
+		t.Fatalf("the bead-by-bead pour wrote %d beads for a non-transient graph apply error", n)
 	}
 }
 
@@ -1175,7 +1142,7 @@ func TestInstantiateSequentialPathPreservesStepMetadata(t *testing.T) {
 // fallback - built for a genuinely root-only molecule - never resurrects a
 // fully-expanded root once its real children have all closed but
 // workflow-finalize has not yet run. Runs both instantiation paths: graph-apply
-// (graphApplySpyStore) and the sequential fallback (plain MemStore).
+// (graphApplySpyStore) and the sequential path (plain MemStore).
 func TestInstantiateStampsWorkflowExpandedForRealChildren(t *testing.T) {
 	recipe := func() *formula.Recipe {
 		return &formula.Recipe{
