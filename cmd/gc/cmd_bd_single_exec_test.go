@@ -429,8 +429,9 @@ func TestGcBdCrossScopeByIDRunsBdOnce(t *testing.T) {
 
 // TestGcBdPassthroughLoadsCityConfigOnce pins the passthrough's config cost.
 // A read verb reads the city's deployment layer once and composes nothing: its
-// routing, the by-id door's split check, the pinned-bd resolver and the
-// hosted-credential probe all answer from that one load. A write composes the
+// routing, the by-id door's split check and the hosted-credential probe all
+// answer from that one load (the pinned-bd resolver reads the root city.toml's
+// [workspace.env] table on its own). A write composes the
 // city config (packs, includes, site binding) once for its guards, and its env
 // builders share the same deployment load. A composition is about 60 ms on a
 // production-sized city; a deployment load reads city.toml, its fragments and

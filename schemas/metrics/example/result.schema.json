@@ -227,7 +227,7 @@
               "storage-remote-stage-unmark",
               "storage-snapshot",
               "storage-snapshot-restore",
-              "session-release-name"
+              "storage-split"
             ]
           },
           "event_id": {

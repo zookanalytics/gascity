@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/rogpeppe/go-internal/testscript"
@@ -63,61 +64,9 @@ func assertSameTestPath(t *testing.T, got, want string) {
 	testutil.AssertSamePath(t, got, want)
 }
 
-// withoutTempRoot returns out with each temp root replaced by "<tmp>", both as
-// named and in canonical form. Go 1.26's testing.T.TempDir prefers GOTMPDIR
-// over TMPDIR, so a test's temp dirs sit under GOTMPDIR when it is set and
-// under os.TempDir otherwise. Whoever launched the run picked those names. A
-// work dir named after a bead whose id starts with a digit contains a
-// sequential test-store id: gc-2xyz-work contains gc-2. Scrub output that
-// prints a temp path before asserting that it names or omits such an id.
-func withoutTempRoot(out string) string {
-	for _, root := range []string{os.Getenv("GOTMPDIR"), os.TempDir()} {
-		if root == "" {
-			continue
-		}
-		root = filepath.Clean(root)
-		out = strings.ReplaceAll(out, canonicalTestPath(root), "<tmp>")
-		out = strings.ReplaceAll(out, root, "<tmp>")
-	}
-	return out
-}
-
 func shortSocketTempDir(t *testing.T, prefix string) string {
 	t.Helper()
 	return testutil.ShortTempDir(t, prefix)
-}
-
-// shortSocketTempDirWithinLimit returns a test-owned temporary directory whose
-// canonicalized path leaves at least reserve bytes of headroom under
-// controllerSocketPathLimit, so a fixture that must assert "this socket path is
-// under the limit" is actually constructible.
-//
-// shortSocketTempDir guarantees a short root only on macOS; on Linux it takes
-// $TMPDIR verbatim. A long $TMPDIR — the fleet's push gate sets a per-agent,
-// per-run one — then pushes a fixture path past the limit and fails the
-// assertion at 0.00s, measuring $TMPDIR rather than the code under test
-// (gc-8ors6). Fall back to /tmp, the short root that both the macOS branch of
-// testutil.ShortTempDir and the production fallback in controllerSocketPath
-// already use, and skip only when even that cannot fit — which no supported
-// platform hits.
-func shortSocketTempDirWithinLimit(t *testing.T, prefix string, reserve int) string {
-	t.Helper()
-	fits := func(dir string) bool {
-		return len(normalizePathForCompare(dir))+reserve <= controllerSocketPathLimit
-	}
-	if dir := shortSocketTempDir(t, prefix); fits(dir) {
-		return dir
-	}
-	dir, err := os.MkdirTemp("/tmp", prefix)
-	if err != nil {
-		t.Skipf("no short temp root available for a socket-path fixture: MkdirTemp(/tmp, %q): %v", prefix, err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	if !fits(dir) {
-		t.Skipf("shortest available temp dir %q leaves under %d bytes of headroom below the %d-byte socket path limit",
-			dir, reserve, controllerSocketPathLimit)
-	}
-	return dir
 }
 
 // cmdGCTmuxSocketRoot returns a tmux socket root under socketParentRoot.
@@ -289,6 +238,21 @@ func (g *doltLeakGuardedTestingM) runWith(
 	reapLeaks func([]DoltProcInfo),
 	graceInitialInterval, graceMaxElapsedTime time.Duration,
 ) int {
+	// A platform that cannot enumerate processes cannot produce a finding, and
+	// must not present that silence as a clean sweep. Announce the gap, then run
+	// the parts that need no process table: the symptom-based directory sweep
+	// still removes stray store dirs.
+	if !doltLeakDetectionAvailable() {
+		fmt.Fprintln(os.Stderr, "cmd/gc test dolt leak guard: dolt process enumeration is unavailable on this platform; leak detection is OFF for this run") //nolint:errcheck
+		sweepOrphanDirs()
+		stopSignalHandler := g.installSignalHandler()
+		defer stopSignalHandler()
+		code := runTests()
+		g.cleanupTemporaryPaths()
+		reapRegistered()
+		return code
+	}
+
 	_ = sweepStale("startup")
 	sweepOrphanDirs()
 	stopSignalHandler := g.installSignalHandler()
@@ -387,10 +351,7 @@ func (g *doltLeakGuardedTestingM) installSignalHandler() func() {
 			_ = g.reapDoltProcessesUnderRoot("signal")
 			g.cleanupTemporaryPaths()
 			signal.Stop(signals)
-			if s, ok := sig.(syscall.Signal); ok {
-				signal.Reset(s)
-				_ = syscall.Kill(os.Getpid(), s)
-			}
+			reraiseTestSignal(sig)
 		case <-done:
 		}
 	}()
@@ -649,12 +610,11 @@ func reapDoltLeakPIDs(pids []int) []error {
 }
 
 // processStillAlive reports whether pid is still present in the process
-// table, probing via signal 0 (delivers no actual signal; ESRCH means the
-// pid is already gone). Mirrors the ESRCH handling killFn callers already
-// use elsewhere in this file.
+// table. A process that exists but cannot be inspected counts as alive, so
+// an observation failure never invents an exit the reaper would then stop
+// waiting for.
 func processStillAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || !errors.Is(err, syscall.ESRCH)
+	return pidutil.Alive(pid)
 }
 
 // reapDoltLeakPIDsWithKillerAndWaiter is the fully injectable form of the
@@ -952,33 +912,6 @@ func stopManagedDoltProcessesUnderTestCity(t *testing.T, cityPath string) {
 // dolt test process to exit after SIGTERM before it escalates to SIGKILL.
 const managedDoltTestSIGTERMGrace = 5 * time.Second
 
-func stopManagedDoltTestPID(t *testing.T, pid int) {
-	t.Helper()
-	if pid <= 0 || !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGTERM: %v", pid, err)
-	}
-	deadline := time.Now().Add(managedDoltTestSIGTERMGrace)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if !managedStopPIDAlive(pid) {
-		return
-	}
-	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		t.Fatalf("signal dolt test pid %d with SIGKILL: %v", pid, err)
-	}
-	deadline = time.Now().Add(time.Second)
-	for managedStopPIDAlive(pid) && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if managedStopPIDAlive(pid) {
-		t.Fatalf("dolt test pid %d still alive after SIGKILL", pid)
-	}
-}
-
 // registerRealBDServerStop stops any dolt sql-server rooted under cityPath
 // before the calling test returns. Callers must invoke this after their own
 // t.TempDir() call so t.Cleanup's LIFO ordering runs this cleanup — and so
@@ -1067,6 +1000,9 @@ func maybeRunFakeDoltSQLServer() {
 // inert to it and /proc/<pid>/cmdline shows exactly what cmd.Args says.
 func startFakeDoltSQLServer(t *testing.T, cityPath string) *exec.Cmd {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake hands its readiness pipe over as fd 3, which Windows cannot pass to a child")
+	}
 	configPath := filepath.Join(cityPath, ".beads", "fake-dolt-config.yaml")
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", filepath.Dir(configPath), err)

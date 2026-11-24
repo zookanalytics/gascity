@@ -479,12 +479,12 @@ func TestEnsureSessionNameAvailableForOwner_RejectsLiveLegacyClaimForOwner(t *te
 	}
 }
 
-// TestEnsureSessionNameAvailable_NameExistsErrorIsActionable pins the
+// TestEnsureSessionNameAvailable_NameExistsErrorSaysHolderIsClosed pins the
 // diagnostic half of the outage: the operator saw only "already belongs to
-// <id>" with no hint that the holder was CLOSED and no remedy, so the deadlock
-// took ~40h and metadata surgery to break. The message must name the holder's
-// terminal status and point at the release lever.
-func TestEnsureSessionNameAvailable_NameExistsErrorIsActionable(t *testing.T) {
+// <id>" with no hint that the holder was CLOSED, so the deadlock took ~40h and
+// metadata surgery to break. The message must name the holder and its
+// terminal status.
+func TestEnsureSessionNameAvailable_NameExistsErrorSaysHolderIsClosed(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, err := store.Create(beads.Bead{
 		Type:   BeadType,
@@ -505,7 +505,7 @@ func TestEnsureSessionNameAvailable_NameExistsErrorIsActionable(t *testing.T) {
 		t.Fatalf("ensureSessionNameAvailable(closed ad-hoc) = %v, want %v", err, ErrSessionNameExists)
 	}
 	msg := err.Error()
-	for _, want := range []string{bead.ID, "closed", "gc session release-name"} {
+	for _, want := range []string{bead.ID, "(closed)"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("error %q does not mention %q", msg, want)
 		}

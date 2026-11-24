@@ -226,7 +226,7 @@ enabled = false
 		t.Fatalf("ScanAll returned error: %v", err)
 	}
 	execs := map[string][]string{}
-	for _, a := range aa {
+	for _, a := range orders.FilterEnabled(aa) {
 		if a.Name == "watch" {
 			execs[a.Rig] = append(execs[a.Rig], a.Exec)
 		}
@@ -312,7 +312,7 @@ enabled = false
 		t.Fatalf("ScanAll returned error: %v", err)
 	}
 	execs := map[string][]string{}
-	for _, a := range aa {
+	for _, a := range orders.FilterEnabled(aa) {
 		if a.Name == "watch" {
 			execs[a.Rig] = append(execs[a.Rig], a.Exec)
 		}

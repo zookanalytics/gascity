@@ -1035,11 +1035,19 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 func TestOrderCheckConditionUsesCityScope(t *testing.T) {
 	cityDir := t.TempDir()
 	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")
-	check := fmt.Sprintf(
-		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
-		cityDir,
-		cityDir,
-		orderDir,
+	check := platformCommand(
+		fmt.Sprintf(
+			`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
+			cityDir,
+			cityDir,
+			orderDir,
+		),
+		fmt.Sprintf(
+			`if ($env:GC_CITY_PATH -eq %s -and $env:GC_STORE_ROOT -eq %s -and $env:GC_STORE_SCOPE -eq 'city' -and $env:ORDER_DIR -eq %s) { exit 0 }; exit 1`,
+			psLiteral(cityDir),
+			psLiteral(cityDir),
+			psLiteral(orderDir),
+		),
 	)
 	aa := []orders.Order{{
 		Name:    "pr-review-router",
@@ -1383,7 +1391,7 @@ name = "test-city"
 		Name:    "release-exec",
 		Trigger: "event",
 		On:      events.BeadClosed,
-		Exec:    "printf ok",
+		Exec:    platformCommand("printf ok", "[Console]::Out.Write('ok')"),
 	}}
 
 	var stdout, stderr bytes.Buffer
@@ -1428,7 +1436,7 @@ name = "test-city"
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(cityDir, "orders", "release-exec.toml"), `[order]
-exec = "printf ok"
+exec = "`+platformCommand("printf ok", "[Console]::Out.Write('ok')")+`"
 trigger = "event"
 on = "bead.closed"
 `)
@@ -3064,7 +3072,7 @@ prefix = "ct"
 		Name:     "poll",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath),
+		Exec:     platformCommand(fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath), fmt.Sprintf("[IO.File]::WriteAllText(%s, \"${env:GC_DOLT_HOST}`n${env:GC_DOLT_PORT}`n${env:GC_DOLT_USER}`n\")", psLiteral(outPath))),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3211,7 +3219,7 @@ prefix = "ct"
 		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
+		Exec:     platformCommand(fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath), fmt.Sprintf("[IO.File]::WriteAllText(%s, \"managed=<${env:GC_DOLT_MANAGED_LOCAL}>`nhost=<${env:GC_DOLT_HOST}>`nport=<${env:GC_DOLT_PORT}>`npack_state=<${env:GC_PACK_STATE_DIR}>`ndata=<${env:GC_DOLT_DATA_DIR}>`nconfig=<${env:GC_DOLT_CONFIG_FILE}>`nstate=<${env:GC_DOLT_STATE_FILE}>`n\")", psLiteral(outPath))),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3411,7 +3419,7 @@ prefix = "fe"
 		Rig:      "frontend",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "true",
+		Exec:     "exit 0",
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3552,7 +3560,7 @@ prefix = "ct"
 		Name:     "leaky",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     `printf '%s\n' "$GITHUB_TOKEN"; exit 1`,
+		Exec:     platformCommand(`printf '%s\n' "$GITHUB_TOKEN"; exit 1`, `[Console]::Out.WriteLine($env:GITHUB_TOKEN); exit 1`),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3600,7 +3608,7 @@ prefix = "ct"
 		Name:     "leaky",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     `printf '%s\n' "$GITHUB_TOKEN"`,
+		Exec:     platformCommand(`printf '%s\n' "$GITHUB_TOKEN"`, `[Console]::Out.WriteLine($env:GITHUB_TOKEN)`),
 	}
 
 	var stdout, stderr bytes.Buffer
