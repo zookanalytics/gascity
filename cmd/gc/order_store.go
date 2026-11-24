@@ -133,16 +133,16 @@ func resolveOrderStoreTarget(cityPath string, cfg *config.City, a orders.Order) 
 			}, nil
 		}
 	}
+	resolveRigPaths(cityPath, cfg.Rigs)
 	rig, ok := rigByName(cfg, a.Rig)
 	if !ok {
 		return execStoreTarget{}, fmt.Errorf("rig %q not found in %s", a.Rig, filepath.Join(cityPath, "city.toml"))
 	}
-	rigPath := resolvedRigPath(cityPath, rig.Path)
-	if rigPath == "" {
+	if strings.TrimSpace(rig.Path) == "" {
 		return execStoreTarget{}, fmt.Errorf("rig %q is declared but has no path binding — run `gc rig add <dir> --name %s` to bind it before dispatching rig-scoped orders", rig.Name, rig.Name)
 	}
 	return execStoreTarget{
-		ScopeRoot: rigPath,
+		ScopeRoot: rig.Path,
 		ScopeKind: "rig",
 		Prefix:    rig.EffectivePrefix(),
 		RigName:   rig.Name,
@@ -449,7 +449,11 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 		return holderPID == state.PID
 	}
 	layout := managedDoltOrderRuntimeLayoutForDataDir(cityPath, dataDir)
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	return owned && !deleted
 }
 
@@ -514,7 +518,11 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	if deleted {
 		return false
 	}
@@ -566,17 +574,17 @@ func orderTrackingSweepTargetsForConfig(cityPath string, cfg *config.City) []ord
 		label:  "city",
 	}}
 	if cfg != nil {
+		resolveRigPaths(cityPath, cfg.Rigs)
 		// A suspended rig is left untouched: a bd read restarts its retired
 		// proxy, and nothing dispatches orders into it while it is suspended.
 		suspended := buildEffectiveSuspendedRigNames(cfg, loadSuspensionStateBestEffort(cityPath))
 		for _, rig := range cfg.Rigs {
-			rigPath := resolvedRigPath(cityPath, rig.Path)
-			if rigPath == "" || suspended[rig.Name] {
+			if strings.TrimSpace(rig.Path) == "" || suspended[rig.Name] {
 				continue
 			}
 			targets = append(targets, orderTrackingSweepTarget{
 				target: execStoreTarget{
-					ScopeRoot: rigPath,
+					ScopeRoot: rig.Path,
 					ScopeKind: "rig",
 					Prefix:    rig.EffectivePrefix(),
 					RigName:   rig.Name,

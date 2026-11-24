@@ -443,7 +443,7 @@ func (r *controlStoreRegistry) release(store beads.Store) (bool, *beads.NativeDo
 // keepsLocked reports whether store is the native store kept for a scope.
 func (r *controlStoreRegistry) keepsLocked(store *beads.NativeDoltStore) bool {
 	for _, kept := range r.native {
-		if kept.store == store {
+		if beads.SameStore(kept.store, store) {
 			return true
 		}
 	}

@@ -30,6 +30,17 @@ suppression as best effort rather than a guarantee.
 gc mail send worker -s "disk warning" -m "..." --dedup "disk-warn:hq"
 ```
 
+## Waking the reader
+
+Plain mail waits for the reader's next turn, whenever that comes. Add
+`--notify` when the reader must act on the mail now. It requests a turn, and
+in a managed city it can request a wake for a reader that is not running.
+
+```
+gc mail send <to> -s "Subject" -m "message body" --notify
+gc mail reply <id> -m "reply body" --notify
+```
+
 ## Reading
 
 ```

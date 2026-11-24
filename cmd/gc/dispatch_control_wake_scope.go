@@ -2,6 +2,7 @@ package main
 
 import (
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -84,7 +85,13 @@ func workflowServeUnreadStorePrefixes(cfg *config.City, cityPath, scopeRoot stri
 			continue
 		}
 		configured[prefix] = struct{}{}
-		if rigPath := resolvedRigPath(cityPath, cfg.Rigs[i].Path); rigPath != "" && samePath(rigPath, scopeRoot) {
+		// Resolved into a local: the config may be shared, and resolveRigPaths
+		// writes through the slice it is handed.
+		rigPath := strings.TrimSpace(cfg.Rigs[i].Path)
+		if rigPath != "" && !filepath.IsAbs(rigPath) {
+			rigPath = filepath.Join(cityPath, rigPath)
+		}
+		if rigPath != "" && samePath(rigPath, scopeRoot) {
 			scopeKnown = true
 			read[prefix] = struct{}{}
 		}

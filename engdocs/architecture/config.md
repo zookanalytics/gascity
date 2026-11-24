@@ -275,7 +275,7 @@ Provider resolution happens later, at agent startup time, via
 | Depended on by | How |
 |---|---|
 | `cmd/gc/controller.go` | Loads config via `LoadWithIncludes`, watches for changes via `WatchDirs`, detects reloads via `Revision` |
-| `cmd/gc/config_invocation_memo.go` | Loads the deployment layer via `LoadDeployment` (`loadCityDeploymentConfig`) for `gc bd` reads, the by-id split check, the pinned-bd resolver and the hosted Beads credential probe |
+| `cmd/gc/config_invocation_memo.go` | Loads the deployment layer via `LoadDeployment` (`loadCityDeploymentConfig`) for `gc bd` reads, the by-id split check and the hosted Beads credential probe |
 | `cmd/gc/pool.go` | Reads `Agent.Pool` for scaling; deep-copies agent fields when spawning pool instances |
 | `cmd/gc/reconciler.go` | Reads resolved agent list and rig list to start/stop agents |
 | `internal/city/` | Uses `Load` for basic config operations (init, add rig) |

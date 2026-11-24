@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -59,7 +61,7 @@ func TestFinalizePatchGoldenVsLegacy(t *testing.T) {
 			}
 			env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
 			info := env.sessionInfo(b.ID)
-			finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), info, "worker", c.mayClose, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
+			finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), info, "worker", c.mayClose, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
 			got, err := env.store.Get(b.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -96,6 +98,109 @@ func TestFinalizePatchGoldenVsLegacy(t *testing.T) {
 				t.Fatalf("finalizePatch: %v, want the fresh-wake reset", p)
 			}
 		})
+	}
+}
+
+// TestFinalizeDrainAckStoppedSession_PrunesWorkerDir (gascity#8093). A
+// drain-ack close is a terminal pool close exactly like the stranded-repair
+// and pool-freeable paths in session_reconciler.go's wake/sleep apply loop,
+// both of which reclaim the worker_dir worktree via
+// pruneAgentHomeWorktreeIfSafeInfo. The drain-ack finalize used to return
+// without that call, so the worktree survived a successful close. This pins
+// the fix: a clean, prunable worker_dir is actually removed when the close
+// fires, not just textually reachable.
+func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rigRoot := filepath.Join(env.city, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rigRoot: %v", err)
+	}
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "demo"}},
+		Rigs:   []config.Rig{{Name: "demo", Path: rigRoot}},
+	}
+	b := env.createSessionBead("worker", "demo/worker")
+
+	workerDir := filepath.Join(env.city, ".gc", "worktrees", "demo", "worker-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatalf("mkdir workerDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+		t.Fatalf("write .git marker: %v", err)
+	}
+	env.setSessionMetadata(&b, map[string]string{
+		"session_key": "k-1",
+		"worker_dir":  workerDir,
+	})
+
+	probe := &fakeGitProbe{isRepo: true}
+	orig := newGitProbe
+	t.Cleanup(func() { newGitProbe = orig })
+	newGitProbe = func(_ string) gitProbe { return probe }
+	// The prune is gated on liveness (gc-9hy4l): a completed scan that saw
+	// nothing running in the tree lets it through.
+	stubLiveScan(t, liveWorktreeState{scanned: true})
+
+	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
+	info := env.sessionInfo(b.ID)
+	finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), info, "worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
+
+	got, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", got.Status)
+	}
+	if !probe.removeInvoked {
+		t.Fatal("drain-ack close did not prune the worker_dir worktree")
+	}
+	if probe.removedPath != workerDir {
+		t.Errorf("WorktreeRemove path = %q, want %q", probe.removedPath, workerDir)
+	}
+}
+
+// TestFinalizeDrainAckStoppedSession_KeepsWorkerDirWhenScanIndeterminate pins
+// the liveness gate on the drain-ack prune (gc-9hy4l): the close still lands,
+// but a process-table scan that could not run leaves the worktree in place.
+func TestFinalizeDrainAckStoppedSession_KeepsWorkerDirWhenScanIndeterminate(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rigRoot := filepath.Join(env.city, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rigRoot: %v", err)
+	}
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "demo"}},
+		Rigs:   []config.Rig{{Name: "demo", Path: rigRoot}},
+	}
+	b := env.createSessionBead("worker", "demo/worker")
+	workerDir := filepath.Join(env.city, ".gc", "worktrees", "demo", "worker-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatalf("mkdir workerDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+		t.Fatalf("write .git marker: %v", err)
+	}
+	env.setSessionMetadata(&b, map[string]string{"session_key": "k-1", "worker_dir": workerDir})
+
+	probe := &fakeGitProbe{isRepo: true}
+	orig := newGitProbe
+	t.Cleanup(func() { newGitProbe = orig })
+	newGitProbe = func(_ string) gitProbe { return probe }
+	stubLiveScan(t, liveWorktreeState{})
+
+	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
+	finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(b.ID), "worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
+
+	got, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", got.Status)
+	}
+	if probe.removeInvoked {
+		t.Fatal("drain-ack close pruned the worker_dir worktree with an indeterminate liveness scan")
 	}
 }
 

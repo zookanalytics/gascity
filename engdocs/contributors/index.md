@@ -57,6 +57,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
   catch-up and the carry reduction: three drops upstream covers, eighteen
   commits shed on the operator's ruling, four trimmed, 92 carried commits
   down to 71, and every message rewritten as a conventional commit
+- [Upstream sync 2026-11-22](upstream-sync-2026-11-22.md) — the 192-commit
+  catch-up (typed stores T7, the Windows port's seams, born-split init):
+  four drops, nine commits shed on the operator's ruling, five trimmed, 75
+  carried commits down to 62, and the cutover notes
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
