@@ -138,10 +138,13 @@ $ gc session peek gcg-14   # use the ID your list printed
 
 This sample comes from a reviewer running Codex; with Claude or another
 provider you see that provider's interface instead, and the exact text always
-varies. Either way, the peek shows the reviewer's prompt — the output of `gc
-prime` — landing as the first input to the provider's CLI. That's how Gas City
-tells the provider how to act. The agent then claims a ready bead, executes it,
-and produces `review.md`.
+varies. Here the peek shows the reviewer's prompt — the output of `gc prime` —
+landing as the first input to the provider's CLI. That's how Gas City tells
+the provider how to act. Claude receives that prompt in its system prompt
+instead, so its peek opens on a short first message: the session's header
+line, then the agent's nudge, or an instruction to start work when it has
+none. Either way, the agent then claims a ready bead, executes it, and produces
+`review.md`.
 
 When the work runs out, the agent goes idle and the GC supervisor shuts its
 session down. That's the on-demand default: an agent with no always-on
