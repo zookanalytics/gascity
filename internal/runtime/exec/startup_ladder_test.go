@@ -187,12 +187,25 @@ func TestUnweldedSlowHostSetupStillHandsBackFirstTurn(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		t.Run(fmt.Sprintf("fresh_only=%v", fresh), func(t *testing.T) {
 			sp, _, _ := hostFSGoldenFixtureWith(t, func(b map[string]string) { reference.LaunchBodies(b) })
-			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			// session_setup is `sleep 300` run through a wrapper that ends
+			// the start's ctx as the sleep begins, so provision and the
+			// launch run under a live ctx and the setup outlives it however
+			// slow the host is. A fixed deadline would have to outlast the
+			// launch's ops, which a loaded host does not promise.
+			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
-			cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", Nudge: "first turn", SessionSetup: []string{"sleep 3"}, FreshOnly: fresh}
+			sleeper, release, err := reference.OnFirstOp("sleep", "300", t.TempDir(), cancel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(release)
+			cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", Nudge: "first turn", SessionSetup: []string{"'" + sleeper + "' 300"}, FreshOnly: fresh}
 			t.Cleanup(func() { _ = sp.Stop("s") })
 			if err := sp.Start(ctx, "s", cfg); err != nil {
 				t.Fatalf("Start = %v, want nil: a session_setup that outlives the start's ctx is a warning", err)
+			}
+			if ctx.Err() == nil {
+				t.Fatal("Start returned with its ctx live: session_setup never began, so it never outlived the ctx")
 			}
 			if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); !ok || turn.Text != "first turn" {
 				t.Fatalf("handback = %+v, %v; want the first turn: it was lost to the start's deadline", turn, ok)
