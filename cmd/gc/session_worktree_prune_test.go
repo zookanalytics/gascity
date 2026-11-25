@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -49,7 +52,8 @@ func liveScanUnavailable() worktreeLivenessInputs {
 }
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
-// probe; WorktreeRemoveErr controls the destructive call, and removed
+// probe; worktrees and worktreeListErr answer the repository's worktree
+// list; WorktreeRemoveErr controls the destructive call, and removed
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted. gitDir is the private
 // git directory the prune reads worktree provenance from.
@@ -62,6 +66,8 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
+	worktrees        []git.Worktree
+	worktreeListErr  error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -79,6 +85,10 @@ func (f *fakeGitProbe) CurrentBranch() (string, error) {
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
+}
+
+func (f *fakeGitProbe) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeListErr
 }
 
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
@@ -843,5 +853,97 @@ func TestLookupRigRootForSession(t *testing.T) {
 				t.Errorf("lookupRigRootForSession(%q) = %q, want %q", c.template, got, c.want)
 			}
 		})
+	}
+}
+
+// cliPruneCity is a city for the worker_dir prune of the session close and
+// prune commands: rig "demo" is a real repository whose HEAD is pushed to its
+// origin and which ignores the worktrees folders made inside its worktrees,
+// and agent demo/helper sets nothing. Its worktrees live under the city's
+// worktrees root, so every git safety gate of the prune passes on a clean one.
+type cliPruneCity struct {
+	t        *testing.T
+	cityDir  string
+	rigRoot  string
+	helperWT string // the folder each helper session's worktree sits under
+	store    beads.Store
+}
+
+func newCLIPruneCity(t *testing.T) *cliPruneCity {
+	t.Helper()
+	origScan := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+
+	c := &cliPruneCity{t: t, cityDir: t.TempDir(), rigRoot: filepath.Join(t.TempDir(), "demo")}
+	c.helperWT = filepath.Join(c.cityDir, ".gc", "worktrees", "demo", "helper")
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+	if err := os.MkdirAll(c.rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
+	}
+	runGit(t, c.rigRoot, "clone", bare, ".")
+	runGit(t, c.rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, c.rigRoot, "config", "user.name", "Test")
+	runGit(t, c.rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, c.rigRoot, "push", "origin", "HEAD")
+	if err := os.WriteFile(filepath.Join(c.rigRoot, ".git", "info", "exclude"), []byte("worktrees/\n"), 0o644); err != nil {
+		t.Fatalf("write info/exclude: %v", err)
+	}
+	writePhase0InterfaceCity(t, c.cityDir, fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "demo"
+path = %q
+
+[[agent]]
+name = "helper"
+dir = "demo"
+start_command = "true"
+`, c.rigRoot))
+	t.Setenv("GC_CITY", c.cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	store, err := openCityStoreAt(c.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	c.store = store
+	return c
+}
+
+// worktree adds a detached worktree of the rig at path.
+func (c *cliPruneCity) worktree(path string) string {
+	c.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		c.t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	runGit(c.t, c.rigRoot, "worktree", "add", "--detach", path)
+	return path
+}
+
+// session creates a manual helper session working in dir, with meta added.
+func (c *cliPruneCity) session(name, dir string, meta map[string]string) beads.Bead {
+	c.t.Helper()
+	m := map[string]string{"session_name": name, "template": "demo/helper", "session_origin": "manual", "work_dir": dir}
+	maps.Copy(m, meta)
+	b, err := c.store.Create(beads.Bead{Title: name, Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: m})
+	if err != nil {
+		c.t.Fatalf("create session %s: %v", name, err)
+	}
+	return b
+}
+
+// assertFolder fails unless dir exists exactly when want says it stays.
+func assertFolder(t *testing.T, dir string, stays bool, stderr string) {
+	t.Helper()
+	_, err := os.Stat(dir)
+	if gone := errors.Is(err, os.ErrNotExist); gone == stays {
+		t.Fatalf("%s gone = %v, want stays = %v; stderr=%q", dir, gone, stays, stderr)
 	}
 }

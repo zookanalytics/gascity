@@ -68,7 +68,7 @@ func newBornSplitHookBudgetFixture(t *testing.T) hookBudgetFixture {
 func finishBornSplitHookBudgetFixture(t *testing.T, cityDir string) hookBudgetFixture {
 	t.Helper()
 	var stdoutBuf, stderrBuf bytes.Buffer
-	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, &stdoutBuf, &stderrBuf); code != 0 {
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, nil, &stdoutBuf, &stderrBuf); code != 0 {
 		t.Fatalf("cmdSessionNew = %d; stderr=%s", code, stderrBuf.String())
 	}
 	sessionBead := onlySessionBead(t, cityDir)

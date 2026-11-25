@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -28,6 +29,7 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
+	WorktreeList() ([]git.Worktree, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -144,6 +146,47 @@ func excludeNormalizedDirs(dirs, exclude []string) []string {
 	return out
 }
 
+// sessionRecordPrunesWorkerDir reports whether the closing session's record
+// asks for its worker_dir to be removed: the prune_worker_dir it records, or,
+// when it records none, its agent's prune_worker_dir, whose default is whether
+// the session is pool-managed (config.Agent.PruneWorkerDirEnabled). The agent
+// is resolved as the session was built (sessionWakeResolveAgentInfo), which
+// finds a rig's stamped copy of a scope = "rig" agent. A record that does not
+// parse keeps the folder, and says so on stderr.
+func sessionRecordPrunesWorkerDir(info sessionpkg.Info, workerDir string, cfg *config.City, stderr io.Writer) bool {
+	prune, recorded, err := sessionpkg.RecordedPruneWorkerDir(info)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: session %s records %v\n", workerDir, info.ID, err) //nolint:errcheck
+		return false
+	}
+	if recorded {
+		return prune
+	}
+	return sessionWakeResolveAgentInfo(info, cfg).PruneWorkerDirEnabled(isPoolManagedSessionInfo(info))
+}
+
+// nestedWorktreeRefusal reports why workerDir must stay because another
+// worktree its repository registers sits beneath it with uncommitted changes,
+// or "" when none does. A session started by hand can cut a change's
+// worktree inside its own folder, and removing the folder deletes that tree's
+// files with it; commits survive in the repository, uncommitted changes do
+// not. A list that cannot be read keeps the folder.
+func nestedWorktreeRefusal(gp gitProbe, workerDir string) string {
+	entries, err := gp.WorktreeList()
+	if err != nil {
+		return fmt.Sprintf("cannot list its repository's worktrees: %v", err)
+	}
+	for _, e := range entries {
+		if pathutil.SamePath(e.Path, workerDir) || !pathutil.PathWithin(workerDir, e.Path) {
+			continue
+		}
+		if newGitProbe(e.Path).HasUncommittedWork() {
+			return fmt.Sprintf("worktree %s beneath it has uncommitted changes", e.Path)
+		}
+	}
+	return ""
+}
+
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
 // pruned, so cleanupClosedBeadAgentHomeWorktrees (agent_home_worktree_cleanup.go)
 // can later detect when it's safe to reclaim. Best-effort: write failures are
@@ -203,6 +246,9 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	if workerDir == "" {
 		return false
 	}
+	if !sessionRecordPrunesWorkerDir(sessionInfoFromBead(session), workerDir, cfg, stderr) {
+		return false
+	}
 	if !filepath.IsAbs(workerDir) {
 		return false
 	}
@@ -247,6 +293,10 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return false
 	}
+	if reason := nestedWorktreeRefusal(gp, workerDir); reason != "" {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
+		return false
+	}
 
 	// Run `git worktree remove` from the rig root rather than from the
 	// worktree being removed: git refuses to remove a worktree whose path
@@ -279,6 +329,9 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	}
 	workerDir := strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info))
 	if workerDir == "" {
+		return
+	}
+	if !sessionRecordPrunesWorkerDir(info, workerDir, cfg, stderr) {
 		return
 	}
 	if !filepath.IsAbs(workerDir) {
@@ -324,6 +377,10 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return
 	}
+	if reason := nestedWorktreeRefusal(gp, workerDir); reason != "" {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
+		return
+	}
 
 	rigRoot := lookupRigRootForSessionInfo(info, cfg)
 	if rigRoot == "" {
@@ -335,6 +392,77 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck
+}
+
+// pruneClosedRowWorkerDir is the legacy reconciler's prune of a row it just
+// closed (a failed create, a dead named-session phantom, an orphan): when the
+// row records a worker_dir, it gathers the pass's liveness once through
+// liveness and hands the row to pruneAgentHomeWorktreeIfSafeInfo, which its
+// record decides. A row with no worker_dir costs no process-table walk.
+func pruneClosedRowWorkerDir(info sessionpkg.Info, cityPath string, cfg *config.City, liveness func() worktreeLivenessInputs, stderr io.Writer) {
+	if sessionpkg.WorkerDirFromInfo(info) == "" {
+		return
+	}
+	pruneWorktree(info, cityPath, cfg, liveness(), stderr)
+}
+
+// pruneClosedSessionWorkerDirs prunes the worker worktree of each session row
+// in ids that a CLI command closed (gc session close, gc session prune), when
+// the row's record asks for it: pruneAgentHomeWorktreeIfSafeInfo decides that
+// and every safety gate. A row that reopened since keeps its worktree, and so
+// does one whose worktree an open row records as its own work dir, such as a
+// successor seat in the same pool slot (the v2 close's workDirInUse): the
+// liveness gate drops every dir equal to the closed row's own, so it cannot see
+// that row. The liveness inputs, the process-table walk and the worktree dirs
+// every open row records, are gathered once, and only when a closed row
+// records a worker_dir. A read error keeps the row's worktree and says so on
+// stderr.
+func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *sessionpkg.Store, ids []string, stderr io.Writer) {
+	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		return
+	}
+	var (
+		open     []sessionpkg.Info
+		liveness worktreeLivenessInputs
+		gathered bool
+	)
+	for _, id := range ids {
+		info, err := sessions.Get(id)
+		if err != nil {
+			fmt.Fprintf(stderr, "worker_dir prune: reading closed session %s: %v\n", id, err) //nolint:errcheck
+			continue
+		}
+		if !info.Closed || sessionpkg.WorkerDirFromInfo(info) == "" {
+			continue
+		}
+		if !gathered {
+			open, err = sessions.ListLabeledSessionInfosUnfiltered()
+			if err != nil {
+				fmt.Fprintf(stderr, "worker_dir prune: listing open sessions: %v\n", err) //nolint:errcheck
+				return
+			}
+			liveness = worktreeLivenessInputs{live: collectLiveWorktreeStateFn()}
+			for _, o := range open {
+				liveness.sessionDirs = append(liveness.sessionDirs, sessionRecordedWorktreeDirs(o)...)
+			}
+			gathered = true
+		}
+		if openRowOwnsWorkDir(open, cityPath, sessionpkg.WorkerDirFromInfo(info)) {
+			continue
+		}
+		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, liveness, stderr)
+	}
+}
+
+// openRowOwnsWorkDir reports whether a row in open records dir as one of its
+// own work dirs (sessionOwnWorkDirs), a relative one resolved against the city.
+func openRowOwnsWorkDir(open []sessionpkg.Info, cityPath, dir string) bool {
+	return slices.ContainsFunc(open, func(o sessionpkg.Info) bool {
+		return slices.ContainsFunc(sessionOwnWorkDirs(o), func(d string) bool {
+			d = strings.TrimSpace(d)
+			return d != "" && pathutil.SamePath(resolveWorkDirAgainstCity(cityPath, d), dir)
+		})
+	})
 }
 
 // lookupRigRootForSession returns the filesystem path of the rig that owns

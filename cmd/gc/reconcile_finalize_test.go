@@ -128,9 +128,12 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
 		t.Fatalf("write .git marker: %v", err)
 	}
+	// A pool-managed session, whose folder goes by default when its record
+	// closes (config.Agent.PruneWorkerDirEnabled).
 	env.setSessionMetadata(&b, map[string]string{
-		"session_key": "k-1",
-		"worker_dir":  workerDir,
+		"session_key":  "k-1",
+		"worker_dir":   workerDir,
+		"pool_managed": "true",
 	})
 
 	probe := &fakeGitProbe{isRepo: true}
@@ -181,7 +184,8 @@ func TestFinalizeDrainAckStoppedSession_KeepsWorkerDirWhenScanIndeterminate(t *t
 	if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
 		t.Fatalf("write .git marker: %v", err)
 	}
-	env.setSessionMetadata(&b, map[string]string{"session_key": "k-1", "worker_dir": workerDir})
+	// Pool-managed, so its record asks for the prune and only the scan keeps it.
+	env.setSessionMetadata(&b, map[string]string{"session_key": "k-1", "worker_dir": workerDir, "pool_managed": "true"})
 
 	probe := &fakeGitProbe{isRepo: true}
 	orig := newGitProbe

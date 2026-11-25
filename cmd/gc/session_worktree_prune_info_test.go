@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -536,5 +539,133 @@ func TestLookupRigRootForSessionInfo(t *testing.T) {
 				t.Errorf("lookupRigRootForSessionInfo(%q) = %q, want %q", c.template, got, c.want)
 			}
 		})
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_FollowsTheSessionsRecord pins who
+// decides whether a closing session's folder goes: the prune_worker_dir its
+// record holds, or with no record its agent's prune_worker_dir, whose default
+// is whether the session is pool-managed. A record that does not parse keeps
+// the folder, and the city-wide switch keeps every folder.
+func TestPruneAgentHomeWorktreeIfSafeInfo_FollowsTheSessionsRecord(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name      string
+		manual    bool   // a session gc session new starts, not pool-managed
+		record    string // the row's prune_worker_dir
+		agent     *bool  // the agent's prune_worker_dir
+		cityOff   bool   // [daemon] auto_prune_worker_dir = false
+		wantPrune bool
+		wantLog   string
+	}{
+		{name: "a pool-managed session with no record and an agent that sets nothing", wantPrune: true},
+		{name: "a manual session with no record and an agent that sets nothing", manual: true},
+		{name: "a manual session with no record and an agent that prunes", manual: true, agent: &yes, wantPrune: true},
+		{name: "a pool-managed session with no record and an agent that keeps", agent: &no},
+		{name: "a pool-managed session whose record keeps", record: "false"},
+		{name: "a manual session whose record prunes over an agent that keeps", manual: true, record: "true", agent: &no, wantPrune: true},
+		{name: "a record that does not parse", record: "keep-it", agent: &yes, wantLog: `prune_worker_dir="keep-it"`},
+		{name: "a record that prunes in a city that keeps every folder", record: "true", cityOff: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPruneFixture(t)
+			fx.cfg.Agents = []config.Agent{{Name: "polecat", Dir: "demo", PruneWorkerDir: tc.agent}}
+			if tc.cityOff {
+				fx.cfg.Daemon.AutoPruneWorkerDir = &no
+			}
+			info := fx.sessionInfo()
+			if tc.manual {
+				info.SessionOrigin = "manual"
+			}
+			info.PruneWorkerDir = tc.record
+			rigProbe := &fakeGitProbe{isRepo: true}
+			fx.setProbe(fx.rigRoot, rigProbe)
+
+			var stderr bytes.Buffer
+			pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr)
+			if rigProbe.removeInvoked != tc.wantPrune {
+				t.Fatalf("WorktreeRemove invoked = %v, want %v; stderr=%q", rigProbe.removeInvoked, tc.wantPrune, stderr.String())
+			}
+			if tc.wantLog != "" && !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to name %s", stderr.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree pins
+// the nested-worktree gate: a folder that holds another registered worktree
+// with uncommitted changes stays, a clean one does not keep it, and a
+// worktree list that cannot be read keeps it.
+func TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dirty     bool
+		listErr   error
+		wantPrune bool
+		wantLog   string
+	}{
+		{name: "a nested worktree with uncommitted changes", dirty: true, wantLog: "has uncommitted changes"},
+		{name: "a clean nested worktree", wantPrune: true},
+		{name: "an unreadable worktree list", listErr: errors.New("git worktree list failed"), wantLog: "cannot list its repository's worktrees"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPruneFixture(t)
+			nested := filepath.Join(fx.workerDir, "worktrees", "gc-change")
+			sibling := filepath.Join(filepath.Dir(fx.workerDir), "polecat-4")
+			fx.setProbe(fx.workerDir, &fakeGitProbe{
+				isRepo:          true,
+				worktrees:       []git.Worktree{{Path: fx.rigRoot}, {Path: fx.workerDir}, {Path: sibling}, {Path: nested}},
+				worktreeListErr: tc.listErr,
+			})
+			// A dirty sibling outside the folder never keeps it.
+			fx.setProbe(sibling, &fakeGitProbe{isRepo: true, hasUncommitted: true})
+			fx.setProbe(nested, &fakeGitProbe{isRepo: true, hasUncommitted: tc.dirty})
+			rigProbe := &fakeGitProbe{isRepo: true}
+			fx.setProbe(fx.rigRoot, rigProbe)
+
+			var stderr bytes.Buffer
+			pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr)
+			if rigProbe.removeInvoked != tc.wantPrune {
+				t.Fatalf("WorktreeRemove invoked = %v, want %v; stderr=%q", rigProbe.removeInvoked, tc.wantPrune, stderr.String())
+			}
+			if tc.wantLog != "" && !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
+			}
+		})
+	}
+}
+
+// TestReconcileSessionBeads_OrphanCloseOffersTheRowToThePrune pins that the
+// legacy reconciler's orphan close, as v2's does, offers the closed row to
+// the worker_dir prune, which the row's record decides.
+func TestReconcileSessionBeads_OrphanCloseOffersTheRowToThePrune(t *testing.T) {
+	var pruned []string
+	orig := pruneWorktree
+	pruneWorktree = func(info sessionpkg.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
+		pruned = append(pruned, info.ID)
+	}
+	t.Cleanup(func() { pruneWorktree = orig })
+	origScan := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	orphan := env.createSessionBead("worker-orphan", "worker")
+	if err := env.store.SetMetadata(orphan.ID, "work_dir", "/city/.gc/worktrees/repo/worker-orphan"); err != nil {
+		t.Fatalf("SetMetadata(work_dir): %v", err)
+	}
+	orphan, err := env.store.Get(orphan.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", orphan.ID, err)
+	}
+	env.reconcile([]beads.Bead{orphan})
+
+	if got, err := env.store.Get(orphan.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("orphan %s = %+v, %v; want closed through the orphan path", orphan.ID, got, err)
+	}
+	if len(pruned) != 1 || pruned[0] != orphan.ID {
+		t.Fatalf("pruned %v, want the closed orphan %s offered once", pruned, orphan.ID)
 	}
 }

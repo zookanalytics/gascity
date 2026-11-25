@@ -931,6 +931,24 @@ func TestCloseEffectEdges(t *testing.T) {
 			}
 		}
 	})
+	t.Run("an orphan close offers its row to the prune, as a pool-slot close does", func(t *testing.T) {
+		var pruned []string
+		orig := pruneWorktree
+		pruneWorktree = func(info session.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
+			pruned = append(pruned, info.ID)
+		}
+		t.Cleanup(func() { pruneWorktree = orig })
+		origScan := collectLiveWorktreeStateFn
+		collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+		t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+		c := orphan(t, "work_dir", "/city/.gc/worktrees/repo/worker-1")
+		if s := c.run(t, gone().tmux()); !s.Closed {
+			t.Fatalf("settlement %+v, want the orphan closed", s)
+		}
+		if len(pruned) != 1 || pruned[0] != c.k.ID {
+			t.Fatalf("pruned %v, want the closed row %s offered once: its record decides whether its folder goes", pruned, c.k.ID)
+		}
+	})
 	t.Run("a killed seat's workflow root takes the seat's route (N08)", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339))
 		root := c.work(t, "open", map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow})

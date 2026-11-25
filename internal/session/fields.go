@@ -465,6 +465,12 @@ var registry = slices.Concat([]Field{
 	{Key: CanonicalPoolSlotMetadata, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/session_identity.go", "desiredSessionIdentity"))},
 	{Key: "real_world_app_project_id", Class: ClassLaunchConfig, Writers: sites(op("internal/api/handler_session_create.go", "Server.persistSessionMeta"))},
 	{Key: beadmeta.OptionMetadataPrefix, Family: true, Class: ClassLaunchConfig, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},
+	// A session's own say over whether its close removes its worker_dir, over
+	// its agent's prune_worker_dir: gc session new's --prune-worker-dir
+	// writes it, and an operator sets it on a running session through a bead
+	// edit, the escape hatch no site models. Only the prune after a close
+	// reads it, so no fence compares it.
+	{Key: PruneWorkerDirMetadataKey, Class: ClassLaunchConfig, Writers: sites(op("cmd/gc/cmd_session.go", "cmdSessionNew"))},
 	{Key: beadmeta.LabelRevisionMetadataKey, Class: ClassAdvisory, NewKey: true, NoWriter: "written by internal/beads' native Dolt label CAS (LL1), outside the census dirs; a version stamp no decision reads"},
 	{Key: beadmeta.InfraMigratedFromMetadataKey, Class: ClassAdvisory, Writers: sites(legacy("cmd/gc/infra_class_migrate.go", "infraMigrationRow"))},
 	// Usage compute attributes a row by its run chain (beadmeta's runIDChainKeys).

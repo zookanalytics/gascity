@@ -65,7 +65,7 @@ path = %q
 	resetHookBudgetProcessState(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d; stderr=%s", code, stderr.String())
 	}
 	work, err := openCityStoreAt(cityDir)
@@ -158,13 +158,13 @@ func TestSessionNewAliasReservationReadsTheBindingOnASplitCity(t *testing.T) {
 	f := newSplitHookBudgetFixture(t)
 	t.Setenv("GC_SESSION_ID", "")
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(first) = %d; stderr=%s", code, stderr.String())
 	}
 	resetHookBudgetProcessState(t)
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "split-alias", "", "", true, false, 0, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(second) = 0, want an alias conflict: the reservation did not read the binding")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {

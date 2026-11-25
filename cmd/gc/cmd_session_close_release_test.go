@@ -716,3 +716,56 @@ func TestSessionCloseHelpDocumentsWorkRelease(t *testing.T) {
 		}
 	}
 }
+
+// TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor pins the worker_dir
+// prune gc session close runs on the row it closed: a session whose record
+// asks for it loses its folder, whether the record was written at creation or
+// while the session ran; a manual session of an agent that sets nothing keeps
+// it; and so does one whose folder holds a registered worktree with
+// uncommitted changes, or whose folder an open session records as its own
+// work dir, though its record asks.
+func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
+	c := newCLIPruneCity(t)
+	dirty := c.worktree(filepath.Join(c.helperWT, "holds-a-change"))
+	change := c.worktree(filepath.Join(dirty, "worktrees", "gc-change"))
+	if err := os.WriteFile(filepath.Join(change, "draft.txt"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatalf("write draft: %v", err)
+	}
+	asks := map[string]string{session.PruneWorkerDirMetadataKey: "true"}
+	for _, tc := range []struct {
+		name    string
+		dir     string
+		meta    map[string]string
+		running map[string]string // written after creation, as gc bd update --set-metadata writes it
+		shared  bool              // an open successor session records the same folder
+		stays   bool
+		wantLog string
+	}{
+		{"a record that asks", c.worktree(filepath.Join(c.helperWT, "asks")), asks, nil, false, false, ""},
+		{"a record set to ask while it ran", c.worktree(filepath.Join(c.helperWT, "set-later")), nil, asks, false, false, ""},
+		{"no record, an agent that sets nothing", c.worktree(filepath.Join(c.helperWT, "unset")), nil, nil, false, true, ""},
+		{"a record that asks over a dirty nested worktree", dirty, asks, nil, false, true, "gc-change beneath it has uncommitted changes"},
+		{"a record that asks for a folder an open session works in", c.worktree(filepath.Join(c.helperWT, "shared")), asks, nil, true, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := c.session("helper-"+filepath.Base(tc.dir), tc.dir, tc.meta)
+			if tc.shared {
+				c.session("helper-"+filepath.Base(tc.dir)+"-successor", tc.dir, nil)
+			}
+			for k, v := range tc.running {
+				if err := c.store.SetMetadata(b.ID, k, v); err != nil {
+					t.Fatalf("SetMetadata(%s): %v", k, err)
+				}
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionClose([]string{b.ID}, "", &stdout, &stderr, false); code != 0 {
+				t.Fatalf("cmdSessionClose = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			assertFolder(t, tc.dir, tc.stays, stderr.String())
+			if !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
+			}
+		})
+	}
+	assertFolder(t, change, true, "")
+}

@@ -4901,6 +4901,11 @@ reconciler rolls back a session no controller has started 10 minutes
 after its creation; run gc session new again then. Only a city that is
 none of these starts the session directly in this process.
 
+--prune-worker-dir records on the session whether its worker_dir is
+removed when it closes, over the agent's prune_worker_dir. Without the
+flag the close takes the agent's setting, which keeps the folder of a
+session gc session new starts unless the agent says otherwise.
+
 ```
 gc session new <template> [flags]
 ```
@@ -4913,6 +4918,7 @@ gc session new helper --alias sky
 gc session new helper --title "debugging auth"
 gc session new helper --title-hint "fix the login redirect loop"
 gc session new helper --no-attach
+gc session new helper --prune-worker-dir
 ```
 
 | Flag | Type | Default | Description |
@@ -4920,6 +4926,7 @@ gc session new helper --no-attach
 | `--alias` | string |  | human-friendly session identifier for commands and mail |
 | `--json` | bool |  | JSON output |
 | `--no-attach` | bool |  | create session without attaching |
+| `--prune-worker-dir` | bool |  | record whether the session's worker_dir is removed when it closes, over the agent's prune_worker_dir |
 | `--title` | string |  | human-readable session title |
 | `--title-hint` | string |  | text to auto-generate a session title from |
 | `--wait-timeout` | duration | `2m0s` | max time to wait for the reconciler to start the session before attaching |

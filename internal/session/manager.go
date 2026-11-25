@@ -250,6 +250,11 @@ type Info struct {
 	// incarnation was launched in, empty when it was launched in its own work
 	// dir. Additive, internal-only (absent from the HTTP wire).
 	LaunchTaskWorkDir string // launch_task_work_dir (raw)
+	// PruneWorkerDir is the RAW prune_worker_dir metadata
+	// (PruneWorkerDirMetadataKey): whether the row's close removes its
+	// worker_dir, as RecordedPruneWorkerDir reads it. Additive, internal-only
+	// (absent from the HTTP wire).
+	PruneWorkerDir string // prune_worker_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//

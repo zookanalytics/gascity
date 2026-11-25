@@ -124,6 +124,7 @@ func newSessionNewCmd(stdout, stderr io.Writer) *cobra.Command {
 	var noAttach bool
 	var jsonOutput bool
 	var waitTimeout time.Duration
+	var pruneWorkerDir bool
 	cmd := &cobra.Command{
 		Use:   "new <template>",
 		Short: "Create a new chat session from an agent template",
@@ -144,15 +145,25 @@ holds while the supervisor is stopped: the session starts once the
 supervisor runs again, provided that is within 10 minutes. The
 reconciler rolls back a session no controller has started 10 minutes
 after its creation; run gc session new again then. Only a city that is
-none of these starts the session directly in this process.`,
+none of these starts the session directly in this process.
+
+--prune-worker-dir records on the session whether its worker_dir is
+removed when it closes, over the agent's prune_worker_dir. Without the
+flag the close takes the agent's setting, which keeps the folder of a
+session gc session new starts unless the agent says otherwise.`,
 		Example: `  gc session new helper
   gc session new helper --alias sky
   gc session new helper --title "debugging auth"
   gc session new helper --title-hint "fix the login redirect loop"
-  gc session new helper --no-attach`,
+  gc session new helper --no-attach
+  gc session new helper --prune-worker-dir`,
 		Args: cobra.ExactArgs(1),
-		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, waitTimeout, stdout, stderr) != 0 {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var prune *bool
+			if cmd.Flags().Changed("prune-worker-dir") {
+				prune = &pruneWorkerDir
+			}
+			if cmdSessionNew(args, alias, title, titleHint, noAttach, jsonOutput, waitTimeout, prune, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -164,6 +175,7 @@ none of these starts the session directly in this process.`,
 	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "create session without attaching")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	cmd.Flags().DurationVar(&waitTimeout, "wait-timeout", defaultSessionNewWaitTimeout, "max time to wait for the reconciler to start the session before attaching")
+	cmd.Flags().BoolVar(&pruneWorkerDir, "prune-worker-dir", false, "record whether the session's worker_dir is removed when it closes, over the agent's prune_worker_dir")
 	return cmd
 }
 
@@ -180,7 +192,7 @@ const defaultSessionNewWaitTimeout = 120 * time.Second
 // with the supervisor (running or not), it creates a session bead and pokes
 // the controller; the reconciler starts the session. Only an unregistered
 // city with no live controller starts the session in this process.
-func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, waitTimeout time.Duration, stdout, stderr io.Writer) int {
+func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, jsonOutput bool, waitTimeout time.Duration, pruneWorkerDir *bool, stdout, stderr io.Writer) int {
 	if waitTimeout <= 0 {
 		waitTimeout = defaultSessionNewWaitTimeout
 	}
@@ -318,6 +330,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			"agent_name":     sessionQualifiedName,
 			"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
 		}
+		if pruneWorkerDir != nil {
+			kindMeta[session.PruneWorkerDirMetadataKey] = strconv.FormatBool(*pruneWorkerDir)
+		}
 		if configuredOwner != "" && requestedAlias == "" {
 			kindMeta[session.NamedSessionMetadataKey] = "true"
 			kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
@@ -451,6 +466,9 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
 		"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+	}
+	if pruneWorkerDir != nil {
+		kindMeta[session.PruneWorkerDirMetadataKey] = strconv.FormatBool(*pruneWorkerDir)
 	}
 	if configuredOwner != "" && requestedAlias == "" {
 		kindMeta[session.NamedSessionMetadataKey] = "true"
@@ -2454,6 +2472,7 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), preserve, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
+		pruneClosedSessionWorkerDirs(cityPath, cfg, sessionFrontDoor(sessStore), []string{sessionID}, stderr)
 	}
 
 	// The op closes once the close's cleanup ran: a run killed before here
@@ -2643,6 +2662,7 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 		if err := withdrawQueuedWaitNudges(cityPath, result.WaitNudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session prune: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
+		pruneClosedSessionWorkerDirs(cityPath, cfg, sessionFrontDoor(sessStore), result.SessionIDs, stderr)
 	}
 
 	if asJSON {

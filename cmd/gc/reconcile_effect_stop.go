@@ -483,6 +483,18 @@ func stopCloseStep(v txView, work finalizeWork, probeErr error) txStep {
 	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
 }
 
+// stopAround runs the stop, and when its finalize closed the row, prunes
+// the closed row's worker worktree as the close effect's cascade does
+// (closeReleases.pruneAfterStop): a drain-ack close ends a session's record
+// as any close does.
+func stopAround(ctx context.Context, a aroundCaps, run func() settlement) settlement {
+	s := run()
+	if s.Closed && a.release != nil {
+		a.release.pruneAfterStop(ctx, a.it)
+	}
+	return s
+}
+
 // passStopped hands the stop's outcome to the premise close.
 func passStopped(_ context.Context, _ txCaps, out stopped) (stopped, error) { return out, nil }
 

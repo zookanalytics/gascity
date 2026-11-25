@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -220,7 +221,7 @@ func TestParsePruneDuration(t *testing.T) {
 
 func TestSessionNewJSONRequiresNoAttach(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, 0, &stdout, &stderr)
+	code := cmdSessionNew([]string{"worker"}, "", "", "", false, true, 0, nil, &stdout, &stderr)
 	if code != 1 {
 		t.Fatalf("cmdSessionNew --json without --no-attach = %d, want 1", code)
 	}
@@ -434,7 +435,7 @@ func TestCmdSessionNew_PoolTemplateUsesAliasBackedWorkDirIdentity(t *testing.T) 
 	for _, alias := range []string{"demo/ant-fenrir", "demo/ant-grendel"} {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, false, 0, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, alias, "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(%q) = %d, want 0; stderr=%s", alias, code, stderr.String())
 		}
 	}
@@ -474,13 +475,13 @@ func TestCmdSessionNew_PoolTemplateCanonicalizesQualifiedAliasCollisions(t *test
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(first) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/ant-fenrir", "", "", true, false, 0, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(second) = 0, want alias conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -505,7 +506,7 @@ func TestCmdSessionNew_PoolTemplateBareAliasStillResolves(t *testing.T) {
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "ant-fenrir", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -547,7 +548,7 @@ func TestCmdSessionNew_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *t
 	for i := 0; i < 2; i++ {
 		stdout.Reset()
 		stderr.Reset()
-		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+		if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 			t.Fatalf("cmdSessionNew(aliasless #%d) = %d, want 0; stderr=%s", i+1, code, stderr.String())
 		}
 	}
@@ -651,7 +652,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(acp) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -728,7 +729,7 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 `)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(custom provider acp default) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -758,7 +759,7 @@ func TestCmdSessionNewRejectsExplicitTmuxAgentWhenCitySessionProviderIsACP(t *te
 	writePoolACPCityExplicitTmuxAgentTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionNew(explicit tmux on ACP city) = %d, want failure", code)
 	}
 	if !strings.Contains(stderr.String(), "requires tmux transport") {
@@ -778,7 +779,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 	writePoolSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(aliasless) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -793,7 +794,7 @@ func TestCmdSessionNew_PoolTemplateRejectsAliasMatchingConcreteIdentity(t *testi
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, false, 0, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"demo/ant"}, "demo/"+sessionName, "", "", true, false, 0, nil, &stdout, &stderr); code == 0 {
 		t.Fatal("cmdSessionNew(alias collision) = 0, want conflict")
 	}
 	if !strings.Contains(stderr.String(), session.ErrSessionAliasExists.Error()) {
@@ -2435,7 +2436,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithController(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(controller) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2485,7 +2486,7 @@ func TestCmdSessionNew_AllowsReservedNamedAliasWithoutController(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(fallback) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2536,7 +2537,7 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}()
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(unmanaged supervisor) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 
@@ -2627,7 +2628,7 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDefersStart(t *testing.T) {
 	registerCityWithSupervisorForTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(registered, supervisor down) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var got sessionNewJSON
@@ -2662,7 +2663,7 @@ func TestCmdSessionNewRegisteredCitySupervisorDownDoesNotWaitToAttach(t *testing
 	registerCityWithSupervisorForTest(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(attach, supervisor down) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	b := onlySessionBead(t, cityDir)
@@ -2721,7 +2722,7 @@ func TestCmdSessionNewWaitsToAttachWhileAControllerIsUp(t *testing.T) {
 			startFakeUnixSocket(t, controllerSocketPath(cityDir), tc.respond)
 
 			var stdout, stderr bytes.Buffer
-			code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, &stdout, &stderr)
+			code := cmdSessionNew([]string{"mayor"}, "", "", "", false, false, time.Millisecond, nil, &stdout, &stderr)
 			out, errText := stdout.String(), stderr.String()
 			// Nothing in the test starts the session, so the wait times out.
 			if code != 1 || !strings.Contains(errText, "did not start within") {
@@ -2817,7 +2818,7 @@ func TestCmdSessionNewCorruptRegistryFailsLoudly(t *testing.T) {
 	registryPath := writeCorruptSupervisorRegistryForTest(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, false, 0, &stdout, &stderr); code == 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, false, 0, nil, &stdout, &stderr); code == 0 {
 		t.Fatalf("cmdSessionNew(corrupt registry) = 0, want non-zero; stdout=%s", stdout.String())
 	}
 	errText := stderr.String()
@@ -2852,7 +2853,7 @@ func TestCmdSessionNewUnregisteredCityStartsDirectly(t *testing.T) {
 			tc.register(t)
 
 			var stdout, stderr bytes.Buffer
-			if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+			if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, nil, &stdout, &stderr); code != 0 {
 				t.Fatalf("cmdSessionNew(unregistered) = %d, want 0; stderr=%s", code, stderr.String())
 			}
 			var got sessionNewJSON
@@ -2886,7 +2887,7 @@ func TestCmdSessionNewLiveControllerPokeFailureDefers(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew(live controller, poke fails) = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var got sessionNewJSON
@@ -2939,7 +2940,7 @@ func TestCmdSessionAttachRegisteredCitySupervisorDownLeavesNamedStartToReconcile
 func TestCmdSessionAttachRegisteredCitySupervisorDownLeavesDeferredSessionToReconciler(t *testing.T) {
 	cityDir := newSupervisorDownSessionCity(t)
 	registerCityWithSupervisorForTest(t, cityDir)
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, io.Discard, io.Discard); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, nil, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("cmdSessionNew(--no-attach) = %d, want 0", code)
 	}
 	created := onlySessionBead(t, cityDir)
@@ -3113,7 +3114,7 @@ func TestDeliverMailNotifyRegisteredCitySupervisorDownRequestsWake(t *testing.T)
 // returns its id.
 func asleepNamedSessionForTest(t *testing.T, cityDir string) string {
 	t.Helper()
-	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, io.Discard, io.Discard); code != 0 {
+	if code := cmdSessionNew([]string{"mayor"}, "", "", "", true, true, 0, nil, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("cmdSessionNew(--no-attach) = %d, want 0", code)
 	}
 	b := onlySessionBead(t, cityDir)
@@ -3408,7 +3409,7 @@ func TestCmdSessionNew_AutoTitleFromMessage(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, false, 0, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "fix the login redirect loop", true, false, 0, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -3433,7 +3434,7 @@ func TestCmdSessionNew_ExplicitTitlePreserved(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, false, 0, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "my explicit title", "some message", true, false, 0, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -3454,7 +3455,7 @@ func TestCmdSessionNew_NoMessageKeepsTemplateName(t *testing.T) {
 	writeNamedSessionCityTOML(t, cityDir)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, &stdout, &stderr)
+	code := cmdSessionNew([]string{"mayor"}, "mayor", "", "", true, false, 0, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
 	}
@@ -4233,4 +4234,81 @@ func TestRouteSessionPeek_NoCacheAgeFooterWhenCacheStale(t *testing.T) {
 	if got := stdout.String(); got != "peeked\n" {
 		t.Errorf("routed peek stdout = %q, want only the live pane output %q", got, "peeked\n")
 	}
+}
+
+// TestCmdSessionNew_RecordsTheFlagOverTheAgentsSetting pins the
+// prune_worker_dir a session gc session new creates records: the
+// --prune-worker-dir flag when given, and nothing without it, so the close
+// takes the agent's setting as it stands then.
+func TestCmdSessionNew_RecordsTheFlagOverTheAgentsSetting(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name  string
+		agent string // a prune_worker_dir line for the agent, or none
+		flag  *bool
+		want  string
+	}{
+		{name: "no flag and an agent that sets nothing"},
+		{name: "no flag and an agent that prunes", agent: "prune_worker_dir = true"},
+		{name: "the flag keeps it over an agent that prunes", agent: "prune_worker_dir = true", flag: &no, want: "false"},
+		{name: "the flag prunes it over an agent that sets nothing", flag: &yes, want: "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			t.Setenv("GC_SESSION", "fake")
+			cityDir := t.TempDir()
+			t.Setenv("GC_CITY", cityDir)
+			writePoolSessionCityTOML(t, cityDir)
+			if tc.agent != "" {
+				f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
+				if err != nil {
+					t.Fatalf("open city.toml: %v", err)
+				}
+				if _, err := fmt.Fprintln(f, tc.agent); err != nil {
+					t.Fatalf("append to city.toml: %v", err)
+				}
+				if err := f.Close(); err != nil {
+					t.Fatalf("close city.toml: %v", err)
+				}
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionNew([]string{"demo/ant"}, "", "", "", true, false, 0, tc.flag, &stdout, &stderr); code != 0 {
+				t.Fatalf("cmdSessionNew = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			all := sessionBeads(t, cityDir)
+			if len(all) != 1 {
+				t.Fatalf("session beads = %d, want 1", len(all))
+			}
+			if got, ok := all[0].Metadata[session.PruneWorkerDirMetadataKey]; got != tc.want || ok != (tc.want != "") {
+				t.Fatalf("%s = %q (recorded %v), want %q", session.PruneWorkerDirMetadataKey, got, ok, tc.want)
+			}
+		})
+	}
+}
+
+// TestCmdSessionPruneRemovesTheWorkerDirsItsRecordsAskFor pins the worker_dir
+// prune gc session prune runs on the rows it closes: a pruned session whose
+// record asks loses its folder, and one whose record keeps it keeps it.
+func TestCmdSessionPruneRemovesTheWorkerDirsItsRecordsAskFor(t *testing.T) {
+	c := newCLIPruneCity(t)
+	old := time.Now().Add(-10 * 24 * time.Hour).UTC().Format(time.RFC3339)
+	drained := map[string]string{"state": string(session.StateDrained), "drain_at": old}
+	asks, keeps := c.worktree(filepath.Join(c.helperWT, "asks")), c.worktree(filepath.Join(c.helperWT, "keeps"))
+	asksMeta := maps.Clone(drained)
+	asksMeta[session.PruneWorkerDirMetadataKey] = "true"
+	keepsMeta := maps.Clone(drained)
+	keepsMeta[session.PruneWorkerDirMetadataKey] = "false"
+	c.session("helper-asks", asks, asksMeta)
+	c.session("helper-keeps", keeps, keepsMeta)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionPrune("7d", "drained", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdSessionPrune = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Pruned 2 session(s).") {
+		t.Fatalf("stdout = %q, want both sessions pruned", stdout.String())
+	}
+	assertFolder(t, asks, false, stderr.String())
+	assertFolder(t, keeps, true, stderr.String())
 }

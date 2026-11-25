@@ -1139,8 +1139,14 @@ func TestAroundCapsAreScoped(t *testing.T) {
 	if got := reflect.TypeOf(section{}.probe).In(1); got != reflect.TypeFor[effectReads]() {
 		t.Errorf("a Probe holds %v, want effectReads alone", got)
 	}
+	// The stop holds the close's handles for its Call's stalled-claim release
+	// and for stopAround, which only prunes the worker_dir of a row its
+	// finalize closed; no other around holds them, and no other kind.
+	stopAroundOnly := func(spec effectSpec) bool {
+		return spec.around == nil || reflect.ValueOf(spec.around).Pointer() == reflect.ValueOf(stopAround).Pointer()
+	}
 	for kind, spec := range effectSpecs {
-		if spec.caps&capRelease != 0 && kind != intentClose && (kind != intentStop || spec.around != nil) {
+		if spec.caps&capRelease != 0 && kind != intentClose && (kind != intentStop || !stopAroundOnly(spec)) {
 			t.Errorf("%s holds the close's release handles", kind)
 		}
 	}

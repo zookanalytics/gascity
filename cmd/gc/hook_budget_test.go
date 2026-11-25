@@ -77,7 +77,7 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	t.Setenv("GC_CITY", cityDir)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, &stdout, &stderr); code != 0 {
+	if code := cmdSessionNew([]string{hookBudgetIdentity}, "", "", "", true, false, 0, nil, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionNew = %d; stderr=%s", code, stderr.String())
 	}
 	sessionBead := onlySessionBead(t, cityDir)

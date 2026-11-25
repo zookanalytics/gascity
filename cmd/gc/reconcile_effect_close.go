@@ -470,9 +470,10 @@ func (c *closeReleases) release(r closeRelease) (closeReleased, error) {
 // closeFailedCreateBead) for it's closed row: cancel its waits and close its
 // external-message bindings; then, except for a failed create, release its
 // work (every identity the closed row carries, but the kept assignees)
-// through ReleaseClaims, alerting on what no lane serves; then, for a pool
-// slot, prune its worker worktree when safe. Each step is best-effort, as
-// legacy's: errors go to stderr, and the orphan release is the fallback.
+// through ReleaseClaims, alerting on what no lane serves; then prune its
+// worker worktree when the row's record asks for it and it is safe
+// (pruneClosedWorkerDir). Each step is best-effort, as legacy's: errors go
+// to stderr, and the orphan release is the fallback.
 func (c *closeReleases) cascade(ctx context.Context, it intent) {
 	store := c.stores[it.Key.Leg]
 	if store == nil {
@@ -505,9 +506,37 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 		logRelease(c.stderr, "closing", b.ID, out, err)
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
-	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
+	c.pruneClosedWorkerDir(ctx, it, b)
+}
+
+// pruneClosedWorkerDir prunes the worker worktree of b, the row it closed,
+// when the row's record asks for it (pruneAgentHomeWorktreeIfSafeInfo decides
+// that and every safety gate), unless the effect's deadline passed or an open
+// row since records the same work dir (workDirInUse).
+func (c *closeReleases) pruneClosedWorkerDir(ctx context.Context, it intent, b beads.Bead) {
+	store := c.stores[it.Key.Leg]
+	if store != nil && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
 		pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.pruneLiveness(store, b), c.stderr)
 	}
+}
+
+// pruneAfterStop is the stop effect's post-close step: when its drain-ack
+// finalize closed the row, it prunes the closed row's worker worktree as a
+// close effect's cascade does. A row reopened since keeps its worktree.
+func (c *closeReleases) pruneAfterStop(ctx context.Context, it intent) {
+	store := c.stores[it.Key.Leg]
+	if store == nil {
+		return
+	}
+	b, err := store.Get(it.Key.ID)
+	switch {
+	case err != nil:
+		fmt.Fprintf(c.stderr, "v2 stop: reading closed session %s: %v\n", it.Key.ID, err) //nolint:errcheck // best-effort stderr
+		return
+	case b.Status != "closed":
+		return
+	}
+	c.pruneClosedWorkerDir(ctx, it, b)
 }
 
 // pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
@@ -515,18 +544,19 @@ var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 
 // pruneLiveness is the liveness snapshot the worker_dir auto-prune consults
 // (gc-9hy4l): the process-table walk plus the worktree dirs every OPEN session
-// row other than closed's records. Gathered per cascade rather than per pass
-// because a pool-slot close is rare, and only when auto-prune is enabled: the
-// prune is a no-op otherwise and never reads the inputs. An unreadable row
-// list leaves the session dirs empty; the process walk still gates the prune,
-// and an indeterminate walk makes it fail closed.
+// row other than closed's records. Gathered per close rather than per pass
+// because a close is rare, and only when auto-prune is enabled: the prune is
+// a no-op otherwise and never reads the inputs. An unreadable row list leaves
+// the session dirs empty; the process walk still gates the prune, and an
+// indeterminate walk makes it fail closed.
 func (c *closeReleases) pruneLiveness(store beads.Store, closed beads.Bead) worktreeLivenessInputs {
 	return storePruneLiveness(c.cfg, store, closed.ID)
 }
 
 // storePruneLiveness gathers pruneLiveness's inputs for the session row
 // closedID from the store alone, for close paths that hold no pass snapshot:
-// the pool-slot close cascade and the drain-ack finalize.
+// the v2 close and stop effects, the legacy drain-ack finalize, and the
+// session close and prune commands.
 func storePruneLiveness(cfg *config.City, store beads.Store, closedID string) worktreeLivenessInputs {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return worktreeLivenessInputs{}
