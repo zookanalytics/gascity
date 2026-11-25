@@ -474,6 +474,10 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		v := *src.InjectAssignedSkills
 		dst.InjectAssignedSkills = &v
 	}
+	if src.PruneWorkerDir != nil {
+		v := *src.PruneWorkerDir
+		dst.PruneWorkerDir = &v
+	}
 	if src.DefaultSlingFormula != nil {
 		v := *src.DefaultSlingFormula
 		dst.DefaultSlingFormula = &v

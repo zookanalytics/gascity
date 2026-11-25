@@ -40,6 +40,9 @@ type AgentPatch struct {
 	Name string `toml:"name" jsonschema:"required"`
 	// WorkDir overrides the agent's session working directory.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// PruneWorkerDir overrides whether a session's worker_dir is removed
+	// when its record closes (see Agent.PruneWorkerDir).
+	PruneWorkerDir *bool `toml:"prune_worker_dir,omitempty"`
 	// TmuxAlias overrides the tmux session name template
 	// (see Agent.TmuxAlias for semantics).
 	TmuxAlias *string `toml:"tmux_alias,omitempty"`
@@ -540,6 +543,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.WorkDir != nil {
 		a.WorkDir = *p.WorkDir
+	}
+	if p.PruneWorkerDir != nil {
+		a.PruneWorkerDir = p.PruneWorkerDir
 	}
 	if p.TmuxAlias != nil {
 		a.TmuxAlias = *p.TmuxAlias
