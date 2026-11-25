@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 func applyT3BridgeRuntimeConfig(tp TemplateParams, env map[string]string) {
@@ -102,11 +104,23 @@ func templateParamsUseT3Bridge(tp TemplateParams) bool {
 	return false
 }
 
+// effectiveSessionProvider is the runtime a session of an agent runs on, as
+// the startup prompt plan and the prompt-budget diagnostics read it. The
+// session provider runs every session it does not route to acp on the city's
+// selection, which effectiveProviderName reads as the provider is built from
+// it: GC_SESSION, then [session] provider, then the platform default. An
+// agent's tmux override names the transport that carries every runtime but
+// acp (transportForRuntimeName), so it reads as that selection, and as tmux
+// where the selection is empty. Any other override reads as given.
 func effectiveSessionProvider(sessionOverride, citySessionProvider string) string {
-	if strings.TrimSpace(sessionOverride) != "" {
-		return strings.TrimSpace(sessionOverride)
+	override := strings.TrimSpace(sessionOverride)
+	if override != "" && override != config.SessionTransportTmux {
+		return override
 	}
-	return strings.TrimSpace(citySessionProvider)
+	if selection := strings.TrimSpace(effectiveProviderName(strings.TrimSpace(citySessionProvider))); selection != "" {
+		return selection
+	}
+	return override
 }
 
 func t3BridgeStartupEnvelopeModel(provider string, tp TemplateParams) string {

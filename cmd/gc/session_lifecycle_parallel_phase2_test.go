@@ -391,3 +391,98 @@ func TestReconcilerSystemPromptConversationRecordAndWakeOpener(t *testing.T) {
 		}
 	})
 }
+
+// A Claude session's launch reads the runtime the session runs on as its
+// session provider is built: GC_SESSION over city.toml's [session] provider,
+// with the claude profile's tmux override reading as that runtime. On a runtime
+// that passes no file to the agent's CLI, a fresh start puts the prompt in its
+// first turn, a wake replays it, and both clear the session's record. tmux and
+// herdr pass the file whichever of the two chose them.
+func TestReconcilerSystemPromptFollowsTheSessionRuntime(t *testing.T) {
+	prevProbe := staleResumeKeyProbe
+	staleResumeKeyProbe = func([]string, string, string, string) (present, probeable bool) { return true, true }
+	t.Cleanup(func() { staleResumeKeyProbe = prevProbe })
+
+	const prompt = "Base worker prompt"
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	wake := map[string]string{"started_config_hash": "already-started", "session_key": "k1", sessionpkg.SystemPromptSessionKeyMetadataKey: "k1"}
+	for _, tc := range []struct {
+		name, city, gcSession string
+		wake, wantFile        bool
+	}{
+		{name: "fresh start on a runtime GC_SESSION names over none in city.toml", gcSession: "k8s"},
+		{name: "wake on a runtime GC_SESSION names over none in city.toml", gcSession: "k8s", wake: true},
+		{name: "fresh start on a runtime city.toml names", city: "k8s"},
+		{name: "wake on a runtime city.toml names", city: "k8s", wake: true},
+		{name: "fresh start on tmux GC_SESSION names over city.toml's runtime", city: "k8s", gcSession: "tmux", wantFile: true},
+		{name: "wake on tmux GC_SESSION names over city.toml's runtime", city: "k8s", gcSession: "tmux", wake: true, wantFile: true},
+		{name: "fresh start on herdr GC_SESSION names over city.toml's runtime", city: "subprocess", gcSession: "herdr", wantFile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", tc.gcSession)
+			tp := resolvePhase2TemplateOnRuntime(t, phase2ProviderCaseForFamily(t, "claude"), tc.city)
+			tp.Prompt = prompt
+			// A fresh start's session carries the record of an earlier
+			// conversation, which the start replaces or clears.
+			metadata := map[string]string{"session_name": "phase2-claude", "template": "worker", sessionpkg.SystemPromptSessionKeyMetadataKey: "k0"}
+			if tc.wake {
+				for k, v := range wake {
+					metadata[k] = v
+				}
+			}
+			store := beads.NewMemStore()
+			session, err := store.Create(beads.Bead{Title: "phase2-claude", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: metadata})
+			if err != nil {
+				t.Fatalf("Create session bead: %v", err)
+			}
+			prepared, err := prepareStartCandidate(startCandidate{info: sessiontest.SeedBead(t, session), tp: tp}, &config.City{}, store, &clock.Fake{Time: now})
+			if err != nil {
+				t.Fatalf("prepareStartCandidate: %v", err)
+			}
+			cfg := prepared.cfg
+			record, written := startCommitPatch(prepared, prepared.candidate.info, now)[sessionpkg.SystemPromptSessionKeyMetadataKey]
+			opener := phase2Beacon(prepared) + "\n\nnudge-claude"
+
+			if !tc.wantFile {
+				if cfg.SystemPrompt != "" || cfg.SystemPromptFileFlag != "" {
+					t.Fatalf("system prompt = %q via %q, want none on runtime %q", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag, tp.EffectiveSessionProvider)
+				}
+				if tc.wake {
+					if want := prompt + startupPromptNudgeSeparator + "nudge-claude"; cfg.Nudge != want || cfg.PromptSuffix != "" {
+						t.Fatalf("wake = suffix %q, nudge %q; want the replay %q typed", cfg.PromptSuffix, cfg.Nudge, want)
+					}
+				} else {
+					if cfg.PromptSuffix != shellquote.Quote(prompt) || cfg.Nudge != "nudge-claude" {
+						t.Fatalf("fresh start = suffix %q, nudge %q; want the prompt as the first message and the nudge after it", cfg.PromptSuffix, cfg.Nudge)
+					}
+					if _, delivery, err := templateParamsToConfigWithDelivery(tp); err != nil || delivery.EffectiveMode != "argv" {
+						t.Fatalf("delivery mode = %q (err %v), want argv", delivery.EffectiveMode, err)
+					}
+				}
+				if !written || record != "" {
+					t.Fatalf("commit records %q (written %v), want the record cleared", record, written)
+				}
+				return
+			}
+
+			if cfg.SystemPrompt != prompt || cfg.SystemPromptFileFlag != "--append-system-prompt-file" {
+				t.Fatalf("system prompt = %q via %q, want the prompt via Claude's flag on runtime %q", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag, tp.EffectiveSessionProvider)
+			}
+			if tc.wake {
+				if cfg.Nudge != opener || cfg.PromptSuffix != "" {
+					t.Fatalf("wake = suffix %q, nudge %q; want only the opener %q typed", cfg.PromptSuffix, cfg.Nudge, opener)
+				}
+				if written {
+					t.Fatalf("wake commit writes the record %q, want it left alone", record)
+				}
+				return
+			}
+			if cfg.PromptSuffix != shellquote.Quote(opener) || cfg.Nudge != "" {
+				t.Fatalf("fresh start = suffix %q, nudge %q; want the opener %q and nothing typed after", cfg.PromptSuffix, cfg.Nudge, opener)
+			}
+			if key := prepared.candidate.info.SessionKey; key == "" || !written || record != key {
+				t.Fatalf("commit records %q (written %v), want the new conversation's key %q", record, written, key)
+			}
+		})
+	}
+}

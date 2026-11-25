@@ -391,6 +391,47 @@ func TestPlanStartupPromptSystemPromptChannel(t *testing.T) {
 	}
 }
 
+// TestEffectiveSessionProviderIsTheRuntimeTheSessionRunsOn pins the runtime
+// name the startup prompt plan and the prompt-budget diagnostics read. A
+// session the agent does not route to acp runs on the selection its session
+// provider is built from, effectiveProviderName's GC_SESSION over [session]
+// provider, and an agent's tmux override reads as that runtime.
+func TestEffectiveSessionProviderIsTheRuntimeTheSessionRunsOn(t *testing.T) {
+	// onDefault is name where the platform default leaves the selection empty.
+	onDefault := func(name string) string {
+		if sessionProviderRuntimeDefault != "" {
+			return sessionProviderRuntimeDefault
+		}
+		return name
+	}
+	cases := []struct {
+		name, gcSession, override, city, want string
+	}{
+		{name: "nothing selects a runtime", want: onDefault("")},
+		{name: "city.toml names the runtime", city: "k8s", want: "k8s"},
+		{name: "GC_SESSION names a runtime city.toml does not", gcSession: "k8s", want: "k8s"},
+		{name: "GC_SESSION over the runtime city.toml names", gcSession: "tmux", city: "k8s", want: "tmux"},
+		{name: "GC_SESSION names herdr over city.toml's runtime", gcSession: "herdr", city: "subprocess", want: "herdr"},
+		{name: "a tmux override on the runtime city.toml names", override: "tmux", city: "k8s", want: "k8s"},
+		{name: "a tmux override on the runtime GC_SESSION names", override: "tmux", gcSession: "exec:/opt/gc-runtime", want: "exec:/opt/gc-runtime"},
+		{name: "a tmux override where nothing selects a runtime", override: "tmux", want: onDefault("tmux")},
+		{name: "an acp override", override: "acp", gcSession: "k8s", city: "tmux", want: "acp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", tc.gcSession)
+			if got := effectiveSessionProvider(tc.override, tc.city); got != tc.want {
+				t.Fatalf("effectiveSessionProvider(%q, %q) with GC_SESSION=%q = %q, want %q", tc.override, tc.city, tc.gcSession, got, tc.want)
+			}
+			if tc.override == "" {
+				if got, built := effectiveSessionProvider("", tc.city), effectiveProviderName(tc.city); got != built {
+					t.Fatalf("runtime %q, but the session provider is built from %q", got, built)
+				}
+			}
+		})
+	}
+}
+
 // TestStartupPromptPlanApplyOwnsPayloadAndMarker pins that applyTo is the single
 // writer of the launch payload and the delivered marker, and that it preserves
 // the two behaviors the reconciler relied on before the decision was shared: a

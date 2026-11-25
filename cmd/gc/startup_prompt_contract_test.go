@@ -306,6 +306,56 @@ func TestStartupPromptContractSystemPromptRidesEveryLaunch(t *testing.T) {
 	}
 }
 
+// TestStartupPromptContractWorkerResumeFollowsTheSessionRuntime pins that the
+// CLI and API worker resumes read the runtime the session runs on as its
+// session provider is built: GC_SESSION over city.toml's [session] provider.
+// On k8s a resume replays the prompt, even into a conversation the record
+// names, because no file rides; subprocess, which cannot carry a nudge, gets no
+// delivery; tmux over a city.toml runtime passes the file and types the opener.
+func TestStartupPromptContractWorkerResumeFollowsTheSessionRuntime(t *testing.T) {
+	recorded := launchMode{name: "resume of a system-prompt conversation", startedHash: "cfg", sessionKey: "warm", systemPromptKey: "warm"}
+	for _, tc := range []struct {
+		name, city, gcSession string
+		// wantFile says the launch passes the system prompt file, and wantNone
+		// that it delivers nothing; otherwise it replays the prompt.
+		wantFile, wantNone bool
+	}{
+		{name: "k8s that GC_SESSION names over none in city.toml", gcSession: "k8s"},
+		{name: "subprocess that GC_SESSION names over none in city.toml", gcSession: "subprocess", wantNone: true},
+		{name: "tmux that GC_SESSION names over city.toml's k8s", city: "k8s", gcSession: "tmux", wantFile: true},
+	} {
+		for _, builder := range launchBuilders[1:] {
+			t.Run(builder.name+"/"+tc.name, func(t *testing.T) {
+				t.Setenv("GC_SESSION", tc.gcSession)
+				city := newContractCity(t, contractPromptBody)
+				city.cfg.Session.Provider = tc.city
+				cfg := builder.build(t, city, recorded, contractPromptBody)
+				marked := cfg.Env[startupPromptDeliveredEnv] == "1"
+				switch {
+				case tc.wantFile:
+					if !strings.Contains(cfg.SystemPrompt, contractPromptBody) || cfg.SystemPromptFileFlag != "--append-system-prompt-file" {
+						t.Fatalf("system prompt = %q via %q, want the prompt via Claude's flag", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag)
+					}
+					if strings.Contains(cfg.Nudge, contractPromptBody) || !strings.HasSuffix(cfg.Nudge, startupOpenerInstruction) || !marked {
+						t.Fatalf("nudge = %q, marked %v; want only the opener, marked delivered", abbreviate(cfg.Nudge), marked)
+					}
+				case tc.wantNone:
+					if cfg.SystemPrompt != "" || cfg.SystemPromptFileFlag != "" || strings.Contains(cfg.Nudge, contractPromptBody) || marked {
+						t.Fatalf("launch = system prompt %q via %q, nudge %q, marked %v; want no delivery", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag, abbreviate(cfg.Nudge), marked)
+					}
+				default:
+					if cfg.SystemPrompt != "" || cfg.SystemPromptFileFlag != "" {
+						t.Fatalf("system prompt = %q via %q, want none", abbreviate(cfg.SystemPrompt), cfg.SystemPromptFileFlag)
+					}
+					if !strings.Contains(cfg.Nudge, contractPromptBody) || !marked {
+						t.Fatalf("nudge = %q, marked %v; want the prompt replayed, marked delivered", abbreviate(cfg.Nudge), marked)
+					}
+				}
+			})
+		}
+	}
+}
+
 // TestStartupPromptContractEmptyPromptDeliversNothing pins the unchanged
 // behavior for agents with no prompt: no payload, no marker, and the hook stays
 // free to carry whatever it carries today.

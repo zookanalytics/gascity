@@ -27,12 +27,13 @@ func startupPromptOverhead(agentName string) int {
 // GC_RIG_ROOT), auto-restored by t.Setenv on test cleanup. Without this, a
 // test run from inside a real gc-managed session (which sets these) would
 // leak ambient rig/agent identity into what should be a hermetic fixture.
-// Every reader of these vars (cmd_prime.go's buildPrimeContextFor) treats
-// an empty value the same as unset (`os.Getenv(k) != ""`), so t.Setenv(k,
-// "") is behaviorally equivalent to unsetting.
+// It clears GC_SESSION too, which effectiveProviderName reads over the
+// fixture's [session] provider. Every reader of these vars treats an empty
+// value the same as unset (`os.Getenv(k) != ""`), so t.Setenv(k, "") is
+// behaviorally equivalent to unsetting.
 func clearPromptDeliveryBudgetEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"GC_ALIAS", "GC_AGENT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
+	for _, k := range []string{"GC_ALIAS", "GC_AGENT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT", "GC_SESSION"} {
 		t.Setenv(k, "")
 	}
 }
@@ -768,25 +769,32 @@ func TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir(t *testing.T) {
 // An oversized prompt on a provider that passes it into the system prompt
 // reaches the agent through a file, so it clears the argv budget. A city that
 // switches the provider's flag off gets the argv budget, and its nudge-fallback
-// warning, back.
+// warning, back, and so does a session whose runtime passes no file, which the
+// check reads as the session provider is built: GC_SESSION over [session]
+// provider.
 func TestPromptDeliveryBudgetCheck_SystemPromptCarriesOversizedPrompt(t *testing.T) {
 	clearPromptDeliveryBudgetEnv(t)
 	off := ""
 	switchedOff := config.BuiltinProviderAlias("claude")
 	switchedOff.SystemPromptFileFlag = &off
 	for _, tc := range []struct {
-		name string
-		spec config.ProviderSpec
-		want doctor.CheckStatus
+		name, city, gcSession string
+		spec                  config.ProviderSpec
+		want                  doctor.CheckStatus
 	}{
 		{name: "claude passes the prompt as a file", spec: config.BuiltinProviderAlias("claude"), want: doctor.StatusOK},
 		{name: "a city that switches the flag off", spec: switchedOff, want: doctor.StatusWarning},
+		{name: "k8s that city.toml names", city: "k8s", spec: config.BuiltinProviderAlias("claude"), want: doctor.StatusWarning},
+		{name: "k8s that GC_SESSION names over none in city.toml", gcSession: "k8s", spec: config.BuiltinProviderAlias("claude"), want: doctor.StatusWarning},
+		{name: "tmux that GC_SESSION names over city.toml's k8s", city: "k8s", gcSession: "tmux", spec: config.BuiltinProviderAlias("claude"), want: doctor.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", tc.gcSession)
 			cityPath := t.TempDir()
 			tmpl := writePromptFile(t, cityPath, "prompts/oversized.md", strings.Repeat("a", 100000))
 			cfg := &config.City{
 				Workspace: config.Workspace{Name: "demo"},
+				Session:   config.SessionConfig{Provider: tc.city},
 				Agents:    []config.Agent{{Name: "oversized", Provider: "claude", Session: "tmux", PromptTemplate: tmpl}},
 				Providers: map[string]config.ProviderSpec{"claude": tc.spec},
 			}

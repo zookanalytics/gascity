@@ -119,8 +119,8 @@ type TemplateParams struct {
 	// SessionOverride is the per-agent session provider override (e.g., "acp",
 	// "tmux", "exec:..."). Empty means use the city-level default.
 	SessionOverride string
-	// EffectiveSessionProvider is the actual session provider after applying
-	// city-level defaults.
+	// EffectiveSessionProvider is the runtime the session runs on
+	// (effectiveSessionProvider).
 	EffectiveSessionProvider string
 	// CityRuntimes is the city's pack-declared runtime registry
 	// (config.City.Runtimes), keyed by selection name. Consulted by

@@ -108,8 +108,8 @@ func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config
 	}
 	switch name {
 	// "" is the default session provider: effectiveSessionProvider returns it
-	// when neither the agent nor [session] provider is set, and the registry's
-	// SetFallback(tmuxFactory) constructs tmux for it.
+	// when nothing selects a runtime and the platform default is empty, and the
+	// registry's SetFallback(tmuxFactory) constructs tmux for it.
 	case "", "tmux":
 		return promptDeliverySupportNudgeFallback
 	// herdr launches via exec argv with no shell-arg slot, and already routes
