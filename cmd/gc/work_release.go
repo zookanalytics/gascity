@@ -95,7 +95,7 @@ var (
 //     routeless claim takes the seat's route, as on the paths below, since
 //     kept it would leave the acked seat asleep holding it (mc-sca8r). A
 //     claim the seat's work_started cell or execution_claim_started stamp
-//     names is kept (PHASE1-2 §6.5), unless it is on a dispatch hold: the ack
+//     names is kept (PHASE1-2 §6.5), unless it is on an active hold: the ack
 //     is no proof it never ran, and giving it back lost started work
 //     (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
@@ -217,11 +217,11 @@ func (s *releaseSeat) nameWorkStarted(raw string) {
 }
 
 // keepsStarted reports whether the drain-ack release keeps b as the seat's
-// started work: its started records name it, or may, and it is on no
-// dispatch hold (hold:mayor, hold:external), whose claim goes back as it
-// always has (gas-kg6).
+// started work: its started records name it, or may, and it is on no active
+// hold (beadmeta.HasActiveHold), whose claim goes back as it always has
+// (gas-kg6).
 func (s releaseSeat) keepsStarted(b beads.Bead) bool {
-	return (s.recordedUnread || s.recorded[strings.TrimSpace(b.ID)]) && !beadmeta.HasDispatchHold(b.Labels)
+	return (s.recordedUnread || s.recorded[strings.TrimSpace(b.ID)]) && !beadmeta.HasActiveHold(b.Labels)
 }
 
 // startedClaimBead is the bead an execution_claim_started stamp names

@@ -8,95 +8,81 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
-// This file expresses the ga-x9kptu / ga-5736js acceptance criteria at the
-// shell-generator level: route-scoped, unassigned pool-demand queries (Tier
-// 3, and the reconciler's count-form) must exclude beads carrying a
-// beadmeta.DispatchHoldLabels value. The generated assignee-scoped tiers serve
-// work as well, so they exclude the dispatch holds too but never the human
-// label; the assigned-ready tier's exclusion (#8010) is pinned in
-// workquery_assigned_ready_hold_test.go.
+// This file expresses the route-scoped serve rules at the shell-generator
+// level: route-scoped, unassigned pool-demand queries (Tier 3, its migration
+// fallback, the graph-anchor probe and the reconciler's count-form) drop beads
+// carrying an active hold, and bd's native human label by its exact flag. The
+// generated assignee-scoped tiers serve work as well, so they drop held rows
+// too but never the human label; the assigned-ready tier's behavior is pinned
+// in workquery_assigned_ready_hold_test.go and the hold predicate's in
+// workquery_active_hold_test.go.
 
-func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
-	for _, label := range beadmeta.DispatchHoldLabels {
-		want := `--exclude-label "` + label + `"`
-		if !strings.Contains(got, want) {
-			t.Errorf("bdReadyPoolDemandShell() = %q, missing %q", got, want)
+// routedReadAndWindowScripts are the route-scoped reads that serve a worker,
+// each with the window its tier cuts the answer to.
+func routedReadAndWindowScripts(topo QueryTopology) map[string]string {
+	return map[string]string{
+		"routedReadyTierScript":                          routedReadyTierScript(topo),
+		"poolDemandFirstRowFunctionScript":               poolDemandFirstRowFunctionScript(topo),
+		"assignedGraphWorkflowAnchorReadyFunctionScript": assignedGraphWorkflowAnchorReadyFunctionScript(topo),
+	}
+}
+
+func TestRouteScopedReadsDropActiveHoldsBeforeTheirWindow(t *testing.T) {
+	for topoName, topo := range assignedHoldTopologies() {
+		for name, got := range routedReadAndWindowScripts(topo) {
+			if !strings.Contains(got, `[.[]`+excludeActiveHoldsJQClause()+excludeClaimantsJQClause()+`]`) {
+				t.Errorf("%s/%s() does not drop held rows, and rows that exclude this claimant, before its window: %q", topoName, name, got)
+			}
+			if !strings.Contains(got, "--limit=0") {
+				t.Errorf("%s/%s() cannot read past a held window: %q", topoName, name, got)
+			}
 		}
 	}
 }
 
-func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
-	for _, label := range beadmeta.DispatchHoldLabels {
-		want := `--exclude-label "` + label + `"`
-		if !strings.Contains(got, want) {
-			t.Errorf("bdReadyPoolDemandMigrationShell() = %q, missing %q", got, want)
-		}
-	}
-}
-
-func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *testing.T) {
+func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesActiveHolds(t *testing.T) {
 	got := legacyEphemeralPoolDemandShell(20, QueryTopology{})
-	if !strings.Contains(got, ".labels") {
-		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing a .labels reference", got)
-	}
-	for _, label := range beadmeta.DispatchHoldLabels {
-		if !strings.Contains(got, `"`+label+`"`) {
-			t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing hold label %q", got, label)
-		}
+	if !strings.Contains(got, excludeActiveHoldsJQClause()) {
+		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing the active hold filter", got)
 	}
 }
 
-// The bd-1.0.4 assigned-ready wisp probe serves its first row and exits the
-// work query, so its jq selection drops every dispatch hold (#8010); the
-// behavior is pinned in workquery_assigned_ready_hold_test.go.
-func TestEphemeralAssignedReadyProbeScriptExcludesDispatchHoldLabels(t *testing.T) {
-	got := ephemeralAssignedReadyProbeScript("cand", QueryTopology{})
-	if !strings.Contains(got, ".labels") {
-		t.Errorf("ephemeralAssignedReadyProbeScript() = %q, missing a .labels reference", got)
-	}
-	for _, label := range beadmeta.DispatchHoldLabels {
-		if !strings.Contains(got, `"`+label+`"`) {
-			t.Errorf("ephemeralAssignedReadyProbeScript() = %q, missing hold label %q", got, label)
-		}
+func TestPoolDemandCountShellExcludesActiveHolds(t *testing.T) {
+	got := poolDemandCountShell("hello-world/worker", QueryTopology{})
+	if !strings.Contains(got, excludeActiveHoldsJQClause()) {
+		t.Errorf("poolDemandCountShell() = %q, missing the active hold filter (the reconciler count-form must not count held rows)", got)
 	}
 }
 
-func TestEffectiveRoutedPoolQueryCarriesHoldLabelExclusionForLegacyAlias(t *testing.T) {
+func TestEffectiveRoutedPoolQueryCarriesHoldExclusionForLegacyAlias(t *testing.T) {
 	a := &Agent{Name: ControlDispatcherAgentName, Dir: "rig"}
 	got := a.EffectiveRoutedPoolQuery()
-	for _, label := range beadmeta.DispatchHoldLabels {
-		want := `--exclude-label "` + label + `"`
-		if !strings.Contains(got, want) {
-			t.Errorf("EffectiveRoutedPoolQuery() (legacy-alias agent) = %q, missing %q", got, want)
-		}
+	if !strings.Contains(got, excludeActiveHoldsJQClause()) {
+		t.Errorf("EffectiveRoutedPoolQuery() (legacy-alias agent) = %q, missing the active hold filter", got)
 	}
 }
 
-func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
-	got := poolDemandCountShell("hello-world/worker", QueryTopology{})
-	for _, label := range beadmeta.DispatchHoldLabels {
-		want := `--exclude-label "` + label + `"`
-		if !strings.Contains(got, want) {
-			t.Errorf("poolDemandCountShell() = %q, missing %q (reconciler count-form must inherit the claim-path fix)", got, want)
-		}
-	}
-}
-
-// bd's native human label parks a bead for a person. It is not a dispatch hold:
-// beadmeta.DispatchHoldLabels names only the two canonical holds, and the hook's
-// held-candidate filter and the in_progress serve gate iterate that list, so the
-// exclusion rides the pool-demand serve rules alone. Every route-scoped query
+// bd's native human label parks a bead for a person. It is not a hold, and the
+// assignee-scoped tiers serve it, so the exclusion rides the pool-demand serve
+// rules alone, as an exact --exclude-label flag. Every route-scoped query
 // renders from those rules and must carry it; the assignee-scoped probes must
 // stay transparent to it.
 
-func TestPoolDemandServeRulesExcludeHumanLabelWithoutMakingItADispatchHold(t *testing.T) {
-	if rules := PoolDemandServeRulesForQuery(); !slices.Contains(rules.ExcludeLabels, "human") {
+func TestPoolDemandServeRulesExcludeHumanLabelAndActiveHolds(t *testing.T) {
+	rules := PoolDemandServeRulesForQuery()
+	if !slices.Contains(rules.ExcludeLabels, beadmeta.HumanLabel) {
 		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabels = %v, missing the human label", rules.ExcludeLabels)
 	}
-	if slices.Contains(beadmeta.DispatchHoldLabels, "human") {
-		t.Errorf("beadmeta.DispatchHoldLabels = %v, must not name the human label: it is not a dispatch hold", beadmeta.DispatchHoldLabels)
+	if !rules.ExcludeActiveHolds {
+		t.Errorf("PoolDemandServeRulesForQuery().ExcludeActiveHolds = false; the routed tier must not serve held work")
+	}
+	for _, label := range rules.ExcludeLabels {
+		if _, held := beadmeta.ActiveHoldValue(label); held || strings.HasPrefix(strings.ToLower(strings.TrimSpace(label)), beadmeta.HoldLabelPrefix) {
+			t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabels names hold label %q; holds are excluded by the active hold predicate, not by an exact flag", label)
+		}
+	}
+	if beadmeta.HasActiveHold([]string{beadmeta.HumanLabel}) {
+		t.Errorf("the human label reads as an active hold; it is not one")
 	}
 }
 

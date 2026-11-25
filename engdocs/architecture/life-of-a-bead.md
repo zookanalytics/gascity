@@ -155,11 +155,13 @@ order, stopping at the first one that returns work:
    for beads whose assignee is one of the session's identities. The tier
    loops over `$GC_SESSION_ID`, `$GC_SESSION_NAME` and `$GC_ALIAS` in that
    order, skipping empty and repeated values, so work is found whichever
-   identifier assigned it. A candidate that is blocked or parked on a
-   dispatch hold is skipped. An assigned graph.v2 workflow root found here
-   is remembered as a fallback instead of being returned at once.
+   identifier assigned it. A candidate that is blocked is skipped, and one
+   parked on an active hold (`hold:<value>`) is dropped before the read's
+   window, so it cannot hide a claim behind it. An assigned graph.v2 workflow
+   root found here is remembered as a fallback instead of being returned at
+   once.
 2. **Assigned, ready**: `bd ready --assignee=<identity> --limit=1` over the
-   same identities, skipping dispatch-held rows.
+   same identities, skipping held rows before the one-row window.
 3. **Origin gate**: only an ephemeral (pool) session, a session with no
    `$GC_SESSION_ORIGIN`, or a session whose `$GC_ALIAS` equals the route
    target goes on to the routed tiers. Any other session ends the query here
@@ -169,9 +171,11 @@ order, stopping at the first one that returns work:
    `gc.root_bead_id` is the remembered workflow root. If none are ready, the
    remembered root itself is returned.
 5. **Pool demand**: `bd ready --metadata-field "gc.routed_to=<route>"
-   --unassigned --exclude-type=epic` plus `--exclude-label` for the dispatch
-   holds and the human label, reading up to `RoutedReadyClaimWindow` (20) rows
-   in bd's priority order. A fallback follows for graph.v2 workflow roots
+   --unassigned --exclude-type=epic --exclude-label human`, reading up to
+   `RoutedReadyClaimWindow` (20) rows in bd's priority order after dropping
+   the rows on an active hold. No `--exclude-label` can name every
+   `hold:<value>`, so jq drops them, and the read is repeated unbounded when
+   a full window held a held row. A fallback follows for graph.v2 workflow roots
    created before roots carried `gc.routed_to`, which are routed only by
    `gc.run_target`. `<route>` is the agent's pool name when it has one, else
    its qualified name.

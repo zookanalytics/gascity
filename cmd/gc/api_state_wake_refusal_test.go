@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -122,7 +121,7 @@ func TestWakeStartRefusal(t *testing.T) {
 				}
 			}
 			if tc.heldWork != "" {
-				held, err := store.Create(beads.Bead{Title: "parked", Type: "task", Assignee: "gc-1", Labels: []string{beadmeta.HoldExternalLabel}})
+				held, err := store.Create(beads.Bead{Title: "parked", Type: "task", Assignee: "gc-1", Labels: []string{"hold:external"}})
 				if err != nil {
 					t.Fatal(err)
 				}

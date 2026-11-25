@@ -114,7 +114,7 @@ type stopPlan struct {
 
 // stalledClaim is the claim an execution-stalled stop gives back: its bead
 // and the seat that holds it. started is the seat's record that a turn began
-// it (stalledClaimOf), which keeps it unless it is on a dispatch hold.
+// it (stalledClaimOf), which keeps it unless it is on an active hold.
 type stalledClaim struct {
 	beadID  string
 	row     session.Info
@@ -307,7 +307,7 @@ func releaseStalledClaim(r *closeReleases, c stalledClaim) {
 		if hit.bead.ID != c.beadID {
 			continue
 		}
-		if c.started && !beadmeta.HasDispatchHold(hit.bead.Labels) {
+		if c.started && !beadmeta.HasActiveHold(hit.bead.Labels) {
 			fmt.Fprintf(r.stderr, "execution-stalled stop: %s keeps claim %s: the seat records that a turn began it\n", c.row.ID, c.beadID) //nolint:errcheck // best-effort
 			continue
 		}

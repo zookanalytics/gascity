@@ -1,6 +1,6 @@
 ---
 title: Hold and Blocked Label Conventions
-description: The canonical hold/blocked label taxonomy for this project's own bd tracker — which label to use, when to use status or a dependency edge instead, and what happened to the old ad hoc labels.
+description: The canonical hold/blocked label taxonomy for this project's own bd tracker — which label to use, when to use status or a dependency edge instead, and what happened to the old ad hoc labels — and what the runtime does with any hold:<value> label.
 ---
 
 ## Why this exists
@@ -40,9 +40,11 @@ is the actual reason you're paused.
 
 ## Canonical `hold:<value>` values
 
-Only two values are canonical. Don't introduce a third without a new
-architecture decision — see `ga-tug8ry.1` for the reasoning that narrowed
-the taxonomy to these two.
+In this repository's own tracker only two values are canonical. Don't
+introduce a third there without a new architecture decision — see
+`ga-tug8ry.1` for the reasoning that narrowed the taxonomy to these two. A
+city or pack that runs Gas City chooses its own values; the runtime honors
+any of them the same way (see "What the runtime does with a hold").
 
 - **`hold:mayor`** — the required next actor is the mayor. Covers both
   mayor-initiated pauses and automation-escalated-to-mayor cases; both are
@@ -97,39 +99,63 @@ different:**
   `ready-to-build`), not a pause-state label. It may legitimately co-occur
   with `hold:mayor`.
 
-## This is a data convention, not SDK behavior
+## What the runtime does with a hold
 
-Nothing in this page requires or implies special-casing any role name in Go.
-`hold:mayor` and `hold:external` are plain label values in this project's own
-bd data, and *which* value to reach for is enforced by convention — this
-document, PR review, and `bd set-state`'s dimension semantics — not by SDK
-code.
+The two values above are this tracker's vocabulary, not the runtime's. Gas City
+reads the whole `hold` state dimension and honors any value in it: a city or a
+pack chooses its own values, and no Go code reads a value as an agent, a role
+or a route. `internal/beadmeta` owns the reading (`ActiveHoldValue`,
+`HasActiveHold`), and every runtime consumer answers with it.
 
-Gas City's "ZERO hardcoded roles" invariant is unaffected. The dispatcher does
-read these two values, from the single shared definition in
-`internal/beadmeta/hold_labels.go` (`DispatchHoldLabels`), so that a bead
-parked on a hold is not handed to a worker as actionable work. That is a check
-for the *presence of a label value*, not a branch on a role: no Go code knows
-or cares who "mayor" is, and renaming the seat would not change a line of it.
-Do not re-spell either literal at a call site — import the constants, so the
-label set stays defined exactly once.
+A label is an **active hold** when, trimmed, it begins with `hold:` in any case
+and its value, the rest of the label trimmed, is not empty and is not `cleared`
+in any case:
 
-Two questions consume that list and they answer oppositely; `DispatchHoldLabels`
-documents the split in full. In short: filter on holds when deciding what an
-agent should **do** (route-scoped dispatch, and any path serving a bead as
-work — `ga-5736js`, `gas-kg6`), never when deciding which sessions still need
-to **exist** (pool demand and crash-recovery accounting stay hold-transparent,
-or a parked bead's owner goes invisible).
+- `hold:mayor`, `hold:external`, `hold:po` and `hold:release-train` are active
+  holds alike, and none of them needs an agent of that name to exist.
+- `hold:cleared` is inactive. `bd set-state <id> hold=cleared` leaves it behind
+  when it releases a hold. `bd set-state` replaces one `hold:` label, the first
+  it finds, and `bd label add` adds one beside any other, so a bead can carry
+  `hold:cleared` beside an active hold, and the active hold still holds.
+- A `hold:` label whose value is empty or only whitespace, `hold` with no
+  colon, and labels that only contain the word (`on-hold`, `mpr-human-hold`)
+  are not holds.
 
-Restoring a lost pool route is a **do** decision too. A pack that parks
-finished work on a hold usually clears its `gc.routed_to` at the same time,
-because the next actor is not the pool that worked it. The controller's
-route-restore lanes (the detached-orphan sweep and `gc.run_target` route
-recovery) leave a held bead's route empty. Once the hold lifts, the bead is
-recoverable again. These lanes know only the two canonical values. A pack
-that parks with a label of its own should also set a bd status (`blocked` or
-`deferred`) or a canonical hold, or the controller will treat the bead as
-detached and restore its route.
+An active hold answers "is this bead work for whoever is asking?" with no, so a
+held bead is:
+
+- not served by any tier of the default work query, and not returned by
+  `gc hook` or claimed by `gc hook --claim`;
+- not pre-assigned to a claimant as a continuation-group sibling;
+- not counted as pool demand, and not dispatched by the control dispatcher's
+  routed tiers;
+- not wake demand for its assignee when it is OPEN, does not keep that
+  session awake, and is not a drain-ack strand;
+- not given a route by the route-restore lanes (the detached-orphan sweep and
+  `gc.run_target` route recovery). A pack that parks work on a hold may clear
+  its `gc.routed_to` because the next actor is not the pool, and that empty
+  route is a parking decision. A hold never implies a route either: nothing
+  writes a route from a hold's value.
+
+A hold does not answer "does a session still need to exist for this bead?".
+Pool accounting still counts a held OPEN assigned bead toward its template's
+seats, held in_progress work keeps its owner's session in demand and awake,
+and orphan release still sees the assignment, so a parked bead's owner stays
+visible to the pool and to crash recovery.
+
+bd's `--exclude-label` matches one label exactly, so no reader flag can
+exclude every hold. The generated work query drops held rows with jq before
+each read cuts its answer to a window, and reads again unbounded when a full
+window held a held row; `gc ready --until-unblocked` leaves held rows out
+itself. A held bead never takes an unheld bead's place in a window.
+
+Removing every active hold label lifts the hold, and the bead is ordinary work
+at the next query. `bd set-state <id> hold=cleared` does that for a bead that
+carries one hold label. It replaces only the first `hold:` label it finds, so on
+a bead that carries more than one, remove each active one with
+`bd label remove <id> hold:<value>`. When the bead still declares a route
+(`gc.run_target`, or the session back-reference a handed-off bead carries), the
+route-restore lanes recover it once the hold lifts.
 
 ## See also
 

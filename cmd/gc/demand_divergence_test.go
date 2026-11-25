@@ -182,7 +182,7 @@ func TestDivergenceClassification(t *testing.T) {
 			name: "open but held", triggerID: "wb-1",
 			bead: beads.Bead{
 				ID: "wb-1", Status: "open", Type: "task", Metadata: routed,
-				Labels: []string{beadmeta.DispatchHoldLabels[0]},
+				Labels: []string{"hold:po"},
 			},
 			wantClass: events.DemandClaimBenign, wantStat: "open",
 		},
@@ -325,7 +325,7 @@ func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
 	}{
 		{
 			name: "held and status-blocked",
-			bead: beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task", Metadata: routed, Labels: []string{beadmeta.DispatchHoldLabels[0]}},
+			bead: beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task", Metadata: routed, Labels: []string{"hold:po"}},
 			want: events.DemandClaimBenign,
 		},
 		{

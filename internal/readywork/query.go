@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -83,9 +84,13 @@ type compiled struct {
 	assignee      string
 	excludeTypes  map[string]bool
 	excludeLabels []string
-	metadata      []metadataFieldFilter
-	status        string
-	sort          string
+	// excludeHeld drops rows carrying an active hold (beadmeta.HasActiveHold).
+	// Only the crash-recovery read sets it (compileUntilUnblocked): it is not a
+	// parameter of the query, and GET /work/ready never applies it.
+	excludeHeld bool
+	metadata    []metadataFieldFilter
+	status      string
+	sort        string
 }
 
 // Validate reports whether q is well formed, without reading anything.
@@ -165,6 +170,9 @@ func (c compiled) matches(b beads.Bead) bool {
 		if slices.Contains(b.Labels, label) {
 			return false
 		}
+	}
+	if c.excludeHeld && beadmeta.HasActiveHold(b.Labels) {
+		return false
 	}
 	return beadMatchesMetadata(b, c.metadata)
 }
