@@ -139,8 +139,8 @@ exec `+fmt.Sprintf("%q", sleepBin)+` "$@"
 exec `+fmt.Sprintf("%q", uname)+` "$@"
 `)
 	// A short state directory, so the socket-path guard admits ordinary
-	// names.
-	state, err := os.MkdirTemp("", "gcf")
+	// names: under /tmp, since os.TempDir is as long as the caller's TMPDIR.
+	state, err := os.MkdirTemp("/tmp", "gcf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -609,11 +609,9 @@ func TestScreenScriptIdentityFromTheWrapper(t *testing.T) {
 // absent there would be started twice.
 func TestScreenScriptStateIgnoresTheCallersEnvironment(t *testing.T) {
 	f := newFakeBackend(t)
-	home, err := os.MkdirTemp("", "gch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(home) })
+	// A short home, as /home/ubuntu is, so the socket-path guard admits
+	// mc-mayor: the script keeps its screen sockets under <home>/.gcss.
+	home := tmpDirOfLength(t, len("/home/ubuntu"))
 	f.file("home", home)
 	base := []string{f.env[0], "GC_EXEC_CITY_PATH=/fake-city"} // PATH, no GC_EXEC_STATE_DIR
 	supervisor := append(append([]string{}, base...), "XDG_RUNTIME_DIR="+f.dir+"/run-a", "TMPDIR="+f.dir+"/tmp-a", "HOME="+f.dir+"/home-a")
