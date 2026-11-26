@@ -104,20 +104,23 @@ func TestSessionEventPumpLiveHerdr(t *testing.T) {
 // usePrivateHerdrConfigRoot points herdr at a fresh config root under /tmp for
 // the rest of the test. herdr binds <root>/herdr/sessions/<session>/
 // herdr-client.sock and exits at once when that path overflows sun_path (108
-// bytes). The provider discards the server's stderr, so all the test sees is
-// ConfigureServer timing out ("did not become ready"). The default root is the
-// invoking user's config dir, which is $HOME/.config under the env -i test
-// wrappers that drop XDG_CONFIG_HOME. With this test's 36-byte session name,
-// any HOME of 31 bytes or more overflows, and a release gate's private
-// /var/tmp HOME easily does (ga-th9i5m). /tmp keeps the path short whatever
-// HOME and TMPDIR are: this package's TestMain moves TMPDIR under a per-run
-// root, so os.MkdirTemp("") and t.TempDir() are already too long. A private
-// root also stops each run leaving its session dir in the user's config.
-// Linux only: os.UserConfigDir follows XDG_CONFIG_HOME there, and herdr's own
-// resolution was verified there (ga-nqlb8q).
+// bytes on Linux, 104 on macOS). The provider discards the server's stderr, so
+// all the test sees is ConfigureServer timing out ("did not become ready"). The
+// default root is the invoking user's config dir, which is $HOME/.config under
+// the env -i test wrappers that drop XDG_CONFIG_HOME. With this test's 36-byte
+// session name, a HOME of 31 bytes or more overflows on Linux, and one of 27 or
+// more on macOS. A release gate's private /var/tmp HOME is easily that long
+// (ga-th9i5m). /tmp keeps the path short whatever HOME and TMPDIR are: this
+// package's TestMain moves TMPDIR under a per-run root, so os.MkdirTemp("") and
+// t.TempDir() are already too long. A private root also stops each run leaving
+// its session dir in the user's config. Setting XDG_CONFIG_HOME moves herdr and
+// the provider together, because the provider finds the socket by herdr's own
+// rule on every platform (herdrConfigDir in internal/runtime/herdr). The helper
+// leaves Windows alone: herdr serves the endpoint there as a named pipe, which
+// has no sun_path limit, and Windows has no /tmp to make the root in.
 func usePrivateHerdrConfigRoot(t *testing.T) {
 	t.Helper()
-	if goruntime.GOOS != "linux" {
+	if goruntime.GOOS == "windows" {
 		return
 	}
 	root, err := os.MkdirTemp("/tmp", "gchp")
