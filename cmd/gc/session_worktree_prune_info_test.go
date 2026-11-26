@@ -176,17 +176,53 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_UnpushedProbeError(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_RigPathUnresolved(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.cfg.Rigs = nil
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+// TestPruneAgentHomeWorktreeIfSafeInfo_RemovesThroughTheMainWorktree pins
+// where the removal runs: from the main worktree the worker_dir's own worktree
+// list names first, for a city-scoped agent's session with no rig configured.
+// A list that cannot be read, or a worker_dir that is the main worktree, keeps
+// the folder.
+func TestPruneAgentHomeWorktreeIfSafeInfo_RemovesThroughTheMainWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mainIsWD  bool
+		listErr   error
+		wantPrune bool
+		wantLog   string
+	}{
+		{name: "the main worktree the list names first", wantPrune: true, wantLog: "pruned worker_dir"},
+		{name: "an unreadable worktree list", listErr: errors.New("git worktree list failed"), wantLog: "cannot list its repository's worktrees"},
+		{name: "a worker_dir that is its repository's main worktree", mainIsWD: true, wantLog: "its repository's main worktree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPruneFixture(t)
+			fx.cfg.Rigs = nil
+			main := filepath.Join(fx.cityPath, "repos", "main")
+			list := []git.Worktree{{Path: main}, {Path: fx.workerDir}}
+			if tc.mainIsWD {
+				list = []git.Worktree{{Path: fx.workerDir}}
+			}
+			wdProbe := &fakeGitProbe{isRepo: true, worktrees: list, worktreeListErr: tc.listErr}
+			fx.setProbe(fx.workerDir, wdProbe)
+			mainProbe := &fakeGitProbe{isRepo: true}
+			fx.setProbe(main, mainProbe)
+			// A city-scoped agent's session, whose record asks for the removal.
+			info := fx.sessionInfo()
+			info.Template = "helper"
+			info.SessionNameMetadata = "helper"
+			info.PruneWorkerDir = "true"
 
-	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr)
-	if !strings.Contains(stderr.String(), "rig path unresolved") {
-		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
+			var stderr bytes.Buffer
+			pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr)
+			if mainProbe.removeInvoked != tc.wantPrune || (tc.wantPrune && mainProbe.removedPath != fx.workerDir) || wdProbe.removeInvoked {
+				t.Fatalf("removal: through the main worktree %v on %q, through the worker_dir %v; want %v through the main worktree alone; stderr=%q",
+					mainProbe.removeInvoked, mainProbe.removedPath, wdProbe.removeInvoked, tc.wantPrune, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
+			}
+			assertNoWorktreeStaleMarker(t, fx.workerDir)
+		})
 	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_RemoveFails(t *testing.T) {
@@ -541,36 +577,6 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_LiveTakesPrecedenceOverGitState(t *tes
 		t.Errorf("git-state probe ran before liveness; got %q", stderr.String())
 	}
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
-}
-
-func TestLookupRigRootForSessionInfo(t *testing.T) {
-	cfg := &config.City{
-		Rigs: []config.Rig{
-			{Name: "demo", Path: "/x/demo"},
-			{Name: "other", Path: "/x/other"},
-		},
-	}
-	cases := []struct {
-		name     string
-		template string
-		want     string
-	}{
-		{"qualified match", "demo/polecat", "/x/demo"},
-		{"other rig", "other/refinery", "/x/other"},
-		{"unqualified", "polecat", ""},
-		{"unknown rig", "missing/polecat", ""},
-		{"empty", "", ""},
-		{"leading slash", "/polecat", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			info := sessionpkg.Info{Template: c.template}
-			got := lookupRigRootForSessionInfo(info, cfg)
-			if got != c.want {
-				t.Errorf("lookupRigRootForSessionInfo(%q) = %q, want %q", c.template, got, c.want)
-			}
-		})
-	}
 }
 
 // TestPruneAgentHomeWorktreeIfSafeInfo_FollowsTheSessionsRecord pins who

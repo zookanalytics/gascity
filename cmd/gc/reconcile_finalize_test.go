@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -136,7 +137,9 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 		"pool_managed": "true",
 	})
 
-	probe := &fakeGitProbe{isRepo: true}
+	// The rig root is the main worktree the worker_dir's repository lists
+	// first, which the removal runs from.
+	probe := &fakeGitProbe{isRepo: true, worktrees: []git.Worktree{{Path: rigRoot}, {Path: workerDir}}}
 	orig := newGitProbe
 	t.Cleanup(func() { newGitProbe = orig })
 	newGitProbe = func(_ string) gitProbe { return probe }

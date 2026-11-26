@@ -136,10 +136,12 @@ func assertNoWorktreeStaleMarker(t *testing.T, workerDir string) {
 
 // pruneTestFixture wires a temp city directory, a writable worker_dir
 // under .gc/worktrees with a .git marker, and a config with a rig that
-// points at a separate "rig root" directory the prune call uses as the
-// git -C target. gitDir is the worker_dir's private git directory: it
-// holds no worktree provenance, so the worker_dir is an unmanaged
-// worktree unless a test says otherwise.
+// points at a separate "rig root" directory. Every probe lists the rig root
+// first among its repository's worktrees unless a test says otherwise, so
+// the rig root is the main worktree the prune call uses as the git -C
+// target. gitDir is the worker_dir's private git directory: it holds no
+// worktree provenance, so the worker_dir is an unmanaged worktree unless a
+// test says otherwise.
 type pruneTestFixture struct {
 	t          *testing.T
 	cityPath   string
@@ -195,7 +197,7 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		if !ok {
 			// Default: a healthy probe. The WorktreeRemove call goes
 			// through this default for the rig-root invocation.
-			probe = &fakeGitProbe{isRepo: true, gitDir: fx.gitDir}
+			probe = &fakeGitProbe{isRepo: true, gitDir: fx.gitDir, worktrees: fx.repoWorktrees()}
 			fx.probesByWD[workDir] = probe
 		}
 		return probe
@@ -204,11 +206,21 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 	return fx
 }
 
+// repoWorktrees is the worktree list of the fixture's repository: the rig
+// root, its main worktree, then the worker_dir.
+func (fx *pruneTestFixture) repoWorktrees() []git.Worktree {
+	return []git.Worktree{{Path: fx.rigRoot}, {Path: fx.workerDir}}
+}
+
 // setProbe installs probe for workDir. A probe that names no git dir and
-// no git dir error reads the fixture's provenance-free gitDir.
+// no git dir error reads the fixture's provenance-free gitDir, and one that
+// names no worktree list and no list error lists the fixture's repository.
 func (fx *pruneTestFixture) setProbe(workDir string, probe *fakeGitProbe) {
 	if probe.gitDir == "" && probe.gitDirErr == nil {
 		probe.gitDir = fx.gitDir
+	}
+	if probe.worktrees == nil && probe.worktreeListErr == nil {
+		probe.worktrees = fx.repoWorktrees()
 	}
 	fx.probesByWD[workDir] = probe
 }
@@ -616,34 +628,55 @@ func TestPruneAgentHomeWorktreeIfSafe_LeavesManagedWorktreeOfAnotherOwner(t *tes
 	}
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.cfg.Rigs = nil
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+// TestPruneAgentHomeWorktreeIfSafe_RemovesThroughTheMainWorktree pins where
+// the removal runs: from the main worktree the worker_dir's own worktree list
+// names first, with no rig configured and a template that names none. A list
+// that cannot be read, or a worker_dir that is the main worktree, keeps the
+// folder.
+func TestPruneAgentHomeWorktreeIfSafe_RemovesThroughTheMainWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mainIsWD  bool
+		listErr   error
+		wantPrune bool
+		wantLog   string
+	}{
+		{name: "the main worktree the list names first", wantPrune: true, wantLog: "pruned worker_dir"},
+		{name: "an unreadable worktree list", listErr: errors.New("git worktree list failed"), wantLog: "cannot list its repository's worktrees"},
+		{name: "a worker_dir that is its repository's main worktree", mainIsWD: true, wantLog: "its repository's main worktree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPruneFixture(t)
+			fx.cfg.Rigs = nil
+			main := filepath.Join(fx.cityPath, "repos", "main")
+			list := []git.Worktree{{Path: main}, {Path: fx.workerDir}}
+			if tc.mainIsWD {
+				list = []git.Worktree{{Path: fx.workerDir}}
+			}
+			wdProbe := &fakeGitProbe{isRepo: true, worktrees: list, worktreeListErr: tc.listErr}
+			fx.setProbe(fx.workerDir, wdProbe)
+			mainProbe := &fakeGitProbe{isRepo: true}
+			fx.setProbe(main, mainProbe)
+			// A city-scoped agent's session, whose record asks for the removal.
+			session := fx.sessionBead()
+			session.Metadata["template"] = "helper"
+			session.Metadata["session_name"] = "helper"
+			session.Metadata[sessionpkg.PruneWorkerDirMetadataKey] = "true"
 
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
-		t.Fatal("prune returned true without rig path")
+			var stderr bytes.Buffer
+			if got := pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr); got != tc.wantPrune {
+				t.Fatalf("prune returned %v, want %v; stderr=%q", got, tc.wantPrune, stderr.String())
+			}
+			if mainProbe.removeInvoked != tc.wantPrune || (tc.wantPrune && mainProbe.removedPath != fx.workerDir) || wdProbe.removeInvoked {
+				t.Fatalf("removal: through the main worktree %v on %q, through the worker_dir %v; want %v through the main worktree alone; stderr=%q",
+					mainProbe.removeInvoked, mainProbe.removedPath, wdProbe.removeInvoked, tc.wantPrune, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
+			}
+			assertNoWorktreeStaleMarker(t, fx.workerDir)
+		})
 	}
-	if !strings.Contains(stderr.String(), "rig path unresolved") {
-		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
-}
-
-func TestPruneAgentHomeWorktreeIfSafe_RigPathEmpty(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.cfg.Rigs = []config.Rig{{Name: "demo", Path: ""}}
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
-
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
-		t.Fatal("prune returned true with empty rig path")
-	}
-	if !strings.Contains(stderr.String(), "rig path unresolved") {
-		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RemoveFails(t *testing.T) {
@@ -853,36 +886,6 @@ func TestPruneAgentHomeWorktreeIfSafe_LiveTakesPrecedenceOverGitState(t *testing
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestLookupRigRootForSession(t *testing.T) {
-	cfg := &config.City{
-		Rigs: []config.Rig{
-			{Name: "demo", Path: "/x/demo"},
-			{Name: "other", Path: "/x/other"},
-		},
-	}
-	cases := []struct {
-		name     string
-		template string
-		want     string
-	}{
-		{"qualified match", "demo/polecat", "/x/demo"},
-		{"other rig", "other/refinery", "/x/other"},
-		{"unqualified", "polecat", ""},
-		{"unknown rig", "missing/polecat", ""},
-		{"empty", "", ""},
-		{"leading slash", "/polecat", ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			bead := beads.Bead{Metadata: map[string]string{"template": c.template}}
-			got := lookupRigRootForSession(bead, cfg)
-			if got != c.want {
-				t.Errorf("lookupRigRootForSession(%q) = %q, want %q", c.template, got, c.want)
-			}
-		})
-	}
-}
-
 // cliPruneCity is a city for the worker_dir prune of the session close and
 // prune commands: rig "demo" is a real repository whose HEAD is pushed to its
 // origin and which ignores the worktrees folders made inside its worktrees,
@@ -1061,4 +1064,30 @@ func TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes(t *testing.T) {
 	assertFolder(t, clean, false, "")
 	assertFolder(t, dirty, true, "")
 	assertFolder(t, unset, true, "")
+}
+
+// TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder runs the
+// prune of a closed session of a city-scoped agent, whose template names no
+// rig, over a real clean and pushed worktree whose record asks for the
+// removal: the folder goes, through the repository the worktree belongs to,
+// which no longer lists it.
+func TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder(t *testing.T) {
+	c := newCLIPruneCity(t)
+	dir := c.worktree(filepath.Join(c.helperWT, "city-helper"))
+	row := c.session("city-helper", dir, map[string]string{"template": "helper", sessionpkg.PruneWorkerDirMetadataKey: "true"})
+	if err := c.store.Close(row.ID); err != nil {
+		t.Fatalf("Close(%s): %v", row.ID, err)
+	}
+	cfg, err := loadCityConfig(c.cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	cfg.Agents = []config.Agent{{Name: "helper"}}
+
+	var stderr bytes.Buffer
+	pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+	assertFolder(t, dir, false, stderr.String())
+	if list := runGit(t, c.rigRoot, "worktree", "list", "--porcelain"); strings.Contains(list, filepath.Base(dir)) {
+		t.Fatalf("the repository still lists the removed worktree:\n%s", list)
+	}
 }

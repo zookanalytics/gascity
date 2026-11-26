@@ -214,12 +214,12 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // force-removed out from under it. Returns true when the removal actually
 // happened.
 //
-// The decision is mechanical, never role-coupled: any pool-managed agent
-// worktree that lives under the configured worktrees root
-// (workdir.WorktreesRoot), is a git worktree no provisioner owns, has nothing
-// live working in it, and probes clean is safe to reclaim. Pool sessions are
-// transient by design — their own worktrees were never meant to outlive the
-// session bead.
+// The decision is mechanical, never role-coupled: when the session's record
+// asks for it (sessionRecordPrunesWorkerDir), a worktree that lives under the
+// configured worktrees root (workdir.WorktreesRoot), is a git worktree no
+// provisioner owns, has nothing live working in it, and probes clean is safe
+// to reclaim, whichever rig the session's template names, or none. The removal
+// runs through the repository the gates probed (worktreeRemovalRoot).
 //
 // liveness is the pass's once-gathered liveness snapshot (the process-table
 // cwd scan plus the open sessions' recorded working directories); the caller
@@ -228,6 +228,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 // No-op when:
 //   - cfg.Daemon.AutoPruneWorkerDir is false
 //   - the session bead has no worker_dir metadata
+//   - the session's record does not ask for the removal
 //   - the worker_dir does not live under the configured worktrees root
 //     (workdir.WorktreesRoot)
 //   - the worker_dir is missing on disk or has no .git pointer
@@ -236,7 +237,7 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - a live process, or a different open session, is working at or beneath the
 //     worker_dir, or the liveness scan is indeterminate (fails closed)
 //   - the worktree has uncommitted changes or unpushed commits
-//   - the rig that owns the session cannot be resolved to a filesystem path
+//   - the worktree's repository cannot list its worktrees
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
 // still shows up via `gc doctor` later, which is the operator's existing
@@ -301,16 +302,12 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		return false
 	}
 
-	// Run `git worktree remove` from the rig root rather than from the
-	// worktree being removed: git refuses to remove a worktree whose path
-	// equals cwd in some configurations, and operating from cwd of a
-	// directory we are about to delete is fragile in general.
-	rigRoot := lookupRigRootForSession(session, cfg)
-	if rigRoot == "" {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
+	root, err := worktreeRemovalRoot(gp, workerDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return false
 	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+	if err := newGitProbe(root).WorktreeRemove(workerDir, true); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return false
 	}
@@ -321,11 +318,10 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 // pruneAgentHomeWorktreeIfSafeInfo is the session.Info form of
 // pruneAgentHomeWorktreeIfSafe: the worker_dir read routes through
 // session.WorkerDirFromInfo (the canonical→legacy Info fallback equivalent to
-// contract.WorkerDirFromMetadata), the rig-root lookup reads Info.Template via
-// lookupRigRootForSessionInfo, and the log line reads Info.SessionNameMetadata —
-// every safety gate (including the shared liveness gate) and the removal itself
-// are unchanged. Byte-identical to the raw form, which survives for its test
-// callers.
+// contract.WorkerDirFromMetadata) and the log line reads
+// Info.SessionNameMetadata — every safety gate (including the shared liveness
+// gate) and the removal itself are unchanged. Byte-identical to the raw form,
+// which survives for its test callers.
 func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg *config.City, liveness worktreeLivenessInputs, stderr io.Writer) {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return
@@ -385,12 +381,12 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 
-	rigRoot := lookupRigRootForSessionInfo(info, cfg)
-	if rigRoot == "" {
-		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: rig path unresolved\n", workerDir) //nolint:errcheck
+	root, err := worktreeRemovalRoot(gp, workerDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return
 	}
-	if err := newGitProbe(rigRoot).WorktreeRemove(workerDir, true); err != nil {
+	if err := newGitProbe(root).WorktreeRemove(workerDir, true); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: pruning worker_dir %s: %v\n", workerDir, err) //nolint:errcheck
 		return
 	}
@@ -460,40 +456,24 @@ func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *s
 	}
 }
 
-// lookupRigRootForSession returns the filesystem path of the rig that owns
-// the given session bead, derived from the qualified template metadata
-// ("<rig>/<template>"). Returns "" when the rig cannot be identified or
-// has no configured path.
-func lookupRigRootForSession(session beads.Bead, cfg *config.City) string {
-	qt := strings.TrimSpace(session.Metadata["template"])
-	slash := strings.IndexByte(qt, '/')
-	if slash <= 0 {
-		return ""
+// worktreeRemovalRoot returns the directory the prune runs
+// `git worktree remove` from for workerDir, the worktree gp probes: its
+// repository's main worktree, which the worktree's own list names first. The
+// removal so goes through the repository every gate probed, whichever rig the
+// session's template names, or none, and never runs from the directory it
+// deletes, which git refuses in some configurations. A list that cannot be
+// read, or a worker_dir that is its repository's main worktree, which
+// `git worktree remove` does not remove, keeps the folder.
+func worktreeRemovalRoot(gp gitProbe, workerDir string) (string, error) {
+	entries, err := gp.WorktreeList()
+	if err != nil {
+		return "", fmt.Errorf("cannot list its repository's worktrees: %w", err)
 	}
-	rigName := qt[:slash]
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == rigName {
-			return strings.TrimSpace(cfg.Rigs[i].Path)
-		}
+	if len(entries) == 0 || strings.TrimSpace(entries[0].Path) == "" {
+		return "", errors.New("its repository lists no main worktree")
 	}
-	return ""
-}
-
-// lookupRigRootForSessionInfo is the session.Info form of
-// lookupRigRootForSession: it reads the qualified template off Info.Template (the
-// verbatim raw mirror of b.Metadata["template"]), so the rig resolution is
-// byte-identical to the raw form.
-func lookupRigRootForSessionInfo(info sessionpkg.Info, cfg *config.City) string {
-	qt := strings.TrimSpace(info.Template)
-	slash := strings.IndexByte(qt, '/')
-	if slash <= 0 {
-		return ""
+	if pathutil.SamePath(entries[0].Path, workerDir) {
+		return "", errors.New("it is its repository's main worktree, not a linked worktree")
 	}
-	rigName := qt[:slash]
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name == rigName {
-			return strings.TrimSpace(cfg.Rigs[i].Path)
-		}
-	}
-	return ""
+	return entries[0].Path, nil
 }
