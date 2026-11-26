@@ -133,50 +133,14 @@ func TestStatusSessionSnapshotSurfacesScopedStoreResolutionError(t *testing.T) {
 // regression test for the API-side call site: statusSessionSnapshot must
 // bind whatever ScopedStoreLike hands back to a request-scoped ctx tightly
 // enough that a slow bd child is killed instead of surviving past the
-// caller's budget. ScopedStoreLike here builds a real ctx-bound BdStore
-// (mirroring what cmd/gc's scopedStoreLike does in production) pointed at
-// a fake `bd` that backgrounds a long sleep and records its PID, proving
-// the ctx statusSessionSnapshot constructs actually propagates end to end.
+// caller's budget.
 func TestStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
-	processgrouptest.RequireRealProcessSignals(t)
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh unavailable")
-	}
-
-	oldTimeout := statusStoreReadTimeout
-	statusStoreReadTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
-
-	binDir := t.TempDir()
-	pidFile := filepath.Join(binDir, "bd-child.pid")
-	writeExecutableScopedTest(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
-		"sleep 30 &\n"+
-		"echo \"$!\" > "+pidFile+"\n"+
-		"wait\n")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	state := newFakeState(t)
 	state.cityBeadStore = beads.NewMemStore()
-	state.scopedStoreFn = func(ctx context.Context, _ beads.Store) (beads.Store, error) {
-		return beads.NewBdStore(t.TempDir(), beads.ExecCommandRunnerWithEnvContext(ctx, nil)), nil
-	}
 	s := &Server{state: state}
-
-	start := time.Now()
-	_ = s.statusSessionSnapshot(context.Background(), s.state.Stores())
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("statusSessionSnapshot blocked %s; want bounded by statusStoreReadTimeout", elapsed)
-	}
-
-	childPid := waitForNonEmptyFileScopedTest(t, pidFile, 5*time.Second)
-	for range 50 {
-		if err := exec.Command("kill", "-0", childPid).Run(); err != nil {
-			return // child is gone
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	_ = exec.Command("kill", "-KILL", childPid).Run()
-	t.Fatalf("bd child process %s survived statusSessionSnapshot's timeout", childPid)
+	assertStatusReadKillsBdChild(t, state, "statusSessionSnapshot", func(ctx context.Context) {
+		_ = s.statusSessionSnapshot(ctx, s.state.Stores())
+	})
 }
 
 // TestStatusListStoreWithTimeoutUsesScopedStoreWhenAvailable proves the
@@ -504,36 +468,10 @@ func TestStatusReadyStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T
 // TestStatusSessionSnapshotKillsBdChildOnTimeout, but through
 // statusListStoreWithTimeout directly.
 func TestStatusListStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
-	processgrouptest.RequireRealProcessSignals(t)
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh unavailable")
-	}
-
-	oldTimeout := statusStoreReadTimeout
-	statusStoreReadTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
-
-	binDir := t.TempDir()
-	pidFile := filepath.Join(binDir, "bd-child.pid")
-	writeExecutableScopedTest(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
-		"sleep 30 &\n"+
-		"echo \"$!\" > "+pidFile+"\n"+
-		"wait\n")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	state := newFakeState(t)
-	state.scopedStoreFn = func(ctx context.Context, _ beads.Store) (beads.Store, error) {
-		return beads.NewBdStore(t.TempDir(), beads.ExecCommandRunnerWithEnvContext(ctx, nil)), nil
-	}
-
-	start := time.Now()
-	_, _ = statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, beads.NewMemStore()), beads.ListQuery{AllowScan: true})
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("statusListStoreWithTimeout blocked %s; want bounded by statusStoreReadTimeout", elapsed)
-	}
-
-	childPid := waitForNonEmptyFileScopedTest(t, pidFile, 5*time.Second)
-	assertStatusWorkReadChildStopped(t, childPid, "statusListStoreWithTimeout")
+	assertStatusReadKillsBdChild(t, state, "statusListStoreWithTimeout", func(ctx context.Context) {
+		_, _ = statusListStoreWithTimeout(ctx, state, testWorkLeg(t, beads.NewMemStore()), beads.ListQuery{AllowScan: true})
+	})
 }
 
 // TestStatusReadyStoreWithTimeoutKillsBdChildOnTimeout proves canonical
@@ -541,36 +479,10 @@ func TestStatusListStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
 // background-bound store would leave the bd child alive after the status
 // deadline, defeating the scoped-store mitigation.
 func TestStatusReadyStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
-	processgrouptest.RequireRealProcessSignals(t)
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh unavailable")
-	}
-
-	oldTimeout := statusStoreReadTimeout
-	statusStoreReadTimeout = 200 * time.Millisecond
-	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
-
-	binDir := t.TempDir()
-	pidFile := filepath.Join(binDir, "bd-child.pid")
-	writeExecutableScopedTest(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
-		"sleep 30 &\n"+
-		"echo \"$!\" > "+pidFile+"\n"+
-		"wait\n")
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	state := newFakeState(t)
-	state.scopedStoreFn = func(ctx context.Context, _ beads.Store) (beads.Store, error) {
-		return beads.NewBdStore(t.TempDir(), beads.ExecCommandRunnerWithEnvContext(ctx, nil)), nil
-	}
-
-	start := time.Now()
-	_, _ = statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
-	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("statusReadyStoreWithTimeout blocked %s; want bounded by statusStoreReadTimeout", elapsed)
-	}
-
-	childPid := waitForNonEmptyFileScopedTest(t, pidFile, 5*time.Second)
-	assertStatusWorkReadChildStopped(t, childPid, "statusReadyStoreWithTimeout")
+	assertStatusReadKillsBdChild(t, state, "statusReadyStoreWithTimeout", func(ctx context.Context) {
+		_, _ = statusReadyStoreWithTimeout(ctx, state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
+	})
 }
 
 // TestStatusSessionSnapshotBoundsSlowScopedStoreResolution proves the
@@ -627,6 +539,75 @@ func TestStatusListStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T)
 	}
 }
 
+// assertStatusReadKillsBdChild fails unless read, a status read through
+// state's ScopedStoreLike, kills the bd child it starts when its request
+// ends. ScopedStoreLike here builds a real ctx-bound BdStore, as cmd/gc's
+// scopedStoreLike does in production, pointed at a fake `bd` that
+// backgrounds a long sleep and records the sleep's pid. The ctx it is handed
+// must carry statusStoreReadTimeout's deadline, which the request's ctx
+// lacks, so a read that hands ScopedStoreLike its caller's ctx instead of the
+// one it derives fails. The test ends the request only once the sleep is
+// running, so the time the fake takes to start never decides the outcome:
+// the read must then return and the sleep must die.
+func assertStatusReadKillsBdChild(t *testing.T, state *fakeState, caller string, read func(context.Context)) {
+	t.Helper()
+	processgrouptest.RequireRealProcessSignals(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh unavailable")
+	}
+
+	// The test ends the request once the fake's child is running, so the
+	// read's own deadline must not end it before that.
+	oldTimeout := statusStoreReadTimeout
+	statusStoreReadTimeout = time.Hour
+	t.Cleanup(func() { statusStoreReadTimeout = oldTimeout })
+
+	binDir := t.TempDir()
+	pidFile := filepath.Join(binDir, "bd-child.pid")
+	writeExecutableScopedTest(t, filepath.Join(binDir, "bd"), "#!/bin/sh\n"+
+		"sleep 30 &\n"+
+		"echo \"$!\" > "+pidFile+"\n"+
+		"wait\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	storeDir := t.TempDir()
+	resolvedCtx := make(chan context.Context, 1)
+	state.scopedStoreFn = func(ctx context.Context, _ beads.Store) (beads.Store, error) {
+		select {
+		case resolvedCtx <- ctx:
+		default:
+		}
+		return beads.NewBdStore(storeDir, beads.ExecCommandRunnerWithEnvContext(ctx, nil)), nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		read(ctx)
+	}()
+
+	childPID := waitForNonEmptyFileScopedTest(t, pidFile, 30*time.Second)
+	// The fake bd runs only through a store scopedStoreFn returned, and
+	// scopedStoreFn sends its ctx before it returns one.
+	deadline, ok := (<-resolvedCtx).Deadline()
+	if !ok {
+		t.Errorf("%s resolved its scoped store under a ctx with no deadline, want statusStoreReadTimeout's", caller)
+	} else if left := time.Until(deadline); left > statusStoreReadTimeout {
+		t.Errorf("%s resolved its scoped store under a ctx %s from its deadline, want at most statusStoreReadTimeout (%s)", caller, left, statusStoreReadTimeout)
+	}
+
+	cancel()
+	select {
+	case <-readDone:
+	case <-time.After(10 * time.Second):
+		_ = exec.Command("kill", "-KILL", childPID).Run()
+		t.Fatalf("%s did not return within 10s of its request ending", caller)
+	}
+	assertStatusWorkReadChildStopped(t, childPID, caller)
+}
+
 func writeExecutableScopedTest(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
@@ -657,7 +638,7 @@ func assertStatusWorkReadChildStopped(t *testing.T, childPID, caller string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	_ = exec.Command("kill", "-KILL", childPID).Run()
-	t.Fatalf("bd child process %s survived %s's timeout", childPID, caller)
+	t.Fatalf("bd child process %s survived the end of %s's request", childPID, caller)
 }
 
 func waitForNonEmptyFileScopedTest(t *testing.T, path string, timeout time.Duration) string {
