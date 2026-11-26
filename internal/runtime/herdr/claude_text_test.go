@@ -134,6 +134,85 @@ func TestClaudeSessionsNeverReceiveMultilinePastes(t *testing.T) {
 	}
 }
 
+// A Claude launch whose instructions ride its system prompt passes them as a
+// file on every Start, fresh or resumed, and types only the opener as the first
+// turn: never the kickoff that would read the instructions back into the
+// window. The opener reaches the pane as one line, the beacon first, because a
+// Claude pane never receives multi-line text; a body of more than one line
+// goes to a message file the line names.
+func TestClaudeSystemPromptSessionsTypeTheOpenerOnOneLine(t *testing.T) {
+	const (
+		name   = "gastown__worker"
+		beacon = "[gastown] gastown/worker-1 • 2026-09-28T10:00:00"
+		role   = "# GC Role Worker\n\nRun the claim block first."
+		claim  = "Run gc hook --claim --json now."
+		flag   = "--append-system-prompt-file"
+	)
+	replay := beacon + "\n\n" + role + "\n\n---\n\n" + claim
+	for _, tc := range []struct {
+		name string
+		cfg  runtime.Config
+		// args is the argv after herdr's `--` ahead of the system prompt file.
+		args string
+		// turn matches the typed first turn; body is what its message file
+		// must hold when the turn names one.
+		turn *regexp.Regexp
+		body string
+	}{
+		{
+			name: "fresh launch: the opener rides PromptSuffix",
+			cfg:  runtime.Config{Command: "claude --effort medium", PromptSuffix: shellquote.Quote(beacon + "\n\n" + claim)},
+			args: "--effort medium ",
+			turn: regexp.MustCompile(`(?m)^agent prompt %5 ` + regexp.QuoteMeta(beacon+" "+claim) + ` --wait `),
+		},
+		{
+			name: "wake: the opener rides the nudge",
+			cfg:  runtime.Config{Command: "claude --resume 7f3c2a1e", Nudge: beacon + "\n\n" + claim},
+			args: "--resume 7f3c2a1e ",
+			turn: regexp.MustCompile(`(?m)^agent prompt %5 ` + regexp.QuoteMeta(beacon+" "+claim) + ` --wait `),
+		},
+		{
+			name: "wake of a conversation begun before the system prompt: the replay goes to a message file",
+			cfg:  runtime.Config{Command: "claude --resume 7f3c2a1e", Nudge: replay},
+			args: "--resume 7f3c2a1e ",
+			turn: regexp.MustCompile(`(?m)^agent prompt %5 ` + regexp.QuoteMeta(beacon+" ") + `Gas City sent you a message for this session in (\S+)\. Read that file and act on it now\. --wait `),
+			body: role + "\n\n---\n\n" + claim,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, state := newFakeHerdrProvider(t)
+			listenHerdrSocket(t, p)
+			tc.cfg.SystemPrompt, tc.cfg.SystemPromptFileFlag = role, flag
+			if err := p.Start(context.Background(), name, tc.cfg); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			calls := fakeCalls(t, state)
+			if strings.Contains(calls, "\n\n") {
+				t.Fatalf("multi-line text reached the Claude pane:\n%s", calls)
+			}
+			if strings.Contains(calls, "Your Gas City instructions for this session are in") {
+				t.Fatalf("the first turn reads the instructions back into the window:\n%s", calls)
+			}
+			path := filepath.Join(p.metaDir, sanitize(name), claudeStartupPromptKey)
+			if !regexp.MustCompile(`(?m)^agent start \S+ --kind claude .* -- ` + regexp.QuoteMeta(tc.args+flag+" "+path) + `$`).MatchString(calls) {
+				t.Fatalf("claude was not launched with the system prompt file %s:\n%s", path, calls)
+			}
+			if b, err := os.ReadFile(path); err != nil || string(b) != role {
+				t.Fatalf("system prompt file = %q, %v; want the instructions alone", b, err)
+			}
+			m := tc.turn.FindStringSubmatch(calls)
+			if m == nil {
+				t.Fatalf("first turn does not match %s:\n%s", tc.turn, calls)
+			}
+			if tc.body != "" {
+				if b, err := os.ReadFile(m[1]); err != nil || string(b) != tc.body {
+					t.Fatalf("message file = %q, %v; want %q", b, err, tc.body)
+				}
+			}
+		})
+	}
+}
+
 // A sidecar whose agent kind cannot be read must not cost the nudge: it is
 // delivered as it is, exactly as before the Claude file delivery existed.
 func TestClaudeSafeNudgeDeliversVerbatimWhenTheKindIsUnreadable(t *testing.T) {

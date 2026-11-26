@@ -427,8 +427,14 @@ func TestResolveTemplateFingerprintChangePolicy(t *testing.T) {
 	if runtime.CoreFingerprint(cfg) != runtime.CoreFingerprint(skillCfg) {
 		t.Errorf("prompt edit moved the core fingerprint: a running session would drift-drain")
 	}
-	if !strings.Contains(cfg.PromptSuffix, "prompt body v2") || strings.Contains(cfg.PromptSuffix, "prompt body v1") {
-		t.Errorf("next start's PromptSuffix = %q, want the edited prompt", cfg.PromptSuffix)
+	// A provider that passes the prompt as a system-prompt file carries it
+	// there; any other carries it in the launch's argv.
+	prompt := cfg.PromptSuffix
+	if cfg.SystemPrompt != "" {
+		prompt = cfg.SystemPrompt
+	}
+	if !strings.Contains(prompt, "prompt body v2") || strings.Contains(prompt, "prompt body v1") {
+		t.Errorf("next start's prompt = %q, want the edited prompt", prompt)
 	}
 
 	if _, cfg := resolve(knobs{max: 2, command: "echo --changed"}); runtime.CoreFingerprint(cfg) == started {

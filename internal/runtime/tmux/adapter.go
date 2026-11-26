@@ -337,14 +337,46 @@ func (p *Provider) Stop(name string) error {
 	// Excluding a caller that lives outside the pane is a harmless no-op.
 	err := p.tm.KillSessionWithProcessesExcluding(name, []string{strconv.Itoa(os.Getpid())})
 	if err != nil && errors.Is(err, ErrSessionNotFound) {
+		p.removeSystemPrompt(name)
 		return nil // idempotent
 	}
 	if err == nil {
 		// Immediately remove from cache so IsRunning reflects the kill
 		// without waiting for an async refresh cycle.
 		p.cache.EvictSession(name)
+		p.removeSystemPrompt(name)
 	}
 	return err
+}
+
+// removeSystemPrompt removes a stopped session's system prompt files: only a
+// running agent reads one, and the session's next launch writes its own. A
+// file that cannot be read or removed stays for the next stop, so it is
+// logged and does not fail the stop.
+func (p *Provider) removeSystemPrompt(name string) {
+	dir := sessionRuntimeDir(p.cfg.RuntimeDir, name)
+	if dir == "" {
+		return
+	}
+	logf := p.logf
+	if logf == nil {
+		logf = log.Printf
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			logf("tmux: reading the directory of stopped session %q: %v", name, err)
+		}
+		return
+	}
+	for _, entry := range entries {
+		if matched, _ := filepath.Match(systemPromptFilePattern, entry.Name()); !matched || entry.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			logf("tmux: removing a system prompt file of stopped session %q: %v", name, err)
+		}
+	}
 }
 
 // Interrupt sends Ctrl-C to the named tmux session.
@@ -1070,6 +1102,7 @@ func (p *Provider) StopUnattendedSession(name, expectedToken string) error {
 		return fmt.Errorf("stopping unattended tmux session %q by certified ID %q: %w", name, after.sessionID, err)
 	}
 	p.cache.EvictSession(name)
+	p.removeSystemPrompt(name)
 	return nil
 }
 
@@ -1524,6 +1557,9 @@ func (p *Provider) TeardownServer() error {
 // startOps abstracts tmux operations needed by the startup sequence.
 // This enables unit testing without a real tmux server.
 type startOps interface {
+	// writeSystemPrompt writes text to a new system prompt file of the
+	// session's, owned by this launch attempt alone, and returns its path.
+	writeSystemPrompt(name, text string) (string, error)
 	createSession(name, workDir, command string, env map[string]string) error
 	respawnAgent(name, workDir, command string, env map[string]string) error
 	isSessionRunning(name string) bool
@@ -1792,6 +1828,69 @@ func (o *tmuxStartOps) recordStartCrash(name, paneContent, status, signal string
 	writeDiagnosticTextBlock(&b, "--- last pane output ---\n", paneContent)
 
 	return o.writeDiagnostic(name, "start-stderr.log", b.String())
+}
+
+// systemPromptFilePattern names the system prompt files in a session's
+// directory under the city runtime root, one per launch attempt. An agent
+// reads its file again after a compaction, so no launch may write a file
+// another launch's agent reads: a start refused because the name is taken
+// would otherwise hand the running agent its instructions.
+const systemPromptFilePattern = "system-prompt-*.md"
+
+// sessionRuntimeDir is the session name's directory under runtimeDir, "" when
+// there is no runtime root.
+func sessionRuntimeDir(runtimeDir, name string) string {
+	dir := citylayout.SessionDiagnosticsDirForRuntimeDir(runtimeDir)
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, name)
+}
+
+// writeSystemPrompt writes text, private to its owner, to a new system prompt
+// file in the session's directory under the city runtime root and returns its
+// path. That directory is never a task or worktree directory. With no runtime
+// root there is nowhere to put the file, which fails the launch rather than
+// starting the agent without its instructions.
+func (o *tmuxStartOps) writeSystemPrompt(name, text string) (string, error) {
+	dir := sessionRuntimeDir(o.runtimeDir, name)
+	if dir == "" {
+		return "", fmt.Errorf("no city runtime root to hold the system prompt file of session %q", name)
+	}
+	if err := runtime.EnsurePrivateDir(dir); err != nil {
+		return "", fmt.Errorf("creating the directory of session %q's system prompt file: %w", name, err)
+	}
+	f, err := os.CreateTemp(dir, systemPromptFilePattern)
+	if err != nil {
+		return "", fmt.Errorf("creating the system prompt file of session %q: %w", name, err)
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("creating %s: %w", path, err)
+	}
+	if err := runtime.WritePrivateFile(path, []byte(text)); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+// passSystemPromptFile writes cfg.SystemPrompt to a system prompt file of
+// this launch's own and returns cfg with its command passing that file through
+// cfg.SystemPromptFileFlag, and the file, which a launch that fails removes.
+// The flag goes before any first message buildLaunchCommand appends. A cfg
+// without both is returned as it is, with no file.
+func passSystemPromptFile(ops startOps, name string, cfg runtime.Config) (runtime.Config, string, error) {
+	if cfg.SystemPrompt == "" || cfg.SystemPromptFileFlag == "" {
+		return cfg, "", nil
+	}
+	path, err := ops.writeSystemPrompt(name, cfg.SystemPrompt)
+	if err != nil {
+		return cfg, "", fmt.Errorf("writing the system prompt file of session %q: %w", name, err)
+	}
+	cfg.Command += " " + cfg.SystemPromptFileFlag + " " + shellquote.Quote(path)
+	return cfg, path, nil
 }
 
 // recordUnconfirmedNudge persists a durable diagnostic artifact when the
@@ -2246,12 +2345,16 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 		return fmt.Errorf("relaunch: running pre_start: %w", err)
 	}
 
-	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	launch, systemPromptFile, err := passSystemPromptFile(ops, name, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("relaunch: %w", err)
+	}
+	fullCommand, promptFile, err := buildLaunchCommand(name, launch)
+	if err != nil {
+		return cleanupLaunchFilesOnError(err, systemPromptFile)
 	}
 	if err := ops.respawnAgent(name, cfg.WorkDir, fullCommand, cfg.Env); err != nil {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err))
+		return cleanupLaunchFilesOnError(fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err), promptFile, systemPromptFile)
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err)
@@ -2691,9 +2794,13 @@ func buildLaunchCommand(name string, cfg runtime.Config) (fullCommand, promptFil
 }
 
 func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
-	fullCommand, promptFile, err := buildLaunchCommand(name, cfg)
+	launch, systemPromptFile, err := passSystemPromptFile(ops, name, cfg)
 	if err != nil {
 		return err
+	}
+	fullCommand, promptFile, err := buildLaunchCommand(name, launch)
+	if err != nil {
+		return cleanupLaunchFilesOnError(err, systemPromptFile)
 	}
 	err = ops.createSession(name, cfg.WorkDir, fullCommand, cfg.Env)
 	if err == nil {
@@ -2707,23 +2814,23 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 		}
 	}
 	if !errors.Is(err, ErrSessionExists) {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session: %w", err))
+		return cleanupLaunchFilesOnError(fmt.Errorf("creating session: %w", err), promptFile, systemPromptFile)
 	}
 
 	// FreshOnly: the name was taken after Start's held-name check. Refuse it
 	// rather than recycle it, live or dead.
 	if cfg.FreshOnly {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+		return cleanupLaunchFilesOnError(fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name), promptFile, systemPromptFile)
 	}
 
 	// Session exists but the pane is already dead (e.g. remain-on-exit corpse).
 	// Safe to recycle even when ProcessNames are unavailable.
 	if !ops.isSessionRunning(name) {
 		if err := ops.killSession(name); err != nil {
-			return cleanupPromptFileOnError(promptFile, fmt.Errorf("killing dead session: %w", err))
+			return cleanupLaunchFilesOnError(fmt.Errorf("killing dead session: %w", err), promptFile, systemPromptFile)
 		}
-		if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile); err != nil {
-			return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session after dead-session cleanup: %w", err))
+		if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile, systemPromptFile); err != nil {
+			return cleanupLaunchFilesOnError(fmt.Errorf("creating session after dead-session cleanup: %w", err), promptFile, systemPromptFile)
 		}
 		return nil
 	}
@@ -2731,7 +2838,7 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	// Session exists — without process names we can't distinguish a zombie
 	// from a healthy session, so treat it as a duplicate.
 	if len(cfg.ProcessNames) == 0 {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+		return cleanupLaunchFilesOnError(fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name), promptFile, systemPromptFile)
 	}
 
 	// We have process names — check if the agent is alive. A liveness read
@@ -2740,18 +2847,18 @@ func ensureFreshSession(ops startOps, name string, cfg runtime.Config) error {
 	// nothing is killed, as refuseHeldName fails closed.
 	running, liveErr := ops.isRuntimeRunning(name, cfg.ProcessNames)
 	if liveErr != nil {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q (agent liveness unknown): %w", runtime.ErrSessionExists, name, liveErr))
+		return cleanupLaunchFilesOnError(fmt.Errorf("%w: session %q (agent liveness unknown): %w", runtime.ErrSessionExists, name, liveErr), promptFile, systemPromptFile)
 	}
 	if running {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+		return cleanupLaunchFilesOnError(fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name), promptFile, systemPromptFile)
 	}
 
 	// Zombie: tmux alive but agent dead. Kill and recreate.
 	if err := ops.killSession(name); err != nil {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("killing zombie session: %w", err))
+		return cleanupLaunchFilesOnError(fmt.Errorf("killing zombie session: %w", err), promptFile, systemPromptFile)
 	}
-	if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile); err != nil {
-		return cleanupPromptFileOnError(promptFile, fmt.Errorf("creating session after zombie cleanup: %w", err))
+	if err := recreateSessionAfterCleanup(ops, name, cfg.WorkDir, fullCommand, cfg.Env, promptFile, systemPromptFile); err != nil {
+		return cleanupLaunchFilesOnError(fmt.Errorf("creating session after zombie cleanup: %w", err), promptFile, systemPromptFile)
 	}
 	return nil
 }
@@ -2793,24 +2900,31 @@ func removePromptFile(promptFile string) error {
 	return nil
 }
 
-func cleanupPromptFileOnError(promptFile string, err error) error {
-	if promptFile == "" || err == nil {
+// cleanupLaunchFilesOnError removes the files a launch wrote for its own agent
+// when the launch fails, so a launch that never started an agent leaves none
+// behind. A nil err removes nothing.
+func cleanupLaunchFilesOnError(err error, files ...string) error {
+	if err == nil {
 		return err
 	}
-	if removeErr := removePromptFile(promptFile); removeErr != nil {
-		return errors.Join(err, removeErr)
+	for _, file := range files {
+		if removeErr := removePromptFile(file); removeErr != nil {
+			err = errors.Join(err, removeErr)
+		}
 	}
 	return err
 }
 
-func recreateSessionAfterCleanup(ops startOps, name, workDir, command string, env map[string]string, promptFile string) error {
+func recreateSessionAfterCleanup(ops startOps, name, workDir, command string, env map[string]string, launchFiles ...string) error {
 	err := ops.createSession(name, workDir, command, env)
 	if errors.Is(err, ErrNoServer) {
 		time.Sleep(50 * time.Millisecond)
 		err = ops.createSession(name, workDir, command, env)
 	}
 	if errors.Is(err, ErrSessionExists) {
-		_ = removePromptFile(promptFile)
+		for _, file := range launchFiles {
+			_ = removePromptFile(file)
+		}
 		return nil // race: another process created it
 	}
 	return err

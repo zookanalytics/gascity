@@ -61,6 +61,104 @@ func TestBuildLaunchCommandColorWrapsLongPromptCommand(t *testing.T) {
 	}
 }
 
+// The system prompt files live in the session's directory under the city
+// runtime root, never in the work directory. Each launch gets a file of its
+// own, whole and private to its owner, so a second launch never rewrites the
+// first one's, and a provider with no runtime root refuses the file rather
+// than writing it somewhere a task can reach.
+func TestTmuxStartOpsWriteSystemPrompt(t *testing.T) {
+	runtimeDir := t.TempDir()
+	ops := newTmuxStartOps(nil, runtimeDir, 0, runtime.Config{}, true)
+	first, err := ops.writeSystemPrompt("gc-city-worker", "# Role v1")
+	if err != nil {
+		t.Fatalf("writeSystemPrompt: %v", err)
+	}
+	dir := filepath.Join(runtimeDir, "sessions", "gc-city-worker")
+	if got := filepath.Dir(first); got != dir {
+		t.Fatalf("file %q is not in the session's directory %q", first, dir)
+	}
+	if ok, _ := filepath.Match(systemPromptFilePattern, filepath.Base(first)); !ok {
+		t.Fatalf("file name %q does not match %q", filepath.Base(first), systemPromptFilePattern)
+	}
+	second, err := ops.writeSystemPrompt("gc-city-worker", "# Role v2")
+	if err != nil {
+		t.Fatalf("second writeSystemPrompt: %v", err)
+	}
+	if second == first {
+		t.Fatalf("second launch wrote %q, the first launch's file", second)
+	}
+	for path, want := range map[string]string{first: "# Role v1", second: "# Role v2"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s = %q, %v; want %q", path, got, err, want)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o600 {
+			t.Fatalf("%s mode = %v, want 0600", path, mode)
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("session dir holds %d entries, want the two launches' files alone (no temp file left behind)", len(entries))
+	}
+
+	if _, err := newTmuxStartOps(nil, "", 0, runtime.Config{}, true).writeSystemPrompt("gc-city-worker", "# Role"); err == nil {
+		t.Fatal("writeSystemPrompt with no runtime root = nil, want an error")
+	}
+}
+
+// Stop removes the session's system prompt files with the session, every
+// launch's, whether the session was running or had already gone, and leaves
+// the session's diagnostics beside them.
+func TestProviderStopRemovesTheSystemPromptFile(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		outs []string
+		errs []error
+	}{
+		// A remain-on-exit corpse: its dead pane has no process to reap, so
+		// the kill reaches tmux without a process-table walk.
+		{name: "killed session", outs: []string{"pane\t4242\t1", ""}, errs: []error{nil, nil}},
+		{name: "vanished session", outs: []string{"", ""}, errs: []error{nil, notFoundErr("kill-session")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtimeDir := t.TempDir()
+			ops := newTmuxStartOps(nil, runtimeDir, 0, runtime.Config{}, true)
+			var paths []string
+			for _, text := range []string{"# Role", "# Role, relaunched"} {
+				path, err := ops.writeSystemPrompt("worker-1", text)
+				if err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, path)
+			}
+			diagnostics := filepath.Join(filepath.Dir(paths[0]), "start-stderr.log")
+			if err := os.WriteFile(diagnostics, []byte("boom"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			fe := &fakeExecutor{outs: tc.outs, errs: tc.errs}
+			p := &Provider{tm: &Tmux{exec: fe}, cache: NewStateCache(nil, time.Hour), cfg: Config{RuntimeDir: runtimeDir}}
+			if err := p.Stop("worker-1"); err != nil {
+				t.Fatalf("Stop: %v", err)
+			}
+			for _, path := range paths {
+				if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("system prompt file %s after Stop: %v, want it removed", path, err)
+				}
+			}
+			if _, err := os.Stat(diagnostics); err != nil {
+				t.Fatalf("diagnostics after Stop: %v, want them kept", err)
+			}
+		})
+	}
+}
+
 func TestProviderAttachRefusesDeadPane(t *testing.T) {
 	fe := &fakeExecutor{
 		outs: []string{"41", "", "pane\t1"},

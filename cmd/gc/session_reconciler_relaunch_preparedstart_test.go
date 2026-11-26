@@ -216,6 +216,41 @@ func TestReconcileSessionBeads_LaunchDriftRelaunchRecordsItsLaunchWorkDir(t *tes
 	}
 }
 
+// TestReconcileSessionBeads_LaunchDriftRelaunchWritesTheSystemPromptRecord pins
+// that a launch-only drift relaunch writes the system prompt record with its
+// baseline, as a start commit does. A relaunch that resumes the recorded
+// conversation with the system prompt file leaves the record, and one that
+// passes no file clears it, since a compaction in that life would leave the
+// conversation's recorded system prompt without the prompt.
+func TestReconcileSessionBeads_LaunchDriftRelaunchWritesTheSystemPromptRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name, flag, want string
+	}{
+		{name: "with the system prompt file", flag: "--append-system-prompt-file", want: "warm-conversation"},
+		{name: "without the system prompt file", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			rp := forkClaude()
+			rp.SystemPromptFileFlag = tc.flag
+			_, session := seedLaunchDriftResumeSession(t, env, rp, map[string]string{sessionpkg.SystemPromptSessionKeyMetadataKey: "warm-conversation"})
+
+			env.reconcile([]beads.Bead{session})
+
+			if got := env.sp.CountCalls("Relaunch", "worker"); got != 1 {
+				t.Fatalf("Relaunch calls = %d, want 1 (launch-only drift must relaunch); stderr=%s", got, env.stderr.String())
+			}
+			b, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := b.Metadata[sessionpkg.SystemPromptSessionKeyMetadataKey]; got != tc.want {
+				t.Fatalf("system prompt record after the relaunch = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRelaunchAgentForLaunchDrift_AbortClearsSpeculativeResumeKey is the #4038
 // correctness guard for the launch-drift relaunch fallback. When a launch-only
 // drift routes through buildPreparedStart on a bead that has a stored baseline

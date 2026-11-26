@@ -1625,6 +1625,11 @@ func deepMergeProvider(base, frag ProviderSpec, name string, fragMeta toml.MetaD
 			func() bool { return base.AcceptStartupDialogs != nil },
 			func() { result.AcceptStartupDialogs = cloneBoolPtr(frag.AcceptStartupDialogs) },
 		},
+		{
+			"system_prompt_file_flag",
+			func() bool { return base.SystemPromptFileFlag != nil },
+			func() { result.SystemPromptFileFlag = copyStringPtr(frag.SystemPromptFileFlag) },
+		},
 	}
 	for _, sf := range scalars {
 		if fragMeta.IsDefined("providers", name, sf.key) {

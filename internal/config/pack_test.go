@@ -5504,3 +5504,17 @@ func mustResolvedPackNames(t *testing.T, includes []string, imports map[string]I
 	}
 	return names
 }
+
+// The pack-load cache hands out deep copies of its provider specs, so a copy's
+// system_prompt_file_flag must not share storage with the cached spec.
+func TestDeepCopyProviderSpecCopiesSystemPromptFileFlag(t *testing.T) {
+	flag := "--append-system-prompt-file"
+	spec := ProviderSpec{SystemPromptFileFlag: &flag}
+	dup := deepCopyProviderSpec(spec)
+	if dup.SystemPromptFileFlag == nil || *dup.SystemPromptFileFlag != flag {
+		t.Fatalf("copy's system_prompt_file_flag = %v, want %q", dup.SystemPromptFileFlag, flag)
+	}
+	if dup.SystemPromptFileFlag == spec.SystemPromptFileFlag {
+		t.Fatal("deepCopyProviderSpec aliases system_prompt_file_flag")
+	}
+}

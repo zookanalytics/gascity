@@ -192,18 +192,26 @@ func phase2ProviderCaseForFamily(t *testing.T, family string) phase2ProviderCase
 
 func resolvePhase2Template(t *testing.T, tc phase2ProviderCase) TemplateParams {
 	t.Helper()
+	return resolvePhase2TemplateOnRuntime(t, tc, "")
+}
+
+// resolvePhase2TemplateOnRuntime is resolvePhase2Template in a city whose
+// [session] provider is citySessionProvider.
+func resolvePhase2TemplateOnRuntime(t *testing.T, tc phase2ProviderCase, citySessionProvider string) TemplateParams {
+	t.Helper()
 
 	cityPath := t.TempDir()
 	params := &agentBuildParams{
-		cityName:   "phase2-city",
-		cityPath:   cityPath,
-		workspace:  &config.Workspace{Provider: tc.family},
-		providers:  builtinProviderAliasesForTest(tc.family),
-		lookPath:   func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
-		fs:         fsys.OSFS{},
-		beaconTime: time.Unix(0, 0),
-		beadNames:  make(map[string]string),
-		stderr:     io.Discard,
+		cityName:        "phase2-city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: tc.family},
+		providers:       builtinProviderAliasesForTest(tc.family),
+		lookPath:        func(name string) (string, error) { return filepath.Join("/usr/bin", name), nil },
+		fs:              fsys.OSFS{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		sessionProvider: citySessionProvider,
 	}
 
 	agentCfg := &config.Agent{

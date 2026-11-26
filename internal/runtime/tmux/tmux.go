@@ -192,15 +192,16 @@ type Config struct {
 	// hosting it. Empty means use the default tmux server.
 	SocketName string
 	// RuntimeDir is the city runtime root under which per-session
-	// diagnostics are persisted. Production sets it to
-	// citylayout.RuntimePath(cityPath), which is "<city>/.gc" -- this doc
-	// said ".gc/runtime" and it was wrong, which is the same mistake gc
-	// doctor made when it went looking for these artifacts under
+	// diagnostics and a session's system prompt file are kept. Production
+	// sets it to citylayout.RuntimePath(cityPath), which is "<city>/.gc" --
+	// this doc said ".gc/runtime" and it was wrong, which is the same
+	// mistake gc doctor made when it went looking for these artifacts under
 	// .gc/runtime/sessions and found a permanently empty directory
 	// (dr-6siig HIGH 1). Resolve the subdirectory through
 	// citylayout.SessionDiagnosticsDirForRuntimeDir, never by joining a
 	// literal. Empty disables the durable capture, so ad-hoc invocations
-	// and tests run unchanged.
+	// and tests run unchanged, and fails a launch that carries a system
+	// prompt (runtime.Config.SystemPrompt), which has nowhere to go.
 	RuntimeDir string
 	// ProgramStatusBin is the gc-osc7501 companion that program-status
 	// capture arms with. Empty resolves it at each arm: next to the running

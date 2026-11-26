@@ -165,8 +165,8 @@ base = "builtin:codex"
 
 // controllerStartupPrompts resolves info's template the way the controller does
 // when it starts or resumes the session, and returns every channel that carries
-// the startup prompt: the launch payload (prompt suffix and nudge) on a fresh
-// start and the prompt nudge on a resume.
+// the startup prompt: the launch payload (system prompt, prompt suffix and
+// nudge) on a fresh start and the prompt nudge on a resume.
 func controllerStartupPrompts(t *testing.T, bp *agentBuildParams, cfg *config.City, agent *config.Agent, info session.Info) (string, map[string]string) {
 	t.Helper()
 	tp, err := resolveDiscoveredSessionTemplate(bp, cfg, agent, info)
@@ -178,7 +178,7 @@ func controllerStartupPrompts(t *testing.T, bp *agentBuildParams, cfg *config.Ci
 		t.Fatalf("templateParamsToConfigWithDelivery(%s): %v", info.ID, err)
 	}
 	return tp.Prompt, map[string]string{
-		"launch":         launch.PromptSuffix + "\n" + launch.Nudge,
+		"launch":         launch.SystemPrompt + "\n" + launch.PromptSuffix + "\n" + launch.Nudge,
 		"resume nudge":   restartPromptNudge(tp.Prompt, tp.Hints.Nudge),
 		"startup prompt": tp.Prompt,
 	}

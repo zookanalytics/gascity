@@ -3,6 +3,7 @@ package herdr
 import (
 	"reflect"
 	goruntime "runtime"
+	"slices"
 	"testing"
 )
 
@@ -78,5 +79,27 @@ func TestLaunchSpecForEmptyCommandIsBareShell(t *testing.T) {
 		if got.Kind != "" || got.Raw != "" {
 			t.Errorf("launchSpecFor(%q) = %+v; want zero spec (bare shell)", cmd, got)
 		}
+	}
+}
+
+// A system prompt file reaches the agent whichever way herdr launches it: as
+// two more arguments for a kind launch, and through the shell command for a
+// raw one. A blank command launches no agent and takes nothing.
+func TestLaunchSpecPassFile(t *testing.T) {
+	const flag, path = "--append-system-prompt-file", "/meta/gastown__worker/startup-prompt.md"
+	kind := launchSpecFor("claude --effort medium")
+	kind.passFile(flag, path)
+	if want := []string{"--effort", "medium", flag, path}; !slices.Equal(kind.Args, want) {
+		t.Fatalf("kind launch args = %q, want %q", kind.Args, want)
+	}
+	raw := launchSpecFor("FOO=1 claude")
+	raw.passFile(flag, "/meta/it's here.md")
+	if want := "FOO=1 claude " + flag + ` '/meta/it'\''s here.md'`; raw.Raw != want {
+		t.Fatalf("raw launch = %q, want %q", raw.Raw, want)
+	}
+	blank := launchSpecFor("")
+	blank.passFile(flag, path)
+	if blank.Kind != "" || blank.Raw != "" || blank.Args != nil {
+		t.Fatalf("blank launch = %+v, want nothing to launch", blank)
 	}
 }

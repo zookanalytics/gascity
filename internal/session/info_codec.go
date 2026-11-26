@@ -170,6 +170,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"churn_count", func(i *Info, v string) { i.ChurnCount = v }},
 	{"resume_failures", func(i *Info, v string) { i.ResumeFailures = v }},
 	{"resume_launch", func(i *Info, v string) { i.ResumeLaunch = v }},
+	{SystemPromptSessionKeyMetadataKey, func(i *Info, v string) { i.SystemPromptSessionKey = v }},
 	{"idle_respawn_attempts", func(i *Info, v string) { i.IdleRespawnAttempts = v }},
 	{"idle_respawn_bead_id", func(i *Info, v string) { i.IdleRespawnBeadID = v }},
 	{"wake_mode", func(i *Info, v string) { i.WakeMode = v }},

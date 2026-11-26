@@ -49,6 +49,9 @@ func writePromptBudgetCity(t *testing.T, toml, promptContent string) {
 		t.Fatal(err)
 	}
 	t.Setenv("GC_CITY_PATH", dir)
+	// The report reads the runtime as the session provider is built, so an
+	// ambient GC_SESSION would choose it over city.toml.
+	t.Setenv("GC_SESSION", "")
 }
 
 const promptBudgetBareTOML = `[workspace]
@@ -385,5 +388,62 @@ func TestPrimePromptBudgetUnchangedNonStrictOutput(t *testing.T) {
 		if strings.Contains(stderr.String(), absent) {
 			t.Errorf("stderr = %q, non-strict mode must not emit budget field %q", stderr.String(), absent)
 		}
+	}
+}
+
+// An oversized prompt for a Claude agent on tmux rides a file into the
+// system prompt, so the strict report names that route and no argv fallback.
+// The report reads the runtime as the session provider is built, GC_SESSION
+// over [session] provider, so on k8s it names the nudge fallback instead.
+func TestPrimePromptBudgetSystemPromptRoute(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	prompt := repeatToBytes("a", maxPromptSuffixRawBytes)
+	for _, tc := range []struct {
+		name, session, gcSession string
+		want                     []string
+	}{
+		{
+			name: "tmux",
+			want: []string{"effective_mode=system-prompt", "runtime=tmux", "oversized_fallback=false"},
+		},
+		{
+			name: "k8s that GC_SESSION names over none in city.toml", gcSession: "k8s",
+			want: []string{"effective_mode=nudge-fallback", "runtime=k8s", "oversized_fallback=true"},
+		},
+		{
+			name: "tmux that GC_SESSION names over city.toml's k8s", session: "\n[session]\nprovider = \"k8s\"\n", gcSession: "tmux",
+			want: []string{"effective_mode=system-prompt", "runtime=tmux", "oversized_fallback=false"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			writePromptBudgetCity(t, `[workspace]
+name = "test-city"
+`+tc.session+`
+[providers.claude]
+base = "builtin:claude"
+
+[[agent]]
+name = "worker"
+provider = "claude"
+session = "tmux"
+prompt_template = "prompts/worker.md"
+`, prompt)
+			t.Setenv("GC_SESSION", tc.gcSession)
+
+			var stdout, stderr bytes.Buffer
+			code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, true)
+			if code != 0 {
+				t.Fatalf("doPrimeWithMode(strict) = %d, want 0; stderr=%s", code, stderr.String())
+			}
+			for _, want := range append([]string{"raw_bytes=" + strconv.Itoa(maxPromptSuffixRawBytes), "hard_fail=false"}, tc.want...) {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr, want substring %q (stderr=%.300s)", want, stderr.String())
+				}
+			}
+		})
 	}
 }

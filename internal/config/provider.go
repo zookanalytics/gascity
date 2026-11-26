@@ -124,6 +124,30 @@ type ProviderSpec struct {
 	// SupportsHooks indicates the provider has an executable hook mechanism
 	// (settings.json, plugins, etc.) for lifecycle events.
 	SupportsHooks *bool `toml:"supports_hooks,omitempty"`
+	// SystemPromptFileFlag is the CLI flag that takes a file whose text joins
+	// the provider's system prompt. When it is set, every launch of a CLI
+	// session on the tmux or herdr runtime, resumes included, writes the
+	// agent's rendered prompt to a file for the session and passes it with this
+	// flag. The conversation's first message is then a short opener instead of
+	// the prompt: the session's beacon line and the agent's nudge, or a default
+	// instruction when it has none. The opener goes where prompt_mode sends a
+	// first message: the argv positional for "arg", after prompt_flag for
+	// "flag", and typed after launch for "none". A wake types the opener alone
+	// for a conversation the session records as begun this way, and replays the
+	// prompt for any other. Claude Code records a conversation's system prompt
+	// at its first request and reuses it on every later request and resume
+	// until the conversation compacts, when it takes the prompt again from the
+	// current launch's file. An edited prompt therefore reaches a running
+	// conversation at its first compaction after its next launch, and every new
+	// conversation starts with it. A launch that passes no file, such as Claude
+	// Code started by hand on the same conversation, leaves the session's
+	// record standing, so if the conversation compacts during that launch, its
+	// recorded system prompt loses the prompt while its wakes still type only
+	// the opener, until it compacts again on a launch that passes the file. The
+	// built-in claude provider sets it to "--append-system-prompt-file". Absent
+	// inherits the base provider's flag, "" switches it off, and any other
+	// value replaces it.
+	SystemPromptFileFlag *string `toml:"system_prompt_file_flag,omitempty"`
 	// InstructionsFile is the filename the provider reads for project instructions
 	// (e.g., "CLAUDE.md", "AGENTS.md"). Empty defaults to "AGENTS.md".
 	InstructionsFile string `toml:"instructions_file,omitempty"`
@@ -259,6 +283,7 @@ type ResolvedProvider struct {
 	Env                    map[string]string
 	SupportsACP            bool
 	SupportsHooks          bool
+	SystemPromptFileFlag   string
 	InstructionsFile       string
 	ResumeFlag             string
 	ResumeStyle            string
@@ -527,6 +552,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PathCheck:              spec.PathCheck,
 		SupportsACP:            boolPtr(spec.SupportsACP),
 		SupportsHooks:          boolPtr(spec.SupportsHooks),
+		SystemPromptFileFlag:   nonEmptyStringPtr(spec.SystemPromptFileFlag),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,
@@ -625,6 +651,24 @@ func cloneBoolPtr(value *bool) *bool {
 	}
 	cloned := *value
 	return &cloned
+}
+
+// nonEmptyStringPtr lifts a built-in profile's plain string into a tri-state
+// spec field: a value the profile does not declare stays nil, so a city layer
+// still inherits it rather than reading an explicit switch-off.
+func nonEmptyStringPtr(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
+}
+
+// derefString safely dereferences a *string, returning "" for nil.
+func derefString(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func cloneStrings(values []string) []string {

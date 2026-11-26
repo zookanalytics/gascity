@@ -384,6 +384,17 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 		}
 		into[key] = layer
 	}
+	// setStringPtr records a tri-state string whenever the layer declares
+	// it, "" included: an empty value is a layer switching the field off.
+	setStringPtr := func(key string, value *string) {
+		if value == nil {
+			return
+		}
+		if _, already := into[key]; already {
+			return
+		}
+		into[key] = layer
+	}
 
 	set("display_name", spec.DisplayName)
 	set("command", spec.Command)
@@ -398,6 +409,7 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("path_check", spec.PathCheck)
 	setBool("supports_acp", spec.SupportsACP)
 	setBool("supports_hooks", spec.SupportsHooks)
+	setStringPtr("system_prompt_file_flag", spec.SystemPromptFileFlag)
 	setBool("emits_permission_warning", spec.EmitsPermissionWarning)
 	setBool("accept_startup_dialogs", spec.AcceptStartupDialogs)
 	set("instructions_file", spec.InstructionsFile)

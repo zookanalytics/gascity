@@ -108,8 +108,8 @@ func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config
 	}
 	switch name {
 	// "" is the default session provider: effectiveSessionProvider returns it
-	// when neither the agent nor [session] provider is set, and the registry's
-	// SetFallback(tmuxFactory) constructs tmux for it.
+	// when nothing selects a runtime and the platform default is empty, and the
+	// registry's SetFallback(tmuxFactory) constructs tmux for it.
 	case "", "tmux":
 		return promptDeliverySupportNudgeFallback
 	// herdr launches via exec argv with no shell-arg slot, and already routes
@@ -239,6 +239,28 @@ func promptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, nudg
 		} else {
 			res.Delivered = false
 		}
+	}
+	return res, nil
+}
+
+// budgetPromptDelivery is the delivery a launch gives prompt, as the prompt
+// budget diagnostics read it (gc prime --strict, gc doctor's
+// prompt-delivery-budget). A prompt that rides the agent's system prompt
+// (systemPromptFileFlagFor) reaches the agent through a file, so no argv
+// budget applies to it, and its effective mode is "system-prompt". Any other
+// prompt gets promptDelivery's routing.
+func budgetPromptDelivery(prompt string, isACP bool, rp *config.ResolvedProvider, runtimeName string, packRuntimes map[string]config.DiscoveredRuntime) (promptDeliveryResult, error) {
+	if prompt == "" || systemPromptFileFlagFor(rp, isACP, runtimeName) == "" {
+		return promptDelivery(prompt, isACP, rp, "", runtimeName, packRuntimes)
+	}
+	res := promptDeliveryResult{
+		Delivered:     true,
+		EffectiveMode: "system-prompt",
+		RawBytes:      len(prompt),
+		ArgvBytes:     len(shellquote.Quote(prompt)),
+	}
+	if rp != nil {
+		res.ConfiguredMode = rp.PromptMode
 	}
 	return res, nil
 }

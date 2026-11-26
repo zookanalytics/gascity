@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Claude Code wraps multi-line input that arrives as a terminal paste in
@@ -16,9 +18,14 @@ import (
 // obey, with an empty user message around it, and sessions sat refusing their
 // prime. A single line is typed input and is the user's own message. So
 // multi-line text for a Claude session goes to a file and the one typed line
-// names it. A startup file is also appended to the system prompt at launch,
-// but an interactive --resume keeps the system prompt of the life it resumes,
-// so the typed line names the file either way.
+// names it.
+//
+// A launch whose instructions ride the agent's system prompt
+// (runtime.Config.SystemPrompt) passes them as the startup file on every
+// Start, and the typed first turn is only the opener, on one line. Otherwise
+// multi-line startup text goes to that file, which the launch also appends to
+// the system prompt; an interactive --resume keeps the system prompt of the
+// life it resumes, so the typed line names the file either way.
 
 const (
 	claudeKind             = "claude"
@@ -45,18 +52,33 @@ func (p *Provider) writeMessageFile(name, key, text string) (string, error) {
 // prepareStartupTurn returns the text start types as the session's first
 // turn. It first drops a prior life's agent-kind marker: Stop wipes the
 // sidecar but a crash does not, and a stale claude marker would turn the next
-// non-Claude life's multi-line nudges into file pointers. For a Claude launch
-// it records the kind and moves multi-line startup text into a file, which the
-// launch appends to the system prompt and the returned kickoff names.
-func (p *Provider) prepareStartupTurn(name string, spec *launchSpec, startupText string) (string, error) {
+// non-Claude life's multi-line nudges into file pointers. A launch carrying a
+// system prompt writes it to the startup file and passes that file to the
+// agent; a Claude session's first turn is then the opener on one line
+// (claudeStartupLine). Without one, a Claude launch moves multi-line startup
+// text into that file, which the launch appends to the system prompt and the
+// returned kickoff names. Either way it records the Claude kind.
+func (p *Provider) prepareStartupTurn(name string, spec *launchSpec, cfg runtime.Config) (string, error) {
 	if err := p.RemoveMeta(name, metaAgentKind); err != nil {
 		fmt.Fprintf(os.Stderr, "herdr: clearing prior-life agent kind for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+	}
+	startupText := startupDeliveryText(cfg)
+	systemPrompt := cfg.SystemPrompt != "" && cfg.SystemPromptFileFlag != ""
+	if systemPrompt {
+		path, err := p.writeMessageFile(name, claudeStartupPromptKey, cfg.SystemPrompt)
+		if err != nil {
+			return "", fmt.Errorf("herdr: write system prompt for %q: %w", name, err)
+		}
+		spec.passFile(cfg.SystemPromptFileFlag, path)
 	}
 	if spec.Kind != claudeKind {
 		return startupText, nil
 	}
 	if err := p.SetMeta(name, metaAgentKind, claudeKind); err != nil {
 		return "", fmt.Errorf("herdr: record agent kind for %q: %w", name, err)
+	}
+	if systemPrompt {
+		return p.claudeStartupLine(name, startupText)
 	}
 	if !isMultiline(startupText) {
 		return startupText, nil
@@ -75,10 +97,45 @@ func (p *Provider) prepareStartupTurn(name string, spec *launchSpec, startupText
 func claudeStartupKickoff(startupText, path string) string {
 	kickoff := "Your Gas City instructions for this session are in " + path + ". Read that file and follow it now, starting with the first action it names."
 	first, _, _ := strings.Cut(startupText, "\n")
-	if strings.HasPrefix(first, "[") && strings.Contains(first, " • ") {
+	if isBeaconLine(first) {
 		return first + " " + kickoff
 	}
 	return kickoff
+}
+
+// claudeStartupLine is the typed first turn of a Claude session whose
+// instructions ride its system prompt: the opener as one line. A leading
+// beacon line stays first, for Claude Code's /resume picker, and the rest of
+// the text follows it on that line when it is one line itself. A longer rest,
+// such as the prompt a conversation begun before the system prompt still
+// replays, goes to a message file the line names (claudeSafeNudge).
+func (p *Provider) claudeStartupLine(name, text string) (string, error) {
+	if !isMultiline(text) {
+		return text, nil
+	}
+	lead, body := "", text
+	if first, rest, _ := strings.Cut(text, "\n"); isBeaconLine(first) {
+		lead, body = first, strings.TrimSpace(rest)
+	}
+	if body == "" {
+		return lead, nil
+	}
+	if isMultiline(body) {
+		pointer, err := p.claudeSafeNudge(name, body)
+		if err != nil {
+			return "", err
+		}
+		body = pointer
+	}
+	if lead == "" {
+		return body, nil
+	}
+	return lead + " " + body, nil
+}
+
+// isBeaconLine reports whether line is a session beacon (`[city] agent • ts`).
+func isBeaconLine(line string) bool {
+	return strings.HasPrefix(line, "[") && strings.Contains(line, " • ")
 }
 
 // claudeSafeNudge returns text unchanged unless it is multi-line and the

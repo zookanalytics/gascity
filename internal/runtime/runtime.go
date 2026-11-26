@@ -1611,6 +1611,19 @@ type Config struct {
 	// reconstruct the command correctly for long prompts.
 	PromptFlag string
 
+	// SystemPrompt is text for the agent's system prompt. When it and
+	// SystemPromptFileFlag are both set, Start writes it to a file for the
+	// session, outside the session's work directory, and passes the agent's
+	// CLI SystemPromptFileFlag and that file's path. The tmux and herdr
+	// providers read it; the caller sets it for no other provider. Excluded
+	// from every fingerprint, like PromptSuffix.
+	SystemPrompt string
+
+	// SystemPromptFileFlag is the agent CLI's flag that takes the file
+	// holding SystemPrompt (Claude Code's --append-system-prompt-file).
+	// Excluded from every fingerprint.
+	SystemPromptFileFlag string
+
 	// FreshOnly makes Start create a fresh runtime or fail: a name the
 	// provider already holds, live or dead, returns ErrSessionExists, and
 	// Start never recycles, kills or reuses the runtime holding it. The v2

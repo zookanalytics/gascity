@@ -299,6 +299,10 @@ func MergeProviderOverBuiltin(base, city ProviderSpec) ProviderSpec {
 	if city.SupportsHooks != nil {
 		result.SupportsHooks = city.SupportsHooks
 	}
+	// Tri-state string: a city "" switches the inherited flag off.
+	if city.SystemPromptFileFlag != nil {
+		result.SystemPromptFileFlag = copyStringPtr(city.SystemPromptFileFlag)
+	}
 	if city.InstructionsFile != "" {
 		result.InstructionsFile = city.InstructionsFile
 	}
@@ -646,6 +650,7 @@ func specToResolved(name string, spec *ProviderSpec) *ResolvedProvider {
 		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
 		SupportsACP:            derefBool(spec.SupportsACP),
 		SupportsHooks:          derefBool(spec.SupportsHooks),
+		SystemPromptFileFlag:   derefString(spec.SystemPromptFileFlag),
 		InstructionsFile:       spec.InstructionsFile,
 		ResumeFlag:             spec.ResumeFlag,
 		ResumeStyle:            spec.ResumeStyle,
@@ -908,20 +913,24 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	}
 	// Tri-state *bool: preserve from leaf if set; else fold from the
 	// resolved value only when some chain layer explicitly contributed it.
-	if leaf.EmitsPermissionWarning == nil && providerBoolFieldSet(r, "emits_permission_warning") {
+	if leaf.EmitsPermissionWarning == nil && providerFieldSet(r, "emits_permission_warning") {
 		v := r.EmitsPermissionWarning
 		out.EmitsPermissionWarning = &v
 	}
-	if leaf.AcceptStartupDialogs == nil && providerBoolFieldSet(r, "accept_startup_dialogs") {
+	if leaf.AcceptStartupDialogs == nil && providerFieldSet(r, "accept_startup_dialogs") {
 		out.AcceptStartupDialogs = cloneBoolPtr(r.AcceptStartupDialogs)
 	}
-	if leaf.SupportsACP == nil && providerBoolFieldSet(r, "supports_acp") {
+	if leaf.SupportsACP == nil && providerFieldSet(r, "supports_acp") {
 		v := r.SupportsACP
 		out.SupportsACP = &v
 	}
-	if leaf.SupportsHooks == nil && providerBoolFieldSet(r, "supports_hooks") {
+	if leaf.SupportsHooks == nil && providerFieldSet(r, "supports_hooks") {
 		v := r.SupportsHooks
 		out.SupportsHooks = &v
+	}
+	if leaf.SystemPromptFileFlag == nil && providerFieldSet(r, "system_prompt_file_flag") {
+		v := r.SystemPromptFileFlag
+		out.SystemPromptFileFlag = &v
 	}
 	if r.InstructionsFile != "" {
 		out.InstructionsFile = r.InstructionsFile
@@ -995,7 +1004,10 @@ func resolvedChainToSpec(r ResolvedProvider, leaf ProviderSpec) ProviderSpec {
 	return out
 }
 
-func providerBoolFieldSet(r ResolvedProvider, field string) bool {
+// providerFieldSet reports whether some layer of r's chain declared field, so
+// folding r back into a spec keeps an explicit value, an explicit false or
+// "" included, and leaves a field no layer declared unset.
+func providerFieldSet(r ResolvedProvider, field string) bool {
 	if r.Provenance.FieldLayer == nil {
 		return false
 	}

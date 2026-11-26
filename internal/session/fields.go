@@ -442,6 +442,19 @@ var registry = slices.Concat([]Field{
 
 	// Launch configuration.
 	{Key: "session_key", Class: ClassLaunchConfig, Premise: true, Writers: sites(op(srcManager, "Manager.PersistSessionKey"))},
+	// The conversation whose system prompt carries the rendered prompt, as
+	// SystemPromptSessionKeyAfterStart decides it: a start commit records it,
+	// a warm relaunch (legacy and v2) with its baseline, and the Manager's own
+	// start clears it when it passed no system prompt file; a resume reads it
+	// to type only the opener.
+	{
+		Key: SystemPromptSessionKeyMetadataKey, Class: ClassLaunchConfig,
+		Writers: sites(legacy(srcLifecycle, "startCommitPatch"), v2(srcLifecycle, "startCommitPatch"), legacy(srcLifecycle, "recoverRunningPendingCreate"),
+			legacy(srcReconciler, "rebaselineLaunchDriftHashesWithBatch"), v2("cmd/gc/reconcile_effect_restart.go", "relaunchResultStep"),
+			op("internal/session/chat.go", "Manager.ensureRunningOn")),
+		Readers: sites(legacy(srcLifecycle, "buildPreparedStartWithTranscript"), v2(srcLifecycle, "buildPreparedStartWithTranscript"),
+			op("cmd/gc/session_startup_prompt.go", "startupPromptCity.applyTo")),
+	},
 	{Key: "alias", Class: ClassAssignmentIdentity, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers"), v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"))},
 	// A requalified named session's prior bare identity is read from its alias
 	// history into the narrow release scope (gastownhall/gascity#5957).

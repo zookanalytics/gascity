@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -160,11 +161,28 @@ func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedSta
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
+	wantSystemPrompt := phase2SystemPromptFamilies[tc.family]
 	want := "Base worker prompt\n\n---\n\nUser message:\nDo the first task."
-	if prepared != nil && strings.TrimSpace(prepared.cfg.PromptSuffix) == "" && prepared.cfg.Env[startupPromptDeliveredEnv] == "1" {
+	switch {
+	case wantSystemPrompt && prepared != nil:
+		// The prompt rides the system prompt, so the first message is the
+		// opener, which carries the configured nudge.
+		want = phase2Beacon(prepared) + "\n\nnudge-" + tc.family + "\n\n---\n\nUser message:\nDo the first task."
+	case prepared != nil && strings.TrimSpace(prepared.cfg.PromptSuffix) == "" && prepared.cfg.Env[startupPromptDeliveredEnv] == "1":
 		want = "Base worker prompt\n\n---\n\nnudge-" + tc.family + "\n\n---\n\nUser message:\nDo the first task."
 	}
+	gotSystemPrompt := ""
+	if prepared != nil {
+		gotSystemPrompt = prepared.cfg.SystemPrompt
+	}
+	evidence["system_prompt"] = gotSystemPrompt
 	switch {
+	case wantSystemPrompt && gotSystemPrompt != "Base worker prompt":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
+			fmt.Sprintf("SystemPrompt = %q, want the base worker prompt in the system prompt", gotSystemPrompt)).WithEvidence(evidence)
+	case !wantSystemPrompt && gotSystemPrompt != "":
+		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
+			fmt.Sprintf("SystemPrompt = %q, want none for a provider without a system-prompt file flag", gotSystemPrompt)).WithEvidence(evidence)
 	case got != want:
 		return workertest.Fail(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
 			fmt.Sprintf("PromptSuffix payload = %q, want %q", got, want)).WithEvidence(evidence)
@@ -175,6 +193,19 @@ func initialMessageFirstStartResult(tc phase2ProviderCase, prepared *preparedSta
 		return workertest.Pass(tc.profileID, workertest.RequirementInputInitialMessageFirstStart,
 			"configured initial_message is injected into the first start exactly once").WithEvidence(evidence)
 	}
+}
+
+// phase2SystemPromptFamilies is the family-keyed expectation of which
+// canonical profiles pass the rendered prompt as a system-prompt file. Kept as
+// test data, not derived from the provider catalog under test, so the check
+// pins the catalog decision rather than echoing it.
+var phase2SystemPromptFamilies = map[string]bool{"claude": true}
+
+// phase2Beacon is the beacon line the phase-2 fixtures render
+// (resolvePhase2TemplateWithHooks pins cityName and beaconTime), computed
+// independently of TemplateParams.Beacon so the check pins the shape.
+func phase2Beacon(prepared *preparedStart) string {
+	return runtime.FormatBeaconAt("phase2-city", prepared.candidate.tp.Alias, false, time.Unix(0, 0))
 }
 
 func initialMessageResumeResult(tc phase2ProviderCase, prepared *preparedStart) workertest.Result {
@@ -258,17 +289,38 @@ func preClaimResumeRestartResult(tc phase2ProviderCase, prepared *preparedStart)
 	return resumeRestartPromptResult(tc, prepared, workertest.RequirementInputPreClaimResumeRestart, "pre-claim work demand")
 }
 
+// resumeRestartPromptResult checks a resume of a conversation that began with
+// the prompt in its system prompt (the fixture records it so). A profile that
+// passes the prompt as a system-prompt file restarts with the opener, its
+// beacon and the default instruction since no nudge is configured; every
+// other profile ignores the record and replays the base prompt.
 func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, requirement workertest.RequirementCode, label string) workertest.Result {
 	got, evidence, err := phase2PromptPayload(tc, prepared)
 	if err != nil {
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("PromptSuffix encoding invalid: %v", err)).WithEvidence(evidence)
 	}
+	wantSystemPrompt := phase2SystemPromptFamilies[tc.family]
+	want := "Base worker prompt"
 	if prepared != nil {
 		evidence["cfg_prompt_suffix"] = prepared.cfg.PromptSuffix
 		evidence["cfg_prompt_flag"] = prepared.cfg.PromptFlag
 		evidence["cfg_nudge"] = prepared.cfg.Nudge
 		evidence["startup_prompt_delivered"] = prepared.cfg.Env[startupPromptDeliveredEnv]
+		evidence["system_prompt"] = prepared.cfg.SystemPrompt
+		if wantSystemPrompt {
+			want = phase2Beacon(prepared) + "\n\n" + startupOpenerInstruction
+		}
+	}
+	switch {
+	case prepared == nil:
+		return workertest.Fail(tc.profileID, requirement, "prepared start = nil").WithEvidence(evidence)
+	case wantSystemPrompt && prepared.cfg.SystemPrompt != "Base worker prompt":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("SystemPrompt = %q, want the base worker prompt passed on the resume", prepared.cfg.SystemPrompt)).WithEvidence(evidence)
+	case !wantSystemPrompt && prepared.cfg.SystemPrompt != "":
+		return workertest.Fail(tc.profileID, requirement,
+			fmt.Sprintf("SystemPrompt = %q, want none for a provider without a system-prompt file flag", prepared.cfg.SystemPrompt)).WithEvidence(evidence)
 	}
 	switch {
 	case prepared == nil:
@@ -279,9 +331,9 @@ func resumeRestartPromptResult(tc phase2ProviderCase, prepared *preparedStart, r
 	case strings.TrimSpace(prepared.cfg.PromptFlag) != "":
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("PromptFlag = %q, want no flag startup prompt replay on resume", prepared.cfg.PromptFlag)).WithEvidence(evidence)
-	case got != "Base worker prompt":
+	case got != want:
 		return workertest.Fail(tc.profileID, requirement,
-			fmt.Sprintf("restart prompt payload = %q, want base worker prompt", got)).WithEvidence(evidence)
+			fmt.Sprintf("restart prompt payload = %q, want %q", got, want)).WithEvidence(evidence)
 	case strings.Contains(prepared.cfg.Nudge, "Do the first task."):
 		return workertest.Fail(tc.profileID, requirement,
 			fmt.Sprintf("cfg.Nudge = %q, want no replayed initial_message on resume", prepared.cfg.Nudge)).WithEvidence(evidence)

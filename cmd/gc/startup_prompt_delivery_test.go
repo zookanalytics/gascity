@@ -189,6 +189,249 @@ func TestPlanStartupPromptTruthTable(t *testing.T) {
 	}
 }
 
+// TestPlanStartupPromptSystemPromptChannel pins when a launch carries the
+// rendered prompt in the agent's system prompt, and what its first turn is
+// then. Every launch on a provider that declares the flag, on a runtime that
+// passes a file to the agent's CLI, passes the prompt that way, resumes
+// included. A fresh launch routes the opener (beacon, blank line, nudge or the
+// default instruction) where the prompt went before; a resume types the opener
+// only for a conversation that began with the prompt in its system prompt, and
+// replays the prompt for any other. Everything else keeps today's delivery.
+func TestPlanStartupPromptSystemPromptChannel(t *testing.T) {
+	const (
+		beacon = "[city] gascity/worker-1 \u2022 2026-11-22T10:00:00"
+		flag   = "--append-system-prompt-file"
+		claim  = "Claim your work."
+	)
+	prompt := beacon + "\n\n# Role\n\nDo the work."
+	oversized := beacon + "\n\n" + repeatToBytes("a", maxPromptSuffixRawBytes)
+	claude := &config.ResolvedProvider{Name: "claude", PromptMode: "arg", SystemPromptFileFlag: flag}
+	claudeNone := &config.ResolvedProvider{Name: "claude", PromptMode: "none", SystemPromptFileFlag: flag}
+	claudeFlag := &config.ResolvedProvider{Name: "claude", PromptMode: "flag", PromptFlag: "--prompt", SystemPromptFileFlag: flag}
+	switchedOff := &config.ResolvedProvider{Name: "claude", PromptMode: "arg"}
+	opener := func(nudge string) string { return beacon + "\n\n" + nudge }
+	defaultOpener := opener(startupOpenerInstruction)
+	src := func(edit func(*startupPromptSource)) startupPromptSource {
+		s := startupPromptSource{Prompt: prompt, Beacon: beacon, ResolvedProvider: claude, RuntimeName: "tmux", TemplateName: "worker", SessionName: "sess"}
+		if edit != nil {
+			edit(&s)
+		}
+		return s
+	}
+
+	cases := []struct {
+		name       string
+		src        startupPromptSource
+		launch     startupPromptLaunch
+		wantSuffix string
+		wantFlag   string
+		wantNudge  string
+		wantSystem string
+		wantMarked bool
+	}{
+		{
+			name:       "fresh: the prompt rides the system prompt and the opener is the first message",
+			src:        src(nil),
+			wantSuffix: shellquote.Quote(defaultOpener),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh with a nudge: the opener carries it and nothing is typed after",
+			src:        src(func(s *startupPromptSource) { s.HintNudge = claim }),
+			wantSuffix: shellquote.Quote(opener(claim)),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh on the default session provider",
+			src:        src(func(s *startupPromptSource) { s.RuntimeName = "" }),
+			wantSuffix: shellquote.Quote(defaultOpener),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh on herdr",
+			src:        src(func(s *startupPromptSource) { s.RuntimeName = "herdr" }),
+			wantSuffix: shellquote.Quote(defaultOpener),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh none mode types the opener",
+			src:        src(func(s *startupPromptSource) { s.ResolvedProvider = claudeNone; s.HintNudge = claim }),
+			wantNudge:  opener(claim),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh flag mode passes the opener with the prompt flag",
+			src:        src(func(s *startupPromptSource) { s.ResolvedProvider = claudeFlag }),
+			wantSuffix: shellquote.Quote(defaultOpener),
+			wantFlag:   "--prompt",
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "fresh oversized prompt rides the file with no argv fallback",
+			src:        src(func(s *startupPromptSource) { s.Prompt = oversized }),
+			wantSuffix: shellquote.Quote(defaultOpener),
+			wantSystem: oversized,
+			wantMarked: true,
+		},
+		{
+			name:       "resume of a conversation that began with it types only the opener",
+			src:        src(func(s *startupPromptSource) { s.ConversationHasSystemPrompt = true; s.HintNudge = claim }),
+			launch:     startupPromptResumeLaunch,
+			wantNudge:  opener(claim),
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "resume of it with no nudge types the default instruction",
+			src:        src(func(s *startupPromptSource) { s.ConversationHasSystemPrompt = true }),
+			launch:     startupPromptResumeLaunch,
+			wantNudge:  defaultOpener,
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "resume of a conversation that began without it replays the prompt, and the file still rides",
+			src:        src(func(s *startupPromptSource) { s.HintNudge = claim }),
+			launch:     startupPromptResumeLaunch,
+			wantNudge:  prompt + startupPromptNudgeSeparator + claim,
+			wantSystem: prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "a provider whose city switched the flag off keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.ResolvedProvider = switchedOff; s.HintNudge = claim }),
+			wantSuffix: shellquote.Quote(prompt),
+			wantNudge:  claim,
+			wantMarked: true,
+		},
+		{
+			name:       "a switched-off provider's resume keeps today's replay",
+			src:        src(func(s *startupPromptSource) { s.ResolvedProvider = switchedOff; s.ConversationHasSystemPrompt = true }),
+			launch:     startupPromptResumeLaunch,
+			wantNudge:  prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "ACP keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.IsACP = true }),
+			wantNudge:  prompt,
+			wantMarked: true,
+		},
+		{
+			name:       "k8s keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.RuntimeName = "k8s" }),
+			wantSuffix: shellquote.Quote(prompt),
+			wantMarked: true,
+		},
+		{
+			name:       "hybrid keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.RuntimeName = "hybrid" }),
+			wantSuffix: shellquote.Quote(prompt),
+			wantMarked: true,
+		},
+		{
+			name:       "a forked conversation keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.Fork = true }),
+			wantSuffix: shellquote.Quote(prompt),
+			wantMarked: true,
+		},
+		{
+			name:       "a beacon alone keeps today's delivery",
+			src:        src(func(s *startupPromptSource) { s.Prompt = beacon }),
+			wantSuffix: shellquote.Quote(beacon),
+			wantMarked: true,
+		},
+		{
+			name:      "an empty prompt delivers nothing",
+			src:       src(func(s *startupPromptSource) { s.Prompt = ""; s.HintNudge = claim }),
+			wantNudge: claim,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := planStartupPrompt(tc.src, tc.launch)
+			if err != nil {
+				t.Fatalf("planStartupPrompt() unexpected error: %v", err)
+			}
+			if plan.PromptSuffix != tc.wantSuffix {
+				t.Errorf("PromptSuffix = %q, want %q", abbreviate(plan.PromptSuffix), abbreviate(tc.wantSuffix))
+			}
+			if plan.PromptFlag != tc.wantFlag {
+				t.Errorf("PromptFlag = %q, want %q", plan.PromptFlag, tc.wantFlag)
+			}
+			if plan.Nudge != tc.wantNudge {
+				t.Errorf("Nudge = %q, want %q", abbreviate(plan.Nudge), abbreviate(tc.wantNudge))
+			}
+			if plan.SystemPrompt != tc.wantSystem {
+				t.Errorf("SystemPrompt = %q, want %q", abbreviate(plan.SystemPrompt), abbreviate(tc.wantSystem))
+			}
+			wantFileFlag := ""
+			if tc.wantSystem != "" {
+				wantFileFlag = flag
+			}
+			if plan.SystemPromptFileFlag != wantFileFlag {
+				t.Errorf("SystemPromptFileFlag = %q, want %q", plan.SystemPromptFileFlag, wantFileFlag)
+			}
+			if plan.MarkDelivered != tc.wantMarked {
+				t.Errorf("MarkDelivered = %v, want %v", plan.MarkDelivered, tc.wantMarked)
+			}
+			if plan.Delivery.OversizedFallback {
+				t.Errorf("Delivery.OversizedFallback = true, want false")
+			}
+			if tc.launch == startupPromptFreshLaunch && plan.Delivery.Delivered != tc.wantMarked {
+				t.Errorf("Delivery.Delivered = %v, want %v", plan.Delivery.Delivered, tc.wantMarked)
+			}
+		})
+	}
+}
+
+// TestEffectiveSessionProviderIsTheRuntimeTheSessionRunsOn pins the runtime
+// name the startup prompt plan and the prompt-budget diagnostics read. A
+// session the agent does not route to acp runs on the selection its session
+// provider is built from, effectiveProviderName's GC_SESSION over [session]
+// provider, and an agent's tmux override reads as that runtime.
+func TestEffectiveSessionProviderIsTheRuntimeTheSessionRunsOn(t *testing.T) {
+	// onDefault is name where the platform default leaves the selection empty.
+	onDefault := func(name string) string {
+		if sessionProviderRuntimeDefault != "" {
+			return sessionProviderRuntimeDefault
+		}
+		return name
+	}
+	cases := []struct {
+		name, gcSession, override, city, want string
+	}{
+		{name: "nothing selects a runtime", want: onDefault("")},
+		{name: "city.toml names the runtime", city: "k8s", want: "k8s"},
+		{name: "GC_SESSION names a runtime city.toml does not", gcSession: "k8s", want: "k8s"},
+		{name: "GC_SESSION over the runtime city.toml names", gcSession: "tmux", city: "k8s", want: "tmux"},
+		{name: "GC_SESSION names herdr over city.toml's runtime", gcSession: "herdr", city: "subprocess", want: "herdr"},
+		{name: "a tmux override on the runtime city.toml names", override: "tmux", city: "k8s", want: "k8s"},
+		{name: "a tmux override on the runtime GC_SESSION names", override: "tmux", gcSession: "exec:/opt/gc-runtime", want: "exec:/opt/gc-runtime"},
+		{name: "a tmux override where nothing selects a runtime", override: "tmux", want: onDefault("tmux")},
+		{name: "an acp override", override: "acp", gcSession: "k8s", city: "tmux", want: "acp"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", tc.gcSession)
+			if got := effectiveSessionProvider(tc.override, tc.city); got != tc.want {
+				t.Fatalf("effectiveSessionProvider(%q, %q) with GC_SESSION=%q = %q, want %q", tc.override, tc.city, tc.gcSession, got, tc.want)
+			}
+			if tc.override == "" {
+				if got, built := effectiveSessionProvider("", tc.city), effectiveProviderName(tc.city); got != built {
+					t.Fatalf("runtime %q, but the session provider is built from %q", got, built)
+				}
+			}
+		})
+	}
+}
+
 // TestStartupPromptPlanApplyOwnsPayloadAndMarker pins that applyTo is the single
 // writer of the launch payload and the delivered marker, and that it preserves
 // the two behaviors the reconciler relied on before the decision was shared: a
@@ -237,6 +480,33 @@ func TestStartupPromptPlanApplyOwnsPayloadAndMarker(t *testing.T) {
 		}
 		if cfg.Nudge != "hint" {
 			t.Errorf("Nudge = %q, want the hint nudge", cfg.Nudge)
+		}
+	})
+
+	t.Run("a plan writes the system prompt and a plan without one clears it", func(t *testing.T) {
+		src := startupPromptSource{
+			Prompt:           "[c] a \u2022 t\n\n# Role",
+			Beacon:           "[c] a \u2022 t",
+			ResolvedProvider: &config.ResolvedProvider{PromptMode: "arg", SystemPromptFileFlag: "--append-system-prompt-file"},
+			RuntimeName:      "tmux",
+		}
+		plan, err := planStartupPrompt(src, startupPromptFreshLaunch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg runtime.Config
+		plan.applyTo(&cfg)
+		if cfg.SystemPrompt != src.Prompt || cfg.SystemPromptFileFlag != "--append-system-prompt-file" {
+			t.Fatalf("system prompt = %q via %q, want the prompt via the provider flag", cfg.SystemPrompt, cfg.SystemPromptFileFlag)
+		}
+		src.ResolvedProvider = &config.ResolvedProvider{PromptMode: "arg"}
+		plan, err = planStartupPrompt(src, startupPromptResumeLaunch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan.applyTo(&cfg)
+		if cfg.SystemPrompt != "" || cfg.SystemPromptFileFlag != "" {
+			t.Fatalf("a plan without the channel left system prompt %q via %q behind", cfg.SystemPrompt, cfg.SystemPromptFileFlag)
 		}
 	})
 

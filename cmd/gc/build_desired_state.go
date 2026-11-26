@@ -3857,6 +3857,7 @@ func applyClientProviderChatStartupPrompt(bp *agentBuildParams, cfgAgent, resolv
 	}
 	beacon := runtime.FormatBeaconAt(bp.cityName, identity, false, bp.beaconTime)
 	tp.Prompt = composeStartupPrompt(beacon, "", suppressStartupPromptForAgent(resolveAgent))
+	tp.Beacon = beacon
 }
 
 // overlayVerdict is classifyOverlaySession's answer for one open session row.

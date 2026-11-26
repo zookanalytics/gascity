@@ -153,7 +153,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		sessionTransport := config.ResolveSessionCreateTransport(a.Session, resolved)
 		isACP := sessionTransport == config.SessionTransportACP
 
-		delivery, dErr := promptDelivery(prompt, isACP, resolved, "", effProvider, c.cfg.Runtimes)
+		delivery, dErr := budgetPromptDelivery(prompt, isACP, resolved, effProvider, c.cfg.Runtimes)
 		// Report the configured mode in the same vocabulary as
 		// reportPromptDeliveryBudget (gc prime --strict).
 		configuredMode := delivery.ConfiguredMode

@@ -25,3 +25,12 @@ func (i Info) LogicalConversationID() string {
 	}
 	return logical
 }
+
+// SystemPromptCarriesPrompt reports whether the session's current
+// conversation, the one its session key names, began with the agent's
+// rendered prompt in its system prompt (SystemPromptSessionKeyMetadataKey). A
+// session without a key has no conversation to continue.
+func (i Info) SystemPromptCarriesPrompt() bool {
+	key := strings.TrimSpace(i.SessionKey)
+	return key != "" && strings.TrimSpace(i.SystemPromptSessionKey) == key
+}
