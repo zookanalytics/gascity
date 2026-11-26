@@ -472,11 +472,13 @@ func closedSessionWorkerDirReclaim(cityPath string, cfg *config.City, sessions *
 // open row records, such as a successor seat's in the same pool slot, stays.
 // The liveness inputs, the process-table walk and the worktree dirs every open
 // row records, are gathered once, on the first closed row that records a
-// worker_dir. An open-row list that cannot be read leaves them unscanned,
-// which keeps every worktree, and says so on stderr.
+// worker_dir. The open rows are every open session row (session.Store.ListAll),
+// a row that lost its session label included. An open-row list that cannot be
+// read, or reads only in part, leaves the inputs unscanned, which keeps every
+// worktree, and says so on stderr.
 func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *sessionpkg.Store, ids []string, stderr io.Writer) {
 	liveness := sync.OnceValue(func() worktreeLivenessInputs {
-		open, err := sessions.ListLabeledSessionInfosUnfiltered()
+		open, err := sessions.ListAll(sessionpkg.ListAllOptions{})
 		if err != nil {
 			fmt.Fprintf(stderr, "worker_dir prune: listing open sessions: %v\n", err) //nolint:errcheck
 			return worktreeLivenessInputs{}

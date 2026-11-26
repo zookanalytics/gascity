@@ -1142,6 +1142,45 @@ func TestPruneClosedSessionWorkerDirsKeepsAnotherRepositorysDirtyWorktree(t *tes
 	}
 }
 
+// TestPruneClosedSessionWorkerDirsKeepsAFolderALabelLostSessionRecords runs
+// the prune of a closed session whose record asks for it over a real clean and
+// pushed worktree: an open session row that records the same folder keeps it,
+// a suspended row that lost its session label included, and with no such row
+// the folder goes.
+func TestPruneClosedSessionWorkerDirsKeepsAFolderALabelLostSessionRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shared bool
+	}{
+		{name: "a label-lost open session records the folder", shared: true},
+		{name: "no other session records it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "shared"))
+			row := c.session("helper-old", dir, map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"})
+			if tc.shared {
+				if _, err := c.store.Create(beads.Bead{Title: "helper-new", Type: sessionpkg.BeadType, Metadata: map[string]string{
+					"session_name": "helper-new", "template": "demo/helper", "state": "suspended", "work_dir": dir,
+				}}); err != nil {
+					t.Fatalf("create the label-lost session: %v", err)
+				}
+			}
+			if err := c.store.Close(row.ID); err != nil {
+				t.Fatalf("Close(%s): %v", row.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+			assertFolder(t, dir, tc.shared, stderr.String())
+		})
+	}
+}
+
 // TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder runs the
 // prune of a closed session of a city-scoped agent, whose template names no
 // rig, over a real clean and pushed worktree whose record asks for the

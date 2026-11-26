@@ -543,44 +543,39 @@ func (c *closeReleases) pruneAfterStop(ctx context.Context, it intent) {
 var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 
 // pruneLiveness is the liveness snapshot the worker_dir auto-prune consults
-// (gc-9hy4l): the process-table walk plus the worktree dirs every OPEN session
-// row other than closed's records. Gathered per close rather than per pass
-// because a close is rare, and only when auto-prune is enabled: the prune is
-// a no-op otherwise and never reads the inputs. An unreadable row list leaves
-// the session dirs empty; the process walk still gates the prune, and an
-// indeterminate walk makes it fail closed.
+// (gc-9hy4l) for closed, gathered per close rather than per pass because a
+// close is rare (storePruneLiveness).
 func (c *closeReleases) pruneLiveness(store beads.Store, closed beads.Bead) worktreeLivenessInputs {
 	return storePruneLiveness(c.cfg, store, closed.ID)
 }
 
-// storePruneLiveness gathers pruneLiveness's inputs for the session row
-// closedID from the store alone, for close paths that hold no pass snapshot:
-// the v2 close and stop effects, the legacy drain-ack finalize, and the
-// session close and prune commands.
+// storePruneLiveness gathers the worker_dir prune's liveness inputs for the
+// session row closedID from the store alone, for close paths that hold no
+// pass snapshot: the v2 close and stop effects and the legacy drain-ack
+// finalize. The inputs are the process-table walk and the worktree dirs every
+// open session row other than closedID records, a row that lost its session
+// label included (loadOpenSessionInfos, the session store's type-and-label
+// union). An open-row list that cannot be read, or reads only in part, leaves
+// the inputs unscanned, which keeps the worktree, as an indeterminate walk
+// does. With auto-prune off it gathers nothing, since the prune reads nothing.
 func storePruneLiveness(cfg *config.City, store beads.Store, closedID string) worktreeLivenessInputs {
 	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		return worktreeLivenessInputs{}
 	}
-	in := worktreeLivenessInputs{live: collectLiveWorktreeStateFn()}
-	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	open, err := loadOpenSessionInfos(store)
 	if err != nil {
-		return in
+		return worktreeLivenessInputs{}
 	}
-	var open []session.Info
-	for _, r := range rows {
-		if r.ID != closedID && r.Status != "closed" {
-			open = append(open, sessionInfoFromBead(r))
-		}
-	}
-	in.sessionDirs = openSessionWorkDirs(open)
-	return in
+	open = slices.DeleteFunc(open, func(info session.Info) bool { return info.ID == closedID })
+	return worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(open)}
 }
 
 // workDirInUse reports an open session row other than closed's whose work
 // dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),
-// as any of the keys a row records it under: a successor seat a floor
-// started in the same slot keeps its worktree. A read error counts as in
-// use.
+// as any of the keys a row records it under (sessionOwnWorkDirs): a successor
+// seat a floor started in the same slot keeps its worktree. The open rows are
+// loadOpenSessionInfos's, a row that lost its session label included. A list
+// that cannot be read, or reads only in part, counts as in use.
 func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
 	clean := func(dir string) string {
 		if dir = strings.TrimSpace(dir); dir == "" {
@@ -592,20 +587,12 @@ func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool 
 	if dir == "" {
 		return false
 	}
-	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	open, err := loadOpenSessionInfos(store)
 	if err != nil {
 		return true
 	}
-	return slices.ContainsFunc(rows, func(r beads.Bead) bool {
-		if r.ID == closed.ID || r.Status == "closed" {
-			return false
-		}
-		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
-			if clean(r.Metadata[k]) == dir {
-				return true
-			}
-		}
-		return false
+	return slices.ContainsFunc(open, func(info session.Info) bool {
+		return info.ID != closed.ID && slices.ContainsFunc(sessionOwnWorkDirs(info), func(d string) bool { return clean(d) == dir })
 	})
 }
 

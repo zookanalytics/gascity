@@ -931,6 +931,40 @@ func TestCloseEffectEdges(t *testing.T) {
 			}
 		}
 	})
+	t.Run("the prune spares a work dir a successor that lost its session label shares", func(t *testing.T) {
+		origScan := collectLiveWorktreeStateFn
+		collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+		t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+		dir := "/city/.gc/worktrees/repo/worker-1"
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "work_dir", dir)
+		rel := newCloseReleases(c.w, nil, io.Discard)
+		succ := sessionRow("succ", "template", "worker", "session_name", "s-succ", "state", "suspended", "work_dir", dir)
+		succ.Labels = nil
+		if _, err := c.store.Create(succ); err != nil {
+			t.Fatal(err)
+		}
+		if !rel.workDirInUse(c.store, c.row(t)) {
+			t.Fatal("a successor that lost its session label reads not in use: the prune would remove its worktree")
+		}
+		in := storePruneLiveness(&config.City{}, c.store, c.k.ID)
+		if !slices.ContainsFunc(in.sessionDirs, func(d sessionWorkDir) bool { return d.dir == dir }) {
+			t.Fatalf("the prune's liveness inputs %+v omit the dir a successor that lost its session label records", in.sessionDirs)
+		}
+	})
+	t.Run("the prune keeps the work dir when the open rows cannot be listed", func(t *testing.T) {
+		origScan := collectLiveWorktreeStateFn
+		collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+		t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", gatherNow.Add(-time.Hour).Format(time.RFC3339), "work_dir", "/city/.gc/worktrees/repo/worker-1")
+		rel := newCloseReleases(c.w, nil, io.Discard)
+		dark := failingListStore{c.store}
+		if !rel.workDirInUse(dark, c.row(t)) {
+			t.Fatal("an unreadable open-row list reads not in use: the prune would remove a worktree an open row may record")
+		}
+		if in := storePruneLiveness(&config.City{}, dark, c.k.ID); in.live.scanned {
+			t.Fatalf("the prune's liveness inputs %+v read scanned over an unreadable open-row list: the prune would go on without the open rows", in)
+		}
+	})
 	t.Run("an orphan close offers its row to the prune, as a pool-slot close does", func(t *testing.T) {
 		var pruned []string
 		orig := pruneWorktree
