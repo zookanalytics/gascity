@@ -10899,35 +10899,20 @@ esac
 	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nset -eu\ncase \"${1:-}\" in\n  config)\n    exit 0\n    ;;\n  *)\n    exit 1\n    ;;\nesac\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-
-	readyFile := filepath.Join(t.TempDir(), "holder-ready")
-	holder := exec.Command("sh", "-c", `
+	// The start lock stays taken for every attempt the script makes, however
+	// late an attempt comes, so the script always reaches the concurrent-start
+	// wait whose budget this test checks.
+	fakeFlock := filepath.Join(binDir, "flock")
+	fakeFlockScript := `#!/bin/sh
 set -eu
-lock_file="$1"
-ready_file="$2"
-: > "$lock_file"
-exec 9>"$lock_file"
-flock 9
-printf 'ready\n' > "$ready_file"
-sleep 5
-`, "sh", layout.LockFile, readyFile)
-	holder.Env = sanitizedBaseEnv("PATH=" + os.Getenv("PATH"))
-	if err := holder.Start(); err != nil {
-		t.Fatalf("start lock holder: %v", err)
-	}
-	defer func() {
-		_ = holder.Process.Kill()
-		_ = holder.Wait()
-	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(readyFile); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for lock holder to acquire flock")
-		}
-		time.Sleep(25 * time.Millisecond)
+if [ "$#" -ne 2 ] || [ "$1" != "-n" ] || [ "$2" != "9" ]; then
+  echo "unexpected flock args: $*" >&2
+  exit 64
+fi
+exit 1
+`
+	if err := os.WriteFile(fakeFlock, []byte(fakeFlockScript), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	env := sanitizedBaseEnv(

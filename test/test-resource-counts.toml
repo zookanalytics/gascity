@@ -104,7 +104,7 @@ calls = 14
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "fixed_sleep"
-calls = 4
+calls = 3
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
@@ -120,7 +120,7 @@ medium = 1
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "subprocess"
-calls = 51
+calls = 50
 medium = 8
 
 [[count]]
