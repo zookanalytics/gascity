@@ -1066,6 +1066,86 @@ func TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes(t *testing.T) {
 	assertFolder(t, unset, true, "")
 }
 
+// TestPruneClosedSessionWorkerDirsKeepsAnotherRepositorysDirtyWorktree runs
+// the prune over a real clean and pushed worktree of the rig whose ignored
+// worktrees/ folder holds a worktree of another repository, which the rig's
+// repository does not list: with uncommitted changes in it, the folder stays
+// and so do the changes, clean, the folder goes, and clean but provisioned by
+// gc worktree ensure, whose path check reads only its own repository's
+// worktrees, the folder stays and the provisioned worktree stays intact.
+func TestPruneClosedSessionWorkerDirsKeepsAnotherRepositorysDirtyWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dirty   bool
+		managed bool
+		stays   bool
+	}{
+		{name: "with uncommitted changes", dirty: true, stays: true},
+		{name: "clean"},
+		{name: "clean and provisioned by gc worktree ensure", managed: true, stays: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "outer"))
+			bare := t.TempDir()
+			runGit(t, bare, "init", "--bare")
+			other := t.TempDir()
+			runGit(t, other, "clone", bare, ".")
+			runGit(t, other, "config", "user.email", "test@test.com")
+			runGit(t, other, "config", "user.name", "Test")
+			runGit(t, other, "commit", "--allow-empty", "-m", "init")
+			runGit(t, other, "push", "origin", "HEAD")
+			root := filepath.Join(dir, "worktrees")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", root, err)
+			}
+			nested := filepath.Join(root, "other-change")
+			var spec worktree.Spec
+			if tc.managed {
+				spec = worktree.Spec{
+					RepoDir: other, Root: root, Path: nested, Branch: "work/other-change",
+					Base:   strings.TrimSpace(runGit(t, other, "rev-parse", "--abbrev-ref", "HEAD")),
+					BeadID: "gc-work", StoreRef: "rig:other", Creator: "provisioner", Owner: "provisioner",
+					Generation: "g1", Lifecycle: worktree.LifecycleActive,
+				}
+				report, err := worktree.Ensure(spec)
+				if err != nil {
+					t.Fatalf("Ensure managed worktree: %v", err)
+				}
+				spec.BaseSHA = report.Provenance.BaseSHA
+			} else {
+				runGit(t, other, "worktree", "add", "--detach", nested)
+			}
+			draft := filepath.Join(nested, "draft.txt")
+			if tc.dirty {
+				if err := os.WriteFile(draft, []byte("unsaved\n"), 0o644); err != nil {
+					t.Fatalf("write draft: %v", err)
+				}
+			}
+			row := c.session("helper-outer", dir, map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"})
+			if err := c.store.Close(row.ID); err != nil {
+				t.Fatalf("Close(%s): %v", row.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+			assertFolder(t, dir, tc.stays, stderr.String())
+			if tc.dirty {
+				if data, err := os.ReadFile(draft); err != nil || string(data) != "unsaved\n" {
+					t.Fatalf("the nested worktree's change = %q, %v; want it kept; stderr=%q", data, err, stderr.String())
+				}
+			}
+			if tc.managed {
+				assertManagedWorktreeIntact(t, spec, stderr.String())
+			}
+		})
+	}
+}
+
 // TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder runs the
 // prune of a closed session of a city-scoped agent, whose template names no
 // rig, over a real clean and pushed worktree whose record asks for the

@@ -168,26 +168,57 @@ func sessionRecordPrunesWorkerDir(info sessionpkg.Info, workerDir string, cfg *c
 	return prune
 }
 
-// nestedWorktreeRefusal reports why workerDir must stay because another
-// worktree its repository registers sits beneath it with uncommitted changes,
-// or "" when none does. A session started by hand can cut a change's
-// worktree inside its own folder, and removing the folder deletes that tree's
-// files with it; commits survive in the repository, uncommitted changes do
-// not. A list that cannot be read keeps the folder.
-func nestedWorktreeRefusal(gp gitProbe, workerDir string) string {
-	entries, err := gp.WorktreeList()
+// nestedCheckoutRefusal reports why workerDir must stay because a git
+// checkout beneath it holds work that removing the folder would lose, or ""
+// when none does. `git worktree remove --force` deletes everything under the
+// folder, ignored paths included, and the folder's own status cannot see a
+// checkout under an ignored path, so the walk reads every `.git` beneath the
+// folder, whichever repository it belongs to. A session started by hand can
+// cut a change's worktree, of any repository, inside its own folder. A
+// worktree (a `.git` file) keeps the folder while it has uncommitted changes,
+// or while its state cannot be read: its commits live in its repository,
+// outside the folder. A worktree `gc worktree ensure` provisioned keeps it
+// too, as managedWorktreeRefusal keeps the folder itself, because only its
+// owner removes it, and the provisioner refuses a path inside a registered
+// worktree of its own repository only. A clone (a `.git` directory) always
+// keeps the folder, because removing the folder deletes the clone's
+// repository with every commit, branch and stash in it. A directory the walk
+// cannot read keeps the folder.
+func nestedCheckoutRefusal(workerDir string) string {
+	root := filepath.Clean(workerDir)
+	var refusal string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Name() != ".git" {
+			return nil
+		}
+		checkout := filepath.Dir(path)
+		switch {
+		case checkout == root && d.IsDir():
+			return fs.SkipDir // the folder's own repository
+		case checkout == root:
+			return nil
+		case d.IsDir():
+			refusal = fmt.Sprintf("clone %s beneath it would be deleted with its repository", checkout)
+			return fs.SkipAll
+		}
+		gp := newGitProbe(checkout)
+		if reason := managedWorktreeRefusal(gp); reason != "" {
+			refusal = fmt.Sprintf("worktree %s beneath it: %s", checkout, reason)
+			return fs.SkipAll
+		}
+		if gp.HasUncommittedWork() {
+			refusal = fmt.Sprintf("checkout %s beneath it has uncommitted changes, or its state cannot be read", checkout)
+			return fs.SkipAll
+		}
+		return nil
+	})
 	if err != nil {
-		return fmt.Sprintf("cannot list its repository's worktrees: %v", err)
+		return fmt.Sprintf("cannot read every checkout beneath it: %v", err)
 	}
-	for _, e := range entries {
-		if pathutil.SamePath(e.Path, workerDir) || !pathutil.PathWithin(workerDir, e.Path) {
-			continue
-		}
-		if newGitProbe(e.Path).HasUncommittedWork() {
-			return fmt.Sprintf("worktree %s beneath it has uncommitted changes", e.Path)
-		}
-	}
-	return ""
+	return refusal
 }
 
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
@@ -237,6 +268,8 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - a live process, or a different open session, is working at or beneath the
 //     worker_dir, or the liveness scan is indeterminate (fails closed)
 //   - the worktree has uncommitted changes or unpushed commits
+//   - a git checkout beneath it holds work the removal would lose, or the
+//     folder cannot be read whole (nestedCheckoutRefusal)
 //   - the worktree's repository cannot list its worktrees
 //
 // Removal failures are logged but never surfaced — an orphaned worktree
@@ -297,7 +330,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return false
 	}
-	if reason := nestedWorktreeRefusal(gp, workerDir); reason != "" {
+	if reason := nestedCheckoutRefusal(workerDir); reason != "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
 		return false
 	}
@@ -376,7 +409,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return
 	}
-	if reason := nestedWorktreeRefusal(gp, workerDir); reason != "" {
+	if reason := nestedCheckoutRefusal(workerDir); reason != "" {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, reason) //nolint:errcheck
 		return
 	}

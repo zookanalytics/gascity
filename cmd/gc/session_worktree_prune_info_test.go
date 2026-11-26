@@ -631,33 +631,55 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_FollowsTheSessionsRecord(t *testing.T)
 }
 
 // TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree pins
-// the nested-worktree gate: a folder that holds another registered worktree
-// with uncommitted changes stays, a clean one does not keep it, and a
-// worktree list that cannot be read keeps it.
+// the nested-checkout gate, which reads every .git beneath the folder,
+// whichever repository it belongs to: a nested worktree (a .git file) with
+// uncommitted changes keeps the folder and a clean one does not, one whose
+// provenance cannot be read keeps it, a nested clone (a .git directory) always
+// keeps it, and so does a directory the walk cannot read.
 func TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		dirty     bool
-		listErr   error
-		wantPrune bool
-		wantLog   string
+		name       string
+		dirty      bool // the nested worktree has uncommitted changes
+		gitDirErr  bool // the nested worktree's private git directory cannot be read
+		clone      bool // the nested checkout is a clone, not a worktree
+		unreadable bool // a directory in the folder cannot be read
+		wantPrune  bool
+		wantLog    string
 	}{
 		{name: "a nested worktree with uncommitted changes", dirty: true, wantLog: "has uncommitted changes"},
 		{name: "a clean nested worktree", wantPrune: true},
-		{name: "an unreadable worktree list", listErr: errors.New("git worktree list failed"), wantLog: "cannot list its repository's worktrees"},
+		{name: "a nested worktree whose provenance cannot be read", gitDirErr: true, wantLog: "cannot read its worktree provenance"},
+		{name: "a nested clone", clone: true, wantLog: "would be deleted with its repository"},
+		{name: "a directory the walk cannot read", unreadable: true, wantLog: "cannot read every checkout beneath it"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.unreadable && os.Geteuid() == 0 {
+				t.Skip("root reads a directory whatever its mode")
+			}
 			fx := newPruneFixture(t)
 			nested := filepath.Join(fx.workerDir, "worktrees", "gc-change")
-			sibling := filepath.Join(filepath.Dir(fx.workerDir), "polecat-4")
-			fx.setProbe(fx.workerDir, &fakeGitProbe{
-				isRepo:          true,
-				worktrees:       []git.Worktree{{Path: fx.rigRoot}, {Path: fx.workerDir}, {Path: sibling}, {Path: nested}},
-				worktreeListErr: tc.listErr,
-			})
-			// A dirty sibling outside the folder never keeps it.
-			fx.setProbe(sibling, &fakeGitProbe{isRepo: true, hasUncommitted: true})
-			fx.setProbe(nested, &fakeGitProbe{isRepo: true, hasUncommitted: tc.dirty})
+			if err := os.MkdirAll(nested, 0o755); err != nil {
+				t.Fatalf("mkdir nested checkout: %v", err)
+			}
+			if tc.clone {
+				if err := os.Mkdir(filepath.Join(nested, ".git"), 0o755); err != nil {
+					t.Fatalf("mkdir nested .git: %v", err)
+				}
+			} else if err := os.WriteFile(filepath.Join(nested, ".git"), []byte("gitdir: /other/repo/.git/worktrees/gc-change\n"), 0o644); err != nil {
+				t.Fatalf("write nested .git: %v", err)
+			}
+			if tc.unreadable {
+				locked := filepath.Join(fx.workerDir, "locked")
+				if err := os.Mkdir(locked, 0o000); err != nil {
+					t.Fatalf("mkdir unreadable dir: %v", err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+			}
+			nestedProbe := &fakeGitProbe{isRepo: true, hasUncommitted: tc.dirty}
+			if tc.gitDirErr {
+				nestedProbe.gitDirErr = errors.New("git rev-parse --git-dir failed")
+			}
+			fx.setProbe(nested, nestedProbe)
 			rigProbe := &fakeGitProbe{isRepo: true}
 			fx.setProbe(fx.rigRoot, rigProbe)
 
