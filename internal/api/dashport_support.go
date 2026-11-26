@@ -299,6 +299,10 @@ func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvi
 	return hints, nil
 }
 
+// ReclaimClosedSessions removes nothing: a seeded city's sessions have no
+// worker_dir on disk.
+func (s *seededState) ReclaimClosedSessions([]string) {}
+
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.
 func (s *seededState) RawConfig() *config.City { return s.cfg }

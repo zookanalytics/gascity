@@ -96,6 +96,8 @@ type fakeState struct {
 	// hints unchanged — a state with no startup prompt to deliver — so tests that
 	// do not care about prompt delivery are unaffected.
 	startupPromptFn func(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
+	// reclaimed records every ReclaimClosedSessions call's ids, in order.
+	reclaimed [][]string
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -396,6 +398,10 @@ func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.Resol
 		return f.startupPromptFn(info, resolved, transport, hints)
 	}
 	return hints, nil
+}
+
+func (f *fakeState) ReclaimClosedSessions(ids []string) {
+	f.reclaimed = append(f.reclaimed, append([]string(nil), ids...))
 }
 
 func (f *fakeState) RawConfig() *config.City {

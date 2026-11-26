@@ -957,9 +957,15 @@ func (c *cliPruneCity) worktree(path string) string {
 // session creates a manual helper session working in dir, with meta added.
 func (c *cliPruneCity) session(name, dir string, meta map[string]string) beads.Bead {
 	c.t.Helper()
+	return c.sessionIn(c.store, name, dir, meta)
+}
+
+// sessionIn is session, written through store.
+func (c *cliPruneCity) sessionIn(store beads.Store, name, dir string, meta map[string]string) beads.Bead {
+	c.t.Helper()
 	m := map[string]string{"session_name": name, "template": "demo/helper", "session_origin": "manual", "work_dir": dir}
 	maps.Copy(m, meta)
-	b, err := c.store.Create(beads.Bead{Title: name, Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: m})
+	b, err := store.Create(beads.Bead{Title: name, Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: m})
 	if err != nil {
 		c.t.Fatalf("create session %s: %v", name, err)
 	}
@@ -1015,4 +1021,44 @@ func TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords(t *testing
 			assertFolder(t, dir, tc.shared, stderr.String())
 		})
 	}
+}
+
+// TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes pins the API's
+// side of the worker_dir prune: the API's worker factories hand the rows an API
+// close closed to controllerState.ReclaimClosedSessions, which runs the prune
+// gc session close's session manager runs (closedSessionWorkerDirReclaim). A
+// closed session whose record asks for it loses its clean folder, one whose
+// folder holds uncommitted changes keeps it, and so does one whose agent sets
+// nothing. The sessions are written through the controller's sessions store,
+// where the API's closes write them.
+func TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes(t *testing.T) {
+	c := newCLIPruneCity(t)
+	cfg, err := loadCityConfig(c.cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	cs := &controllerState{cityPath: c.cityDir, cityBeadStore: c.store, cfg: cfg}
+	sessions := cs.Stores().Sessions().Store
+	asks := map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"}
+	clean := c.worktree(filepath.Join(c.helperWT, "clean"))
+	dirty := c.worktree(filepath.Join(c.helperWT, "dirty"))
+	if err := os.WriteFile(filepath.Join(dirty, "draft.txt"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatalf("write draft: %v", err)
+	}
+	unset := c.worktree(filepath.Join(c.helperWT, "unset"))
+	var ids []string
+	for _, s := range []struct {
+		dir  string
+		meta map[string]string
+	}{{clean, asks}, {dirty, asks}, {unset, nil}} {
+		b := c.sessionIn(sessions, "helper-"+filepath.Base(s.dir), s.dir, s.meta)
+		if err := sessions.Close(b.ID); err != nil {
+			t.Fatalf("Close(%s): %v", b.ID, err)
+		}
+		ids = append(ids, b.ID)
+	}
+	cs.ReclaimClosedSessions(ids)
+	assertFolder(t, clean, false, "")
+	assertFolder(t, dirty, true, "")
+	assertFolder(t, unset, true, "")
 }
