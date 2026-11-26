@@ -999,21 +999,21 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(info.ID)
 			}
 			recordStopped(true)
-			// Reclaim the worker worktree when the retired row's record asks
+			// Reclaim the worker worktree when the closed row's record asks
 			// for it (sessionRecordPrunesWorkerDir; unset, a pool-managed
 			// session's goes, since pool worktrees are transient by design),
 			// same as the stranded-repair and pool-freeable close paths below.
-			// Skipped under safety gates (uncommitted, unpushed) and
-			// overridable via cfg.Daemon.AutoPruneWorkerDir (gascity#8093). The liveness
-			// inputs are gathered here, from the store, because a drain-ack
-			// close is rare and this path holds no pass snapshot; the gather
-			// is skipped when auto-prune is off or the row records no
-			// worker_dir, and an indeterminate scan fails closed (gc-9hy4l).
-			var pruneLiveness worktreeLivenessInputs
-			if sessionpkg.WorkerDirFromInfo(info) != "" {
-				pruneLiveness = storePruneLiveness(cfg, store, info.ID)
-			}
-			pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, pruneLiveness, stderr)
+			// pruneClosedRowWorkerDir reads the closed row again, so a record
+			// written after the caller's Info was read decides. Skipped under
+			// safety gates (uncommitted, unpushed) and overridable via
+			// cfg.Daemon.AutoPruneWorkerDir (gascity#8093). The liveness
+			// inputs are gathered from the store, because a drain-ack close is
+			// rare and this path holds no pass snapshot, and only for a row
+			// that records a worker_dir; an indeterminate scan fails closed
+			// (gc-9hy4l).
+			pruneClosedRowWorkerDir(sessionFrontDoor(store), info.ID, cityPath, cfg, func() worktreeLivenessInputs {
+				return storePruneLiveness(cfg, store, info.ID)
+			}, stderr)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
@@ -2570,7 +2570,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// the Step-6d front-door cutover. Guarded by
 						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickClose.
 						tick.markClosed(id)
-						pruneClosedRowWorkerDir(infoByID[id], cityPath, cfg, pruneLiveness, stderr)
+						pruneClosedRowWorkerDir(sessFront, id, cityPath, cfg, pruneLiveness, stderr)
 					}
 					if trace != nil {
 						outcome := TraceOutcomeClosed
@@ -3016,7 +3016,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 						if closeSeat(store, sw, infoByID[id], closeWhy{reason: reason, gate: closeReleasing, preserve: preserve}, clk.Now().UTC(), stderr) {
 							tick.markClosed(id)
-							pruneClosedRowWorkerDir(infoByID[id], cityPath, cfg, pruneLiveness, stderr)
+							pruneClosedRowWorkerDir(sessFront, id, cityPath, cfg, pruneLiveness, stderr)
 							fmt.Fprintf(stdout, "Recycled dead named-session phantom '%s' (squats configured identity %q; process gone)\n", name, identity) //nolint:errcheck
 							if trace != nil {
 								trace.RecordDecision(TraceSiteReconcilerRecycleNamedPhantom, TraceReasonCode(reason), TraceOutcomeRecycled, template, name, traceRecordPayload{
@@ -3069,7 +3069,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// pre-close Info. Guarded by
 						// TestReconcileSessionBeads_MinFloorCountReflectsMidTickCloseOrphan.
 						tick.markClosed(id)
-						pruneClosedRowWorkerDir(infoByID[id], cityPath, cfg, pruneLiveness, stderr)
+						pruneClosedRowWorkerDir(sessFront, id, cityPath, cfg, pruneLiveness, stderr)
 					}
 					if trace != nil {
 						outcome := TraceOutcomeClosed
@@ -5315,7 +5315,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if !storeQueryPartial &&
 				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], clk, stderr) {
 				tick.markClosed(target.info.ID)
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, pruneLiveness(), stderr)
+				pruneClosedRowWorkerDir(sessFront, target.info.ID, cityPath, cfg, pruneLiveness, stderr)
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
@@ -5340,7 +5340,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// still live in the tree or under the safety gates (uncommitted,
 				// unpushed) and overridable via
 				// cfg.Daemon.AutoPruneWorkerDir.
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, pruneLiveness(), stderr)
+				pruneClosedRowWorkerDir(sessFront, target.info.ID, cityPath, cfg, pruneLiveness, stderr)
 			}
 		}
 	}

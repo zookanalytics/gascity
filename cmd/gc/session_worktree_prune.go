@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -426,13 +427,27 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck
 }
 
-// pruneClosedRowWorkerDir is the legacy reconciler's prune of a row it just
-// closed (a failed create, a dead named-session phantom, an orphan): when the
-// row records a worker_dir, it gathers the pass's liveness once through
-// liveness and hands the row to pruneAgentHomeWorktreeIfSafeInfo, which its
-// record decides. A row with no worker_dir costs no process-table walk.
-func pruneClosedRowWorkerDir(info sessionpkg.Info, cityPath string, cfg *config.City, liveness func() worktreeLivenessInputs, stderr io.Writer) {
-	if sessionpkg.WorkerDirFromInfo(info) == "" {
+// pruneClosedRowWorkerDir is the worker_dir prune a close path runs once it
+// has closed the session row id: the legacy reconciler's closes, and the
+// session manager's after a session close or prune
+// (pruneClosedSessionWorkerDirs). It reads the row again, so the removal
+// follows the record the closed row holds, a prune_worker_dir written after
+// the caller's snapshot included, and hands that row to pruneWorktree
+// (pruneAgentHomeWorktreeIfSafeInfo), which decides the removal and every
+// safety gate. liveness is gathered only for a closed row that records a
+// worker_dir, so another close costs no process-table walk. A row that
+// reopened since or cannot be read keeps its worktree, and a city whose
+// auto-prune is off reads nothing.
+func pruneClosedRowWorkerDir(sessions *sessionpkg.Store, id, cityPath string, cfg *config.City, liveness func() worktreeLivenessInputs, stderr io.Writer) {
+	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
+		return
+	}
+	info, err := sessions.Get(id)
+	if err != nil {
+		fmt.Fprintf(stderr, "worker_dir prune: reading closed session %s: %v\n", id, err) //nolint:errcheck
+		return
+	}
+	if !info.Closed || sessionpkg.WorkerDirFromInfo(info) == "" {
 		return
 	}
 	pruneWorktree(info, cityPath, cfg, liveness(), stderr)
@@ -451,41 +466,25 @@ func closedSessionWorkerDirReclaim(cityPath string, cfg *config.City, sessions *
 }
 
 // pruneClosedSessionWorkerDirs prunes the worker worktree of each session row
-// in ids that a session manager closed (closedSessionWorkerDirReclaim), when
-// the row's record asks for it: pruneAgentHomeWorktreeIfSafeInfo decides that
-// and every safety gate. A row that reopened since keeps its worktree, and so
-// does one whose worktree an open row records, such as a successor seat in the
-// same pool slot. The liveness inputs, the process-table walk and the worktree
-// dirs every open row records, are gathered once, and only when a closed row
-// records a worker_dir. A read error keeps the row's worktree and says so on
-// stderr.
+// in ids that a session manager closed (closedSessionWorkerDirReclaim), as
+// pruneClosedRowWorkerDir does for one row, so a row's worktree goes only when
+// its closed record asks for it and every safety gate passes. A worktree an
+// open row records, such as a successor seat's in the same pool slot, stays.
+// The liveness inputs, the process-table walk and the worktree dirs every open
+// row records, are gathered once, on the first closed row that records a
+// worker_dir. An open-row list that cannot be read leaves them unscanned,
+// which keeps every worktree, and says so on stderr.
 func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *sessionpkg.Store, ids []string, stderr io.Writer) {
-	if cfg == nil || !cfg.Daemon.AutoPruneWorkerDirEnabled() {
-		return
-	}
-	var (
-		liveness worktreeLivenessInputs
-		gathered bool
-	)
-	for _, id := range ids {
-		info, err := sessions.Get(id)
+	liveness := sync.OnceValue(func() worktreeLivenessInputs {
+		open, err := sessions.ListLabeledSessionInfosUnfiltered()
 		if err != nil {
-			fmt.Fprintf(stderr, "worker_dir prune: reading closed session %s: %v\n", id, err) //nolint:errcheck
-			continue
+			fmt.Fprintf(stderr, "worker_dir prune: listing open sessions: %v\n", err) //nolint:errcheck
+			return worktreeLivenessInputs{}
 		}
-		if !info.Closed || sessionpkg.WorkerDirFromInfo(info) == "" {
-			continue
-		}
-		if !gathered {
-			open, err := sessions.ListLabeledSessionInfosUnfiltered()
-			if err != nil {
-				fmt.Fprintf(stderr, "worker_dir prune: listing open sessions: %v\n", err) //nolint:errcheck
-				return
-			}
-			liveness = worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(open)}
-			gathered = true
-		}
-		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, liveness, stderr)
+		return worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(open)}
+	})
+	for _, id := range ids {
+		pruneClosedRowWorkerDir(sessions, id, cityPath, cfg, liveness, stderr)
 	}
 }
 

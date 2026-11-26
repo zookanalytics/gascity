@@ -132,20 +132,15 @@ func finishInterruptedClose(
 		return rollBackInterruptedClose(store, info, cause, trace, clk.Now(), stderr), false
 	}
 	if info.MetadataState == strandedRepairCloseReason || interruptedClosePassthroughCodes[info.MetadataState] {
-		// The liveness inputs are gathered here rather than once per pass
-		// because an interrupted close is rare: the process-table walk is
-		// only paid when one actually finishes, and only when auto-prune is
-		// enabled and the row records a worker_dir (the prune is a no-op
-		// otherwise and never consults the inputs). An indeterminate scan
-		// makes the prune fail closed.
-		var pruneLiveness worktreeLivenessInputs
-		if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() && sessionpkg.WorkerDirFromInfo(info) != "" {
-			pruneLiveness = worktreeLivenessInputs{
-				live:        collectLiveWorktreeStateFn(),
-				sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
-			}
-		}
-		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, pruneLiveness, stderr)
+		// pruneClosedRowWorkerDir reads the closed row again, so the record
+		// it holds decides. The liveness inputs are gathered here rather than
+		// once per pass because an interrupted close is rare: the
+		// process-table walk is only paid when one actually finishes, and
+		// only when auto-prune is enabled and the row records a worker_dir.
+		// An indeterminate scan makes the prune fail closed.
+		pruneClosedRowWorkerDir(sessionFrontDoor(store), info.ID, cityPath, cfg, func() worktreeLivenessInputs {
+			return worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(snapshot.OpenInfos())}
+		}, stderr)
 	}
 	fmt.Fprintf(stderr, "WARN: reconciler: finished interrupted %q close of session bead %s — runtime not running\n", info.MetadataState, info.ID) //nolint:errcheck
 	recordInterruptedClose(trace, info, TraceOutcomeClosed, traceRecordPayload{

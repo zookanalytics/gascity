@@ -697,12 +697,15 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree(t *t
 
 // TestReconcileSessionBeads_OrphanCloseOffersTheRowToThePrune pins that the
 // legacy reconciler's orphan close, as v2's does, offers the closed row to
-// the worker_dir prune, which the row's record decides.
+// the worker_dir prune, which the row's record decides: the record the closed
+// row holds, not the pass's snapshot of it. The snapshot asks for the
+// removal, and a keep written after the snapshot was read and before the
+// close is what the prune receives.
 func TestReconcileSessionBeads_OrphanCloseOffersTheRowToThePrune(t *testing.T) {
-	var pruned []string
+	var pruned []sessionpkg.Info
 	orig := pruneWorktree
 	pruneWorktree = func(info sessionpkg.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
-		pruned = append(pruned, info.ID)
+		pruned = append(pruned, info)
 	}
 	t.Cleanup(func() { pruneWorktree = orig })
 	origScan := collectLiveWorktreeStateFn
@@ -712,19 +715,28 @@ func TestReconcileSessionBeads_OrphanCloseOffersTheRowToThePrune(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	orphan := env.createSessionBead("worker-orphan", "worker")
-	if err := env.store.SetMetadata(orphan.ID, "work_dir", "/city/.gc/worktrees/repo/worker-orphan"); err != nil {
-		t.Fatalf("SetMetadata(work_dir): %v", err)
+	if err := env.store.SetMetadataBatch(orphan.ID, map[string]string{
+		"work_dir":                           "/city/.gc/worktrees/repo/worker-orphan",
+		sessionpkg.PruneWorkerDirMetadataKey: "true",
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
 	}
-	orphan, err := env.store.Get(orphan.ID)
+	snapshot, err := env.store.Get(orphan.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", orphan.ID, err)
 	}
-	env.reconcile([]beads.Bead{orphan})
+	if err := env.store.SetMetadata(orphan.ID, sessionpkg.PruneWorkerDirMetadataKey, "false"); err != nil {
+		t.Fatalf("SetMetadata(%s): %v", sessionpkg.PruneWorkerDirMetadataKey, err)
+	}
+	env.reconcile([]beads.Bead{snapshot})
 
 	if got, err := env.store.Get(orphan.ID); err != nil || got.Status != "closed" {
 		t.Fatalf("orphan %s = %+v, %v; want closed through the orphan path", orphan.ID, got, err)
 	}
-	if len(pruned) != 1 || pruned[0] != orphan.ID {
+	if len(pruned) != 1 || pruned[0].ID != orphan.ID {
 		t.Fatalf("pruned %v, want the closed orphan %s offered once", pruned, orphan.ID)
+	}
+	if !pruned[0].Closed || pruned[0].PruneWorkerDir != "false" {
+		t.Fatalf("the prune received closed=%v prune_worker_dir=%q, want the closed row's own keep, not the snapshot's ask", pruned[0].Closed, pruned[0].PruneWorkerDir)
 	}
 }

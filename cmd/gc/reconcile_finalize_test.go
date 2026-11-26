@@ -166,6 +166,55 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 	}
 }
 
+// TestFinalizeDrainAckStoppedSession_KeepsTheWorkerDirItsClosedRowKeeps pins
+// that the drain-ack prune follows the record the closed row holds, not the
+// Info its caller read: the Info is of a pool-managed session with no record,
+// whose folder goes by default, and a keep written after that read and before
+// the close keeps the folder. TestFinalizeDrainAckStoppedSession_PrunesWorkerDir
+// is the same fixture with no keep written.
+func TestFinalizeDrainAckStoppedSession_KeepsTheWorkerDirItsClosedRowKeeps(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rigRoot := filepath.Join(env.city, "repos", "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rigRoot: %v", err)
+	}
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", Dir: "demo"}},
+		Rigs:   []config.Rig{{Name: "demo", Path: rigRoot}},
+	}
+	b := env.createSessionBead("worker", "demo/worker")
+	workerDir := filepath.Join(env.city, ".gc", "worktrees", "demo", "worker-1")
+	if err := os.MkdirAll(workerDir, 0o755); err != nil {
+		t.Fatalf("mkdir workerDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workerDir, ".git"), []byte("gitdir: /fake\n"), 0o644); err != nil {
+		t.Fatalf("write .git marker: %v", err)
+	}
+	env.setSessionMetadata(&b, map[string]string{"session_key": "k-1", "worker_dir": workerDir, "pool_managed": "true"})
+
+	probe := &fakeGitProbe{isRepo: true, worktrees: []git.Worktree{{Path: rigRoot}, {Path: workerDir}}}
+	orig := newGitProbe
+	t.Cleanup(func() { newGitProbe = orig })
+	newGitProbe = func(_ string) gitProbe { return probe }
+	stubLiveScan(t, liveWorktreeState{scanned: true})
+
+	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
+	info := env.sessionInfo(b.ID)
+	env.setSessionMetadata(&b, map[string]string{session.PruneWorkerDirMetadataKey: "false"})
+	finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), info, "worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
+
+	got, err := env.store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", got.Status)
+	}
+	if probe.removeInvoked {
+		t.Fatal("drain-ack close removed the worker_dir its closed row keeps")
+	}
+}
+
 // TestFinalizeDrainAckStoppedSession_KeepsWorkerDirWhenScanIndeterminate pins
 // the liveness gate on the drain-ack prune (gc-9hy4l): the close still lands,
 // but a process-table scan that could not run leaves the worktree in place.

@@ -1011,16 +1011,12 @@ func TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords(t *testing
 			if err := c.store.Close(closing.ID); err != nil {
 				t.Fatalf("Close(%s): %v", closing.ID, err)
 			}
-			closed, err := c.store.Get(closing.ID)
-			if err != nil {
-				t.Fatalf("Get(%s): %v", closing.ID, err)
-			}
 			cfg, err := loadCityConfig(c.cityDir)
 			if err != nil {
 				t.Fatalf("loadCityConfig: %v", err)
 			}
 			var stderr bytes.Buffer
-			pruneClosedRowWorkerDir(sessionInfoFromBead(closed), c.cityDir, cfg, func() worktreeLivenessInputs { return pass }, &stderr)
+			pruneClosedRowWorkerDir(sessionFrontDoor(c.store), closing.ID, c.cityDir, cfg, func() worktreeLivenessInputs { return pass }, &stderr)
 			assertFolder(t, dir, tc.shared, stderr.String())
 		})
 	}
