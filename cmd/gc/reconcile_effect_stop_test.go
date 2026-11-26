@@ -536,6 +536,8 @@ func TestStopCloseOffersTheClosedRowToThePrune(t *testing.T) {
 	origScan := collectLiveWorktreeStateFn
 	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
 	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+	origPrune := pruneWorktree
+	t.Cleanup(func() { pruneWorktree = origPrune })
 	for _, c := range []struct {
 		name   string
 		entry  func(*selectionEntry)
@@ -545,14 +547,12 @@ func TestStopCloseOffersTheClosedRowToThePrune(t *testing.T) {
 		{"a stop that leaves it drained", wanted, false},
 	} {
 		var pruned []string
-		orig := pruneWorktree
 		pruneWorktree = func(info session.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
 			pruned = append(pruned, info.ID)
 		}
 		s, got, _ := stopRun(t, signaled(drainOrphaned, "work_dir", "/city/.gc/worktrees/repo/worker-1"), c.entry, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
 			p.held.release = &closeReleases{stores: map[string]beads.Store{rowLeg: store}, cfg: &config.City{}, stderr: io.Discard}
 		})
-		pruneWorktree = orig
 		if closed := got.Status == "closed"; s.Outcome != settledLanded || closed != c.closed {
 			t.Fatalf("%s: settlement %+v, status %s; want closed=%v", c.name, s, got.Status, c.closed)
 		}
