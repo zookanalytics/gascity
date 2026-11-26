@@ -129,7 +129,7 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 		t.Fatalf("write .git marker: %v", err)
 	}
 	// A pool-managed session, whose folder goes by default when its record
-	// closes (config.Agent.PruneWorkerDirEnabled).
+	// closes (session.PrunesWorkerDirAtClose).
 	env.setSessionMetadata(&b, map[string]string{
 		"session_key":  "k-1",
 		"worker_dir":   workerDir,

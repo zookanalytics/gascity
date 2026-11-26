@@ -39,6 +39,27 @@ func RecordedPruneWorkerDir(info Info) (prune, recorded bool, err error) {
 	return prune, true, nil
 }
 
+// PrunesWorkerDirAtClose decides whether the close of the session info
+// describes removes its worker_dir. The session's own prune_worker_dir record
+// decides first (RecordedPruneWorkerDir), then agentSetting, its agent's
+// prune_worker_dir, and with neither set, whether the session is pool-managed:
+// a pool session's folder goes and any other session's stays. A record that
+// does not parse keeps the folder and returns the parse error. Whether the
+// removal is safe is the caller's to check.
+func PrunesWorkerDirAtClose(info Info, agentSetting *bool, poolManaged bool) (bool, error) {
+	prune, recorded, err := RecordedPruneWorkerDir(info)
+	switch {
+	case err != nil:
+		return false, err
+	case recorded:
+		return prune, nil
+	case agentSetting != nil:
+		return *agentSetting, nil
+	default:
+		return poolManaged, nil
+	}
+}
+
 // LaunchTaskWorkDirPatch is the patch recording dir as the task work_dir a
 // start launches info in, "" for a start in the session's own work dir. It is
 // empty when info already records dir, so a start that leaves the session

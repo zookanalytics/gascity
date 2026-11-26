@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -604,5 +605,52 @@ func TestFactoryRuntimeHandleUsesConfiguredProviderAndRecorder(t *testing.T) {
 	}
 	if got, want := payload.SessionName, "legacy-runtime-name"; got != want {
 		t.Fatalf("payload.SessionName = %q, want %q", got, want)
+	}
+}
+
+// FactoryConfig.AfterClose reaches the factory's session manager: a handle's
+// close hands it the closed row, and the catalog's prune the rows it closed.
+func TestFactoryThreadsAfterCloseToTheHandleAndCatalog(t *testing.T) {
+	var got [][]string
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:   t.TempDir(),
+		Store:      beads.NewMemStore(),
+		Provider:   runtime.NewFake(),
+		AfterClose: func(ids []string) { got = append(got, append([]string(nil), ids...)) },
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	ctx := context.Background()
+	create := func() sessionpkg.Info {
+		t.Helper()
+		info, err := factory.manager.CreateSession(ctx, sessionpkg.CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		return info
+	}
+
+	closed := create()
+	handle, err := factory.SessionByID(closed.ID)
+	if err != nil {
+		t.Fatalf("SessionByID: %v", err)
+	}
+	if _, err := handle.CloseDetailed(ctx, handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
+		t.Fatalf("CloseDetailed: %v", err)
+	}
+	pruned := create()
+	if err := factory.manager.Suspend(ctx, handleActor(t, handle, sessionpkg.ActorOperator), pruned.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	catalog, err := factory.Catalog()
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if _, err := catalog.PruneBefore(time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	if want := [][]string{{closed.ID}, {pruned.ID}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after-close calls = %v, want %v", got, want)
 	}
 }

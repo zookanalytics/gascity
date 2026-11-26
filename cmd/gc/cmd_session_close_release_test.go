@@ -718,12 +718,14 @@ func TestSessionCloseHelpDocumentsWorkRelease(t *testing.T) {
 }
 
 // TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor pins the worker_dir
-// prune gc session close runs on the row it closed: a session whose record
-// asks for it loses its folder, whether the record was written at creation or
-// while the session ran; a manual session of an agent that sets nothing keeps
-// it; and so does one whose folder holds a registered worktree with
-// uncommitted changes, or whose folder an open session records as its own
-// work dir, though its record asks.
+// prune gc session close's session manager runs on the row it closed
+// (closedSessionWorkerDirReclaim): a session whose record asks for it loses
+// its folder, whether the record was written at creation or while the session
+// ran; a manual session of an agent that sets nothing keeps it; and so does
+// one whose folder holds a registered worktree with uncommitted changes, or
+// whose folder an open session records as its own work dir, though its record
+// asks. The prune says why it keeps a folder on the process's stderr, which
+// TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree reads.
 func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 	c := newCLIPruneCity(t)
 	dirty := c.worktree(filepath.Join(c.helperWT, "holds-a-change"))
@@ -739,13 +741,12 @@ func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 		running map[string]string // written after creation, as gc bd update --set-metadata writes it
 		shared  bool              // an open successor session records the same folder
 		stays   bool
-		wantLog string
 	}{
-		{"a record that asks", c.worktree(filepath.Join(c.helperWT, "asks")), asks, nil, false, false, ""},
-		{"a record set to ask while it ran", c.worktree(filepath.Join(c.helperWT, "set-later")), nil, asks, false, false, ""},
-		{"no record, an agent that sets nothing", c.worktree(filepath.Join(c.helperWT, "unset")), nil, nil, false, true, ""},
-		{"a record that asks over a dirty nested worktree", dirty, asks, nil, false, true, "gc-change beneath it has uncommitted changes"},
-		{"a record that asks for a folder an open session works in", c.worktree(filepath.Join(c.helperWT, "shared")), asks, nil, true, true, ""},
+		{"a record that asks", c.worktree(filepath.Join(c.helperWT, "asks")), asks, nil, false, false},
+		{"a record set to ask while it ran", c.worktree(filepath.Join(c.helperWT, "set-later")), nil, asks, false, false},
+		{"no record, an agent that sets nothing", c.worktree(filepath.Join(c.helperWT, "unset")), nil, nil, false, true},
+		{"a record that asks over a dirty nested worktree", dirty, asks, nil, false, true},
+		{"a record that asks for a folder an open session works in", c.worktree(filepath.Join(c.helperWT, "shared")), asks, nil, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := c.session("helper-"+filepath.Base(tc.dir), tc.dir, tc.meta)
@@ -762,9 +763,6 @@ func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 				t.Fatalf("cmdSessionClose = %d, want 0; stderr=%s", code, stderr.String())
 			}
 			assertFolder(t, tc.dir, tc.stays, stderr.String())
-			if !strings.Contains(stderr.String(), tc.wantLog) {
-				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
-			}
 		})
 	}
 	assertFolder(t, change, true, "")

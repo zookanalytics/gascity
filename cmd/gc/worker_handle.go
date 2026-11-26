@@ -102,6 +102,10 @@ func workerFactoryWithAttribution(
 		}
 		searchPaths = worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 	}
+	var sessions *session.Store
+	if !beads.IsNilStore(store) {
+		sessions = sessionFrontDoor(store)
+	}
 	return worker.NewFactory(worker.FactoryConfig{
 		Store:                   store,
 		Provider:                sp,
@@ -119,6 +123,7 @@ func workerFactoryWithAttribution(
 		// The zero store resolves no class store: a deferred submit writes
 		// no shadow, so it opens nothing.
 		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
+		AfterClose:      closedSessionWorkerDirReclaim(cityPath, cfg, sessions, os.Stderr),
 	})
 }
 

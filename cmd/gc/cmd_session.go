@@ -2472,7 +2472,6 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), preserve, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
-		pruneClosedSessionWorkerDirs(cityPath, cfg, sessionFrontDoor(sessStore), []string{sessionID}, stderr)
 	}
 
 	// The op closes once the close's cleanup ran: a run killed before here
@@ -2632,12 +2631,16 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 
 	// The session catalog and prune are session-class, so route through the
 	// session coordination-class store for relocation-safety. cityPath/cfg are
-	// resolved here (best-effort, no pack refresh) to key the class store and are
-	// reused below to withdraw queued wait nudges after the prune.
+	// resolved here (best-effort, no pack refresh) to key the class store and the
+	// catalog, whose prune removes each closed session's worker_dir its record
+	// asks for (closedSessionWorkerDirReclaim), and are reused below to withdraw
+	// queued wait nudges after the prune.
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	catalogCity := ""
 	if cityErr == nil {
 		cfg, _ = loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+		catalogCity = cityPath
 	}
 	sessStore := cliSessionStore(store, cfg, cityPath)
 
@@ -2646,7 +2649,7 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	catalog, err := workerSessionCatalogWithConfig("", sessStore, sp, nil)
+	catalog, err := workerSessionCatalogWithConfig(catalogCity, sessStore, sp, cfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session prune: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -2662,7 +2665,6 @@ func cmdSessionPrune(beforeStr, statesStr string, stdout, stderr io.Writer, json
 		if err := withdrawQueuedWaitNudges(cityPath, result.WaitNudgeIDs); err != nil {
 			fmt.Fprintf(stderr, "gc session prune: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
-		pruneClosedSessionWorkerDirs(cityPath, cfg, sessionFrontDoor(sessStore), result.SessionIDs, stderr)
 	}
 
 	if asJSON {

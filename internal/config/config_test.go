@@ -8726,7 +8726,7 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 	}
 }
 
-func TestAgentPruneWorkerDirParsesAndDefaultsToPoolManagedSessions(t *testing.T) {
+func TestAgentPruneWorkerDirParses(t *testing.T) {
 	cfg, err := Parse([]byte(`
 [workspace]
 name = "bright-lights"
@@ -8752,25 +8752,9 @@ name = "unset"
 	if agents["unset"].PruneWorkerDir != nil {
 		t.Fatalf("unset agent PruneWorkerDir = %v, want nil", *agents["unset"].PruneWorkerDir)
 	}
-	for _, tc := range []struct {
-		agent       string
-		poolManaged bool
-		want        bool
-	}{
-		{"unset", true, true},
-		{"unset", false, false},
-		{"kept", true, false},
-		{"kept", false, false},
-		{"pruned", true, true},
-		{"pruned", false, true},
-	} {
-		if got := agents[tc.agent].PruneWorkerDirEnabled(tc.poolManaged); got != tc.want {
-			t.Errorf("%s.PruneWorkerDirEnabled(poolManaged=%v) = %v, want %v", tc.agent, tc.poolManaged, got, tc.want)
+	for name, want := range map[string]bool{"kept": false, "pruned": true} {
+		if got := agents[name].PruneWorkerDir; got == nil || *got != want {
+			t.Errorf("%s PruneWorkerDir = %v, want %v", name, got, want)
 		}
-	}
-	// A session whose template is no longer configured takes the default.
-	var gone *Agent
-	if !gone.PruneWorkerDirEnabled(true) || gone.PruneWorkerDirEnabled(false) {
-		t.Error("nil agent: want the folder of a pool-managed session pruned and any other session's kept")
 	}
 }

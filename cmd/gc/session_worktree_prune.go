@@ -148,23 +148,24 @@ func worktreeLivenessBlocksPrune(workerDir string, liveness worktreeLivenessInpu
 	return false
 }
 
-// sessionRecordPrunesWorkerDir reports whether the closing session's record
-// asks for its worker_dir to be removed: the prune_worker_dir it records, or,
-// when it records none, its agent's prune_worker_dir, whose default is whether
-// the session is pool-managed (config.Agent.PruneWorkerDirEnabled). The agent
-// is resolved as the session was built (sessionWakeResolveAgentInfo), which
-// finds a rig's stamped copy of a scope = "rig" agent. A record that does not
-// parse keeps the folder, and says so on stderr.
+// sessionRecordPrunesWorkerDir reports whether the closing session's worker_dir
+// is removed, as sessionpkg.PrunesWorkerDirAtClose decides from the facts it
+// gathers: the session's record, its agent's prune_worker_dir, and whether the
+// session is pool-managed. The agent is resolved as the session was built
+// (sessionWakeResolveAgentInfo), which finds a rig's stamped copy of a
+// scope = "rig" agent; a template the config no longer has sets nothing. A
+// record that does not parse keeps the folder, and says so on stderr.
 func sessionRecordPrunesWorkerDir(info sessionpkg.Info, workerDir string, cfg *config.City, stderr io.Writer) bool {
-	prune, recorded, err := sessionpkg.RecordedPruneWorkerDir(info)
+	var agentSetting *bool
+	if agent := sessionWakeResolveAgentInfo(info, cfg); agent != nil {
+		agentSetting = agent.PruneWorkerDir
+	}
+	prune, err := sessionpkg.PrunesWorkerDirAtClose(info, agentSetting, isPoolManagedSessionInfo(info))
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: session %s records %v\n", workerDir, info.ID, err) //nolint:errcheck
 		return false
 	}
-	if recorded {
-		return prune
-	}
-	return sessionWakeResolveAgentInfo(info, cfg).PruneWorkerDirEnabled(isPoolManagedSessionInfo(info))
+	return prune
 }
 
 // nestedWorktreeRefusal reports why workerDir must stay because another
@@ -408,8 +409,20 @@ func pruneClosedRowWorkerDir(info sessionpkg.Info, cityPath string, cfg *config.
 	pruneWorktree(info, cityPath, cfg, liveness(), stderr)
 }
 
+// closedSessionWorkerDirReclaim is the cleanup a worker factory's session
+// manager runs after it closes rows (worker.FactoryConfig.AfterClose), as a
+// session close or prune does: pruneClosedSessionWorkerDirs over the closed
+// rows, saying on stderr what it keeps and what it removes. Nil without a city
+// path, its config or a session store, with which no removal can be judged.
+func closedSessionWorkerDirReclaim(cityPath string, cfg *config.City, sessions *sessionpkg.Store, stderr io.Writer) func(ids []string) {
+	if cityPath == "" || cfg == nil || sessions == nil {
+		return nil
+	}
+	return func(ids []string) { pruneClosedSessionWorkerDirs(cityPath, cfg, sessions, ids, stderr) }
+}
+
 // pruneClosedSessionWorkerDirs prunes the worker worktree of each session row
-// in ids that a CLI command closed (gc session close, gc session prune), when
+// in ids that a session manager closed (closedSessionWorkerDirReclaim), when
 // the row's record asks for it: pruneAgentHomeWorktreeIfSafeInfo decides that
 // and every safety gate. A row that reopened since keeps its worktree, and so
 // does one whose worktree an open row records, such as a successor seat in the

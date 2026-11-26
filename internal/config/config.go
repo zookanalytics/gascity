@@ -4293,17 +4293,6 @@ func (a *Agent) AttachEnabled() bool {
 	return a.Attach == nil || *a.Attach
 }
 
-// PruneWorkerDirEnabled reports whether a session of this agent removes its
-// worker_dir when its record closes: the agent's prune_worker_dir, or when
-// that is unset, whether the session is pool-managed. A nil agent, such as a
-// template the config no longer has, takes the default.
-func (a *Agent) PruneWorkerDirEnabled(poolManaged bool) bool {
-	if a == nil || a.PruneWorkerDir == nil {
-		return poolManaged
-	}
-	return *a.PruneWorkerDir
-}
-
 // EffectiveDefaultSlingFormula returns the default sling formula for
 // this agent, or "" if none is set.
 func (a *Agent) EffectiveDefaultSlingFormula() string {
