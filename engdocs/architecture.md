@@ -63,20 +63,48 @@ packs lie outside it.
 
 ## Domains
 
-Gas City's parts are the bead store, the event bus, config, sessions and
-their runtime providers, prompt templates, provider hooks, formulas and
-dispatch, orders, health patrol, the controller, and the CLI and API that
-project them. The rows below are the parts that decide which orders a city
-runs, where each one is bound, and where each run executes and is recorded.
-
 | Domain | Responsibility | Data it owns | Must not |
 |---|---|---|---|
+| Bead store | Keeps beads and the dependencies between them, and answers queries over them, such as which beads are ready, through one interface, whichever backend holds them. | Each bead's record: its id, status, assignee, labels, metadata and dependencies. | Decide what a bead means: the parts that write and read a kind of bead decide that. |
+| Event bus | Records each event of the city's activity in sequence and delivers it to every watcher. | The city's event log, and the payload shape registered for each event type. | Fail the operation that fires an event, or change an event once it is recorded. |
 | Config | Composes `city.toml` and every pack imported at city scope or on a rig into the one resolved configuration every other part reads. | The declared configuration: the rigs, the imports at city scope and on each rig, and the layers each scope reads formulas and orders from. | Start a session, dispatch work or write a bead. |
+| Sessions | Start, wake, sleep, stop and close each agent session, deliver its prompt, and decide each change to its lifecycle, whatever runtime it runs on. | Each session's record, a bead at city scope that only sessions write: its identity, its lifecycle state, the provider conversation it continues and the config it started under. | Reach a session's process except through its runtime provider. |
+| Runtime providers | Run a session's process on one substrate: start and stop it, deliver input to it, and report its output, liveness and activity. | The live process, and the metadata the provider keeps under the session's name. | Write beads or config: a provider knows a session only by its name and the start config it is handed. |
+| Prompt templates | Render an agent's prompt from the template its pack supplies, with the agent's city, rig, name and work queries filled in. | The variables and functions a template can use. | Deliver the prompt it renders. |
+| Provider hooks | Install the files that have each coding-agent provider call `gc` at its lifecycle points. | The hook files `gc` manages, in the city and in each agent's work dir. | Act in a session `gc` did not start, such as one a person opens with the same provider in an agent's work dir. |
+| Formulas and dispatch | Route work to agents and pools, turn a formula into a run of beads, and execute a v2 run's control steps until it finishes. | Each run's root, step and control beads, with their dependencies and routes, and the convoys that track routed work. | Start or wake a session. |
 | Orders | Discovers the order set, binding each order city-wide or to one rig by where it is defined and the scope it declares. | The order set: each order's definition, trigger, action and binding. | Dispatch an order or write a bead. |
+| Health patrol | Keeps the sessions config wants alive: restarts one that dies or drifts from its config, quarantines one that keeps failing, and stops one idle past its timeout. | No durable data of its own. | Restart, stop or close a session on an unanswered probe: a runtime read that fails or times out defers the action. |
 | Controller | Runs one city: it reloads config when the city's files change, reconciles the city's sessions, and dispatches each due order. | The order runs it starts, each recorded as a tracking bead. | Decide which orders exist or where one is bound: it dispatches the order set as discovered. |
+| CLI and API | Project the parts to people, agents and programs: the `gc` commands, and the HTTP and SSE API the supervisor serves. | No domain data: each answer comes from the part that owns it. | Re-implement domain logic, or carry an untyped shape on the wire ([invariants](architecture/invariants.md)). |
 
 How they work together:
 
+- To reconcile sessions, the controller gathers what config wants and what
+  each runtime reports, sessions decide each session's next lifecycle
+  change, and the controller carries it out. Health patrol's restarts,
+  quarantines and idle stops are among those changes.
+- A session starts from a start config built from its agent's resolved
+  configuration, and its runtime provider launches the process from it. The
+  config carries the prompt that prompt templates render, by a route the
+  agent's provider takes, such as the system prompt or the first message.
+- A session's provider hooks call `gc` at the session's lifecycle points.
+  At its start, the call brings in the prompt when the launch did not carry
+  it. Where the provider wires them, a call before a compaction hands off,
+  and a call at each submitted prompt brings in the session's mail and
+  queued nudges.
+- The controller starts or wakes a session for the work routed to it, and
+  sizes each pool to the ready work routed to that pool. An agent claims its
+  work through `gc hook`, which finds pool work by the predicate the
+  controller counts it with.
+- Coding agents run each formula run's work steps. A v2 run's control steps
+  go to the control dispatcher that `gc` provides at the scope whose store
+  holds the run, and no coding agent runs them.
+- The CLI and API serve the event bus to its watchers, through `gc events`
+  and the API's event stream.
+- While a supervisor serves the city, the CLI sends a mutation that must
+  hold the supervisor's locks through the API instead of writing the stores
+  itself.
 - Orders scans the layers config resolves, the city's and then each rig's
   own, and applies the city's order overrides and skip list.
 - The controller discovers the order set again whenever it reloads config.
@@ -85,9 +113,7 @@ How they work together:
 - To find an order due, the controller reads its past runs from the bead
   store and, for an event trigger, the event bus. A due exec order runs its
   script on the controller's host, with no agent. A due formula order becomes
-  a wisp of its formula, and coding agents run its work steps. The control
-  steps of a v2 wisp go to the control dispatcher of the run's scope, which
-  `gc` provides, and no coding agent runs them.
+  a wisp of its formula.
 - A run executes in its order's scope: the city for a city-wide order, and
   the rig for a rig-bound one. A rig-bound order whose pool is a city agent,
   not one of the rig's, runs at city scope, where that agent reads its work.
@@ -95,8 +121,15 @@ How they work together:
   at that scope: the tracking bead is order tracking, and the wisp is
   execution graph, except a v1 wisp poured with steps, which is work.
 
-The depth is in [config](architecture/config.md), [orders](architecture/orders.md)
-and the [controller](architecture/controller.md).
+Each part's own document holds its depth: the [bead store](architecture/beads.md),
+the [event bus](architecture/event-bus.md), [config](architecture/config.md),
+[sessions and runtime providers](architecture/session.md),
+[prompt templates](architecture/prompt-templates.md),
+[provider hooks](../internal/hooks/config/README.md),
+[formulas](architecture/formulas.md) and [dispatch](architecture/dispatch.md),
+[orders](architecture/orders.md), [health patrol](architecture/health-patrol.md),
+the [controller](architecture/controller.md), and the
+[CLI and API](architecture/api-control-plane.md).
 
 ## Cross-cutting rules
 
@@ -107,9 +140,6 @@ and the [controller](architecture/controller.md).
   capability activates.
 - **Side effects stay in Layer 0.** I/O and process spawning happen only
   there.
-- **The CLI and the API are projections.** Both call the domain packages,
-  neither re-implements domain logic, and every wire shape is typed
-  ([invariants](architecture/invariants.md)).
 - **Running state is queried live.** No PID, lock or state file tracks a
   running process; the system itself is asked.
 - **On a rig, the rig's own definition wins.** Where a city-level formula or
@@ -146,3 +176,9 @@ and the [controller](architecture/controller.md).
   close the tracking bead of an exec run that is still going, and a second
   run can start beside it. Order dispatch does not yet meet Work converges
   across a restart. gc-xpnop0 and gc-8utvkm retire it.
+- **Some session decisions still sit outside sessions.** The controller's
+  reconciler and some `gc` commands decide some session lifecycle changes
+  and patch the session's record themselves, so a change to how sessions
+  behave must be checked there too. The session refactor's sequence in
+  [internal/session/PLAN.md](../internal/session/PLAN.md) moves each
+  decision into sessions.
