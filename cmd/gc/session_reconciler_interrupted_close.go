@@ -142,7 +142,7 @@ func finishInterruptedClose(
 		if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() && sessionpkg.WorkerDirFromInfo(info) != "" {
 			pruneLiveness = worktreeLivenessInputs{
 				live:        collectLiveWorktreeStateFn(),
-				sessionDirs: liveSessionWorktreeDirs(snapshot),
+				sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
 			}
 		}
 		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, pruneLiveness, stderr)

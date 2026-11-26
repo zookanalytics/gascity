@@ -188,9 +188,9 @@ func sessionOwnWorkDirs(info sessionpkg.Info) []string {
 // place of its own. liveSessionWorktreeDirs unions this across every open
 // session to build the active-session set, start preparation reads it to find
 // the session working in a task work_dir (preparedTaskWorkDirOwner), and the
-// worker_dir auto-prune passes the retired session's own set to
-// worktreeLivenessBlocksPrune so the pass's pre-close snapshot entry for that
-// session is not read as a live signal against its own worktree.
+// worker_dir auto-prune lists it for each open session by the session's id
+// (openSessionWorkDirs), so the prune of a closed session drops that session's
+// own entries alone.
 func sessionRecordedWorktreeDirs(info sessionpkg.Info) []string {
 	return append(sessionOwnWorkDirs(info), info.LaunchTaskWorkDir)
 }

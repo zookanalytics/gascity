@@ -429,7 +429,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_OwnRecordedSessionDirDoesNotBlockSelf(
 	// own worker_dir appears in sessionDirs. That self-reference must not read
 	// as a live signal against its own worktree.
 	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr)
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession(fx.sessionInfo().ID, fx.workerDir), &stderr)
 	if !rigProbe.removeInvoked {
 		t.Errorf("WorktreeRemove not invoked; the retired session's own dir wrongly blocked its own prune; log: %q", stderr.String())
 	}
@@ -449,7 +449,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_OtherSessionNestedDirBlocks(t *testing
 		t.Fatalf("mkdir nested: %v", err)
 	}
 	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession(nested), &stderr)
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, liveViaSession("session-2", nested), &stderr)
 	if rigProbe.removeInvoked {
 		t.Error("WorktreeRemove invoked while a different open session works beneath the worktree")
 	}
@@ -462,7 +462,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_OtherSessionNestedDirBlocks(t *testing
 // TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot
 // reproduces the reconciler's real pre-close composition rather than a
 // hand-built sessionDirs: the pass builds its liveness inputs from the snapshot
-// captured at tick start (via liveSessionWorktreeDirs), which lists the prunable
+// captured at tick start (via openSessionWorkDirs), which lists the prunable
 // pool session as open, then closes and prunes that same session with the frozen
 // inputs. The session's own worker_dir is therefore in the carried set and must
 // not block reclaiming its now-retired worktree.
@@ -476,7 +476,7 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot(t *
 	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info})
 	pruneLiveness := worktreeLivenessInputs{
 		live:        liveWorktreeState{scanned: true},
-		sessionDirs: liveSessionWorktreeDirs(snapshot),
+		sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
 	}
 	// Guard the reproduction: the session's worker_dir really is in the set the
 	// pass would carry, so a passing prune proves the self-filter, not an
@@ -490,6 +490,37 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_PrunesSessionPresentInOpenSnapshot(t *
 	if !rigProbe.removeInvoked {
 		t.Fatalf("retired pool session present in the open snapshot was not pruned; log: %q", stderr.String())
 	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderAnotherOpenSessionInTheSnapshotRecords
+// is the same pre-close composition with a second open session in the
+// snapshot that records the same worker_dir, as the next session in the same
+// pool slot does: the prune drops the closing session's own entries, not the
+// other session's, so the folder stays.
+func TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderAnotherOpenSessionInTheSnapshotRecords(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	info := fx.sessionInfo()
+	successor := fx.sessionInfo()
+	successor.ID = "session-2"
+	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info, successor})
+	pruneLiveness := worktreeLivenessInputs{
+		live:        liveWorktreeState{scanned: true},
+		sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
+	}
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(info, fx.cityPath, fx.cfg, pruneLiveness, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatalf("WorktreeRemove invoked for a folder another open session records; log: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "active session dir") {
+		t.Errorf("expected active-session reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_LiveTakesPrecedenceOverGitState(t *testing.T) {

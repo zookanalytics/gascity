@@ -466,7 +466,7 @@ func retirePoolSlotAtDrainDeadline(
 	if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() {
 		pruneLiveness = worktreeLivenessInputs{
 			live:        collectLiveWorktreeStateFn(),
-			sessionDirs: liveSessionWorktreeDirs(snapshot),
+			sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
 		}
 	}
 	poolSlotRetireWorktreePrune(info, cityPath, cfg, pruneLiveness, stderr)

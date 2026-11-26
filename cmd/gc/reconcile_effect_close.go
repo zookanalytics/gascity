@@ -566,22 +566,13 @@ func storePruneLiveness(cfg *config.City, store beads.Store, closedID string) wo
 	if err != nil {
 		return in
 	}
-	seen := make(map[string]struct{})
+	var open []session.Info
 	for _, r := range rows {
-		if r.ID == closedID || r.Status == "closed" {
-			continue
-		}
-		for _, dir := range sessionRecordedWorktreeDirs(sessionInfoFromBead(r)) {
-			if dir = strings.TrimSpace(dir); dir == "" || !filepath.IsAbs(dir) {
-				continue
-			}
-			if _, dup := seen[dir]; dup {
-				continue
-			}
-			seen[dir] = struct{}{}
-			in.sessionDirs = append(in.sessionDirs, dir)
+		if r.ID != closedID && r.Status != "closed" {
+			open = append(open, sessionInfoFromBead(r))
 		}
 	}
+	in.sessionDirs = openSessionWorkDirs(open)
 	return in
 }
 

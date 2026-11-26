@@ -2034,7 +2034,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		return worktreeLivenessInputs{
 			live:        collectLiveWorktreeStateFn(),
-			sessionDirs: liveSessionWorktreeDirs(snapshot),
+			sessionDirs: openSessionWorkDirs(snapshot.OpenInfos()),
 		}
 	})
 	// Every tick counts as a cycle, including ticks aborted by context

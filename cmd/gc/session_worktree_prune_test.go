@@ -39,10 +39,14 @@ func liveAt(dirs ...string) worktreeLivenessInputs {
 }
 
 // liveViaSession returns a successfully-scanned liveness snapshot with no live
-// process cwd but the given open-session working directories, exercising the
-// session-dir cross-check independently of the /proc scan.
-func liveViaSession(dirs ...string) worktreeLivenessInputs {
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: dirs}
+// process cwd but the given working directories recorded by the open session
+// id, exercising the session-dir cross-check independently of the /proc scan.
+func liveViaSession(id string, dirs ...string) worktreeLivenessInputs {
+	in := worktreeLivenessInputs{live: liveWorktreeState{scanned: true}}
+	for _, d := range dirs {
+		in.sessionDirs = append(in.sessionDirs, sessionWorkDir{sessionID: id, dir: d})
+	}
+	return in
 }
 
 // liveScanUnavailable is the indeterminate liveness snapshot — the process
@@ -770,7 +774,7 @@ func TestPruneAgentHomeWorktreeIfSafe_OwnRecordedSessionDirDoesNotBlockSelf(t *t
 	// as a live signal against its own worktree, or a clean retired pool
 	// worktree is never reclaimed.
 	var stderr bytes.Buffer
-	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr) {
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.sessionBead().ID, fx.workerDir), &stderr) {
 		t.Fatalf("prune skipped a clean worktree whose only session-dir signal was its own retired session; log: %q", stderr.String())
 	}
 	if !rigProbe.removeInvoked {
@@ -792,11 +796,34 @@ func TestPruneAgentHomeWorktreeIfSafe_OtherSessionNestedDirBlocks(t *testing.T) 
 		t.Fatalf("mkdir nested: %v", err)
 	}
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(nested), &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession("session-2", nested), &stderr) {
 		t.Fatal("prune returned true while a different open session works beneath the worktree")
 	}
 	if rigProbe.removeInvoked {
 		t.Error("WorktreeRemove invoked while a different open session works beneath the worktree")
+	}
+	if !strings.Contains(stderr.String(), "active session dir") {
+		t.Errorf("expected active-session reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_OtherSessionSameDirBlocks(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	// A different open session records the retired session's worker_dir
+	// itself, as the next session in the same pool slot does. Only the
+	// retired session's own entries are dropped, so the other session's
+	// identical entry still blocks removal.
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession("session-2", fx.workerDir), &stderr) {
+		t.Fatal("prune returned true while a different open session records the same worktree")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked while a different open session records the same worktree")
 	}
 	if !strings.Contains(stderr.String(), "active session dir") {
 		t.Errorf("expected active-session reason log; got %q", stderr.String())
@@ -945,5 +972,47 @@ func assertFolder(t *testing.T, dir string, stays bool, stderr string) {
 	_, err := os.Stat(dir)
 	if gone := errors.Is(err, os.ErrNotExist); gone == stays {
 		t.Fatalf("%s gone = %v, want stays = %v; stderr=%q", dir, gone, stays, stderr)
+	}
+}
+
+// TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords runs the
+// legacy reconciler's prune of a row it closed (a failed create, a dead
+// named-session phantom, an orphan) with the liveness its pass gathers from
+// the snapshot taken before the close: a folder another open session records
+// stays, and the same folder with the closing session alone in the snapshot
+// goes.
+func TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords(t *testing.T) {
+	asks := map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"}
+	for _, tc := range []struct {
+		name   string
+		shared bool
+	}{
+		{"another open session records the folder", true},
+		{"the closing session alone records it", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "shared"))
+			closing := c.session("helper-old", dir, asks)
+			open := []sessionpkg.Info{sessionInfoFromBead(closing)}
+			if tc.shared {
+				open = append(open, sessionInfoFromBead(c.session("helper-new", dir, nil)))
+			}
+			pass := worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: openSessionWorkDirs(open)}
+			if err := c.store.Close(closing.ID); err != nil {
+				t.Fatalf("Close(%s): %v", closing.ID, err)
+			}
+			closed, err := c.store.Get(closing.ID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", closing.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			var stderr bytes.Buffer
+			pruneClosedRowWorkerDir(sessionInfoFromBead(closed), c.cityDir, cfg, func() worktreeLivenessInputs { return pass }, &stderr)
+			assertFolder(t, dir, tc.shared, stderr.String())
+		})
 	}
 }

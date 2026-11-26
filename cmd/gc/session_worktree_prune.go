@@ -64,31 +64,59 @@ func managedWorktreeRefusal(gp gitProbe) string {
 
 // worktreeLivenessInputs bundles the liveness signals the worker_dir auto-prune
 // consults before removing a closed session's worktree: the authoritative
-// process-table scan (live) and the recorded working directories of every open
-// session (sessionDirs). The reconciler gathers both once per pass and shares
-// the same value across every prune decision in that pass, matching the
-// closed-bead reaper's own once-per-pass gather — the process-table walk is far
-// more expensive than the per-worktree git probes.
+// process-table scan (live) and the working directories open sessions record,
+// each with the session that records it (sessionDirs). The reconciler gathers
+// both once per pass and shares the same value across every prune decision in
+// that pass, matching the closed-bead reaper's own once-per-pass gather — the
+// process-table walk is far more expensive than the per-worktree git probes.
 type worktreeLivenessInputs struct {
 	live        liveWorktreeState
-	sessionDirs []string
+	sessionDirs []sessionWorkDir
 }
 
-// worktreeLivenessBlocksPrune reports whether the pass's liveness snapshot
-// forbids removing workerDir, logging the reason to stderr when it does. It is
-// the shared gate both prune forms consult before the git-state probes, so a
-// clean tree — the normal resting state of a healthy agent between commits —
-// can no longer read as prunable while a process is running in it.
+// sessionWorkDir is one working directory an open session row records, with
+// that row's id: the prune of a closed row drops the entries of that row alone,
+// so another open row recording the same directory still blocks.
+type sessionWorkDir struct {
+	sessionID string
+	dir       string
+}
+
+// openSessionWorkDirs lists the absolute working directories each of infos
+// records (sessionRecordedWorktreeDirs), each with its session's id: the
+// active-session side of the worker_dir prune's liveness inputs.
+func openSessionWorkDirs(infos []sessionpkg.Info) []sessionWorkDir {
+	var out []sessionWorkDir
+	for _, info := range infos {
+		var seen []string
+		for _, dir := range sessionRecordedWorktreeDirs(info) {
+			if dir = strings.TrimSpace(dir); dir == "" || !filepath.IsAbs(dir) || slices.Contains(seen, dir) {
+				continue
+			}
+			seen = append(seen, dir)
+			out = append(out, sessionWorkDir{sessionID: info.ID, dir: dir})
+		}
+	}
+	return out
+}
+
+// worktreeLivenessBlocksPrune reports whether the liveness snapshot forbids
+// removing workerDir, the worktree of the closed session selfID, logging the
+// reason to stderr when it does. It is the shared gate both prune forms consult
+// before the git-state probes, so a clean tree — the normal resting state of a
+// healthy agent between commits — can no longer read as prunable while a
+// process is running in it.
 //
-// selfSessionDirs are the retired session's own recorded worktree dirs. They
-// are dropped from the active-session cross-check before it runs: the pass
-// gathers sessionDirs from the snapshot taken at tick start, which still lists
-// the session being pruned as open, so its own recorded directory would
-// otherwise read as a live signal against its own worktree and no clean pool
-// worktree would ever be reclaimed. The /proc cwd scan is consulted unchanged —
-// a process genuinely still running in the tree (a drain in flight, a crash
-// adoption, a reaped-but-live runtime) is a real liveness signal and still
-// blocks — so only the recorded-metadata signal is self-filtered.
+// The directories selfID records are dropped from the active-session
+// cross-check before it runs: a pass gathers sessionDirs from the snapshot
+// taken at tick start, which still lists the session being pruned as open, so
+// its own recorded directory would otherwise read as a live signal against its
+// own worktree and no clean pool worktree would ever be reclaimed. Only
+// selfID's entries are dropped: another open session recording the same
+// directory, such as the next session in the same pool slot, still blocks. The
+// /proc cwd scan is consulted unchanged — a process genuinely still running in
+// the tree (a drain in flight, a crash adoption, a reaped-but-live runtime) is a
+// real liveness signal and still blocks.
 //
 // It fails closed: an indeterminate scan (scanned=false) blocks removal,
 // because a scan that observed nothing running is indistinguishable from one
@@ -102,48 +130,22 @@ type worktreeLivenessInputs struct {
 // git-state gates, liveness is transient and self-resolving once the process
 // exits, and writing into a tree a process is actively using would race that
 // process.
-func worktreeLivenessBlocksPrune(workerDir string, liveness worktreeLivenessInputs, selfSessionDirs []string, stderr io.Writer) bool {
+func worktreeLivenessBlocksPrune(workerDir string, liveness worktreeLivenessInputs, selfID string, stderr io.Writer) bool {
 	if !liveness.live.scanned {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: liveness scan unavailable (failing closed)\n", workerDir) //nolint:errcheck
 		return true
 	}
-	sessionDirs := excludeNormalizedDirs(liveness.sessionDirs, selfSessionDirs)
+	var sessionDirs []string
+	for _, d := range liveness.sessionDirs {
+		if d.sessionID != selfID {
+			sessionDirs = append(sessionDirs, d.dir)
+		}
+	}
 	if isLive, why := worktreeIsLive(workerDir, liveness.live, sessionDirs); isLive {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: %s\n", workerDir, why) //nolint:errcheck
 		return true
 	}
 	return false
-}
-
-// excludeNormalizedDirs returns the entries of dirs whose normalized path does
-// not match any normalized entry of exclude. It is how the worker_dir auto-prune
-// drops the retired session's own recorded dirs from the active-session liveness
-// set before the cross-check compares it against that session's worker_dir.
-// Comparison is on pathutil.NormalizePathForCompare so it matches worktreeIsLive's
-// own normalization; a dir a different session recorded strictly beneath the
-// worktree is not an exact match, so it survives and still blocks. Empty exclude
-// entries never match.
-func excludeNormalizedDirs(dirs, exclude []string) []string {
-	if len(dirs) == 0 || len(exclude) == 0 {
-		return dirs
-	}
-	skip := make(map[string]struct{}, len(exclude))
-	for _, e := range exclude {
-		if n := pathutil.NormalizePathForCompare(e); n != "" {
-			skip[n] = struct{}{}
-		}
-	}
-	if len(skip) == 0 {
-		return dirs
-	}
-	out := make([]string, 0, len(dirs))
-	for _, d := range dirs {
-		if _, ok := skip[pathutil.NormalizePathForCompare(d)]; ok {
-			continue
-		}
-		out = append(out, d)
-	}
-	return out
 }
 
 // sessionRecordPrunesWorkerDir reports whether the closing session's record
@@ -275,7 +277,7 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 	// state of a healthy agent between commits, so those probes alone cannot
 	// see a live worktree, and checking first also avoids writing a stale
 	// marker into a tree a process is still using.
-	if worktreeLivenessBlocksPrune(workerDir, liveness, []string{workerDir}, stderr) {
+	if worktreeLivenessBlocksPrune(workerDir, liveness, session.ID, stderr) {
 		return false
 	}
 	if gp.HasUncommittedWork() {
@@ -359,7 +361,7 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	// state of a healthy agent between commits, so those probes alone cannot
 	// see a live worktree, and checking first also avoids writing a stale
 	// marker into a tree a process is still using.
-	if worktreeLivenessBlocksPrune(workerDir, liveness, sessionRecordedWorktreeDirs(info), stderr) {
+	if worktreeLivenessBlocksPrune(workerDir, liveness, info.ID, stderr) {
 		return
 	}
 	if gp.HasUncommittedWork() {
@@ -410,11 +412,9 @@ func pruneClosedRowWorkerDir(info sessionpkg.Info, cityPath string, cfg *config.
 // in ids that a CLI command closed (gc session close, gc session prune), when
 // the row's record asks for it: pruneAgentHomeWorktreeIfSafeInfo decides that
 // and every safety gate. A row that reopened since keeps its worktree, and so
-// does one whose worktree an open row records as its own work dir, such as a
-// successor seat in the same pool slot (the v2 close's workDirInUse): the
-// liveness gate drops every dir equal to the closed row's own, so it cannot see
-// that row. The liveness inputs, the process-table walk and the worktree dirs
-// every open row records, are gathered once, and only when a closed row
+// does one whose worktree an open row records, such as a successor seat in the
+// same pool slot. The liveness inputs, the process-table walk and the worktree
+// dirs every open row records, are gathered once, and only when a closed row
 // records a worker_dir. A read error keeps the row's worktree and says so on
 // stderr.
 func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *sessionpkg.Store, ids []string, stderr io.Writer) {
@@ -422,7 +422,6 @@ func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *s
 		return
 	}
 	var (
-		open     []sessionpkg.Info
 		liveness worktreeLivenessInputs
 		gathered bool
 	)
@@ -436,33 +435,16 @@ func pruneClosedSessionWorkerDirs(cityPath string, cfg *config.City, sessions *s
 			continue
 		}
 		if !gathered {
-			open, err = sessions.ListLabeledSessionInfosUnfiltered()
+			open, err := sessions.ListLabeledSessionInfosUnfiltered()
 			if err != nil {
 				fmt.Fprintf(stderr, "worker_dir prune: listing open sessions: %v\n", err) //nolint:errcheck
 				return
 			}
-			liveness = worktreeLivenessInputs{live: collectLiveWorktreeStateFn()}
-			for _, o := range open {
-				liveness.sessionDirs = append(liveness.sessionDirs, sessionRecordedWorktreeDirs(o)...)
-			}
+			liveness = worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(open)}
 			gathered = true
-		}
-		if openRowOwnsWorkDir(open, cityPath, sessionpkg.WorkerDirFromInfo(info)) {
-			continue
 		}
 		pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, liveness, stderr)
 	}
-}
-
-// openRowOwnsWorkDir reports whether a row in open records dir as one of its
-// own work dirs (sessionOwnWorkDirs), a relative one resolved against the city.
-func openRowOwnsWorkDir(open []sessionpkg.Info, cityPath, dir string) bool {
-	return slices.ContainsFunc(open, func(o sessionpkg.Info) bool {
-		return slices.ContainsFunc(sessionOwnWorkDirs(o), func(d string) bool {
-			d = strings.TrimSpace(d)
-			return d != "" && pathutil.SamePath(resolveWorkDirAgainstCity(cityPath, d), dir)
-		})
-	})
 }
 
 // lookupRigRootForSession returns the filesystem path of the rig that owns
