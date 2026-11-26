@@ -168,6 +168,8 @@ type nudgeTarget struct {
 	sessionID         string
 	continuationEpoch string
 	sessionName       string
+	// closed reports that the session bead the target resolved to is closed.
+	closed bool
 	// fromClaim marks a target built from a contract ClaimTarget
 	// (fileClaimTarget): its queue keys are exactly claimKeys.
 	fromClaim bool
@@ -2517,6 +2519,7 @@ type nudgeTargetFields struct {
 	transport         string
 	provider          string
 	continuationEpoch string
+	closed            bool
 }
 
 // resolveNudgeTargetFromSessionInfo reads the session attributes buildNudgeTarget
@@ -2540,6 +2543,7 @@ func resolveNudgeTargetFromSessionInfo(cityPath string, cfg *config.City, i sess
 		transport:         strings.TrimSpace(i.TransportMetadata),
 		provider:          strings.TrimSpace(i.Provider),
 		continuationEpoch: strings.TrimSpace(i.ContinuationEpoch),
+		closed:            i.Closed,
 	})
 }
 
@@ -2558,6 +2562,7 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 		sessionID:         f.sessionID,
 		continuationEpoch: f.continuationEpoch,
 		sessionName:       f.sessionName,
+		closed:            f.closed,
 	}
 	target.agent = parseNudgeAgentIdentity(identity)
 	resolvedByAgent := false

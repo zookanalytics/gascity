@@ -476,6 +476,26 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	return beadToMessage(b), nil
 }
 
+// RecipientRoute returns the route message id is delivered to, the address
+// an inbox read matches: the recipient a send names, or for a reply the sender
+// of the message it answers, by session id where that message recorded one
+// (Reply). A reply's To is that sender's display address when the original was
+// sent, which names no session, or another one, once that session's alias
+// changes or it closes.
+func (p *Provider) RecipientRoute(id string) (string, error) {
+	b, err := p.store.Get(id)
+	if err != nil {
+		return "", beadmailError("recipient route", err)
+	}
+	if b.Type != messageBeadType {
+		return "", fmt.Errorf("beadmail recipient route: bead %s is type %q, not message", id, b.Type)
+	}
+	if isRemovedMessageBead(b) {
+		return "", beadmailError("recipient route", beads.ErrNotFound)
+	}
+	return b.Assignee, nil
+}
+
 // Read retrieves a message by ID and marks it as read (adds "read" label).
 // The message remains in the store (not closed).
 func (p *Provider) Read(id string) (mail.Message, error) {
