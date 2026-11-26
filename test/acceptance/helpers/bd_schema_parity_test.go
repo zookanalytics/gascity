@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/steveyegge/beads/schema"
 )
 
@@ -132,7 +133,19 @@ func TestBdLatestSchemaVersionIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	t.Setenv("HOME", pollutedHome)
 
 	if _, err := bdLatestSchemaVersion(bdPath); err != nil {
+		skipWithoutEmbeddedDolt(t, bdPath, err)
 		t.Fatalf("bdLatestSchemaVersion under a shared-server HOME: %v", err)
+	}
+}
+
+// skipWithoutEmbeddedDolt skips t when err is bdPath refusing the embedded Dolt
+// database the probe migrates (beadstest.EmbeddedDoltUnsupported). Such a bd
+// cannot answer the probe at all, so a test of the probe against a real bd has
+// nothing to observe on it. Any other error returns, for the caller to fail on.
+func skipWithoutEmbeddedDolt(t *testing.T, bdPath string, err error) {
+	t.Helper()
+	if beadstest.EmbeddedDoltUnsupported(err.Error()) {
+		t.Skipf("%s cannot open an embedded Dolt store, which the schema probe needs: %v", bdPath, err)
 	}
 }
 
@@ -156,6 +169,7 @@ func TestBdLatestSchemaVersionLeavesNothingInItsTempRoot(t *testing.T) {
 	})
 
 	if _, err := bdLatestSchemaVersionUnder(bdPath, []string{root}); err != nil {
+		skipWithoutEmbeddedDolt(t, bdPath, err)
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(root)
