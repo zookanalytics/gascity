@@ -169,22 +169,30 @@ func sessionRecordPrunesWorkerDir(info sessionpkg.Info, workerDir string, cfg *c
 	return prune
 }
 
-// nestedCheckoutRefusal reports why workerDir must stay because a git
-// checkout beneath it holds work that removing the folder would lose, or ""
-// when none does. `git worktree remove --force` deletes everything under the
-// folder, ignored paths included, and the folder's own status cannot see a
-// checkout under an ignored path, so the walk reads every `.git` beneath the
-// folder, whichever repository it belongs to. A session started by hand can
-// cut a change's worktree, of any repository, inside its own folder. A
-// worktree (a `.git` file) keeps the folder while it has uncommitted changes,
-// or while its state cannot be read: its commits live in its repository,
-// outside the folder. A worktree `gc worktree ensure` provisioned keeps it
-// too, as managedWorktreeRefusal keeps the folder itself, because only its
-// owner removes it, and the provisioner refuses a path inside a registered
-// worktree of its own repository only. A clone (a `.git` directory) always
-// keeps the folder, because removing the folder deletes the clone's
-// repository with every commit, branch and stash in it. A directory the walk
-// cannot read keeps the folder.
+// nestedCheckoutRefusal reports why workerDir must stay because a repository
+// or a checkout beneath it holds work that removing the folder would lose, or
+// "" when none does. `git worktree remove --force` deletes everything under
+// the folder, ignored paths included, and the folder's own status cannot see
+// what an ignored path holds, so the walk reads every directory beneath the
+// folder, whichever repository it belongs to.
+//
+// A repository stored beneath the folder keeps it, because removing the folder
+// deletes that repository with every commit, branch and stash in it. The walk
+// knows a repository by its git directory, whatever its name (isGitDir): a
+// clone's .git, a bare clone, or the git directory a checkout's .git file
+// points at.
+//
+// A worktree (a `.git` file) keeps the folder while it has uncommitted
+// changes, or while its state cannot be read. Its commits live in its
+// repository, which keeps the folder itself when it is stored beneath it. A
+// worktree `gc worktree ensure` provisioned keeps the folder too, as
+// managedWorktreeRefusal keeps the folder itself, because only its owner
+// removes it, and the provisioner refuses a path inside a registered worktree
+// of its own repository only. A session started by hand can cut a change's
+// worktree, of any repository, inside its own folder.
+//
+// A directory the walk cannot read keeps the folder. Ignored files that belong
+// to no repository, such as build output and caches, go with it.
 func nestedCheckoutRefusal(workerDir string) string {
 	root := filepath.Clean(workerDir)
 	var refusal string
@@ -192,18 +200,26 @@ func nestedCheckoutRefusal(workerDir string) string {
 		if err != nil {
 			return err
 		}
-		if d.Name() != ".git" {
+		if path == root {
+			return nil
+		}
+		if d.IsDir() {
+			if path == filepath.Join(root, ".git") {
+				return fs.SkipDir // the folder's own repository
+			}
+			repo, err := isGitDir(path)
+			if err != nil {
+				return err
+			}
+			if repo {
+				refusal = fmt.Sprintf("repository %s beneath it would be deleted with every commit in it", path)
+				return fs.SkipAll
+			}
 			return nil
 		}
 		checkout := filepath.Dir(path)
-		switch {
-		case checkout == root && d.IsDir():
-			return fs.SkipDir // the folder's own repository
-		case checkout == root:
+		if d.Name() != ".git" || checkout == root {
 			return nil
-		case d.IsDir():
-			refusal = fmt.Sprintf("clone %s beneath it would be deleted with its repository", checkout)
-			return fs.SkipAll
 		}
 		gp := newGitProbe(checkout)
 		if reason := managedWorktreeRefusal(gp); reason != "" {
@@ -220,6 +236,34 @@ func nestedCheckoutRefusal(workerDir string) string {
 		return fmt.Sprintf("cannot read every checkout beneath it: %v", err)
 	}
 	return refusal
+}
+
+// isGitDir reports whether dir is a repository's git directory: one named
+// .git, or one that carries HEAD beside an objects directory, as a bare
+// repository does, whatever its name. A probe that fails for any reason but a
+// missing entry returns its error.
+func isGitDir(dir string) (bool, error) {
+	if filepath.Base(dir) == ".git" {
+		return true, nil
+	}
+	head, err := os.Lstat(filepath.Join(dir, "HEAD"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if head.IsDir() {
+		return false, nil
+	}
+	objects, err := os.Stat(filepath.Join(dir, "objects"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return objects.IsDir(), nil
 }
 
 // writeWorktreeStaleMarker records why workerDir was left in place instead of
@@ -269,8 +313,8 @@ func writeWorktreeStaleMarker(gp gitProbe, workerDir, reason string, stderr io.W
 //   - a live process, or a different open session, is working at or beneath the
 //     worker_dir, or the liveness scan is indeterminate (fails closed)
 //   - the worktree has uncommitted changes or unpushed commits
-//   - a git checkout beneath it holds work the removal would lose, or the
-//     folder cannot be read whole (nestedCheckoutRefusal)
+//   - a repository or a git checkout beneath it holds work the removal would
+//     lose, or the folder cannot be read whole (nestedCheckoutRefusal)
 //   - the worktree's repository cannot list its worktrees
 //
 // Removal failures are logged but never surfaced — an orphaned worktree

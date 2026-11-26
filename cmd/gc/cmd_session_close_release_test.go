@@ -722,9 +722,11 @@ func TestSessionCloseHelpDocumentsWorkRelease(t *testing.T) {
 // (closedSessionWorkerDirReclaim): a session whose record asks for it loses
 // its folder, whether the record was written at creation or while the session
 // ran; a manual session of an agent that sets nothing keeps it; and so does
-// one whose folder holds a registered worktree with uncommitted changes, or
-// whose folder an open session records as its own work dir, though its record
-// asks. The prune says why it keeps a folder on the process's stderr, which
+// one whose folder holds a registered worktree with uncommitted changes, or a
+// repository with a commit no other repository has, whether a bare clone or a
+// checkout whose git directory sits beside it under another name, or whose
+// folder an open session records as its own work dir, though its record asks.
+// The prune says why it keeps a folder on the process's stderr, which
 // TestPruneAgentHomeWorktreeIfSafeInfo_KeepsAFolderHoldingADirtyWorktree reads.
 func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 	c := newCLIPruneCity(t)
@@ -733,6 +735,18 @@ func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(change, "draft.txt"), []byte("unsaved\n"), 0o644); err != nil {
 		t.Fatalf("write draft: %v", err)
 	}
+	commitAs := []string{"-c", "user.email=test@test.com", "-c", "user.name=Test"}
+	bare := c.worktree(filepath.Join(c.helperWT, "holds-a-bare-clone"))
+	saved := filepath.Join(bare, "worktrees", "saved.git")
+	runGit(t, c.rigRoot, "clone", "--bare", c.rigRoot, saved)
+	tree := strings.TrimSpace(runGit(t, saved, "rev-parse", "HEAD^{tree}"))
+	savedCommit := strings.TrimSpace(runGit(t, saved, append(commitAs, "commit-tree", tree, "-p", "HEAD", "-m", "kept only here")...))
+	runGit(t, saved, "update-ref", "refs/heads/saved", savedCommit)
+	separate := c.worktree(filepath.Join(c.helperWT, "holds-a-git-dir"))
+	scratch := filepath.Join(separate, "worktrees", "scratch")
+	runGit(t, c.rigRoot, "init", "--separate-git-dir", filepath.Join(separate, "worktrees", "scratch-store"), scratch)
+	runGit(t, scratch, append(commitAs, "commit", "--allow-empty", "-m", "kept only here")...)
+	scratchCommit := strings.TrimSpace(runGit(t, scratch, "rev-parse", "HEAD"))
 	asks := map[string]string{session.PruneWorkerDirMetadataKey: "true"}
 	for _, tc := range []struct {
 		name    string
@@ -746,6 +760,8 @@ func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 		{"a record set to ask while it ran", c.worktree(filepath.Join(c.helperWT, "set-later")), nil, asks, false, false},
 		{"no record, an agent that sets nothing", c.worktree(filepath.Join(c.helperWT, "unset")), nil, nil, false, true},
 		{"a record that asks over a dirty nested worktree", dirty, asks, nil, false, true},
+		{"a record that asks over a bare clone holding a commit only it has", bare, asks, nil, false, true},
+		{"a record that asks over a checkout's git directory under another name", separate, asks, nil, false, true},
 		{"a record that asks for a folder an open session works in", c.worktree(filepath.Join(c.helperWT, "shared")), asks, nil, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -766,4 +782,6 @@ func TestCmdSessionCloseRemovesTheWorkerDirItsRecordAsksFor(t *testing.T) {
 		})
 	}
 	assertFolder(t, change, true, "")
+	runGit(t, saved, "cat-file", "-e", savedCommit+"^{commit}")
+	runGit(t, scratch, "cat-file", "-e", scratchCommit+"^{commit}")
 }

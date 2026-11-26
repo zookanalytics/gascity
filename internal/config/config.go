@@ -3147,10 +3147,11 @@ type DaemonConfig struct {
 	// not a managed worktree (one gc worktree ensure provisioned, which only
 	// its owner removes), no live process working in it, clean working tree,
 	// no unpushed commits, no git worktree of any repository beneath it with
-	// uncommitted changes or provisioned by gc worktree ensure, and no clone
-	// beneath it. Nil (unset) defaults to true so pool worktrees do not
-	// accumulate without bound across pool recycles. Set to false to keep
-	// every session's worktree for post-session diagnostics.
+	// uncommitted changes or provisioned by gc worktree ensure, and no
+	// repository stored beneath it, such as a clone or a bare repository. Nil
+	// (unset) defaults to true so pool worktrees do not accumulate without
+	// bound across pool recycles. Set to false to keep every session's
+	// worktree for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
 }
 
@@ -3212,7 +3213,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // Removal is still gated on per-worktree safety probes (not a managed
 // worktree, nothing live working in the tree, clean tree, no unpushed
 // commits, no worktree of any repository beneath it with uncommitted changes
-// or provisioned by gc worktree ensure, no clone beneath it).
+// or provisioned by gc worktree ensure, no repository stored beneath it).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
