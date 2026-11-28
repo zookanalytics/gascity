@@ -449,6 +449,12 @@
               "null"
             ]
           },
+          "PruneWorkerDir": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
           "ResumeCommand": {
             "type": [
               "string",
@@ -590,6 +596,7 @@
           "Rig",
           "Name",
           "WorkDir",
+          "PruneWorkerDir",
           "TmuxAlias",
           "Scope",
           "Suspended",

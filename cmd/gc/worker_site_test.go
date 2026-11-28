@@ -794,7 +794,7 @@ func TestWorkerSiteSessionNewRecordsADeferredSession(t *testing.T) {
 				dials := countSocketDials(t)
 
 				var stdout, stderr bytes.Buffer
-				if code := cmdSessionNew([]string{tc.template}, "", "", "", noAttach, false, time.Second, &stdout, &stderr); code != 0 {
+				if code := cmdSessionNew([]string{tc.template}, "", "", "", noAttach, false, time.Second, nil, &stdout, &stderr); code != 0 {
 					t.Fatalf("gc session new on a worker site = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 				}
 				if !strings.Contains(stdout.String(), "reconciler will start it") {

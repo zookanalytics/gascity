@@ -132,3 +132,52 @@ func TestResumeClearsTheLaunchTaskWorkDir(t *testing.T) {
 		t.Fatalf("launch_task_work_dir after a resume in the session's own work dir = %q, want cleared", dir)
 	}
 }
+
+func TestRecordedPruneWorkerDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, value     string
+		prune, recorded bool
+		wantErr         bool
+	}{
+		{"no record", "", false, false, false},
+		{"a blank record", "  ", false, false, false},
+		{"prune", "true", true, true, false},
+		{"keep", "false", false, true, false},
+		{"another form ParseBool reads", "0", false, true, false},
+		{"a value ParseBool does not read", "keep", false, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prune, recorded, err := RecordedPruneWorkerDir(Info{PruneWorkerDir: tc.value})
+			if prune != tc.prune || recorded != tc.recorded || (err != nil) != tc.wantErr {
+				t.Fatalf("RecordedPruneWorkerDir(%q) = %v, %v, %v; want %v, %v, error %v", tc.value, prune, recorded, err, tc.prune, tc.recorded, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestPrunesWorkerDirAtClose(t *testing.T) {
+	yes, no := true, false
+	for _, tc := range []struct {
+		name        string
+		record      string
+		agent       *bool
+		poolManaged bool
+		want        bool
+		wantErr     bool
+	}{
+		{name: "a pool session with no record and an agent that sets nothing", poolManaged: true, want: true},
+		{name: "any other session with no record and an agent that sets nothing"},
+		{name: "an agent that prunes, for a session that is not pool-managed", agent: &yes, want: true},
+		{name: "an agent that keeps, for a pool session", agent: &no, poolManaged: true},
+		{name: "a record that prunes over an agent that keeps", record: "true", agent: &no, want: true},
+		{name: "a record that keeps over an agent that prunes, for a pool session", record: "false", agent: &yes, poolManaged: true},
+		{name: "a record that does not parse", record: "keep-it", agent: &yes, poolManaged: true, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PrunesWorkerDirAtClose(Info{PruneWorkerDir: tc.record}, tc.agent, tc.poolManaged)
+			if got != tc.want || (err != nil) != tc.wantErr {
+				t.Fatalf("PrunesWorkerDirAtClose = %v, %v; want %v, error %v", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

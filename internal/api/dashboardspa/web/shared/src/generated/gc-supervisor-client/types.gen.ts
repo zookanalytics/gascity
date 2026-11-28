@@ -123,6 +123,7 @@ export type AgentPatch = {
     PreStartAppend: Array<string> | null;
     PromptTemplate: string | null;
     Provider: string | null;
+    PruneWorkerDir: boolean | null;
     ResumeCommand: string | null;
     Rig: string;
     ScaleCheck: string | null;

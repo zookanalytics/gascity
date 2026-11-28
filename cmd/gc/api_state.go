@@ -2261,6 +2261,20 @@ func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *confi
 	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
 }
 
+// ReclaimClosedSessions implements api.State: it runs the worker_dir prune gc
+// session close's session manager runs (closedSessionWorkerDirReclaim) over
+// the rows an API close closed, saying on the controller's stderr what it
+// keeps and what it removes. A city with no session store removes nothing.
+func (cs *controllerState) ReclaimClosedSessions(ids []string) {
+	sessions := cs.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
+		return
+	}
+	if reclaim := closedSessionWorkerDirReclaim(cs.CityPath(), cs.Config(), session.NewStore(sessions), os.Stderr); reclaim != nil {
+		reclaim(ids)
+	}
+}
+
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {
 	cs.mu.RLock()

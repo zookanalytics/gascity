@@ -707,6 +707,9 @@ type AgentOverride struct {
 	// WorkDir overrides the agent's working directory without changing
 	// its qualified identity or rig association.
 	WorkDir *string `toml:"work_dir,omitempty"`
+	// PruneWorkerDir overrides whether a session's worker_dir is removed
+	// when its record closes (see Agent.PruneWorkerDir).
+	PruneWorkerDir *bool `toml:"prune_worker_dir,omitempty"`
 	// TmuxAlias overrides the tmux session name template
 	// (see Agent.TmuxAlias for semantics).
 	TmuxAlias *string `toml:"tmux_alias,omitempty"`
@@ -3135,14 +3138,20 @@ type DaemonConfig struct {
 	// behavior. Duration string (e.g., "250ms", "500ms"). Trade-off:
 	// adds tick latency up to this value when set.
 	TickDebounce string `toml:"tick_debounce,omitempty"`
-	// AutoPruneWorkerDir controls whether the reconciler removes a
-	// pool-managed session's worker_dir (agent worktree) after the session
-	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
-	// provisioned, which only its owner removes), clean working tree, no
-	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
-	// accumulate without bound across pool recycles. Set to false to
-	// retain worktrees for post-session diagnostics.
+	// AutoPruneWorkerDir is the city-wide switch for removing a session's
+	// worker_dir (agent worktree) when the session's record closes. Which
+	// sessions remove theirs is each agent's prune_worker_dir, or a
+	// session's own prune_worker_dir record; unset, only a pool-managed
+	// session's folder goes.
+	// Removal is gated on: path lives under the city's .gc/worktrees/ tree,
+	// not a managed worktree (one gc worktree ensure provisioned, which only
+	// its owner removes), no live process working in it, clean working tree,
+	// no unpushed commits, no git worktree of any repository beneath it with
+	// uncommitted changes or provisioned by gc worktree ensure, and no
+	// repository stored beneath it, such as a clone or a bare repository. Nil
+	// (unset) defaults to true so pool worktrees do not accumulate without
+	// bound across pool recycles. Set to false to keep every session's
+	// worktree for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
 }
 
@@ -3197,12 +3206,14 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
 
-// AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
-// pool-managed session's worker_dir after the session bead is closed. The
-// default is true: pool worktrees are transient by design and accumulate
-// without bound otherwise. Removal is still gated on per-worktree safety
-// probes (not a managed worktree, nothing live working in the tree, clean
-// tree, no unpushed commits).
+// AutoPruneWorkerDirEnabled reports whether gc may remove a session's
+// worker_dir when the session's record closes; the session's recorded
+// prune_worker_dir decides whether it does. The default is true: pool
+// worktrees are transient by design and accumulate without bound otherwise.
+// Removal is still gated on per-worktree safety probes (not a managed
+// worktree, nothing live working in the tree, clean tree, no unpushed
+// commits, no worktree of any repository beneath it with uncommitted changes
+// or provisioned by gc worktree ensure, no repository stored beneath it).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3736,6 +3747,18 @@ type Agent struct {
 	// agent's qualified identity. Relative paths resolve against city root
 	// and may use the same template placeholders as session_setup.
 	WorkDir string `toml:"work_dir,omitempty"`
+	// PruneWorkerDir controls whether gc removes a session's worker_dir, the
+	// working directory work_dir gives it, when the session's record closes.
+	// Nil (unset) removes the folder of a pool-managed session and keeps any
+	// other session's, such as one gc session new starts. A session's own
+	// prune_worker_dir record overrides it for that session, and the close
+	// reads the record first: gc session new --prune-worker-dir writes it at
+	// creation, and
+	// `gc bd update <session-id> --set-metadata prune_worker_dir=false` keeps
+	// a running session's folder for later triage. Removal keeps the safety
+	// gates [daemon] auto_prune_worker_dir lists, and
+	// auto_prune_worker_dir = false keeps every session's folder.
+	PruneWorkerDir *bool `toml:"prune_worker_dir,omitempty"`
 	// TmuxAlias overrides the tmux session_name for pool and factory-created
 	// manual sessions of this agent. When unset, sessions fall back to the
 	// universal derivation ("s-<beadID>" for ad-hoc sessions,
@@ -4165,6 +4188,7 @@ func (a Agent) Clone() Agent {
 	out.HooksInstalled = copyBoolPtr(a.HooksInstalled)
 	out.InjectAssignedSkills = copyBoolPtr(a.InjectAssignedSkills)
 	out.Attach = copyBoolPtr(a.Attach)
+	out.PruneWorkerDir = copyBoolPtr(a.PruneWorkerDir)
 	out.DefaultSlingFormula = copyStringPtr(a.DefaultSlingFormula)
 	out.InheritedDefaultSlingFormula = copyStringPtr(a.InheritedDefaultSlingFormula)
 	return out

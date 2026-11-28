@@ -1986,6 +1986,55 @@ func TestClose(t *testing.T) {
 	}
 }
 
+// TestAfterCloseGetsTheRowsTheManagerCloses pins WithAfterClose: a close
+// hands the caller's cleanup the row it closed, a close of a row already
+// closed hands it again, a close that fails hands nothing, and a prune hands
+// the rows it closed and nothing when it closes none.
+func TestAfterCloseGetsTheRowsTheManagerCloses(t *testing.T) {
+	store := beads.NewMemStore()
+	var got [][]string
+	mgr := newTestManager(t, store, runtime.NewFake(), WithAfterClose(func(ids []string) { got = append(got, slices.Clone(ids)) }))
+	ctx := context.Background()
+	create := func(title string) Info {
+		t.Helper()
+		info, err := mgr.CreateSession(ctx, CreateOptions{Template: "helper", Title: title, Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("CreateSession(%s): %v", title, err)
+		}
+		return info
+	}
+
+	a := create("a")
+	for _, pass := range []string{"close", "close again"} {
+		if err := mgr.Close(ctx, testActor(mgr, ActorOperator), a.ID); err != nil {
+			t.Fatalf("%s: %v", pass, err)
+		}
+	}
+	if err := mgr.Close(ctx, testActor(mgr, ActorOperator), "gc-no-such-session"); err == nil {
+		t.Fatal("close of a session that does not exist succeeded")
+	}
+	b, c := create("b"), create("c")
+	for _, id := range []string{b.ID, c.ID} {
+		if err := mgr.Suspend(ctx, testActor(mgr, ActorOperator), id, false); err != nil {
+			t.Fatalf("Suspend(%s): %v", id, err)
+		}
+	}
+	if _, err := mgr.PruneDetailed(time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("prune that closes nothing: %v", err)
+	}
+	result, err := mgr.PruneDetailed(time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	pruned := slices.Sorted(slices.Values(result.SessionIDs))
+	if want := []string{b.ID, c.ID}; !slices.Equal(pruned, slices.Sorted(slices.Values(want))) {
+		t.Fatalf("prune closed %v, want %v", result.SessionIDs, want)
+	}
+	if len(got) != 3 || !slices.Equal(got[0], []string{a.ID}) || !slices.Equal(got[1], []string{a.ID}) || !slices.Equal(slices.Sorted(slices.Values(got[2])), pruned) {
+		t.Fatalf("after-close calls = %v, want [[%s] [%s] %v]", got, a.ID, a.ID, pruned)
+	}
+}
+
 func TestCloseRemovesRuntimeMCPSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()

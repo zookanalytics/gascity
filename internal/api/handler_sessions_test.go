@@ -1603,6 +1603,44 @@ func TestHandleSessionClose(t *testing.T) {
 	}
 }
 
+// TestSessionCloseReclaimsTheClosedSession pins that both close routes hand
+// the row they closed to the controller's cleanup
+// (State.ReclaimClosedSessions, through the worker factory's AfterClose),
+// which removes its worker_dir as gc session close does, and that a close of a
+// session that does not exist hands it nothing.
+func TestSessionCloseReclaimsTheClosedSession(t *testing.T) {
+	for _, route := range []struct {
+		name  string
+		close func(fs *fakeState, srv *Server, id string) *httptest.ResponseRecorder
+	}{
+		{"huma", func(fs *fakeState, srv *Server, id string) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			newTestCityHandlerWith(t, fs, srv).ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+id+"/close", nil))
+			return w
+		}},
+		{"legacy", func(_ *fakeState, srv *Server, id string) *httptest.ResponseRecorder {
+			w := httptest.NewRecorder()
+			srv.legacySessionHandler().ServeHTTP(w, newPostRequest("/v0/session/"+id+"/close", nil))
+			return w
+		}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Reclaimed Close")
+			if w := route.close(fs, srv, info.ID); w.Code != http.StatusOK {
+				t.Fatalf("close: status %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+			}
+			if w := route.close(fs, srv, "gc-no-such-session"); w.Code == http.StatusOK {
+				t.Fatalf("close of a session that does not exist: status %d, want an error", w.Code)
+			}
+			if len(fs.reclaimed) != 1 || !slices.Equal(fs.reclaimed[0], []string{info.ID}) {
+				t.Fatalf("reclaimed %v, want [[%s]]", fs.reclaimed, info.ID)
+			}
+		})
+	}
+}
+
 func TestHumaSessionCloseContinuesAfterWaitLookupLimit(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)

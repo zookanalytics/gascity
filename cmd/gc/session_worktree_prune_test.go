@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -36,10 +39,14 @@ func liveAt(dirs ...string) worktreeLivenessInputs {
 }
 
 // liveViaSession returns a successfully-scanned liveness snapshot with no live
-// process cwd but the given open-session working directories, exercising the
-// session-dir cross-check independently of the /proc scan.
-func liveViaSession(dirs ...string) worktreeLivenessInputs {
-	return worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: dirs}
+// process cwd but the given working directories recorded by the open session
+// id, exercising the session-dir cross-check independently of the /proc scan.
+func liveViaSession(id string, dirs ...string) worktreeLivenessInputs {
+	in := worktreeLivenessInputs{live: liveWorktreeState{scanned: true}}
+	for _, d := range dirs {
+		in.sessionDirs = append(in.sessionDirs, sessionWorkDir{sessionID: id, dir: d})
+	}
+	return in
 }
 
 // liveScanUnavailable is the indeterminate liveness snapshot — the process
@@ -49,7 +56,8 @@ func liveScanUnavailable() worktreeLivenessInputs {
 }
 
 // fakeGitProbe is a hand-rolled gitProbe stub. Each field controls one
-// probe; WorktreeRemoveErr controls the destructive call, and removed
+// probe; worktrees and worktreeListErr answer the repository's worktree
+// list; WorktreeRemoveErr controls the destructive call, and removed
 // records the (path, force) of every WorktreeRemove invocation so tests
 // can assert which directory the removal targeted. gitDir is the private
 // git directory the prune reads worktree provenance from.
@@ -62,6 +70,8 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
+	worktrees        []git.Worktree
+	worktreeListErr  error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -79,6 +89,10 @@ func (f *fakeGitProbe) CurrentBranch() (string, error) {
 func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
+}
+
+func (f *fakeGitProbe) WorktreeList() ([]git.Worktree, error) {
+	return f.worktrees, f.worktreeListErr
 }
 
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
@@ -122,10 +136,12 @@ func assertNoWorktreeStaleMarker(t *testing.T, workerDir string) {
 
 // pruneTestFixture wires a temp city directory, a writable worker_dir
 // under .gc/worktrees with a .git marker, and a config with a rig that
-// points at a separate "rig root" directory the prune call uses as the
-// git -C target. gitDir is the worker_dir's private git directory: it
-// holds no worktree provenance, so the worker_dir is an unmanaged
-// worktree unless a test says otherwise.
+// points at a separate "rig root" directory. Every probe lists the rig root
+// first among its repository's worktrees unless a test says otherwise, so
+// the rig root is the main worktree the prune call uses as the git -C
+// target. gitDir is the worker_dir's private git directory: it holds no
+// worktree provenance, so the worker_dir is an unmanaged worktree unless a
+// test says otherwise.
 type pruneTestFixture struct {
 	t          *testing.T
 	cityPath   string
@@ -181,7 +197,7 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 		if !ok {
 			// Default: a healthy probe. The WorktreeRemove call goes
 			// through this default for the rig-root invocation.
-			probe = &fakeGitProbe{isRepo: true, gitDir: fx.gitDir}
+			probe = &fakeGitProbe{isRepo: true, gitDir: fx.gitDir, worktrees: fx.repoWorktrees()}
 			fx.probesByWD[workDir] = probe
 		}
 		return probe
@@ -190,11 +206,21 @@ func newPruneFixture(t *testing.T) *pruneTestFixture {
 	return fx
 }
 
+// repoWorktrees is the worktree list of the fixture's repository: the rig
+// root, its main worktree, then the worker_dir.
+func (fx *pruneTestFixture) repoWorktrees() []git.Worktree {
+	return []git.Worktree{{Path: fx.rigRoot}, {Path: fx.workerDir}}
+}
+
 // setProbe installs probe for workDir. A probe that names no git dir and
-// no git dir error reads the fixture's provenance-free gitDir.
+// no git dir error reads the fixture's provenance-free gitDir, and one that
+// names no worktree list and no list error lists the fixture's repository.
 func (fx *pruneTestFixture) setProbe(workDir string, probe *fakeGitProbe) {
 	if probe.gitDir == "" && probe.gitDirErr == nil {
 		probe.gitDir = fx.gitDir
+	}
+	if probe.worktrees == nil && probe.worktreeListErr == nil {
+		probe.worktrees = fx.repoWorktrees()
 	}
 	fx.probesByWD[workDir] = probe
 }
@@ -602,34 +628,55 @@ func TestPruneAgentHomeWorktreeIfSafe_LeavesManagedWorktreeOfAnotherOwner(t *tes
 	}
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.cfg.Rigs = nil
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+// TestPruneAgentHomeWorktreeIfSafe_RemovesThroughTheMainWorktree pins where
+// the removal runs: from the main worktree the worker_dir's own worktree list
+// names first, with no rig configured and a template that names none. A list
+// that cannot be read, or a worker_dir that is the main worktree, keeps the
+// folder.
+func TestPruneAgentHomeWorktreeIfSafe_RemovesThroughTheMainWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mainIsWD  bool
+		listErr   error
+		wantPrune bool
+		wantLog   string
+	}{
+		{name: "the main worktree the list names first", wantPrune: true, wantLog: "pruned worker_dir"},
+		{name: "an unreadable worktree list", listErr: errors.New("git worktree list failed"), wantLog: "cannot list its repository's worktrees"},
+		{name: "a worker_dir that is its repository's main worktree", mainIsWD: true, wantLog: "its repository's main worktree"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newPruneFixture(t)
+			fx.cfg.Rigs = nil
+			main := filepath.Join(fx.cityPath, "repos", "main")
+			list := []git.Worktree{{Path: main}, {Path: fx.workerDir}}
+			if tc.mainIsWD {
+				list = []git.Worktree{{Path: fx.workerDir}}
+			}
+			wdProbe := &fakeGitProbe{isRepo: true, worktrees: list, worktreeListErr: tc.listErr}
+			fx.setProbe(fx.workerDir, wdProbe)
+			mainProbe := &fakeGitProbe{isRepo: true}
+			fx.setProbe(main, mainProbe)
+			// A city-scoped agent's session, whose record asks for the removal.
+			session := fx.sessionBead()
+			session.Metadata["template"] = "helper"
+			session.Metadata["session_name"] = "helper"
+			session.Metadata[sessionpkg.PruneWorkerDirMetadataKey] = "true"
 
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
-		t.Fatal("prune returned true without rig path")
+			var stderr bytes.Buffer
+			if got := pruneAgentHomeWorktreeIfSafe(session, fx.cityPath, fx.cfg, livePruneAllowed(), &stderr); got != tc.wantPrune {
+				t.Fatalf("prune returned %v, want %v; stderr=%q", got, tc.wantPrune, stderr.String())
+			}
+			if mainProbe.removeInvoked != tc.wantPrune || (tc.wantPrune && mainProbe.removedPath != fx.workerDir) || wdProbe.removeInvoked {
+				t.Fatalf("removal: through the main worktree %v on %q, through the worker_dir %v; want %v through the main worktree alone; stderr=%q",
+					mainProbe.removeInvoked, mainProbe.removedPath, wdProbe.removeInvoked, tc.wantPrune, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), tc.wantLog) {
+				t.Fatalf("stderr = %q, want it to say %q", stderr.String(), tc.wantLog)
+			}
+			assertNoWorktreeStaleMarker(t, fx.workerDir)
+		})
 	}
-	if !strings.Contains(stderr.String(), "rig path unresolved") {
-		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
-}
-
-func TestPruneAgentHomeWorktreeIfSafe_RigPathEmpty(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.cfg.Rigs = []config.Rig{{Name: "demo", Path: ""}}
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
-
-	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, livePruneAllowed(), &stderr) {
-		t.Fatal("prune returned true with empty rig path")
-	}
-	if !strings.Contains(stderr.String(), "rig path unresolved") {
-		t.Errorf("expected rig-unresolved log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RemoveFails(t *testing.T) {
@@ -760,7 +807,7 @@ func TestPruneAgentHomeWorktreeIfSafe_OwnRecordedSessionDirDoesNotBlockSelf(t *t
 	// as a live signal against its own worktree, or a clean retired pool
 	// worktree is never reclaimed.
 	var stderr bytes.Buffer
-	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.workerDir), &stderr) {
+	if !pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(fx.sessionBead().ID, fx.workerDir), &stderr) {
 		t.Fatalf("prune skipped a clean worktree whose only session-dir signal was its own retired session; log: %q", stderr.String())
 	}
 	if !rigProbe.removeInvoked {
@@ -782,11 +829,34 @@ func TestPruneAgentHomeWorktreeIfSafe_OtherSessionNestedDirBlocks(t *testing.T) 
 		t.Fatalf("mkdir nested: %v", err)
 	}
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession(nested), &stderr) {
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession("session-2", nested), &stderr) {
 		t.Fatal("prune returned true while a different open session works beneath the worktree")
 	}
 	if rigProbe.removeInvoked {
 		t.Error("WorktreeRemove invoked while a different open session works beneath the worktree")
+	}
+	if !strings.Contains(stderr.String(), "active session dir") {
+		t.Errorf("expected active-session reason log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+func TestPruneAgentHomeWorktreeIfSafe_OtherSessionSameDirBlocks(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	// A different open session records the retired session's worker_dir
+	// itself, as the next session in the same pool slot does. Only the
+	// retired session's own entries are dropped, so the other session's
+	// identical entry still blocks removal.
+	var stderr bytes.Buffer
+	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, liveViaSession("session-2", fx.workerDir), &stderr) {
+		t.Fatal("prune returned true while a different open session records the same worktree")
+	}
+	if rigProbe.removeInvoked {
+		t.Error("WorktreeRemove invoked while a different open session records the same worktree")
 	}
 	if !strings.Contains(stderr.String(), "active session dir") {
 		t.Errorf("expected active-session reason log; got %q", stderr.String())
@@ -816,32 +886,323 @@ func TestPruneAgentHomeWorktreeIfSafe_LiveTakesPrecedenceOverGitState(t *testing
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestLookupRigRootForSession(t *testing.T) {
-	cfg := &config.City{
-		Rigs: []config.Rig{
-			{Name: "demo", Path: "/x/demo"},
-			{Name: "other", Path: "/x/other"},
-		},
+// cliPruneCity is a city for the worker_dir prune of the session close and
+// prune commands: rig "demo" is a real repository whose HEAD is pushed to its
+// origin and which ignores the worktrees folders made inside its worktrees,
+// and agent demo/helper sets nothing. Its worktrees live under the city's
+// worktrees root, so every git safety gate of the prune passes on a clean one.
+type cliPruneCity struct {
+	t        *testing.T
+	cityDir  string
+	rigRoot  string
+	helperWT string // the folder each helper session's worktree sits under
+	store    beads.Store
+}
+
+func newCLIPruneCity(t *testing.T) *cliPruneCity {
+	t.Helper()
+	origScan := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+
+	c := &cliPruneCity{t: t, cityDir: t.TempDir(), rigRoot: filepath.Join(t.TempDir(), "demo")}
+	c.helperWT = filepath.Join(c.cityDir, ".gc", "worktrees", "demo", "helper")
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+	if err := os.MkdirAll(c.rigRoot, 0o755); err != nil {
+		t.Fatalf("mkdir rig root: %v", err)
 	}
-	cases := []struct {
-		name     string
-		template string
-		want     string
+	runGit(t, c.rigRoot, "clone", bare, ".")
+	runGit(t, c.rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, c.rigRoot, "config", "user.name", "Test")
+	runGit(t, c.rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, c.rigRoot, "push", "origin", "HEAD")
+	if err := os.WriteFile(filepath.Join(c.rigRoot, ".git", "info", "exclude"), []byte("worktrees/\n"), 0o644); err != nil {
+		t.Fatalf("write info/exclude: %v", err)
+	}
+	writePhase0InterfaceCity(t, c.cityDir, fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "demo"
+path = %q
+
+[[agent]]
+name = "helper"
+dir = "demo"
+start_command = "true"
+`, c.rigRoot))
+	t.Setenv("GC_CITY", c.cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+	store, err := openCityStoreAt(c.cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	c.store = store
+	return c
+}
+
+// worktree adds a detached worktree of the rig at path.
+func (c *cliPruneCity) worktree(path string) string {
+	c.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		c.t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	runGit(c.t, c.rigRoot, "worktree", "add", "--detach", path)
+	return path
+}
+
+// session creates a manual helper session working in dir, with meta added.
+func (c *cliPruneCity) session(name, dir string, meta map[string]string) beads.Bead {
+	c.t.Helper()
+	return c.sessionIn(c.store, name, dir, meta)
+}
+
+// sessionIn is session, written through store.
+func (c *cliPruneCity) sessionIn(store beads.Store, name, dir string, meta map[string]string) beads.Bead {
+	c.t.Helper()
+	m := map[string]string{"session_name": name, "template": "demo/helper", "session_origin": "manual", "work_dir": dir}
+	maps.Copy(m, meta)
+	b, err := store.Create(beads.Bead{Title: name, Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: m})
+	if err != nil {
+		c.t.Fatalf("create session %s: %v", name, err)
+	}
+	return b
+}
+
+// assertFolder fails unless dir exists exactly when want says it stays.
+func assertFolder(t *testing.T, dir string, stays bool, stderr string) {
+	t.Helper()
+	_, err := os.Stat(dir)
+	if gone := errors.Is(err, os.ErrNotExist); gone == stays {
+		t.Fatalf("%s gone = %v, want stays = %v; stderr=%q", dir, gone, stays, stderr)
+	}
+}
+
+// TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords runs the
+// legacy reconciler's prune of a row it closed (a failed create, a dead
+// named-session phantom, an orphan) with the liveness its pass gathers from
+// the snapshot taken before the close: a folder another open session records
+// stays, and the same folder with the closing session alone in the snapshot
+// goes.
+func TestPruneClosedRowWorkerDirKeepsAFolderAnotherOpenSessionRecords(t *testing.T) {
+	asks := map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"}
+	for _, tc := range []struct {
+		name   string
+		shared bool
 	}{
-		{"qualified match", "demo/polecat", "/x/demo"},
-		{"other rig", "other/refinery", "/x/other"},
-		{"unqualified", "polecat", ""},
-		{"unknown rig", "missing/polecat", ""},
-		{"empty", "", ""},
-		{"leading slash", "/polecat", ""},
+		{"another open session records the folder", true},
+		{"the closing session alone records it", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "shared"))
+			closing := c.session("helper-old", dir, asks)
+			open := []sessionpkg.Info{sessionInfoFromBead(closing)}
+			if tc.shared {
+				open = append(open, sessionInfoFromBead(c.session("helper-new", dir, nil)))
+			}
+			pass := worktreeLivenessInputs{live: liveWorktreeState{scanned: true}, sessionDirs: openSessionWorkDirs(open)}
+			if err := c.store.Close(closing.ID); err != nil {
+				t.Fatalf("Close(%s): %v", closing.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			var stderr bytes.Buffer
+			pruneClosedRowWorkerDir(sessionFrontDoor(c.store), closing.ID, c.cityDir, cfg, func() worktreeLivenessInputs { return pass }, &stderr)
+			assertFolder(t, dir, tc.shared, stderr.String())
+		})
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			bead := beads.Bead{Metadata: map[string]string{"template": c.template}}
-			got := lookupRigRootForSession(bead, cfg)
-			if got != c.want {
-				t.Errorf("lookupRigRootForSession(%q) = %q, want %q", c.template, got, c.want)
+}
+
+// TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes pins the API's
+// side of the worker_dir prune: the API's worker factories hand the rows an API
+// close closed to controllerState.ReclaimClosedSessions, which runs the prune
+// gc session close's session manager runs (closedSessionWorkerDirReclaim). A
+// closed session whose record asks for it loses its clean folder, one whose
+// folder holds uncommitted changes keeps it, and so does one whose agent sets
+// nothing. The sessions are written through the controller's sessions store,
+// where the API's closes write them.
+func TestControllerStateReclaimClosedSessionsPrunesAsTheCLIDoes(t *testing.T) {
+	c := newCLIPruneCity(t)
+	cfg, err := loadCityConfig(c.cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	cs := &controllerState{cityPath: c.cityDir, cityBeadStore: c.store, cfg: cfg}
+	sessions := cs.Stores().Sessions().Store
+	asks := map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"}
+	clean := c.worktree(filepath.Join(c.helperWT, "clean"))
+	dirty := c.worktree(filepath.Join(c.helperWT, "dirty"))
+	if err := os.WriteFile(filepath.Join(dirty, "draft.txt"), []byte("unsaved\n"), 0o644); err != nil {
+		t.Fatalf("write draft: %v", err)
+	}
+	unset := c.worktree(filepath.Join(c.helperWT, "unset"))
+	var ids []string
+	for _, s := range []struct {
+		dir  string
+		meta map[string]string
+	}{{clean, asks}, {dirty, asks}, {unset, nil}} {
+		b := c.sessionIn(sessions, "helper-"+filepath.Base(s.dir), s.dir, s.meta)
+		if err := sessions.Close(b.ID); err != nil {
+			t.Fatalf("Close(%s): %v", b.ID, err)
+		}
+		ids = append(ids, b.ID)
+	}
+	cs.ReclaimClosedSessions(ids)
+	assertFolder(t, clean, false, "")
+	assertFolder(t, dirty, true, "")
+	assertFolder(t, unset, true, "")
+}
+
+// TestPruneClosedSessionWorkerDirsKeepsAnotherRepositorysDirtyWorktree runs
+// the prune over a real clean and pushed worktree of the rig whose ignored
+// worktrees/ folder holds a worktree of another repository, which the rig's
+// repository does not list: with uncommitted changes in it, the folder stays
+// and so do the changes, clean, the folder goes, and clean but provisioned by
+// gc worktree ensure, whose path check reads only its own repository's
+// worktrees, the folder stays and the provisioned worktree stays intact.
+func TestPruneClosedSessionWorkerDirsKeepsAnotherRepositorysDirtyWorktree(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dirty   bool
+		managed bool
+		stays   bool
+	}{
+		{name: "with uncommitted changes", dirty: true, stays: true},
+		{name: "clean"},
+		{name: "clean and provisioned by gc worktree ensure", managed: true, stays: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "outer"))
+			bare := t.TempDir()
+			runGit(t, bare, "init", "--bare")
+			other := t.TempDir()
+			runGit(t, other, "clone", bare, ".")
+			runGit(t, other, "config", "user.email", "test@test.com")
+			runGit(t, other, "config", "user.name", "Test")
+			runGit(t, other, "commit", "--allow-empty", "-m", "init")
+			runGit(t, other, "push", "origin", "HEAD")
+			root := filepath.Join(dir, "worktrees")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("mkdir %s: %v", root, err)
+			}
+			nested := filepath.Join(root, "other-change")
+			var spec worktree.Spec
+			if tc.managed {
+				spec = worktree.Spec{
+					RepoDir: other, Root: root, Path: nested, Branch: "work/other-change",
+					Base:   strings.TrimSpace(runGit(t, other, "rev-parse", "--abbrev-ref", "HEAD")),
+					BeadID: "gc-work", StoreRef: "rig:other", Creator: "provisioner", Owner: "provisioner",
+					Generation: "g1", Lifecycle: worktree.LifecycleActive,
+				}
+				report, err := worktree.Ensure(spec)
+				if err != nil {
+					t.Fatalf("Ensure managed worktree: %v", err)
+				}
+				spec.BaseSHA = report.Provenance.BaseSHA
+			} else {
+				runGit(t, other, "worktree", "add", "--detach", nested)
+			}
+			draft := filepath.Join(nested, "draft.txt")
+			if tc.dirty {
+				if err := os.WriteFile(draft, []byte("unsaved\n"), 0o644); err != nil {
+					t.Fatalf("write draft: %v", err)
+				}
+			}
+			row := c.session("helper-outer", dir, map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"})
+			if err := c.store.Close(row.ID); err != nil {
+				t.Fatalf("Close(%s): %v", row.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+			assertFolder(t, dir, tc.stays, stderr.String())
+			if tc.dirty {
+				if data, err := os.ReadFile(draft); err != nil || string(data) != "unsaved\n" {
+					t.Fatalf("the nested worktree's change = %q, %v; want it kept; stderr=%q", data, err, stderr.String())
+				}
+			}
+			if tc.managed {
+				assertManagedWorktreeIntact(t, spec, stderr.String())
 			}
 		})
+	}
+}
+
+// TestPruneClosedSessionWorkerDirsKeepsAFolderALabelLostSessionRecords runs
+// the prune of a closed session whose record asks for it over a real clean and
+// pushed worktree: an open session row that records the same folder keeps it,
+// a suspended row that lost its session label included, and with no such row
+// the folder goes.
+func TestPruneClosedSessionWorkerDirsKeepsAFolderALabelLostSessionRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		shared bool
+	}{
+		{name: "a label-lost open session records the folder", shared: true},
+		{name: "no other session records it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLIPruneCity(t)
+			dir := c.worktree(filepath.Join(c.helperWT, "shared"))
+			row := c.session("helper-old", dir, map[string]string{sessionpkg.PruneWorkerDirMetadataKey: "true"})
+			if tc.shared {
+				if _, err := c.store.Create(beads.Bead{Title: "helper-new", Type: sessionpkg.BeadType, Metadata: map[string]string{
+					"session_name": "helper-new", "template": "demo/helper", "state": "suspended", "work_dir": dir,
+				}}); err != nil {
+					t.Fatalf("create the label-lost session: %v", err)
+				}
+			}
+			if err := c.store.Close(row.ID); err != nil {
+				t.Fatalf("Close(%s): %v", row.ID, err)
+			}
+			cfg, err := loadCityConfig(c.cityDir)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+			assertFolder(t, dir, tc.shared, stderr.String())
+		})
+	}
+}
+
+// TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder runs the
+// prune of a closed session of a city-scoped agent, whose template names no
+// rig, over a real clean and pushed worktree whose record asks for the
+// removal: the folder goes, through the repository the worktree belongs to,
+// which no longer lists it.
+func TestPruneClosedSessionWorkerDirsRemovesACityScopedSessionsFolder(t *testing.T) {
+	c := newCLIPruneCity(t)
+	dir := c.worktree(filepath.Join(c.helperWT, "city-helper"))
+	row := c.session("city-helper", dir, map[string]string{"template": "helper", sessionpkg.PruneWorkerDirMetadataKey: "true"})
+	if err := c.store.Close(row.ID); err != nil {
+		t.Fatalf("Close(%s): %v", row.ID, err)
+	}
+	cfg, err := loadCityConfig(c.cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	cfg.Agents = []config.Agent{{Name: "helper"}}
+
+	var stderr bytes.Buffer
+	pruneClosedSessionWorkerDirs(c.cityDir, cfg, sessionFrontDoor(c.store), []string{row.ID}, &stderr)
+	assertFolder(t, dir, false, stderr.String())
+	if list := runGit(t, c.rigRoot, "worktree", "list", "--porcelain"); strings.Contains(list, filepath.Base(dir)) {
+		t.Fatalf("the repository still lists the removed worktree:\n%s", list)
 	}
 }

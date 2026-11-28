@@ -102,8 +102,10 @@ type startCaps struct {
 // reaches no row write and none of a Call's handles (provider start,
 // routing, kill), but two after-close writers: the close's cascade
 // (capRelease), which writes only after its close landed, and a closed row's
-// cleanup (capRetire), which writes only its waits and bindings; C5a1's
-// endpoint gate may add Eligible here, never Admit.
+// cleanup (capRetire), which writes only its waits and bindings. The stop's
+// around reaches the close's handles only for the worker_dir prune after its
+// finalize closed the row (stopAround). C5a1's endpoint gate may add
+// Eligible here, never Admit.
 type aroundCaps struct {
 	it      intent
 	reads   effectReads     // capReadStores: read-only

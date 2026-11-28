@@ -206,6 +206,16 @@ type State interface {
 	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
 	// means the prompt cannot be delivered and the launch must not proceed.
 	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
+
+	// ReclaimClosedSessions cleans up what the closed session rows ids leave
+	// behind, as the controller does after its own closes and gc session
+	// close does after its: each one's worker_dir goes when its record asks
+	// for it (session.PrunesWorkerDirAtClose) and its safety checks pass. The
+	// API's worker factories run it once a handle's close has closed a row
+	// (worker.FactoryConfig.AfterClose), so a close through the API cannot
+	// keep a folder a CLI close removes. What it keeps or removes, and why,
+	// goes to the controller's log, never to the API's caller.
+	ReclaimClosedSessions(ids []string)
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields

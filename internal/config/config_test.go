@@ -8725,3 +8725,36 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
 	}
 }
+
+func TestAgentPruneWorkerDirParses(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "bright-lights"
+
+[[agent]]
+name = "kept"
+prune_worker_dir = false
+
+[[agent]]
+name = "pruned"
+prune_worker_dir = true
+
+[[agent]]
+name = "unset"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	agents := map[string]*Agent{}
+	for i := range cfg.Agents {
+		agents[cfg.Agents[i].Name] = &cfg.Agents[i]
+	}
+	if agents["unset"].PruneWorkerDir != nil {
+		t.Fatalf("unset agent PruneWorkerDir = %v, want nil", *agents["unset"].PruneWorkerDir)
+	}
+	for name, want := range map[string]bool{"kept": false, "pruned": true} {
+		if got := agents[name].PruneWorkerDir; got == nil || *got != want {
+			t.Errorf("%s PruneWorkerDir = %v, want %v", name, got, want)
+		}
+	}
+}

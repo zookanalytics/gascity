@@ -1,6 +1,10 @@
 package session
 
-import "strings"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // LaunchTaskWorkDirMetadataKey records on a session row the task work_dir its
 // current incarnation was launched in: the work_dir of a bead the session
@@ -11,6 +15,50 @@ import "strings"
 // a retiring pool session's worker_dir, and a task work_dir belongs to its
 // bead, not to the session launched in it.
 const LaunchTaskWorkDirMetadataKey = "launch_task_work_dir"
+
+// PruneWorkerDirMetadataKey records on a session row whether the row's close
+// removes its worker_dir, "true" or "false", over its agent's
+// prune_worker_dir: gc session new --prune-worker-dir writes it at creation,
+// and an operator may set it while the session runs, to keep one folder for
+// later triage. A row without it takes its agent's setting at the close.
+const PruneWorkerDirMetadataKey = "prune_worker_dir"
+
+// RecordedPruneWorkerDir reads info's prune_worker_dir record. recorded is
+// false when the row holds none. err is set when the row holds a value
+// strconv.ParseBool does not read, which no close takes as consent to remove
+// the folder.
+func RecordedPruneWorkerDir(info Info) (prune, recorded bool, err error) {
+	v := strings.TrimSpace(info.PruneWorkerDir)
+	if v == "" {
+		return false, false, nil
+	}
+	prune, err = strconv.ParseBool(v)
+	if err != nil {
+		return false, true, fmt.Errorf("%s=%q: %w", PruneWorkerDirMetadataKey, v, err)
+	}
+	return prune, true, nil
+}
+
+// PrunesWorkerDirAtClose decides whether the close of the session info
+// describes removes its worker_dir. The session's own prune_worker_dir record
+// decides first (RecordedPruneWorkerDir), then agentSetting, its agent's
+// prune_worker_dir, and with neither set, whether the session is pool-managed:
+// a pool session's folder goes and any other session's stays. A record that
+// does not parse keeps the folder and returns the parse error. Whether the
+// removal is safe is the caller's to check.
+func PrunesWorkerDirAtClose(info Info, agentSetting *bool, poolManaged bool) (bool, error) {
+	prune, recorded, err := RecordedPruneWorkerDir(info)
+	switch {
+	case err != nil:
+		return false, err
+	case recorded:
+		return prune, nil
+	case agentSetting != nil:
+		return *agentSetting, nil
+	default:
+		return poolManaged, nil
+	}
+}
 
 // LaunchTaskWorkDirPatch is the patch recording dir as the task work_dir a
 // start launches info in, "" for a start in the session's own work dir. It is

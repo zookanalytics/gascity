@@ -92,6 +92,10 @@
           "type": "string",
           "description": "WorkDir overrides the session working directory without changing the\nagent's qualified identity. Relative paths resolve against city root\nand may use the same template placeholders as session_setup."
         },
+        "prune_worker_dir": {
+          "type": "boolean",
+          "description": "PruneWorkerDir controls whether gc removes a session's worker_dir, the\nworking directory work_dir gives it, when the session's record closes.\nNil (unset) removes the folder of a pool-managed session and keeps any\nother session's, such as one gc session new starts. A session's own\nprune_worker_dir record overrides it for that session, and the close\nreads the record first: gc session new --prune-worker-dir writes it at\ncreation, and\n`gc bd update \u003csession-id\u003e --set-metadata prune_worker_dir=false` keeps\na running session's folder for later triage. Removal keeps the safety\ngates [daemon] auto_prune_worker_dir lists, and\nauto_prune_worker_dir = false keeps every session's folder."
+        },
         "tmux_alias": {
           "type": "string",
           "description": "TmuxAlias overrides the tmux session_name for pool and factory-created\nmanual sessions of this agent. When unset, sessions fall back to the\nuniversal derivation (\"s-\u003cbeadID\u003e\" for ad-hoc sessions,\n\"\u003cbasename\u003e-\u003cbeadID\u003e\" for pool sessions). When set, it is expanded as a\nGo text/template using the same PathContext fields as work_dir /\nsession_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,\nDefaultBranch), sanitized for tmux, and validated as an explicit session name. For pool\nsessions, a live-name collision appends the bead ID as a deterministic\nsuffix. For manual `gc session new` sessions, tmux_alias becomes the\nexplicit session_name and takes precedence over --alias, which remains the\ncommand/mail alias; duplicate explicit names fail closed. Configured named\nsessions keep their named-session runtime name instead of using\ntmux_alias. When no --alias is supplied, work_dir templates that use\n{{.Agent}} see the resolved tmux_alias as the concrete session identity."
@@ -465,6 +469,10 @@
           "type": "string",
           "description": "WorkDir overrides the agent's working directory without changing\nits qualified identity or rig association."
         },
+        "prune_worker_dir": {
+          "type": "boolean",
+          "description": "PruneWorkerDir overrides whether a session's worker_dir is removed\nwhen its record closes (see Agent.PruneWorkerDir)."
+        },
         "tmux_alias": {
           "type": "string",
           "description": "TmuxAlias overrides the tmux session name template\n(see Agent.TmuxAlias for semantics)."
@@ -765,6 +773,10 @@
         "work_dir": {
           "type": "string",
           "description": "WorkDir overrides the agent's session working directory."
+        },
+        "prune_worker_dir": {
+          "type": "boolean",
+          "description": "PruneWorkerDir overrides whether a session's worker_dir is removed\nwhen its record closes (see Agent.PruneWorkerDir)."
         },
         "tmux_alias": {
           "type": "string",
@@ -1553,7 +1565,7 @@
         },
         "auto_prune_worker_dir": {
           "type": "boolean",
-          "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, not a managed worktree (one gc worktree ensure\nprovisioned, which only its owner removes), clean working tree, no\nunpushed commits. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
+          "description": "AutoPruneWorkerDir is the city-wide switch for removing a session's\nworker_dir (agent worktree) when the session's record closes. Which\nsessions remove theirs is each agent's prune_worker_dir, or a\nsession's own prune_worker_dir record; unset, only a pool-managed\nsession's folder goes.\nRemoval is gated on: path lives under the city's .gc/worktrees/ tree,\nnot a managed worktree (one gc worktree ensure provisioned, which only\nits owner removes), no live process working in it, clean working tree,\nno unpushed commits, no git worktree of any repository beneath it with\nuncommitted changes or provisioned by gc worktree ensure, and no\nrepository stored beneath it, such as a clone or a bare repository. Nil\n(unset) defaults to true so pool worktrees do not accumulate without\nbound across pool recycles. Set to false to keep every session's\nworktree for post-session diagnostics.",
           "default": true
         }
       },

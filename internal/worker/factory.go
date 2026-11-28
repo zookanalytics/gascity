@@ -67,6 +67,11 @@ type FactoryConfig struct {
 	// DeferredSubmits is where the factory's manager queues a submit a
 	// session cannot take yet. Nil keeps the city's state.json queue.
 	DeferredSubmits sessionpkg.DeferredSubmitQueue
+	// AfterClose runs with the ids of the session rows a handle's close or
+	// the catalog's prune closed (session.WithAfterClose): the caller's
+	// cleanup of what a closed session leaves behind, such as its
+	// worker_dir. Nil runs nothing.
+	AfterClose func(ids []string)
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -112,6 +117,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.DeferredSubmits != nil {
 		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
+	}
+	if cfg.AfterClose != nil {
+		opts = append(opts, sessionpkg.WithAfterClose(cfg.AfterClose))
 	}
 	manager := sessionpkg.NewManagerWithOptions(beads.SessionStore{Store: cfg.Store}, cfg.Provider, opts...)
 	return newFactory(manager, cfg)

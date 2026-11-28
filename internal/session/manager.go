@@ -250,6 +250,11 @@ type Info struct {
 	// incarnation was launched in, empty when it was launched in its own work
 	// dir. Additive, internal-only (absent from the HTTP wire).
 	LaunchTaskWorkDir string // launch_task_work_dir (raw)
+	// PruneWorkerDir is the RAW prune_worker_dir metadata
+	// (PruneWorkerDirMetadataKey): whether the row's close removes its
+	// worker_dir, as RecordedPruneWorkerDir reads it. Additive, internal-only
+	// (absent from the HTTP wire).
+	PruneWorkerDir string // prune_worker_dir (raw)
 
 	// --- state / bookkeeping cluster (controller read surface) ---
 	//
@@ -662,6 +667,7 @@ type Manager struct {
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
+	afterClose              func(ids []string)  // the caller's cleanup after rows close (WithAfterClose)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -1010,6 +1016,28 @@ func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
 		if waiter != nil {
 			m.staleKeyDetectionWaiter = waiter
 		}
+	}
+}
+
+// WithAfterClose runs fn with the ids of the session rows the Manager closes:
+// after CloseDetailed closes a row or finds it closed, and after PruneDetailed
+// closes any. It runs outside the session's start lock, once the rows are
+// closed, and is where a caller cleans up what a closed session leaves behind,
+// such as its worker_dir, whose removal PrunesWorkerDirAtClose decides. A nil
+// fn is ignored.
+func WithAfterClose(fn func(ids []string)) ManagerOption {
+	return func(m *Manager) {
+		if fn != nil {
+			m.afterClose = fn
+		}
+	}
+}
+
+// closed hands ids, the session rows the Manager just closed, to the caller's
+// cleanup (WithAfterClose).
+func (m *Manager) closed(ids []string) {
+	if m.afterClose != nil && len(ids) > 0 {
+		m.afterClose(ids)
 	}
 }
 
@@ -1889,7 +1917,8 @@ func (m *Manager) Close(ctx context.Context, by Actor, id string) error {
 }
 
 // CloseDetailed ends a conversation permanently and reports cleanup
-// artifacts. It stops the runtime under by's runtime lease mode.
+// artifacts. It stops the runtime under by's runtime lease mode, and once the
+// row is closed hands it to the caller's cleanup (WithAfterClose).
 func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (CloseResult, error) {
 	if err := m.checkActor(by); err != nil {
 		return CloseResult{}, err
@@ -1965,6 +1994,9 @@ func (m *Manager) CloseDetailed(ctx context.Context, by Actor, id string) (Close
 		_ = clearRuntimeMCPServersSnapshot(m.cityPath, id)
 		return nil
 	})
+	if err == nil {
+		m.closed([]string{id})
+	}
 	return result, err
 }
 
@@ -2311,7 +2343,9 @@ func (m *Manager) Prune(before time.Time) (int, error) {
 // When no states are supplied it defaults to [StateSuspended] for backward
 // compatibility. Callers may opt in to asleep or drained cleanup by passing
 // StateAsleep or StateDrained. StateDrained also matches legacy
-// state=asleep/sleep_reason=drained beads.
+// state=asleep/sleep_reason=drained beads. The rows it closes, those of a
+// prune that stops at an error included, go to the caller's cleanup
+// (WithAfterClose).
 func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult, error) {
 	if len(states) == 0 {
 		states = []State{StateSuspended}
@@ -2327,6 +2361,7 @@ func (m *Manager) PruneDetailed(before time.Time, states ...State) (PruneResult,
 		return PruneResult{}, fmt.Errorf("listing sessions: %w", err)
 	}
 	result := PruneResult{}
+	defer func() { m.closed(result.SessionIDs) }()
 	for _, b := range all {
 		if !IsSessionBeadOrRepairable(b) {
 			continue

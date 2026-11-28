@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -523,6 +524,83 @@ func TestUndesiredNonPoolRowClosesAsLegacy(t *testing.T) {
 		if c.closed && (got.Metadata["state"] != "drained" || got.Metadata["close_reason"] != session.CanonicalCloseReason("drained")) {
 			t.Errorf("%s: row %v, want legacy's drained close", c.name, got.Metadata)
 		}
+	}
+}
+
+// TestStopCloseOffersTheClosedRowToThePrune. Kills a drain-ack close that
+// ends a row's record without the worker_dir prune every other close runs: a
+// stop whose finalize closes the row offers the closed row to the prune,
+// which the row's record decides; a stop that leaves the row drained offers
+// nothing.
+func TestStopCloseOffersTheClosedRowToThePrune(t *testing.T) {
+	origScan := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+	origPrune := pruneWorktree
+	t.Cleanup(func() { pruneWorktree = origPrune })
+	for _, c := range []struct {
+		name   string
+		entry  func(*selectionEntry)
+		closed bool
+	}{
+		{"a stop that closes the row", undesired(drainOrphaned), true},
+		{"a stop that leaves it drained", wanted, false},
+	} {
+		var pruned []string
+		pruneWorktree = func(info session.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
+			pruned = append(pruned, info.ID)
+		}
+		s, got, _ := stopRun(t, signaled(drainOrphaned, "work_dir", "/city/.gc/worktrees/repo/worker-1"), c.entry, func(p *effectPass, _ *fenceLeaf, store beads.Store, _ string) {
+			p.held.release = &closeReleases{stores: map[string]beads.Store{rowLeg: store}, cfg: &config.City{}, stderr: io.Discard}
+		})
+		if closed := got.Status == "closed"; s.Outcome != settledLanded || closed != c.closed {
+			t.Fatalf("%s: settlement %+v, status %s; want closed=%v", c.name, s, got.Status, c.closed)
+		}
+		if want := map[bool]int{true: 1}[c.closed]; len(pruned) != want || (want == 1 && pruned[0] != got.ID) {
+			t.Fatalf("%s: pruned %v, want the closed row offered %d time(s)", c.name, pruned, want)
+		}
+	}
+}
+
+// TestPlannerHandsADrainAckStopTheCloseReleases. Kills a planner that hands
+// the close's release handles only to a close or an execution-stalled stop:
+// stopAround reaches the worker_dir prune through them, so a drain-ack stop
+// the planner submits, whose finalize closes the row, must offer the closed
+// row to the prune.
+func TestPlannerHandsADrainAckStopTheCloseReleases(t *testing.T) {
+	origScan := collectLiveWorktreeStateFn
+	collectLiveWorktreeStateFn = func() liveWorktreeState { return liveWorktreeState{scanned: true} }
+	t.Cleanup(func() { collectLiveWorktreeStateFn = origScan })
+	pruned := make(chan string, 4)
+	orig := pruneWorktree
+	pruneWorktree = func(info session.Info, _ string, _ *config.City, _ worktreeLivenessInputs, _ io.Writer) {
+		pruned <- info.ID
+	}
+	t.Cleanup(func() { pruneWorktree = orig })
+
+	var w *World
+	p, it, store, _ := admittedBeginOn(t, signaled(drainOrphaned, "work_dir", "/city/.gc/worktrees/repo/worker-1"), undesired(drainOrphaned), func(world *World) {
+		world.LegStores[rowLeg] = atomicClosing{world.LegStores[rowLeg].(*beads.MemStore)} // the premise close's store
+		w = world
+	})
+	if it.Kind != intentStop || stopReason(it) == executionStalledDrainReason {
+		t.Fatalf("decided %+v, want a stop that is not an execution-stalled drain", it)
+	}
+	it.Deadline = time.Now().Add(time.Minute)
+	rt := newDefaultPlanner(io.Discard)
+	rt.planner.submit(w, p.Alloc, []intent{it})
+	rt.exec.stop(time.Now().Add(time.Minute)) // returns once the effect settled
+	close(pruned)
+
+	if got, err := store.Get(it.Key.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("row %s = %+v, %v; want the stop's finalize to close it", it.Key.ID, got, err)
+	}
+	var offered []string
+	for id := range pruned {
+		offered = append(offered, id)
+	}
+	if len(offered) != 1 || offered[0] != it.Key.ID {
+		t.Fatalf("pruned %v, want the closed row %s offered once", offered, it.Key.ID)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -960,7 +961,8 @@ func TestInterruptedCloseGatesTheWorktreePruneOnLiveness(t *testing.T) {
 			halfCloseSessionBead(t, store, seat.ID, "stranded-repair", now.Add(-time.Hour), nil)
 
 			gitDir := t.TempDir()
-			probe := &fakeGitProbe{isRepo: true, gitDir: gitDir}
+			repoRoot := filepath.Join(cityPath, "repos", "repo")
+			probe := &fakeGitProbe{isRepo: true, gitDir: gitDir, worktrees: []git.Worktree{{Path: repoRoot}, {Path: workerDir}}}
 			origProbe := newGitProbe
 			newGitProbe = func(string) gitProbe { return probe }
 			t.Cleanup(func() { newGitProbe = origProbe })
@@ -986,14 +988,11 @@ func TestInterruptedCloseGatesTheWorktreePruneOnLiveness(t *testing.T) {
 			if blocked != tc.live {
 				t.Fatalf("liveness refusal logged = %v, want %v\n%s", blocked, tc.live, out.String())
 			}
-			if probe.removeInvoked {
-				t.Fatalf("worktree removed (rig path is unresolvable in this fixture; live=%v)\n%s", tc.live, out.String())
-			}
-			// Past the liveness gate the prune reaches its last gate, the rig
-			// path this fixture does not resolve.
-			reachedRigGate := strings.Contains(out.String(), "not pruning worker_dir "+workerDir+": rig path unresolved")
-			if reachedRigGate == tc.live {
-				t.Fatalf("prune reached the rig-path gate = %v with live=%v\n%s", reachedRigGate, tc.live, out.String())
+			// Past the liveness gate every git-state gate passes on the fake
+			// probe, so the prune removes the worktree through the main
+			// worktree its repository lists first.
+			if probe.removeInvoked == tc.live || (!tc.live && probe.removedPath != workerDir) {
+				t.Fatalf("worktree removal invoked = %v on %q with live=%v, want it exactly when nothing is live\n%s", probe.removeInvoked, probe.removedPath, tc.live, out.String())
 			}
 		})
 	}

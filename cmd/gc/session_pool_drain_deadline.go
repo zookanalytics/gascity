@@ -60,9 +60,9 @@ const drainFinalizeDeadline = "deadline"
 // worktree on disk. Production value is the same helper the pool-freeable close
 // uses; the deadline path preempts that close, so without this call every
 // retired seat would leak its worktree.
-var poolSlotRetireWorktreePrune = pruneAgentHomeWorktreeIfSafeInfo
+var poolSlotRetireWorktreePrune = pruneClosedRowWorkerDir
 
-func swapWorktreePruneForTest(fn func(sessionpkg.Info, string, *config.City, worktreeLivenessInputs, io.Writer)) func() {
+func swapWorktreePruneForTest(fn func(*sessionpkg.Store, string, string, *config.City, func() worktreeLivenessInputs, io.Writer)) func() {
 	prev := poolSlotRetireWorktreePrune
 	poolSlotRetireWorktreePrune = fn
 	return func() { poolSlotRetireWorktreePrune = prev }
@@ -457,19 +457,15 @@ func retirePoolSlotAtDrainDeadline(
 
 	// Pool worktrees are transient by design; the deadline path preempts the
 	// pool-freeable close, which is the only other site that reclaims them.
+	// The prune reads the closed row again, so the record it holds decides.
 	// The liveness inputs are gathered here rather than once per pass because
 	// a deadline retirement is rare: the process-table walk is only paid when
-	// a seat actually retires, and only when auto-prune is enabled (the prune
-	// is a no-op otherwise and never consults the inputs). An indeterminate
-	// scan makes the prune fail closed (gc-k6uu6).
-	var pruneLiveness worktreeLivenessInputs
-	if cfg != nil && cfg.Daemon.AutoPruneWorkerDirEnabled() {
-		pruneLiveness = worktreeLivenessInputs{
-			live:        collectLiveWorktreeStateFn(),
-			sessionDirs: liveSessionWorktreeDirs(snapshot),
-		}
-	}
-	poolSlotRetireWorktreePrune(info, cityPath, cfg, pruneLiveness, stderr)
+	// a seat actually retires, and only when auto-prune is enabled and the row
+	// records a worker_dir. An indeterminate scan makes the prune fail closed
+	// (gc-k6uu6).
+	poolSlotRetireWorktreePrune(sessionFrontDoor(store), info.ID, cityPath, cfg, func() worktreeLivenessInputs {
+		return worktreeLivenessInputs{live: collectLiveWorktreeStateFn(), sessionDirs: openSessionWorkDirs(snapshot.OpenInfos())}
+	}, stderr)
 
 	fmt.Fprintf(stderr, "session reconciler: retired pool slot %s at the drain deadline after %s in an unfinalized drain; its runtime name is free again\n", name, drainAge.Round(time.Second)) //nolint:errcheck
 	if rec != nil {
